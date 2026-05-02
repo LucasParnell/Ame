@@ -14,6 +14,7 @@
 
 constexpr uint32_t kRingOrder    = 6;
 constexpr uint32_t kMessageCount = 4096;
+constexpr bool kEmitBootMetrics = false;
 constexpr int64_t kCapTypeSharedRing = 4;
 constexpr int64_t kCapTypeDoorbell = 5;
 constexpr int64_t kCapTypeProcess = 2;
@@ -75,6 +76,11 @@ static void try_console_log(const char* msg) {
 }
 
 static void try_console_log_counter(const char* key, uint64_t value) {
+    if constexpr (!kEmitBootMetrics) {
+        (void)key;
+        (void)value;
+        return;
+    }
     mochi::log_counter(key, value);
 }
 
@@ -146,7 +152,7 @@ extern "C" [[noreturn]] void _start() {
         }
     }
     if (my_cpu == 0 && pong_cpu == 1) {
-        try_console_log("AFFINITY OK\n");
+        try_console_log("demo: affinity ready\n");
     }
 
     uint32_t hot_count = kMessageCount;
@@ -193,11 +199,11 @@ extern "C" [[noreturn]] void _start() {
     const uint64_t notify_after_hot = static_cast<uint64_t>(sys_debug_counter(10));
 
     if (sent != recv) {
-        try_console_log("IPC HOT RING FAIL\n");
+        try_console_log("ipc: hot ring failed\n");
         while (true) sys_yield();
     }
-    try_console_log("IPC HOT RING OK\n");
-    try_console_log("IPC CROSS CORE HOT RING OK\n");
+    try_console_log("ipc: hot ring ready\n");
+    try_console_log("ipc: cross-core hot ring ready\n");
 
     // Test B: force doorbell sleep/wake.
     uint32_t sleep_magic = 0x12345678;
@@ -229,7 +235,7 @@ extern "C" [[noreturn]] void _start() {
         }
     }
     if (!sleeping) {
-        try_console_log("IPC DOORBELL SLEEP FAIL\n");
+        try_console_log("ipc: doorbell sleep failed\n");
         while (true) sys_yield();
     }
 
@@ -251,24 +257,24 @@ extern "C" [[noreturn]] void _start() {
             ++total_recv;
         }
     }
-    try_console_log("IPC DOORBELL SLEEP OK\n");
-    try_console_log("IPC CROSS CORE DOORBELL OK\n");
+    try_console_log("ipc: doorbell sleep ready\n");
+    try_console_log("ipc: cross-core doorbell ready\n");
 
-    try_console_log_counter("METRIC RING_MESSAGES_SENT", total_sent);
-    try_console_log_counter("METRIC RING_MESSAGES_RECV", total_recv);
-    try_console_log_counter("METRIC CROSS_CORE_RING_MESSAGES_SENT", sent);
-    try_console_log_counter("METRIC CROSS_CORE_RING_MESSAGES_RECV", recv);
+    try_console_log_counter("metric.ring.messages.sent", total_sent);
+    try_console_log_counter("metric.ring.messages.recv", total_recv);
+    try_console_log_counter("metric.cross.core.ring.messages.sent", sent);
+    try_console_log_counter("metric.cross.core.ring.messages.recv", recv);
 
     const uint64_t msg_count = total_recv ? total_recv : 1;
     const uint64_t ctx = static_cast<uint64_t>(sys_debug_counter(2));
     const uint64_t ipc = static_cast<uint64_t>(sys_debug_counter(1));
-    try_console_log_counter("METRIC CONTEXT_SWITCHES_PER_1K_MSG", (ctx * 1000ull) / msg_count);
-    try_console_log_counter("METRIC IPC_SYSCALLS_PER_1K_MSG", (ipc * 1000ull) / msg_count);
-    try_console_log_counter("METRIC CROSS_CORE_CONTEXT_SWITCHES_PER_1K_MSG",
+    try_console_log_counter("metric.context.switches.per.1k.msg", (ctx * 1000ull) / msg_count);
+    try_console_log_counter("metric.ipc.syscalls.per.1k.msg", (ipc * 1000ull) / msg_count);
+    try_console_log_counter("metric.cross.core.context.switches.per.1k.msg",
                             ((ctx_after_hot - ctx_before_hot) * 1000ull) / kMessageCount);
-    try_console_log_counter("METRIC CROSS_CORE_IPC_SYSCALLS_PER_1K_MSG",
+    try_console_log_counter("metric.cross.core.ipc.syscalls.per.1k.msg",
                             ((ipc_after_hot - ipc_before_hot) * 1000ull) / kMessageCount);
-    try_console_log_counter("METRIC CROSS_CORE_NOTIFY_CALLS",
+    try_console_log_counter("metric.cross.core.notify.calls",
                             notify_after_hot - notify_before_hot);
 
     if (sys_cap_identify(kDoneDoorbell) == kCapTypeDoorbell) {

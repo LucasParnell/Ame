@@ -30,5 +30,5 @@ if len(data) != 4 or struct.unpack('>I', data)[0] != 0xd00dfeed:
     raise SystemExit(f"error: {path} is not a valid DTB blob")
 PY
 
-echo "DANGO LINUX ARTIFACTS CHECK OK"
+echo "dango: linux artifacts check ready"
 ls -lh "${OUT}/Image" "${OUT}/initramfs.cpio" "${OUT}/dango-linux.dtb" "${OUT}/dango-agent" "${OUT}/manifest.toml"

@@ -93,6 +93,10 @@ static void dango_log(const char* msg) {
     mochi::log_write(mochi::LogLevel::Info, msg);
 }
 
+static void dango_debug(const char* msg) {
+    (void)msg;
+}
+
 [[noreturn]] static void fail(const char* msg) {
     // Keep failures visible even if the console service is blocked.
     sys_debug_puts(msg, slen(msg));
@@ -397,66 +401,66 @@ extern "C" [[noreturn]] void _start() {
 
     const uint64_t auth_gate_base = sys_doorbell_read(kAuthGateDoorbell);
 
-    dango_log("DANGO MANAGER START\n");
+    dango_log("dango: manager starting\n");
     LinuxArtifacts linux{};
     const bool have_linux = discover_linux_artifacts(boot_archive, &linux);
-    if (have_linux) dango_log("DANGO LINUX ARTIFACTS OK\n");
+    if (have_linux) dango_log("dango: linux artifacts ready\n");
 
     const int64_t el = sys_debug_counter(dango::VM_DEBUG_EL_CURRENT);
     const int64_t el2 = sys_debug_counter(dango::VM_DEBUG_EL2_AVAILABLE);
     const int64_t vhe = sys_debug_counter(dango::VM_DEBUG_VHE_AVAILABLE);
-    if (el < 0 || el > 3 || el2 < 0 || vhe < 0) fail("DANGO EL2 DETECT FAIL\n");
-    dango_log("DANGO EL2 DETECT OK\n");
+    if (el < 0 || el > 3 || el2 < 0 || vhe < 0) fail("dango: el2 detection failed\n");
+    dango_debug("dango: el2 available\n");
 
     const dango::VmLayout layout = have_linux ? linux.layout : dango::v3_layout();
-    if (!validate_layout(layout)) fail("DANGO LAYOUT FAIL\n");
+    if (!validate_layout(layout)) fail("dango: layout validation failed\n");
     const uint64_t active_ram_size = have_linux ? layout.ram_size : (16ull * 1024ull * 1024ull);
 
-    dango_log("DANGO VM CREATE START\n");
+    dango_debug("dango: creating vm\n");
     const int64_t vm_rc = sys_vm_create(kVmRoot, 0);
-    if (vm_rc < 0) fail("DANGO VM CREATE SYSCALL FAIL\n");
+    if (vm_rc < 0) fail("dango: vm create syscall failed\n");
     const CapHandle vm = as_cap(vm_rc);
-    if (vm == kNullCap) fail("DANGO VM OBJECT FAIL\n");
-    dango_log("DANGO VM CREATE OK\n");
+    if (vm == kNullCap) fail("dango: vm object invalid\n");
+    dango_log("dango: vm created\n");
 
-    dango_log("DANGO VM INSPECT START\n");
+    dango_debug("dango: inspecting vm\n");
     dango::VmInfo vm_info{};
     if (sys_vm_inspect(vm, &vm_info, sizeof(vm_info)) != 0 ||
         vm_info.state != dango::VM_CREATED) {
-        fail("DANGO VM OBJECT FAIL\n");
+        fail("dango: vm object invalid\n");
     }
-    dango_log("DANGO VM OBJECT OK\n");
+    dango_debug("dango: vm object ready\n");
 
-    dango_log("DANGO VM MEMORY CREATE START\n");
+    dango_debug("dango: creating guest memory\n");
     const CapHandle memory = as_cap(sys_vm_memory_create(vm, active_ram_size, 0));
-    if (memory == kNullCap) fail("DANGO VM MEMORY FAIL\n");
-    dango_log("DANGO VM MEMORY CREATE OK\n");
+    if (memory == kNullCap) fail("dango: guest memory failed\n");
+    dango_debug("dango: guest memory created\n");
 
     const uint32_t guest_rights = dango::RIGHT_READ | dango::RIGHT_WRITE | dango::RIGHT_EXEC;
-    dango_log("DANGO VM MEMORY MAP START\n");
+    dango_debug("dango: mapping guest memory\n");
     if (sys_vm_memory_map(vm, memory, layout.ram_base, active_ram_size, guest_rights) != 0) {
-        fail("DANGO VM MEMORY FAIL\n");
+        fail("dango: guest memory failed\n");
     }
-    dango_log("DANGO VM MEMORY MAP OK\n");
+    dango_debug("dango: guest memory mapped\n");
 
-    dango_log("DANGO VM MEMORY INSPECT START\n");
+    dango_debug("dango: inspecting guest memory\n");
     dango::VmMemoryInfo mem_info{};
     if (sys_vm_memory_inspect(memory, &mem_info, sizeof(mem_info)) != 0 ||
         mem_info.guest_pa_base != layout.ram_base ||
         mem_info.mapped_size != active_ram_size ||
         mem_info.mapped_stage2 == 0) {
-        fail("DANGO VM MEMORY FAIL\n");
+        fail("dango: guest memory failed\n");
     }
-    dango_log("DANGO VM MEMORY OK\n");
+    dango_debug("dango: guest memory ready\n");
 
-    dango_log("DANGO STAGE2 INSPECT START\n");
+    dango_debug("dango: inspecting stage2\n");
     if (sys_vm_inspect(vm, &vm_info, sizeof(vm_info)) != 0 ||
         vm_info.stage2_active != 0 ||
         vm_info.stage2_built == 0 ||
         vm_info.stage2_mapped_pages != (active_ram_size / dango::kPageSize)) {
-        fail("DANGO STAGE2 SCAFFOLD FAIL\n");
+        fail("dango: stage2 invalid\n");
     }
-    dango_log("DANGO STAGE2 SCAFFOLD OK\n");
+    dango_debug("dango: stage2 ready\n");
 
     if (have_linux) {
         if (!contains(layout.ram_base, layout.ram_size, layout.kernel_load, linux.image_size) ||
@@ -470,69 +474,69 @@ extern "C" [[noreturn]] void _start() {
                      layout.dtb_base, linux.dtb_size) ||
             overlaps(layout.initramfs_load, linux.initramfs_size,
                      layout.dtb_base, linux.dtb_size)) {
-            fail("DANGO LINUX LOAD FAIL\n");
+            fail("dango: linux load failed\n");
         }
-        dango_log("DANGO LINUX COPY IMAGE START\n");
+        dango_debug("dango: copying linux image\n");
         if (sys_vm_memory_write(memory,
                                 guest_offset(layout, layout.kernel_load),
                                 linux.image,
                                 linux.image_size) != 0) {
-            fail("DANGO LINUX LOAD FAIL\n");
+            fail("dango: linux load failed\n");
         }
-        dango_log("DANGO LINUX COPY IMAGE OK\n");
+        dango_debug("dango: linux image copied\n");
 
-        dango_log("DANGO LINUX COPY INITRD START\n");
+        dango_debug("dango: copying linux initramfs\n");
         if (sys_vm_memory_write(memory,
                                 guest_offset(layout, layout.initramfs_load),
                                 linux.initramfs,
                                 linux.initramfs_size) != 0) {
-            fail("DANGO LINUX LOAD FAIL\n");
+            fail("dango: linux load failed\n");
         }
-        dango_log("DANGO LINUX COPY INITRD OK\n");
+        dango_debug("dango: linux initramfs copied\n");
 
-        dango_log("DANGO LINUX COPY DTB START\n");
+        dango_debug("dango: copying linux dtb\n");
         if (sys_vm_memory_write(memory,
                                 guest_offset(layout, layout.dtb_base),
                                 linux.dtb,
                                 linux.dtb_size) != 0) {
-            fail("DANGO LINUX LOAD FAIL\n");
+            fail("dango: linux load failed\n");
         }
-        dango_log("DANGO LINUX COPY DTB OK\n");
+        dango_debug("dango: linux dtb copied\n");
 
-        dango_log("DANGO LINUX LOAD OK\n");
+        dango_log("dango: linux image loaded\n");
     }
 
-    dango_log("DANGO VCPU CREATE START\n");
+    dango_debug("dango: creating vcpu\n");
     const CapHandle vcpu = as_cap(sys_vcpu_create(vm, 0));
-    if (vcpu == kNullCap) fail("DANGO VCPU OBJECT FAIL\n");
-    dango_log("DANGO VCPU CREATE OK\n");
+    if (vcpu == kNullCap) fail("dango: vcpu object invalid\n");
+    dango_debug("dango: vcpu created\n");
 
     const uint64_t entry_pc = have_linux ? linux.entry : 0x4008'0000ull;
-    dango_log("DANGO VCPU SET ENTRY START\n");
+    dango_debug("dango: setting vcpu entry\n");
     if (sys_vcpu_set_entry(vcpu, entry_pc, layout.dtb_base, 0) != 0) {
-        fail("DANGO VCPU OBJECT FAIL\n");
+        fail("dango: vcpu object invalid\n");
     }
-    dango_log("DANGO VCPU SET ENTRY OK\n");
+    dango_debug("dango: vcpu entry set\n");
 
-    dango_log("DANGO VCPU INSPECT START\n");
+    dango_debug("dango: inspecting vcpu\n");
     dango::VcpuInfo vcpu_info{};
     if (sys_vcpu_inspect(vcpu, &vcpu_info, sizeof(vcpu_info)) != 0 ||
         (vcpu_info.state != dango::VCPU_CONFIGURED &&
          vcpu_info.state != dango::VCPU_READY) ||
         vcpu_info.entry_pc != entry_pc) {
-        fail("DANGO VCPU OBJECT FAIL\n");
+        fail("dango: vcpu object invalid\n");
     }
-    dango_log("DANGO VCPU OBJECT OK\n");
+    dango_debug("dango: vcpu ready\n");
 
     if (!have_linux) {
         if (sys_vcpu_run(vcpu, 100) != dango::E_NOTIMPL) {
-            fail("DANGO VCPU RUN STUB FAIL\n");
+            fail("dango: vcpu stub run failed\n");
         }
-        console_log("DANGO VCPU RUN STUB OK\n");
+        console_log("dango: vcpu stub run complete\n");
     }
 
     const CapHandle channel = as_cap(sys_vm_channel_create(vm, kRingOrder, 0));
-    if (channel == kNullCap) fail("DANGO CHANNEL FAIL\n");
+    if (channel == kNullCap) fail("dango: channel setup failed\n");
     const CapHandle h2g_ring = as_cap(sys_vm_channel_endpoint(
         channel, dango::VM_CHANNEL_HOST_TO_GUEST_RING,
         dango::RIGHT_READ | dango::RIGHT_WRITE | dango::RIGHT_MAP | dango::RIGHT_DUP));
@@ -551,23 +555,23 @@ extern "C" [[noreturn]] void _start() {
         sys_cap_identify(g2h_ring) != dango::CAP_SHARED_RING ||
         sys_cap_identify(h2g_db) != dango::CAP_DOORBELL ||
         sys_cap_identify(g2h_db) != dango::CAP_DOORBELL) {
-        fail("DANGO CHANNEL FAIL\n");
+        fail("dango: channel setup failed\n");
     }
     dango::VmChannelInfo channel_info{};
     if (sys_vm_channel_inspect(channel, &channel_info, sizeof(channel_info)) != 0 ||
         channel_info.endpoint_present_mask != 0xFull) {
-        fail("DANGO CHANNEL FAIL\n");
+        fail("dango: channel setup failed\n");
     }
-    console_log("DANGO CHANNEL OK\n");
-    console_log("DANGO LAYOUT OK\n");
+    console_log("dango: channel ready\n");
+    console_log("dango: layout ready\n");
 
-    if (sys_notify(kLayoutDoneDoorbell) != 0) fail("DANGO SERVICE FAIL\n");
+    if (sys_notify(kLayoutDoneDoorbell) != 0) fail("dango: service failed\n");
     if (sys_wait_doorbell(kAuthGateDoorbell, auth_gate_base) != 0) {
-        fail("DANGO SERVICE FAIL\n");
+        fail("dango: service failed\n");
     }
 
     if (have_linux) {
-        dango_log("DANGO LINUX RUN START\n");
+        dango_log("dango: starting linux guest\n");
         bool run_ok = true;
         for (uint32_t i = 0; i < kLinuxRunSlices; ++i) {
             const int64_t run_rc = sys_vcpu_run(vcpu, kLinuxRunBudgetTicks);
@@ -576,7 +580,7 @@ extern "C" [[noreturn]] void _start() {
                 if (saw_hello > 0) break;
                 continue;
             }
-            dango_log("DANGO LINUX RUN EXIT\n");
+            dango_debug("dango: linux guest exited early\n");
             run_ok = false;
             break;
         }
@@ -584,14 +588,14 @@ extern "C" [[noreturn]] void _start() {
             const int64_t saw_hello = sys_debug_counter(dango::VM_DEBUG_GUEST_LINUX_HELLO);
             const int64_t saw_agent = sys_debug_counter(dango::VM_DEBUG_GUEST_AGENT_START);
             const int64_t saw_stub = sys_debug_counter(dango::VM_DEBUG_GUEST_BOOT_STUB);
-            if (saw_hello > 0) dango_log("DANGO LINUX HELLO OK\n");
-            else if (saw_agent > 0) dango_log("DANGO LINUX AGENT START OK\n");
-            else if (saw_stub > 0) dango_log("DANGO VCPU RUN SLICE OK\n");
-            else dango_log("DANGO VCPU RUN SLICE OK\n");
+            if (saw_hello > 0) dango_log("dango: linux guest responded\n");
+            else if (saw_agent > 0) dango_log("dango: linux guest agent started\n");
+            else if (saw_stub > 0) dango_debug("dango: linux guest still running\n");
+            else dango_debug("dango: linux guest still running\n");
         }
     }
 
-    console_log("DANGO SERVICE OK\n");
+    console_log("dango: service ready\n");
     (void)sys_notify(kDoneDoorbell);
     for (uint32_t i = 0; i < 256; ++i) sys_yield();
     while (true) {

@@ -57,6 +57,7 @@ constexpr uint32_t kCapKernelLogRingBase = 7;
 constexpr uint32_t kMaxManifestServices = 8;
 constexpr uint32_t kManifestScanLimit = 1024;
 constexpr uint64_t kInitrdScanLimit = 16ull * 1024ull * 1024ull;
+constexpr bool kEmitBootMetrics = false;
 
 struct ServiceSpec {
     char name[32];
@@ -179,6 +180,11 @@ static void console_log(const char* msg) {
 }
 
 static void console_log_counter(const char* key, uint64_t value) {
+    if constexpr (!kEmitBootMetrics) {
+        (void)key;
+        (void)value;
+        return;
+    }
     mochi::log_counter(key, value);
 }
 
@@ -302,9 +308,9 @@ extern "C" [[noreturn]] void _start() {
 
     for (uint32_t i = 0; i < service_count; ++i) {
         if (!services[i].image_data || services[i].image_size == 0) {
-            fail_halt("INIT MANIFEST FAIL\n");
+            fail_halt("init: manifest failed\n");
         }
-        if (!spawn_service(services[i], SPAWN_SUSPENDED)) fail_halt("INIT SPAWN FAIL\n");
+        if (!spawn_service(services[i], SPAWN_SUSPENDED)) fail_halt("init: spawn failed\n");
     }
 
     ServiceSpec* nameservice = find_service(services, service_count, "nameservice");
@@ -327,14 +333,14 @@ extern "C" [[noreturn]] void _start() {
             : as_cap(sys_doorbell_create());
     const CapHandle init_log_ring = as_cap(sys_ring_create(kRingOrder, 0));
     if (console_db == kNullCap || init_log_ring == kNullCap || console_proc == kNullCap) {
-        fail_halt("INIT WIRING FAIL\n");
+        fail_halt("init: wiring failed\n");
     }
     for (uint32_t i = 0; i < service_count; ++i) {
         services[i].log_ring = as_cap(sys_ring_create(kRingOrder, 0));
-        if (services[i].log_ring == kNullCap) fail_halt("INIT WIRING FAIL\n");
+        if (services[i].log_ring == kNullCap) fail_halt("init: wiring failed\n");
     }
     if (sys_map_page(init_log_ring, kVaInitLogRing, RIGHT_READ | RIGHT_WRITE) != 0) {
-        fail_halt("INIT WIRING FAIL\n");
+        fail_halt("init: wiring failed\n");
     }
     mochi::log_set_sink(reinterpret_cast<RingPage*>(kVaInitLogRing),
                         kRingOrder,
@@ -344,28 +350,28 @@ extern "C" [[noreturn]] void _start() {
     if (console_proc != kNullCap) {
         require_ok(sys_cap_grant(console_proc, kCapUart,
                                  RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                   "INIT WIRING FAIL\n");
+                   "init: wiring failed\n");
         require_ok(sys_doorbell_share(console_db, console_proc,
                                       RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-                   "INIT WIRING FAIL\n");
+                   "init: wiring failed\n");
         for (uint32_t cpu = 0; cpu < kKernelLogRingCount; ++cpu) {
             const CapHandle kernel_ring = cap_slot(kCapKernelLogRingBase + cpu);
             require_ok(sys_ring_share(kernel_ring, console_proc,
                                       RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                       "INIT WIRING FAIL\n");
+                       "init: wiring failed\n");
         }
         require_ok(sys_ring_share(init_log_ring, console_proc,
                                   RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                   "INIT WIRING FAIL\n");
+                   "init: wiring failed\n");
         for (uint32_t i = 0; i < service_count; ++i) {
             require_ok(sys_ring_share(services[i].log_ring, console_proc,
                                       RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                       "INIT WIRING FAIL\n");
+                       "init: wiring failed\n");
         }
     }
-    if (!console || console->main_thread == kNullCap) fail_halt("INIT WIRING FAIL\n");
-    require_ok(sys_thread_set_affinity(console->main_thread, 1ull << 0), "INIT WIRING FAIL\n");
-    require_ok(sys_thread_resume(console->main_thread), "INIT WIRING FAIL\n");
+    if (!console || console->main_thread == kNullCap) fail_halt("init: wiring failed\n");
+    require_ok(sys_thread_set_affinity(console->main_thread, 1ull << 0), "init: wiring failed\n");
+    require_ok(sys_thread_resume(console->main_thread), "init: wiring failed\n");
 
     // IPC demo wiring.
     const CapHandle ring_ping_to_pong = as_cap(sys_ring_create(kRingOrder, 0));
@@ -378,7 +384,7 @@ extern "C" [[noreturn]] void _start() {
     const CapHandle db_nameservice = as_cap(sys_doorbell_create());
     const CapHandle db_ns_reply = as_cap(sys_doorbell_create());
     if (sys_map_page(ring_ping_to_pong, kVaPingToPongRing, RIGHT_READ | RIGHT_WRITE) != 0) {
-        fail_halt("INIT WIRING FAIL\n");
+        fail_halt("init: wiring failed\n");
     }
     RingPage* ping_to_pong_ring = reinterpret_cast<RingPage*>(kVaPingToPongRing);
     if (ring_ping_to_pong == kNullCap || ring_pong_to_ping == kNullCap ||
@@ -387,90 +393,90 @@ extern "C" [[noreturn]] void _start() {
         db_nameservice == kNullCap || db_ns_reply == kNullCap ||
         nameservice_proc == kNullCap || pong_proc == kNullCap || ping_proc == kNullCap ||
         !ping_to_pong_ring) {
-        fail_halt("INIT WIRING FAIL\n");
+        fail_halt("init: wiring failed\n");
     }
 
     if (!nameservice || !pong || !ping ||
         nameservice->main_thread == kNullCap ||
         pong->main_thread == kNullCap ||
         ping->main_thread == kNullCap) {
-        fail_halt("INIT WIRING FAIL\n");
+        fail_halt("init: wiring failed\n");
     }
 
     // Nameservice cap layout [0..8]
     require_ok(sys_ring_share(ns_request_ring, nameservice_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_ring_share(ns_reply_ring, nameservice_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(db_nameservice, nameservice_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(db_ns_reply, nameservice_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_cap_grant(nameservice_proc, ping_proc, RIGHT_SPAWN),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_cap_grant(nameservice_proc, pong_proc, RIGHT_READ | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     if (dango_proc != kNullCap) {
         require_ok(sys_cap_grant(nameservice_proc, dango_proc, RIGHT_READ | RIGHT_DUP),
-                   "INIT WIRING FAIL\n");
+                   "init: wiring failed\n");
     }
     require_ok(sys_ring_share(nameservice->log_ring, nameservice_proc,
                               RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(console_db, nameservice_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
 
     // Pong cap layout [0..5]
     require_ok(sys_ring_share(ring_ping_to_pong, pong_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_ring_share(ring_pong_to_ping, pong_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(db_pong, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(db_ping, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_ring_share(pong->log_ring, pong_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(console_db, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
 
     // Ping cap layout [0..5]
     require_ok(sys_ring_share(ring_ping_to_pong, ping_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_ring_share(ring_pong_to_ping, ping_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(db_pong, ping_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(db_ping, ping_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_ring_share(ping->log_ring, ping_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(console_db, ping_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(db_ipc_done, ping_proc, RIGHT_NOTIFY),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_ring_share(ns_request_ring, ping_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_ring_share(ns_reply_ring, ping_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(db_nameservice, ping_proc, RIGHT_NOTIFY | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
     require_ok(sys_doorbell_share(db_ns_reply, ping_proc, RIGHT_WAIT | RIGHT_DUP),
-               "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
 
     require_ok(sys_thread_set_affinity(nameservice->main_thread, 1ull << 0),
-               "INIT WIRING FAIL\n");
-    require_ok(sys_thread_resume(nameservice->main_thread), "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
+    require_ok(sys_thread_resume(nameservice->main_thread), "init: wiring failed\n");
     require_ok(sys_thread_set_affinity(pong->main_thread, 1ull << 1),
-               "INIT WIRING FAIL\n");
-    require_ok(sys_thread_resume(pong->main_thread), "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
+    require_ok(sys_thread_resume(pong->main_thread), "init: wiring failed\n");
     require_ok(sys_thread_set_affinity(ping->main_thread, 1ull << 0),
-               "INIT WIRING FAIL\n");
-    require_ok(sys_thread_resume(ping->main_thread), "INIT WIRING FAIL\n");
+               "init: wiring failed\n");
+    require_ok(sys_thread_resume(ping->main_thread), "init: wiring failed\n");
 
     const uint64_t ipc_done_base = sys_doorbell_read(db_ipc_done);
     const int64_t ipc_wait_rc = sys_wait_doorbell(db_ipc_done, ipc_done_base);
-    if (ipc_wait_rc < 0) fail_halt("IPC HOT RING FAIL\n");
+    if (ipc_wait_rc < 0) fail_halt("ipc: hot ring failed\n");
 
     // Supervision demo: force a crash message to pong, wait for a supervisor
     // death event, then restart according to the manifest policy.
@@ -490,90 +496,90 @@ extern "C" [[noreturn]] void _start() {
         sys_yield();
     }
     if (!saw_death || !pong || !token_eq(pong->restart, "always")) {
-        fail_halt("SUPERVISION FAIL\n");
+        fail_halt("init: supervision failed\n");
     }
 
-    if (!spawn_service(*pong, SPAWN_SUSPENDED)) fail_halt("SUPERVISION FAIL\n");
+    if (!spawn_service(*pong, SPAWN_SUSPENDED)) fail_halt("init: supervision failed\n");
     pong_proc = pong->proc;
     if (pong_proc != kNullCap) {
         require_ok(sys_ring_share(ring_ping_to_pong, pong_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                   "SUPERVISION FAIL\n");
+                   "init: supervision failed\n");
         require_ok(sys_ring_share(ring_pong_to_ping, pong_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                   "SUPERVISION FAIL\n");
+                   "init: supervision failed\n");
         require_ok(sys_doorbell_share(db_pong, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-                   "SUPERVISION FAIL\n");
+                   "init: supervision failed\n");
         require_ok(sys_doorbell_share(db_ping, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-                   "SUPERVISION FAIL\n");
+                   "init: supervision failed\n");
         require_ok(sys_ring_share(pong->log_ring, pong_proc,
                                   RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                   "SUPERVISION FAIL\n");
+                   "init: supervision failed\n");
         require_ok(sys_doorbell_share(console_db, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-                   "SUPERVISION FAIL\n");
+                   "init: supervision failed\n");
         require_ok(sys_thread_set_affinity(pong->main_thread, 1ull << 1),
-                   "SUPERVISION FAIL\n");
-        require_ok(sys_thread_resume(pong->main_thread), "SUPERVISION FAIL\n");
+                   "init: supervision failed\n");
+        require_ok(sys_thread_resume(pong->main_thread), "init: supervision failed\n");
     } else {
-        fail_halt("SUPERVISION FAIL\n");
+        fail_halt("init: supervision failed\n");
     }
-    console_log("SUPERVISION OK\n");
+    console_log("init: supervision ready\n");
 
     const uint64_t doorbell_sleeps = static_cast<uint64_t>(sys_debug_counter(5));
     const uint64_t doorbell_wakes = static_cast<uint64_t>(sys_debug_counter(6));
     if (doorbell_sleeps == 0 || doorbell_wakes == 0) {
-        fail_halt("IPC DOORBELL SLEEP FAIL\n");
+        fail_halt("ipc: doorbell sleep failed\n");
     }
 
-    if (static_cast<uint64_t>(sys_debug_counter(17)) >= 2) console_log("EKI LOCAL SCHED OK\n");
+    if (static_cast<uint64_t>(sys_debug_counter(17)) >= 2) console_log("sched: local scheduling ready\n");
     if (static_cast<uint64_t>(sys_debug_counter(23)) > 0 &&
         static_cast<uint64_t>(sys_debug_counter(24)) > 0 &&
         static_cast<uint64_t>(sys_debug_counter(25)) > 0) {
-        console_log("REMOTE WAKE OK\n");
+        console_log("sched: remote wake ready\n");
     }
     if (static_cast<uint64_t>(sys_debug_counter(28)) > 0) {
-        console_log("CROSS CORE DOORBELL OK\n");
+        console_log("ipc: cross-core doorbell ready\n");
     }
-    console_log("RESSHA FAIRNESS OK\n");
-    console_log("MIDIX V1 BOOT OK\n");
-    console_log("MIDIX V2 BOOT OK\n");
-    console_log_counter("METRIC SYSCALLS", static_cast<uint64_t>(sys_debug_counter(0)));
-    console_log_counter("METRIC IPC_SYSCALLS", static_cast<uint64_t>(sys_debug_counter(1)));
-    console_log_counter("METRIC CONTEXT_SWITCHES", static_cast<uint64_t>(sys_debug_counter(2)));
-    console_log_counter("METRIC DEBUG_PUTS", static_cast<uint64_t>(sys_debug_counter(3)));
-    console_log_counter("METRIC EL0_FAULTS", static_cast<uint64_t>(sys_debug_counter(4)));
-    console_log_counter("METRIC DOORBELL_SLEEPS", static_cast<uint64_t>(sys_debug_counter(5)));
-    console_log_counter("METRIC DOORBELL_WAKES", static_cast<uint64_t>(sys_debug_counter(6)));
-    console_log_counter("METRIC TIMER_TICKS", static_cast<uint64_t>(sys_debug_counter(7)));
-    console_log_counter("METRIC DOORBELL_WAIT_CALLS", static_cast<uint64_t>(sys_debug_counter(8)));
-    console_log_counter("METRIC DOORBELL_WAIT_IMMEDIATE", static_cast<uint64_t>(sys_debug_counter(9)));
-    console_log_counter("METRIC NOTIFY_CALLS", static_cast<uint64_t>(sys_debug_counter(10)));
-    console_log_counter("METRIC NOTIFY_NO_WAITER", static_cast<uint64_t>(sys_debug_counter(11)));
-    console_log_counter("METRIC NOTIFY_WOKE_THREAD", static_cast<uint64_t>(sys_debug_counter(12)));
-    console_log_counter("METRIC YIELDS", static_cast<uint64_t>(sys_debug_counter(13)));
-    console_log_counter("METRIC BLOCK_SWITCHES", static_cast<uint64_t>(sys_debug_counter(14)));
-    console_log_counter("METRIC TIMER_PREEMPTS", static_cast<uint64_t>(sys_debug_counter(15)));
-    console_log_counter("METRIC EXIT_SWITCHES", static_cast<uint64_t>(sys_debug_counter(16)));
-    console_log_counter("METRIC CPUS_ONLINE", static_cast<uint64_t>(sys_debug_counter(17)));
-    console_log_counter("METRIC CPU0_CONTEXT_SWITCHES", static_cast<uint64_t>(sys_debug_counter(18)));
-    console_log_counter("METRIC CPU1_CONTEXT_SWITCHES", static_cast<uint64_t>(sys_debug_counter(19)));
-    console_log_counter("METRIC CPU0_TIMER_PREEMPTS", static_cast<uint64_t>(sys_debug_counter(20)));
-    console_log_counter("METRIC CPU1_TIMER_PREEMPTS", static_cast<uint64_t>(sys_debug_counter(21)));
-    console_log_counter("METRIC LOCAL_WAKES", static_cast<uint64_t>(sys_debug_counter(22)));
-    console_log_counter("METRIC REMOTE_WAKES", static_cast<uint64_t>(sys_debug_counter(23)));
-    console_log_counter("METRIC IPI_SENT", static_cast<uint64_t>(sys_debug_counter(24)));
-    console_log_counter("METRIC IPI_HANDLED", static_cast<uint64_t>(sys_debug_counter(25)));
-    console_log_counter("METRIC PENDING_WAKE_DRAINS", static_cast<uint64_t>(sys_debug_counter(26)));
-    console_log_counter("METRIC DOORBELL_LOCAL_WAKES", static_cast<uint64_t>(sys_debug_counter(27)));
-    console_log_counter("METRIC DOORBELL_REMOTE_WAKES", static_cast<uint64_t>(sys_debug_counter(28)));
-    console_log_counter("METRIC RESSHA_FAIRNESS_MAX_LAG", static_cast<uint64_t>(sys_debug_counter(29)));
-    console_log_counter("METRIC PRINCIPAL_A_RUNTIME", static_cast<uint64_t>(sys_debug_counter(30)));
-    console_log_counter("METRIC PRINCIPAL_B_RUNTIME", static_cast<uint64_t>(sys_debug_counter(31)));
+    console_log("sched: fairness check complete\n");
+    console_log("init: base services ready\n");
+    console_log("init: scheduler tests ready\n");
+    console_log_counter("metric.syscalls", static_cast<uint64_t>(sys_debug_counter(0)));
+    console_log_counter("metric.ipc.syscalls", static_cast<uint64_t>(sys_debug_counter(1)));
+    console_log_counter("metric.context.switches", static_cast<uint64_t>(sys_debug_counter(2)));
+    console_log_counter("metric.debug.puts", static_cast<uint64_t>(sys_debug_counter(3)));
+    console_log_counter("metric.el0.faults", static_cast<uint64_t>(sys_debug_counter(4)));
+    console_log_counter("metric.doorbell.sleeps", static_cast<uint64_t>(sys_debug_counter(5)));
+    console_log_counter("metric.doorbell.wakes", static_cast<uint64_t>(sys_debug_counter(6)));
+    console_log_counter("metric.timer.ticks", static_cast<uint64_t>(sys_debug_counter(7)));
+    console_log_counter("metric.doorbell.wait.calls", static_cast<uint64_t>(sys_debug_counter(8)));
+    console_log_counter("metric.doorbell.wait.immediate", static_cast<uint64_t>(sys_debug_counter(9)));
+    console_log_counter("metric.notify.calls", static_cast<uint64_t>(sys_debug_counter(10)));
+    console_log_counter("metric.notify.no.waiter", static_cast<uint64_t>(sys_debug_counter(11)));
+    console_log_counter("metric.notify.woke.thread", static_cast<uint64_t>(sys_debug_counter(12)));
+    console_log_counter("metric.yields", static_cast<uint64_t>(sys_debug_counter(13)));
+    console_log_counter("metric.block.switches", static_cast<uint64_t>(sys_debug_counter(14)));
+    console_log_counter("metric.timer.preempts", static_cast<uint64_t>(sys_debug_counter(15)));
+    console_log_counter("metric.exit.switches", static_cast<uint64_t>(sys_debug_counter(16)));
+    console_log_counter("metric.cpus.online", static_cast<uint64_t>(sys_debug_counter(17)));
+    console_log_counter("metric.cpu0.context.switches", static_cast<uint64_t>(sys_debug_counter(18)));
+    console_log_counter("metric.cpu1.context.switches", static_cast<uint64_t>(sys_debug_counter(19)));
+    console_log_counter("metric.cpu0.timer.preempts", static_cast<uint64_t>(sys_debug_counter(20)));
+    console_log_counter("metric.cpu1.timer.preempts", static_cast<uint64_t>(sys_debug_counter(21)));
+    console_log_counter("metric.local.wakes", static_cast<uint64_t>(sys_debug_counter(22)));
+    console_log_counter("metric.remote.wakes", static_cast<uint64_t>(sys_debug_counter(23)));
+    console_log_counter("metric.ipi.sent", static_cast<uint64_t>(sys_debug_counter(24)));
+    console_log_counter("metric.ipi.handled", static_cast<uint64_t>(sys_debug_counter(25)));
+    console_log_counter("metric.pending.wake.drains", static_cast<uint64_t>(sys_debug_counter(26)));
+    console_log_counter("metric.doorbell.local.wakes", static_cast<uint64_t>(sys_debug_counter(27)));
+    console_log_counter("metric.doorbell.remote.wakes", static_cast<uint64_t>(sys_debug_counter(28)));
+    console_log_counter("metric.ressha.fairness.max.lag", static_cast<uint64_t>(sys_debug_counter(29)));
+    console_log_counter("metric.principal.a.runtime", static_cast<uint64_t>(sys_debug_counter(30)));
+    console_log_counter("metric.principal.b.runtime", static_cast<uint64_t>(sys_debug_counter(31)));
 
     if (!dango || !auth_probe ||
         dango_proc == kNullCap ||
         auth_probe_proc == kNullCap ||
         dango->main_thread == kNullCap ||
         auth_probe->main_thread == kNullCap) {
-        fail_halt("DANGO WIRING FAIL\n");
+        fail_halt("dango: wiring failed\n");
     }
 
     const CapHandle db_dango_done = as_cap(sys_doorbell_create());
@@ -582,70 +588,70 @@ extern "C" [[noreturn]] void _start() {
     if (db_dango_done == kNullCap ||
         db_dango_auth_gate == kNullCap ||
         db_dango_layout_done == kNullCap) {
-        fail_halt("DANGO WIRING FAIL\n");
+        fail_halt("dango: wiring failed\n");
     }
 
     require_ok(sys_ring_share(dango->log_ring, dango_proc,
                               RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
     require_ok(sys_doorbell_share(console_db, dango_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
     require_ok(sys_cap_grant(dango_proc, kCapVmRoot, RIGHT_VM_CREATE | RIGHT_VM_INSPECT),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
     require_ok(sys_doorbell_share(db_dango_done, dango_proc, RIGHT_NOTIFY),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
     require_ok(sys_doorbell_share(db_dango_auth_gate, dango_proc, RIGHT_WAIT),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
     require_ok(sys_doorbell_share(db_dango_layout_done, dango_proc, RIGHT_NOTIFY),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
     require_ok(sys_cap_grant(dango_proc, kCapInitrd, RIGHT_READ | RIGHT_MAP),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
 
     require_ok(sys_ring_share(auth_probe->log_ring, auth_probe_proc,
                               RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
     require_ok(sys_doorbell_share(console_db, auth_probe_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
     require_ok(sys_cap_grant(auth_probe_proc, kCapVmRoot, RIGHT_VM_INSPECT),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
     require_ok(sys_doorbell_share(db_dango_auth_gate, auth_probe_proc, RIGHT_NOTIFY),
-               "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
 
     const uint64_t layout_base = sys_doorbell_read(db_dango_layout_done);
     const uint64_t dango_done_base = sys_doorbell_read(db_dango_done);
 
     require_ok(sys_thread_set_affinity(dango->main_thread, 1ull << 0),
-               "DANGO WIRING FAIL\n");
-    require_ok(sys_thread_resume(dango->main_thread), "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
+    require_ok(sys_thread_resume(dango->main_thread), "dango: wiring failed\n");
     if (sys_wait_doorbell(db_dango_layout_done, layout_base) != 0) {
-        fail_halt("DANGO WIRING FAIL\n");
+        fail_halt("dango: wiring failed\n");
     }
 
     require_ok(sys_thread_set_affinity(auth_probe->main_thread, 1ull << 0),
-               "DANGO WIRING FAIL\n");
-    require_ok(sys_thread_resume(auth_probe->main_thread), "DANGO WIRING FAIL\n");
+               "dango: wiring failed\n");
+    require_ok(sys_thread_resume(auth_probe->main_thread), "dango: wiring failed\n");
     if (sys_wait_doorbell(db_dango_done, dango_done_base) != 0) {
-        fail_halt("DANGO WIRING FAIL\n");
+        fail_halt("dango: wiring failed\n");
     }
 
-    console_log_counter("METRIC VM_CREATE_CALLS", static_cast<uint64_t>(sys_debug_counter(32)));
-    console_log_counter("METRIC VM_CREATED", static_cast<uint64_t>(sys_debug_counter(33)));
-    console_log_counter("METRIC VM_DESTROYED", static_cast<uint64_t>(sys_debug_counter(34)));
-    console_log_counter("METRIC VM_MEMORY_CREATED", static_cast<uint64_t>(sys_debug_counter(35)));
-    console_log_counter("METRIC VM_MEMORY_MAPPED", static_cast<uint64_t>(sys_debug_counter(36)));
-    console_log_counter("METRIC VM_MEMORY_UNMAPPED", static_cast<uint64_t>(sys_debug_counter(37)));
-    console_log_counter("METRIC VM_STAGE2_TABLES_CREATED", static_cast<uint64_t>(sys_debug_counter(38)));
-    console_log_counter("METRIC VM_STAGE2_PAGES_MAPPED", static_cast<uint64_t>(sys_debug_counter(39)));
-    console_log_counter("METRIC VM_VCPUS_CREATED", static_cast<uint64_t>(sys_debug_counter(40)));
-    console_log_counter("METRIC VM_VCPU_CONFIGURED", static_cast<uint64_t>(sys_debug_counter(41)));
-    console_log_counter("METRIC VM_VCPU_RUN_ATTEMPTS", static_cast<uint64_t>(sys_debug_counter(42)));
-    console_log_counter("METRIC VM_VCPU_RUN_NOTIMPL", static_cast<uint64_t>(sys_debug_counter(43)));
-    console_log_counter("METRIC VM_CHANNELS_CREATED", static_cast<uint64_t>(sys_debug_counter(44)));
-    console_log_counter("METRIC VM_ERRORS", static_cast<uint64_t>(sys_debug_counter(45)));
-    console_log_counter("METRIC EL_CURRENT", static_cast<uint64_t>(sys_debug_counter(46)));
-    console_log_counter("METRIC EL2_AVAILABLE", static_cast<uint64_t>(sys_debug_counter(47)));
-    console_log_counter("METRIC VHE_AVAILABLE", static_cast<uint64_t>(sys_debug_counter(48)));
-    console_log("MIDIX V3 BOOT OK\n");
+    console_log_counter("metric.vm.create.calls", static_cast<uint64_t>(sys_debug_counter(32)));
+    console_log_counter("metric.vm.created", static_cast<uint64_t>(sys_debug_counter(33)));
+    console_log_counter("metric.vm.destroyed", static_cast<uint64_t>(sys_debug_counter(34)));
+    console_log_counter("metric.vm.memory.created", static_cast<uint64_t>(sys_debug_counter(35)));
+    console_log_counter("metric.vm.memory.mapped", static_cast<uint64_t>(sys_debug_counter(36)));
+    console_log_counter("metric.vm.memory.unmapped", static_cast<uint64_t>(sys_debug_counter(37)));
+    console_log_counter("metric.vm.stage2.tables.created", static_cast<uint64_t>(sys_debug_counter(38)));
+    console_log_counter("metric.vm.stage2.pages.mapped", static_cast<uint64_t>(sys_debug_counter(39)));
+    console_log_counter("metric.vm.vcpus.created", static_cast<uint64_t>(sys_debug_counter(40)));
+    console_log_counter("metric.vm.vcpu.configured", static_cast<uint64_t>(sys_debug_counter(41)));
+    console_log_counter("metric.vm.vcpu.run.attempts", static_cast<uint64_t>(sys_debug_counter(42)));
+    console_log_counter("metric.vm.vcpu.run.notimpl", static_cast<uint64_t>(sys_debug_counter(43)));
+    console_log_counter("metric.vm.channels.created", static_cast<uint64_t>(sys_debug_counter(44)));
+    console_log_counter("metric.vm.errors", static_cast<uint64_t>(sys_debug_counter(45)));
+    console_log_counter("metric.el.current", static_cast<uint64_t>(sys_debug_counter(46)));
+    console_log_counter("metric.el2.available", static_cast<uint64_t>(sys_debug_counter(47)));
+    console_log_counter("metric.vhe.available", static_cast<uint64_t>(sys_debug_counter(48)));
+    console_log("init: system ready\n");
 
     while (true) {
         sys_yield();

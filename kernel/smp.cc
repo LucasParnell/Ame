@@ -160,14 +160,12 @@ static u64 psci_call(u64 fn, u64 a0, u64 a1, u64 a2) {
 } // namespace
 
 void init(PhysAddr dtb_phys) {
-    ANKO_LOG_INFO("kernel/smp", "smp init");
     g_info = parse_dtb(dtb_phys);
     if (g_boot_el >= 2) g_info.psci_hvc = false;
     if (g_info.count < 2) g_info.count = 2;
     if (g_info.count > kMaxCpus) g_info.count = kMaxCpus;
 
     g_cpu_started[0] = 1;
-    ANKO_LOG_INFO("kernel/smp", "cpu0 online");
 
     for (u32 cpu = 1; cpu < g_info.count; ++cpu) {
         const u64 rc = psci_call(g_info.psci_cpu_on,
@@ -184,9 +182,6 @@ void init(PhysAddr dtb_phys) {
             if (__atomic_load_n(&g_cpu_started[cpu], __ATOMIC_ACQUIRE)) break;
             asm volatile("yield" ::: "memory");
         }
-        if (__atomic_load_n(&g_cpu_started[cpu], __ATOMIC_ACQUIRE)) {
-            ANKO_LOGF_INFO("kernel/smp", "cpu%u online", cpu);
-        }
     }
 
     u32 online = 1;
@@ -195,9 +190,8 @@ void init(PhysAddr dtb_phys) {
     }
     sched::set_online_cpu_count(online);
     if (online >= 2) {
-        ANKO_LOG_RAW("SMP BOOT OK\n");
+        ANKO_LOG_INFO("kernel/smp", "smp ready");
     }
-    ANKO_LOGF_RAW("METRIC CPUS_ONLINE=%u\n", online);
 }
 
 u32 cpu_count() {

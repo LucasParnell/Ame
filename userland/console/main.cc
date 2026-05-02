@@ -122,8 +122,7 @@ extern "C" [[noreturn]] void _start() {
     }
 
     (void)drain_all(uart, inputs, kLogRingCount);
-    uart_log(uart, mochi::LogLevel::Info, "io.console", "hello world");
-    uart_log(uart, mochi::LogLevel::Info, "io.console", "CONSOLE OK");
+    uart_log(uart, mochi::LogLevel::Info, "io.console", "console: ready");
 
     while (true) {
         if (drain_all(uart, inputs, kLogRingCount)) {

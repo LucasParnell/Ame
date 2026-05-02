@@ -183,20 +183,20 @@ void note_guest_console_char(char c) {
 
     if (c == '\n') {
         line[len] = '\0';
-        if (!saw_boot_stub && libk::strcmp(line, "DANGO VM BOOT STUB OK") == 0) {
+        if (!saw_boot_stub && libk::strcmp(line, "dango: vm boot stub reached") == 0) {
             saw_boot_stub = true;
             metric_inc(VM_DEBUG_GUEST_BOOT_STUB);
-            ANKO_LOG_RAW("DANGO GUEST BOOT STUB OK\n");
+            ANKO_LOG_RAW("dango: guest boot stub reached\n");
         }
-        if (!saw_agent_start && libk::strcmp(line, "DANGO AGENT START") == 0) {
+        if (!saw_agent_start && libk::strcmp(line, "dango-agent: started") == 0) {
             saw_agent_start = true;
             metric_inc(VM_DEBUG_GUEST_AGENT_START);
-            ANKO_LOG_RAW("DANGO GUEST AGENT START OK\n");
+            ANKO_LOG_RAW("dango: guest agent started\n");
         }
-        if (!saw_linux_hello && libk::strcmp(line, "DANGO LINUX HELLO OK") == 0) {
+        if (!saw_linux_hello && libk::strcmp(line, "dango: linux guest responded") == 0) {
             saw_linux_hello = true;
             metric_inc(VM_DEBUG_GUEST_LINUX_HELLO);
-            ANKO_LOG_RAW("DANGO GUEST UART HELLO OK\n");
+            ANKO_LOG_RAW("dango: guest uart hello\n");
         }
         len = 0;
         return;
@@ -645,7 +645,7 @@ void log_sysreg_trap(const Vcpu& vcpu, u64 esr) {
     const u32 rt  = static_cast<u32>((iss >> 5)  & 0x1Full);
     const u32 crm = static_cast<u32>((iss >> 1)  & 0xFull);
     const bool read = (iss & 1ull) != 0;
-    libk::printf("DANGO SYSREG TRAP %s op0=%u op1=%u crn=%u crm=%u op2=%u rt=%u pc=%llx esr=%llx\n",
+    libk::printf("dango sysreg trap %s op0=%u op1=%u crn=%u crm=%u op2=%u rt=%u pc=%llx esr=%llx\n",
                  read ? "read" : "write", op0, op1, crn, crm, op2, rt,
                  static_cast<unsigned long long>(vcpu.el2.pc), static_cast<unsigned long long>(esr));
 }
@@ -654,7 +654,7 @@ void log_unsupported_exit(const Vcpu& vcpu, const Vm& owner, u64 esr, u64 ec) {
     const u64 ipa = fault_ipa(vcpu.el2, ec);
     u32 mapped_rights = 0;
     const PhysAddr mapped_pa = stage2_lookup_page(const_cast<Stage2AddressSpace*>(&owner.stage2), ipa, &mapped_rights);
-    libk::printf("DANGO VM EXIT unsupported ec=%llx iss=%llx esr=%llx pc=%llx far=%llx hpfar=%llx ipa=%llx s2pa=%llx rights=%x\n",
+    libk::printf("dango vm exit unsupported ec=%llx iss=%llx esr=%llx pc=%llx far=%llx hpfar=%llx ipa=%llx s2pa=%llx rights=%x\n",
                  static_cast<unsigned long long>(ec), static_cast<unsigned long long>(esr_iss(esr)),
                  static_cast<unsigned long long>(esr), static_cast<unsigned long long>(vcpu.el2.pc),
                  static_cast<unsigned long long>(vcpu.el2.exit_far), static_cast<unsigned long long>(vcpu.el2.exit_hpfar),
@@ -974,7 +974,7 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, u64 budget_ticks) {
 
         if (ec == kEcInstrAbortLower) {
             const u64 ipa = fault_ipa(vcpu->el2, ec);
-            libk::printf("DANGO VM EXIT instr-abort-lower pc=%llx ipa=%llx esr=%llx\n",
+            libk::printf("dango vm exit instr-abort-lower pc=%llx ipa=%llx esr=%llx\n",
                          static_cast<unsigned long long>(vcpu->el2.pc),
                          static_cast<unsigned long long>(ipa),
                          static_cast<unsigned long long>(esr));

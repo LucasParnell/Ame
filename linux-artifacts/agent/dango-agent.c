@@ -88,8 +88,8 @@ void _start(void) {
     ensure_stdio_console();
 
     const char msg[] =
-        "DANGO AGENT START\n"
-        "DANGO LINUX HELLO OK\n";
+        "dango-agent: started\n"
+        "dango: linux guest responded\n";
 
     if (sys_write(1, msg, sizeof(msg) - 1) < 0) {
         (void)sys_write(2, msg, sizeof(msg) - 1);

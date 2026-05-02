@@ -11,36 +11,36 @@ if not src or not src.exists():
 smp = src / 'arch/arm64/kernel/smp.c'
 if smp.exists():
     text = smp.read_text()
-    if 'DANGO_TRACE smp_prepare_boot_cpu: before cpuinfo_store_boot_cpu' not in text:
+    if 'dango-trace smp_prepare_boot_cpu: before cpuinfo_store_boot_cpu' not in text:
         text = text.replace(
             'void __init smp_prepare_boot_cpu(void)\n{',
-            'void __init smp_prepare_boot_cpu(void)\n{\n\tpr_info("DANGO_TRACE smp_prepare_boot_cpu: entry\\n");',
+            'void __init smp_prepare_boot_cpu(void)\n{\n\tpr_info("dango-trace smp_prepare_boot_cpu: entry\\n");',
             1,
         )
         text = text.replace(
             '\tcpuinfo_store_boot_cpu();',
-            '\tpr_info("DANGO_TRACE smp_prepare_boot_cpu: before cpuinfo_store_boot_cpu\\n");\n\tcpuinfo_store_boot_cpu();\n\tpr_info("DANGO_TRACE smp_prepare_boot_cpu: after cpuinfo_store_boot_cpu\\n");',
+            '\tpr_info("dango-trace smp_prepare_boot_cpu: before cpuinfo_store_boot_cpu\\n");\n\tcpuinfo_store_boot_cpu();\n\tpr_info("dango-trace smp_prepare_boot_cpu: after cpuinfo_store_boot_cpu\\n");',
             1,
         )
         text = text.replace(
             '\tsetup_boot_cpu_features();',
-            '\tpr_info("DANGO_TRACE smp_prepare_boot_cpu: before setup_boot_cpu_features\\n");\n\tsetup_boot_cpu_features();\n\tpr_info("DANGO_TRACE smp_prepare_boot_cpu: after setup_boot_cpu_features\\n");',
+            '\tpr_info("dango-trace smp_prepare_boot_cpu: before setup_boot_cpu_features\\n");\n\tsetup_boot_cpu_features();\n\tpr_info("dango-trace smp_prepare_boot_cpu: after setup_boot_cpu_features\\n");',
             1,
         )
         smp.write_text(text)
-        print('DANGO Linux trace: patched arch/arm64/kernel/smp.c')
+        print('dango linux trace: patched arch/arm64/kernel/smp.c')
     else:
-        print('DANGO Linux trace: arch/arm64/kernel/smp.c already patched')
+        print('dango linux trace: arch/arm64/kernel/smp.c already patched')
 else:
     print('warning: arch/arm64/kernel/smp.c not found; skipping trace patch', file=sys.stderr)
 
 main = src / 'init/main.c'
 if main.exists():
     text = main.read_text()
-    if 'DANGO_TRACE start_kernel: entry' not in text:
+    if 'dango-trace start_kernel: entry' not in text:
         text = text.replace(
             'asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protector\nvoid start_kernel(void)\n{',
-            'asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protector\nvoid start_kernel(void)\n{\n\tpr_info("DANGO_TRACE start_kernel: entry\\n");',
+            'asmlinkage __visible __init __no_sanitize_address __noreturn __no_stack_protector\nvoid start_kernel(void)\n{\n\tpr_info("dango-trace start_kernel: entry\\n");',
             1,
         )
         # These replacements are deliberately best-effort; if upstream reshuffles
@@ -60,8 +60,8 @@ if main.exists():
             ('time_init();', 'before time_init'),
             ('rest_init();', 'before rest_init'),
         ]:
-            text = text.replace(needle, f'pr_info("DANGO_TRACE start_kernel: {marker}\\n");\n\t{needle}', 1)
+            text = text.replace(needle, f'pr_info("dango-trace start_kernel: {marker}\\n");\n\t{needle}', 1)
         main.write_text(text)
-        print('DANGO Linux trace: patched init/main.c')
+        print('dango linux trace: patched init/main.c')
     else:
-        print('DANGO Linux trace: init/main.c already patched')
+        print('dango linux trace: init/main.c already patched')

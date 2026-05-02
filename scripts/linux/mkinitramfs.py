@@ -86,7 +86,7 @@ def build(agent: Path, output: Path) -> None:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 3:
-        print(f"usage: {argv[0]} DANGO_AGENT OUTPUT_CPIO", file=sys.stderr)
+        print(f"usage: {argv[0]} DANGO-AGENT OUTPUT_CPIO", file=sys.stderr)
         return 2
     build(Path(argv[1]), Path(argv[2]))
     return 0

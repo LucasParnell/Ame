@@ -257,7 +257,7 @@ static inline void log_counter(const char* key, uint64_t value) {
     char line[96];
     uint32_t n = 0;
     bool truncated = false;
-    log_append_str(line, sizeof(line), &n, &truncated, key ? key : "METRIC");
+    log_append_str(line, sizeof(line), &n, &truncated, key ? key : "metric");
     log_append_char(line, sizeof(line), &n, &truncated, '=');
     log_append_u64(line, sizeof(line), &n, &truncated, value);
     log_append_char(line, sizeof(line), &n, &truncated, '\n');

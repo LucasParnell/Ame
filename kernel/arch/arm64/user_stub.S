@@ -9,10 +9,10 @@ msg_hello:
     .ascii "hello world\n"
 msg_hello_end:
 msg_console:
-    .ascii "CONSOLE OK\n"
+    .ascii "console: ready\n"
 msg_console_end:
 msg_boot_ok:
-    .ascii "MIDIX V0 BOOT OK\n"
+    .ascii "init: boot stub ready\n"
 msg_boot_ok_end:
 
 .section .text.userstub, "ax"

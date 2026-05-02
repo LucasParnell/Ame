@@ -256,7 +256,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
         return kNullCap;
     }
     if (root->target != &g_root) {
-        ANKO_LOG_ERROR("kernel/vm", "SYS_VM_CREATE root target mismatch");
+        ANKO_LOG_ERROR("kernel/vm", "sys_vm_create root target mismatch");
         if (out_error) *out_error = E_NOTFOUND;
         note_error();
         return kNullCap;
@@ -264,7 +264,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
 
     const u32 slot = find_free_vm_slot();
     if (slot >= kMaxVms) {
-        ANKO_LOG_ERROR("kernel/vm", "SYS_VM_CREATE no free vm slot");
+        ANKO_LOG_ERROR("kernel/vm", "sys_vm_create no free vm slot");
         if (out_error) *out_error = E_OVERFLOW;
         note_error();
         return kNullCap;
@@ -272,7 +272,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
 
     Vm* v = static_cast<Vm*>(mm::heap_alloc(sizeof(Vm), alignof(Vm)));
     if (!v) {
-        ANKO_LOG_ERROR("kernel/vm", "SYS_VM_CREATE heap alloc failed");
+        ANKO_LOG_ERROR("kernel/vm", "sys_vm_create heap alloc failed");
         if (out_error) *out_error = E_NOMEM;
         note_error();
         return kNullCap;
@@ -287,7 +287,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
 
     const SysError s2 = stage2_create(&v->stage2);
     if (s2 != E_OK) {
-        ANKO_LOGF_ERROR("kernel/vm", "SYS_VM_CREATE stage2 create fail rc=%d",
+        ANKO_LOGF_ERROR("kernel/vm", "sys_vm_create stage2 create fail rc=%d",
                         static_cast<int>(s2));
         v->state = VM_DEAD;
         if (out_error) *out_error = s2;
@@ -300,7 +300,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
                                            RIGHT_VM_INSPECT | RIGHT_VM_DESTROY |
                                            RIGHT_DUP);
     if (cap_h == kNullCap) {
-        ANKO_LOG_ERROR("kernel/vm", "SYS_VM_CREATE cap alloc failed");
+        ANKO_LOG_ERROR("kernel/vm", "sys_vm_create cap alloc failed");
         v->state = VM_DEAD;
         stage2_destroy(&v->stage2);
         if (out_error) *out_error = E_OVERFLOW;

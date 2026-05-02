@@ -5,7 +5,7 @@
 //
 // Startup order follows spec §5.1 and §8 V0 Boot Flow:
 //
-//   phase 0  early UART, libk putchar, "ANKO\n"   ← THIS COMMIT
+//   phase 0  early UART, libk putchar, "anko\n"   ← THIS COMMIT
 //   phase 1  DTB parse, page tables + MMU, vectors, phys allocator, GIC, timer
 //   phase 2  cap table, IPC, scheduler, init process, enter EL0
 
@@ -44,7 +44,7 @@ extern "C" [[noreturn]] void kernel_main() {
     drivers::uart::early_init(platform::kUartBase);
     anko::log::early_init();
     libk::set_putchar(drivers::uart::putchar_thunk);
-    ANKO_LOG_INFO("kernel/boot", "ANKO");
+    ANKO_LOG_INFO("kernel/boot", "anko booting");
     (void)g_dtb_phys;
 
     // Install exception vectors early so EL0 SVC has a defined handler.
@@ -54,7 +54,6 @@ extern "C" [[noreturn]] void kernel_main() {
         :
         : "r"(&vectors)
         : "memory");
-    ANKO_LOG_INFO("kernel/boot", "vectors set");
 
     // Direct-QEMU bootstrap: use the RAM size expected by scripts/run-qemu.sh.
     // Linux VM bring-up needs enough physical pages for the embedded initrd,
@@ -62,26 +61,17 @@ extern "C" [[noreturn]] void kernel_main() {
     // QEMU_MEM default in scripts/run-qemu.sh until DTB RAM discovery replaces
     // the fixed bootstrap size.
     mm::phys_init(platform::kRamBase, 512ull * 1024ull * 1024ull);
-    ANKO_LOG_INFO("kernel/boot", "phys init");
     mm::heap_init();
-    ANKO_LOG_INFO("kernel/boot", "heap init");
     mm::vm_init();
-    ANKO_LOG_INFO("kernel/boot", "mmu init");
     drivers::gic::init(platform::kGicDistBase, platform::kGicCpuBase);
     drivers::timer::init(platform::kTimerIrqPhysNS);
-    ANKO_LOG_INFO("kernel/boot", "irq init");
 
     cap::init();
-    ANKO_LOG_INFO("kernel/boot", "cap init");
     ipc::init();
-    ANKO_LOG_INFO("kernel/boot", "ipc init");
     vm::init();
-    ANKO_LOG_INFO("kernel/boot", "vm init");
     sched::init();
-    ANKO_LOG_INFO("kernel/boot", "sched init");
     smp::init(g_dtb_phys);
-    ANKO_LOG_INFO("kernel/boot", "creating init");
     kernel::init::create_init_process();
-    ANKO_LOG_INFO("kernel/boot", "entering scheduler");
+    ANKO_LOG_INFO("kernel/boot", "scheduler ready");
     sched::enter();
 }

@@ -30,7 +30,7 @@ echo "[2/5] build initramfs"
 "${AME}/scripts/linux/build-initramfs.sh"
 
 echo "[3/5] configure/build linux"
-if [[ "${DANGO_LINUX_TRACE:-1}" != "0" ]]; then
+if [[ "${DANGO_LINUX_TRACE:-0}" != "0" ]]; then
     DANGO_LINUX_SRC="${DANGO_LINUX_SRC}" "${AME}/scripts/linux/apply-dango-trace.py" "${DANGO_LINUX_SRC}"
 fi
 # Start from defconfig for the first reliable guest boot, then apply the
@@ -87,4 +87,4 @@ vcpus = 1
 EOF_MANIFEST
 
 "${AME}/scripts/linux/check-artifacts.sh" "${OUT}"
-echo "DANGO LINUX ARTIFACTS OK"
+echo "dango: linux artifacts ready"

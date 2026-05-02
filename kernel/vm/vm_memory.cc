@@ -37,7 +37,7 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
 
     PhysAddr* backing = static_cast<PhysAddr*>(mm::heap_alloc(bytes, alignof(PhysAddr)));
     if (!backing) {
-        ANKO_LOG_ERROR("kernel/vm", "VM_MEMORY backing array alloc failed");
+        ANKO_LOG_ERROR("kernel/vm", "vm_memory backing array alloc failed");
         return false;
     }
     libk::memset(backing, 0, bytes);
@@ -45,7 +45,7 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
     for (usize i = 0; i < pages; ++i) {
         PhysAddr pa = mm::alloc_page();
         if (!pa) {
-            ANKO_LOGF_ERROR("kernel/vm", "VM_MEMORY alloc_page failed at %llu/%llu",
+            ANKO_LOGF_ERROR("kernel/vm", "vm_memory alloc_page failed at %llu/%llu",
                             static_cast<unsigned long long>(i),
                             static_cast<unsigned long long>(pages));
             for (usize j = 0; j < i; ++j) mm::free_page(backing[j]);
@@ -96,7 +96,7 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
     SysError rc = E_OK;
     Vm* v = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
     if (!v) {
-        ANKO_LOGF_ERROR("kernel/vm", "VM_MEMORY_CREATE vm cap fail rc=%d",
+        ANKO_LOGF_ERROR("kernel/vm", "vm_memory_create vm cap fail rc=%d",
                         static_cast<int>(rc));
         if (out_error) *out_error = rc;
         return kNullCap;
@@ -129,7 +129,7 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
     }
     if (!backing_ok) {
         mem->dead = true;
-        ANKO_LOG_ERROR("kernel/vm", "VM_MEMORY_CREATE backing allocation failed");
+        ANKO_LOG_ERROR("kernel/vm", "vm_memory_create backing allocation failed");
         if (out_error) *out_error = E_NOMEM;
         note_error();
         return kNullCap;
@@ -150,7 +150,7 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
                                            RIGHT_VM_MEMORY_INSPECT |
                                            RIGHT_DUP);
     if (cap_h == kNullCap) {
-        ANKO_LOG_ERROR("kernel/vm", "VM_MEMORY_CREATE cap alloc failed");
+        ANKO_LOG_ERROR("kernel/vm", "vm_memory_create cap alloc failed");
         destroy_memory_object(mem);
         if (out_error) *out_error = E_OVERFLOW;
         note_error();

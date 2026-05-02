@@ -1,0 +1,104 @@
+--- a/kernel/arch/arm64/el2.S
++++ b/kernel/arch/arm64/el2.S
+@@ -60,6 +60,34 @@
+     add     \slot_reg, \slot_reg, \tmp_reg, lsl #3
+ .endm
+ 
++/*
++ * Save lower-EL GPRs before using any register as EL2 scratch state.
++ *
++ * Asynchronous entries are especially easy to get wrong: the interrupted
++ * guest's x0-x30 are still live in the hardware registers when the vector is
++ * entered.  Do not mark the exit kind in x23 until after x23 has been saved to
++ * the stack, otherwise every host IRQ corrupts guest x23.
++ */
++.macro SAVE_LOWER_GPRS
++    sub     sp, sp, #256
++    stp     x0, x1, [sp, #0]
++    stp     x2, x3, [sp, #16]
++    stp     x4, x5, [sp, #32]
++    stp     x6, x7, [sp, #48]
++    stp     x8, x9, [sp, #64]
++    stp     x10, x11, [sp, #80]
++    stp     x12, x13, [sp, #96]
++    stp     x14, x15, [sp, #112]
++    stp     x16, x17, [sp, #128]
++    stp     x18, x19, [sp, #144]
++    stp     x20, x21, [sp, #160]
++    stp     x22, x23, [sp, #176]
++    stp     x24, x25, [sp, #192]
++    stp     x26, x27, [sp, #208]
++    stp     x28, x29, [sp, #224]
++    str     x30, [sp, #240]
++.endm
++
+ el2_vectors:
+     EL2_VEC el2_unhandled
+     EL2_VEC el2_unhandled
+@@ -86,35 +114,20 @@
+     b 1b
+ 
+ el2_lower_irq:
++    SAVE_LOWER_GPRS
+     mov     x23, #1
+-    b       el2_lower_async
++    b       el2_lower_async_saved
+ 
+ el2_lower_fiq:
++    SAVE_LOWER_GPRS
+     mov     x23, #2
+-    b       el2_lower_async
++    b       el2_lower_async_saved
+ 
+ el2_lower_serror:
++    SAVE_LOWER_GPRS
+     mov     x23, #3
+ 
+-el2_lower_async:
+-    sub     sp, sp, #256
+-    stp     x0, x1, [sp, #0]
+-    stp     x2, x3, [sp, #16]
+-    stp     x4, x5, [sp, #32]
+-    stp     x6, x7, [sp, #48]
+-    stp     x8, x9, [sp, #64]
+-    stp     x10, x11, [sp, #80]
+-    stp     x12, x13, [sp, #96]
+-    stp     x14, x15, [sp, #112]
+-    stp     x16, x17, [sp, #128]
+-    stp     x18, x19, [sp, #144]
+-    stp     x20, x21, [sp, #160]
+-    stp     x22, x23, [sp, #176]
+-    stp     x24, x25, [sp, #192]
+-    stp     x26, x27, [sp, #208]
+-    stp     x28, x29, [sp, #224]
+-    str     x30, [sp, #240]
+-
++el2_lower_async_saved:
+     LOAD_EL2_RUN_STATE_SLOT x20, x24
+     ldr     x21, [x20]
+     cbz     x21, el2_unhandled_saved
+@@ -125,23 +138,7 @@
+     b       el2_unhandled
+ 
+ el2_lower_sync:
+-    sub     sp, sp, #256
+-    stp     x0, x1, [sp, #0]
+-    stp     x2, x3, [sp, #16]
+-    stp     x4, x5, [sp, #32]
+-    stp     x6, x7, [sp, #48]
+-    stp     x8, x9, [sp, #64]
+-    stp     x10, x11, [sp, #80]
+-    stp     x12, x13, [sp, #96]
+-    stp     x14, x15, [sp, #112]
+-    stp     x16, x17, [sp, #128]
+-    stp     x18, x19, [sp, #144]
+-    stp     x20, x21, [sp, #160]
+-    stp     x22, x23, [sp, #176]
+-    stp     x24, x25, [sp, #192]
+-    stp     x26, x27, [sp, #208]
+-    stp     x28, x29, [sp, #224]
+-    str     x30, [sp, #240]
++    SAVE_LOWER_GPRS
+ 
+     LOAD_EL2_RUN_STATE_SLOT x20, x24
+     ldr     x21, [x20]

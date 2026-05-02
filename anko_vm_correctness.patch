@@ -1,0 +1,750 @@
+--- a/kernel/include/anko/vm.h
++++ b/kernel/include/anko/vm.h
+@@ -21,6 +21,9 @@
+ constexpr u32 kVgicMaxIrqs = 64;
+ constexpr u32 kVgicBitmapWords = kVgicMaxIrqs / 32;
+ 
++constexpr u64 kDefaultGuestMidr = 0x410FD034ull; // ARM Cortex-A53 MIDR.
++
++
+ constexpr u64 kGuestPhysMin = 0x4000'0000ull;
+ constexpr u64 kGuestPhysMax = 0x4800'0000ull;
+ constexpr u64 kDangoRamBase = 0x4000'0000ull;
+@@ -184,6 +187,14 @@
+      * el2.S zeros exit_esr/exit_far/exit_hpfar and records the kind here.
+      */
+     u64 exit_kind;
++
++    /*
++     * Stable architectural CPU identity exposed to the guest through
++     * VMPIDR_EL2/VPIDR_EL2.  Do not let the guest observe the host CPU it
++     * happens to be scheduled on.
++     */
++    u64 guest_vmpidr;
++    u64 guest_vpidr;
+ };
+ 
+ struct VgicState {
+@@ -205,8 +216,8 @@
+ static_assert(__builtin_offsetof(El2RunState, guest_irq_pending) == 480);
+ static_assert(__builtin_offsetof(El2RunState, timer_hw_mask) == 488);
+ static_assert(__builtin_offsetof(El2RunState, exit_kind) == 496);
+-static_assert(__builtin_offsetof(El2RunState, guest_irq_pending) == 480);
+-static_assert(__builtin_offsetof(El2RunState, timer_hw_mask) == 488);
++static_assert(__builtin_offsetof(El2RunState, guest_vmpidr) == 504);
++static_assert(__builtin_offsetof(El2RunState, guest_vpidr) == 512);
+ struct Vcpu {
+     u32 vcpu_id;
+     u32 owner_vm_id;
+@@ -223,6 +234,8 @@
+     u64 flags;
+     u64 run_count;
+     u64 last_exit_reason;
++    u64 virtual_mpidr;
++    u64 virtual_midr;
+     VgicState vgic;
+ };
+ 
+--- a/kernel/arch/arm64/el2.S
++++ b/kernel/arch/arm64/el2.S
+@@ -38,12 +38,28 @@
+ .equ CTX_GUEST_IRQ_PENDING, 480
+ .equ CTX_TIMER_HW_MASK,    488
+ .equ CTX_EXIT_KIND,        496
++.equ CTX_GUEST_VMPIDR,    504
++.equ CTX_GUEST_VPIDR,     512
++
++.equ EL2_RUN_STATE_MAX_CPUS, 4
+ 
+ .macro EL2_VEC target
+     .balign 128
+     b \target
+ .endm
+ 
++.macro LOAD_EL2_RUN_STATE_SLOT slot_reg, tmp_reg
++    mrs     \tmp_reg, MPIDR_EL1
++    and     \tmp_reg, \tmp_reg, #0xff
++    cmp     \tmp_reg, #EL2_RUN_STATE_MAX_CPUS
++    b.lo    1f
++    mov     \tmp_reg, xzr
++1:
++    adrp    \slot_reg, g_el2_run_state
++    add     \slot_reg, \slot_reg, :lo12:g_el2_run_state
++    add     \slot_reg, \slot_reg, \tmp_reg, lsl #3
++.endm
++
+ el2_vectors:
+     EL2_VEC el2_unhandled
+     EL2_VEC el2_unhandled
+@@ -99,8 +115,7 @@
+     stp     x28, x29, [sp, #224]
+     str     x30, [sp, #240]
+ 
+-    adrp    x20, g_el2_run_state
+-    add     x20, x20, :lo12:g_el2_run_state
++    LOAD_EL2_RUN_STATE_SLOT x20, x24
+     ldr     x21, [x20]
+     cbz     x21, el2_unhandled_saved
+     b       el2_guest_exit_common
+@@ -128,8 +143,7 @@
+     stp     x28, x29, [sp, #224]
+     str     x30, [sp, #240]
+ 
+-    adrp    x20, g_el2_run_state
+-    add     x20, x20, :lo12:g_el2_run_state
++    LOAD_EL2_RUN_STATE_SLOT x20, x24
+     ldr     x21, [x20]
+     cbnz    x21, el2_guest_exit
+ 
+@@ -172,6 +186,11 @@
+     msr     CNTVOFF_EL2, xzr
+     msr     CPTR_EL2, xzr
+ 
++    ldr     x0, [x21, #CTX_GUEST_VMPIDR]
++    msr     VMPIDR_EL2, x0
++    ldr     x0, [x21, #CTX_GUEST_VPIDR]
++    msr     VPIDR_EL2, x0
++
+     ldr     x0, [x21, #CTX_GUEST_MAIR]
+     msr     MAIR_EL1, x0
+     ldr     x0, [x21, #CTX_GUEST_TCR]
+@@ -427,7 +446,9 @@
+ .align 12
+ .global g_el2_run_state
+ g_el2_run_state:
++    .rept EL2_RUN_STATE_MAX_CPUS
+     .quad 0
++    .endr
+ 
+ .align 12
+ .global __el2_stack_top
+--- a/kernel/vm/stage2.cc
++++ b/kernel/vm/stage2.cc
+@@ -9,8 +9,10 @@
+ constexpr u64 S2_DESC_TABLE = 1ull << 1;
+ constexpr u64 S2_DESC_AF = 1ull << 10;
+ constexpr u64 S2_DESC_SH_INNER = 3ull << 8;
+-constexpr u64 S2_DESC_S2AP_RW = 3ull << 6;
++constexpr u64 S2_DESC_S2AP_READ = 1ull << 6;
++constexpr u64 S2_DESC_S2AP_WRITE = 1ull << 7;
+ constexpr u64 S2_DESC_MEM_NORMAL = 0xFull << 2;
++constexpr u64 S2_DESC_XN = 1ull << 54;
+ constexpr u64 S2_DESC_ADDR_MASK = 0x0000'FFFF'FFFF'F000ull;
+ constexpr u64 S2_DESC_BLOCK_PAGE = S2_DESC_VALID | S2_DESC_TABLE;
+ 
+@@ -65,8 +67,17 @@
+ }
+ 
+ u64 stage2_page_attrs(u32 rights) {
+-    (void)rights;
+-    return S2_DESC_MEM_NORMAL | S2_DESC_S2AP_RW | S2_DESC_SH_INNER | S2_DESC_AF;
++    /*
++     * Stage-2 S2AP is independent from host capability rights.  Preserve the
++     * exact guest access requested by the VM monitor rather than silently
++     * upgrading every mapping to RWX.  Bits [7:6] are read/write permission in
++     * the stage-2 long-descriptor format; XN blocks instruction fetches.
++     */
++    u64 attrs = S2_DESC_MEM_NORMAL | S2_DESC_SH_INNER | S2_DESC_AF;
++    if (rights & RIGHT_READ) attrs |= S2_DESC_S2AP_READ;
++    if (rights & RIGHT_WRITE) attrs |= S2_DESC_S2AP_WRITE;
++    if ((rights & RIGHT_EXEC) == 0) attrs |= S2_DESC_XN;
++    return attrs;
+ }
+ 
+ SysError record_mapping(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights) {
+--- a/kernel/vm/vcpu.cc
++++ b/kernel/vm/vcpu.cc
+@@ -17,6 +17,8 @@
+ constexpr u64 kLinuxBootProbeEntry = 0x4008'0000ull;
+ constexpr u64 kHcrExitUnsupported = 0;
+ constexpr u64 kEcWfx = 0x01;
++constexpr u64 kEcHvc64 = 0x16;
++constexpr u64 kEcSmc64 = 0x17;
+ constexpr u64 kEcSysReg = 0x18;
+ constexpr u64 kEcInstrAbortLower = 0x20;
+ constexpr u64 kEcInstrAbortCurrent = 0x21;
+@@ -31,6 +33,32 @@
+ constexpr u32 kGuestPhysTimerIrq = 30;
+ constexpr u32 kGuestVirtTimerIrq = 27;
+ 
++constexpr u32 kPsciVersion32 = 0x84000000u;
++constexpr u32 kPsciCpuSuspend32 = 0x84000001u;
++constexpr u32 kPsciCpuOff32 = 0x84000002u;
++constexpr u32 kPsciCpuOn32 = 0x84000003u;
++constexpr u32 kPsciAffinityInfo32 = 0x84000004u;
++constexpr u32 kPsciMigrateInfoType32 = 0x84000006u;
++constexpr u32 kPsciSystemOff32 = 0x84000008u;
++constexpr u32 kPsciSystemReset32 = 0x84000009u;
++constexpr u32 kPsciFeatures32 = 0x8400000Au;
++constexpr u32 kPsciCpuSuspend64 = 0xC4000001u;
++constexpr u32 kPsciCpuOn64 = 0xC4000003u;
++constexpr u32 kPsciAffinityInfo64 = 0xC4000004u;
++
++constexpr i64 kPsciSuccess = 0;
++constexpr i64 kPsciNotSupported = -1;
++constexpr i64 kPsciInvalidParameters = -2;
++constexpr i64 kPsciDenied = -3;
++constexpr i64 kPsciAlreadyOn = -4;
++
++enum class PsciAction : u32 {
++    NotHandled = 0,
++    Continue = 1,
++    StopCurrent = 2,
++    ShutdownVm = 3,
++};
++
+ constexpr u32 GICD_CTLR       = 0x000;
+ constexpr u32 GICD_TYPER      = 0x004;
+ constexpr u32 GICD_IIDR       = 0x008;
+@@ -114,6 +142,10 @@
+     state.regs[reg] = value;
+ }
+ 
++void write_x0(El2RunState& state, i64 value) {
++    state.regs[0] = static_cast<u64>(value);
++}
++
+ u64 mask_width(u32 size) {
+     if (size >= 8) return ~0ull;
+     return (1ull << (size * 8)) - 1ull;
+@@ -473,6 +505,130 @@
+     return true;
+ }
+ 
++
++bool psci_function_supported(u32 fn) {
++    switch (fn) {
++    case kPsciVersion32:
++    case kPsciCpuOff32:
++    case kPsciCpuOn32:
++    case kPsciCpuOn64:
++    case kPsciAffinityInfo32:
++    case kPsciAffinityInfo64:
++    case kPsciMigrateInfoType32:
++    case kPsciSystemOff32:
++    case kPsciSystemReset32:
++    case kPsciFeatures32:
++        return true;
++    default:
++        return false;
++    }
++}
++
++Vcpu* find_vcpu_by_mpidr(Vm& owner, u64 mpidr) {
++    const u64 aff = mpidr & 0x00FF'FFFFull;
++    for (u32 i = 0; i < owner.vcpu_count; ++i) {
++        Vcpu* candidate = owner.vcpus[i];
++        if (!candidate || candidate->state == VCPU_DEAD) continue;
++        if ((candidate->virtual_mpidr & 0x00FF'FFFFull) == aff) return candidate;
++    }
++    return nullptr;
++}
++
++void reset_target_vcpu_for_psci_on(Vcpu& target, u64 entry, u64 context_id) {
++    target.entry_pc = entry;
++    target.arg0 = context_id;
++    target.arg1 = 0;
++    target.sp = 0;
++    target.pc = entry;
++    target.pstate = 0x3C5;
++    for (u32 i = 0; i < 31; ++i) target.regs[i] = 0;
++    target.regs[0] = context_id;
++    libk::memset(&target.el2, 0, sizeof(target.el2));
++    target.state = VCPU_READY;
++}
++
++PsciAction emulate_psci(Vcpu& vcpu, Vm& owner, u64 ec) {
++    if (ec != kEcHvc64 && ec != kEcSmc64) return PsciAction::NotHandled;
++
++    const u32 fn = static_cast<u32>(vcpu.el2.regs[0]);
++    switch (fn) {
++    case kPsciVersion32:
++        // PSCI 1.0, which is enough for Linux's PSCI probing path.
++        write_x0(vcpu.el2, 0x0001'0000);
++        break;
++
++    case kPsciFeatures32: {
++        const u32 queried = static_cast<u32>(vcpu.el2.regs[1]);
++        write_x0(vcpu.el2, psci_function_supported(queried) ? kPsciSuccess : kPsciNotSupported);
++        break;
++    }
++
++    case kPsciMigrateInfoType32:
++        // Trusted OS not present / migration not required.
++        write_x0(vcpu.el2, 2);
++        break;
++
++    case kPsciAffinityInfo32:
++    case kPsciAffinityInfo64: {
++        const u64 target_mpidr = vcpu.el2.regs[1];
++        Vcpu* target = find_vcpu_by_mpidr(owner, target_mpidr);
++        if (!target) {
++            write_x0(vcpu.el2, kPsciInvalidParameters);
++        } else {
++            const bool on = target->state == VCPU_READY ||
++                            target->state == VCPU_CONFIGURED ||
++                            target->state == VCPU_RUNNING;
++            write_x0(vcpu.el2, on ? 0 : 1);
++        }
++        break;
++    }
++
++    case kPsciCpuOn32:
++    case kPsciCpuOn64: {
++        const u64 target_mpidr = vcpu.el2.regs[1];
++        const u64 entry = vcpu.el2.regs[2];
++        const u64 context_id = vcpu.el2.regs[3];
++        if ((entry & 0x3ull) != 0) {
++            write_x0(vcpu.el2, kPsciInvalidParameters);
++            break;
++        }
++        Vcpu* target = find_vcpu_by_mpidr(owner, target_mpidr);
++        if (!target) {
++            write_x0(vcpu.el2, kPsciInvalidParameters);
++        } else if (target == &vcpu || target->state == VCPU_READY ||
++                   target->state == VCPU_CONFIGURED || target->state == VCPU_RUNNING) {
++            write_x0(vcpu.el2, kPsciAlreadyOn);
++        } else {
++            reset_target_vcpu_for_psci_on(*target, entry, context_id);
++            write_x0(vcpu.el2, kPsciSuccess);
++        }
++        break;
++    }
++
++    case kPsciCpuOff32:
++        write_x0(vcpu.el2, kPsciSuccess);
++        vcpu.el2.pc += 4;
++        return PsciAction::StopCurrent;
++
++    case kPsciSystemOff32:
++    case kPsciSystemReset32:
++        write_x0(vcpu.el2, kPsciSuccess);
++        vcpu.el2.pc += 4;
++        return PsciAction::ShutdownVm;
++
++    case kPsciCpuSuspend32:
++    case kPsciCpuSuspend64:
++        write_x0(vcpu.el2, kPsciDenied);
++        break;
++
++    default:
++        return PsciAction::NotHandled;
++    }
++
++    vcpu.el2.pc += 4;
++    return PsciAction::Continue;
++}
++
+ void log_sysreg_trap(const Vcpu& vcpu, u64 esr) {
+     const u64 iss = esr_iss(esr);
+     const u32 op0 = static_cast<u32>((iss >> 20) & 0x3ull);
+@@ -549,6 +705,8 @@
+     vcpu.el2.guest_irq_pending = 0;
+     vcpu.el2.timer_hw_mask = 0;
+     vcpu.el2.exit_kind = 0;
++    vcpu.el2.guest_vmpidr = vcpu.virtual_mpidr;
++    vcpu.el2.guest_vpidr = vcpu.virtual_midr ? vcpu.virtual_midr : kDefaultGuestMidr;
+ 
+     vcpu.el2.host_cntp_ctl   = 0;
+     vcpu.el2.host_cntp_cval  = 0;
+@@ -583,6 +741,8 @@
+     vcpu->owner_vm_id = v->vm_id;
+     vcpu->state = VCPU_CREATED;
+     vcpu->flags = flags;
++    vcpu->virtual_mpidr = static_cast<u64>(v->vcpu_count);
++    vcpu->virtual_midr = kDefaultGuestMidr;
+ 
+     const CapHandle cap_h = cap::alloc(*caller.cap_table, CAP_VCPU, vcpu,
+                                        RIGHT_VCPU_CONTROL |
+@@ -616,8 +776,12 @@
+     vcpu->arg0 = arg0;
+     vcpu->arg1 = arg1;
+     vcpu->pc = entry_pc;
++    for (u32 i = 0; i < 31; ++i) vcpu->regs[i] = 0;
+     vcpu->regs[0] = arg0;
+     vcpu->regs[1] = arg1;
++    vcpu->sp = 0;
++    vcpu->pstate = 0x3C5;
++    libk::memset(&vcpu->el2, 0, sizeof(vcpu->el2));
+     vcpu->state = VCPU_READY;
+     metric_inc(VM_DEBUG_VCPU_CONFIGURED);
+ 
+@@ -746,6 +910,25 @@
+ 
+         const u64 ec = esr_ec(esr);
+ 
++        if (ec == kEcHvc64 || ec == kEcSmc64) {
++            const PsciAction psci = emulate_psci(*vcpu, *owner, ec);
++            if (psci == PsciAction::Continue) continue;
++            if (psci == PsciAction::StopCurrent) {
++                sync_vcpu_from_el2(*vcpu);
++                vcpu->state = VCPU_BLOCKED;
++                owner->state = VM_READY;
++                vcpu->last_exit_reason = 0;
++                return E_OK;
++            }
++            if (psci == PsciAction::ShutdownVm) {
++                sync_vcpu_from_el2(*vcpu);
++                vcpu->state = VCPU_DEAD;
++                owner->state = VM_DEAD;
++                vcpu->last_exit_reason = 0;
++                return E_OK;
++            }
++        }
++
+         /*
+          * Defensive fallback. Synchronous ESR==0 should not normally happen,
+          * but keep it as a budget-style exit rather than reporting a bogus
+--- a/kernel/syscall/dispatch.cc
++++ b/kernel/syscall/dispatch.cc
+@@ -656,7 +656,7 @@
+     }
+ 
+     case SYS_DEBUG_COUNTERS:
+-        if (a0 >= vm::VM_DEBUG_CREATE_CALLS && a0 <= vm::VM_DEBUG_VHE_AVAILABLE) {
++        if (a0 >= vm::VM_DEBUG_CREATE_CALLS && a0 <= vm::VM_DEBUG_VCPU_UNSUPPORTED_EXITS) {
+             return ok(static_cast<long>(vm::debug_counter(a0)));
+         }
+         switch (a0) {
+--- a/linux-artifacts/dts/dango-linux-minimal.dts.in
++++ b/linux-artifacts/dts/dango-linux-minimal.dts.in
+@@ -7,6 +7,7 @@
+     interrupt-parent = <&intc>;
+ 
+     chosen {
++        stdout-path = "serial0:115200n8";
+         bootargs = "@BOOTARGS@";
+         linux,initrd-start = <@INITRD_START_HI@ @INITRD_START_LO@>;
+         linux,initrd-end   = <@INITRD_END_HI@ @INITRD_END_LO@>;
+@@ -17,6 +18,11 @@
+         reg = <0x0 0x40000000 0x0 0x08000000>; // 128 MiB
+     };
+ 
++    psci {
++        compatible = "arm,psci-1.0", "arm,psci-0.2";
++        method = "hvc";
++    };
++
+     cpus {
+         #address-cells = <1>;
+         #size-cells = <0>;
+@@ -25,6 +31,7 @@
+             device_type = "cpu";
+             compatible = "arm,arm-v8";
+             reg = <0>;
++            enable-method = "psci";
+         };
+     };
+ 
+--- a/linux-artifacts/dts/dango-linux-minimal.dts
++++ b/linux-artifacts/dts/dango-linux-minimal.dts
+@@ -7,6 +7,7 @@
+     interrupt-parent = <&intc>;
+ 
+     chosen {
++        stdout-path = "serial0:115200n8";
+         bootargs = "console=ttyAMA0 earlycon=pl011,0x09000000 keep_bootcon ignore_loglevel loglevel=8 initcall_debug nosmp maxcpus=1 cma=0 coherent_pool=1M cpuidle.off=1 rdinit=/init init=/init panic=-1";
+         linux,initrd-start = <0x0 0x46000000>;
+         linux,initrd-end   = <0x0 0x46100000>;
+@@ -17,6 +18,11 @@
+         reg = <0x0 0x40000000 0x0 0x08000000>;
+     };
+ 
++    psci {
++        compatible = "arm,psci-1.0", "arm,psci-0.2";
++        method = "hvc";
++    };
++
+     cpus {
+         #address-cells = <1>;
+         #size-cells = <0>;
+@@ -25,6 +31,7 @@
+             device_type = "cpu";
+             compatible = "arm,arm-v8";
+             reg = <0>;
++            enable-method = "psci";
+         };
+     };
+ 
+--- a/userland/dango/manager/main.cc
++++ b/userland/dango/manager/main.cc
+@@ -13,16 +13,6 @@
+ constexpr uint64_t kVaConsoleRing = 0x5000'0000ull;
+ constexpr uint64_t kVaBootInitrd = 0x5100'0000ull;
+ constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;
+-constexpr uint64_t kLinuxBootStubLoad = 0x4010'0000ull;
+-
+-static const uint32_t kLinuxBootStub[] = {
+-    0xaa0003f4, 0x100001b5, 0xd2a12016, 0x384016b7,
+-    0x34000077, 0xb90002d7, 0x17fffffd, 0xaa1403e0,
+-    0xaa1f03e1, 0xaa1f03e2, 0xaa1f03e3, 0xd2800010,
+-    0xf2a80410, 0xd61f0200, 0x474e4144, 0x4d56204f,
+-    0x4f4f4220, 0x54532054, 0x4f204255, 0x00000a4b,
+-};
+-
+ constexpr CapHandle cap_slot(uint32_t idx) {
+     return (static_cast<CapHandle>(1) << 32) | idx;
+ }
+@@ -65,6 +55,8 @@
+     uint64_t initramfs_size;
+     const uint8_t* dtb;
+     uint64_t dtb_size;
++    dango::VmLayout layout;
++    uint64_t entry;
+ };
+ 
+ static uint32_t slen(const char* s) {
+@@ -112,16 +104,31 @@
+     return (v & (dango::kPageSize - 1)) == 0;
+ }
+ 
++static bool checked_add(uint64_t a, uint64_t b, uint64_t* out) {
++    const uint64_t r = a + b;
++    if (r < a) return false;
++    *out = r;
++    return true;
++}
++
++static uint64_t round_up_page(uint64_t value) {
++    return (value + dango::kPageSize - 1) & ~(dango::kPageSize - 1);
++}
++
+ static bool overlaps(uint64_t a_base, uint64_t a_size, uint64_t b_base, uint64_t b_size) {
+-    const uint64_t a_end = a_base + a_size;
+-    const uint64_t b_end = b_base + b_size;
++    uint64_t a_end = 0;
++    uint64_t b_end = 0;
++    if (!checked_add(a_base, a_size, &a_end)) return true;
++    if (!checked_add(b_base, b_size, &b_end)) return true;
+     return a_base < b_end && a_end > b_base;
+ }
+ 
+ static bool contains(uint64_t outer_base, uint64_t outer_size,
+                      uint64_t inner_base, uint64_t inner_size) {
+-    const uint64_t outer_end = outer_base + outer_size;
+-    const uint64_t inner_end = inner_base + inner_size;
++    uint64_t outer_end = 0;
++    uint64_t inner_end = 0;
++    if (!checked_add(outer_base, outer_size, &outer_end)) return false;
++    if (!checked_add(inner_base, inner_size, &inner_end)) return false;
+     return inner_base >= outer_base && inner_end <= outer_end && inner_end >= inner_base;
+ }
+ 
+@@ -206,6 +213,137 @@
+     return nullptr;
+ }
+ 
++
++static bool ascii_space(char c) {
++    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
++}
++
++static bool key_at(const uint8_t* data, uint64_t size, uint64_t off, const char* key) {
++    if (off != 0) {
++        const char prev = static_cast<char>(data[off - 1]);
++        if (prev != '\n' && prev != '\r') return false;
++    }
++    uint64_t i = off;
++    while (i < size && (data[i] == ' ' || data[i] == '\t')) ++i;
++    for (uint32_t k = 0; key[k]; ++k, ++i) {
++        if (i >= size || static_cast<char>(data[i]) != key[k]) return false;
++    }
++    while (i < size && (data[i] == ' ' || data[i] == '\t')) ++i;
++    return i < size && data[i] == '=';
++}
++
++static const uint8_t* manifest_value(const uint8_t* data, uint64_t size,
++                                     const char* key, uint64_t* out_len) {
++    if (!data || !key || !out_len) return nullptr;
++    for (uint64_t off = 0; off < size; ++off) {
++        if (!key_at(data, size, off, key)) continue;
++        uint64_t i = off;
++        while (i < size && data[i] != '=') ++i;
++        if (i >= size) return nullptr;
++        ++i;
++        while (i < size && ascii_space(static_cast<char>(data[i]))) ++i;
++        if (i >= size) return nullptr;
++        if (data[i] == '"') {
++            const uint64_t start = ++i;
++            while (i < size && data[i] != '"') ++i;
++            if (i >= size) return nullptr;
++            *out_len = i - start;
++            return data + start;
++        }
++        const uint64_t start = i;
++        while (i < size && !ascii_space(static_cast<char>(data[i])) && data[i] != '#') ++i;
++        *out_len = i - start;
++        return data + start;
++    }
++    return nullptr;
++}
++
++static bool token_equals(const uint8_t* p, uint64_t len, const char* s) {
++    uint64_t i = 0;
++    while (i < len && s[i]) {
++        if (static_cast<char>(p[i]) != s[i]) return false;
++        ++i;
++    }
++    return i == len && s[i] == '\0';
++}
++
++static bool parse_u64_token(const uint8_t* p, uint64_t len, uint64_t* out) {
++    if (!p || !out || len == 0) return false;
++    uint64_t i = 0;
++    uint32_t base = 10;
++    if (len >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
++        base = 16;
++        i = 2;
++    }
++    if (i >= len) return false;
++    uint64_t value = 0;
++    for (; i < len; ++i) {
++        const char c = static_cast<char>(p[i]);
++        uint32_t digit = 0;
++        if (c >= '0' && c <= '9') digit = static_cast<uint32_t>(c - '0');
++        else if (base == 16 && c >= 'a' && c <= 'f') digit = static_cast<uint32_t>(c - 'a' + 10);
++        else if (base == 16 && c >= 'A' && c <= 'F') digit = static_cast<uint32_t>(c - 'A' + 10);
++        else return false;
++        if (digit >= base) return false;
++        if (value > (~0ull - digit) / base) return false;
++        value = value * base + digit;
++    }
++    *out = value;
++    return true;
++}
++
++static bool manifest_u64(const LinuxArtifacts& artifacts, const char* key, uint64_t* out) {
++    uint64_t len = 0;
++    const uint8_t* value = manifest_value(artifacts.manifest, artifacts.manifest_size, key, &len);
++    return parse_u64_token(value, len, out);
++}
++
++static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
++    if (!artifacts || !artifacts->manifest || artifacts->manifest_size == 0) return false;
++
++    uint64_t manifest_kernel_size = 0;
++    uint64_t manifest_initramfs_size = 0;
++    uint64_t manifest_dtb_size = 0;
++    if (!manifest_u64(*artifacts, "kernel_size", &manifest_kernel_size) ||
++        !manifest_u64(*artifacts, "initramfs_size", &manifest_initramfs_size) ||
++        !manifest_u64(*artifacts, "dtb_size", &manifest_dtb_size) ||
++        manifest_kernel_size != artifacts->image_size ||
++        manifest_initramfs_size != artifacts->initramfs_size ||
++        manifest_dtb_size != artifacts->dtb_size) {
++        return false;
++    }
++
++    dango::VmLayout layout = dango::v3_layout();
++    if (!manifest_u64(*artifacts, "memory_base", &layout.ram_base) ||
++        !manifest_u64(*artifacts, "memory_size", &layout.ram_size) ||
++        !manifest_u64(*artifacts, "kernel_load", &layout.kernel_load) ||
++        !manifest_u64(*artifacts, "initramfs_load", &layout.initramfs_load) ||
++        !manifest_u64(*artifacts, "dtb_load", &layout.dtb_base)) {
++        return false;
++    }
++
++    layout.dtb_size = round_up_page(artifacts->dtb_size);
++    if (layout.dtb_size < dango::kDtbSize) layout.dtb_size = dango::kDtbSize;
++    layout.mmio_base = dango::kMmioBase;
++    layout.mmio_size = dango::kMmioSize;
++    layout.channel_base = dango::kChannelBase;
++    layout.channel_size = dango::kChannelSize;
++
++    uint64_t entry_len = 0;
++    const uint8_t* entry = manifest_value(artifacts->manifest, artifacts->manifest_size,
++                                          "entry", &entry_len);
++    uint64_t entry_pc = 0;
++    if (entry && token_equals(entry, entry_len, "kernel_load")) {
++        entry_pc = layout.kernel_load;
++    } else if (!entry || !parse_u64_token(entry, entry_len, &entry_pc)) {
++        return false;
++    }
++
++    artifacts->layout = layout;
++    artifacts->entry = entry_pc;
++    return true;
++}
++
+ static bool discover_linux_artifacts(const uint8_t* archive, LinuxArtifacts* out) {
+     if (!archive || !out) return false;
+     LinuxArtifacts artifacts{};
+@@ -216,7 +354,26 @@
+     if (!artifacts.manifest || !artifacts.image || !artifacts.initramfs || !artifacts.dtb) {
+         return false;
+     }
+-    *out = artifacts;
++    if (!parse_linux_manifest(&artifacts)) return false;
++    out->manifest = artifacts.manifest;
++    out->manifest_size = artifacts.manifest_size;
++    out->image = artifacts.image;
++    out->image_size = artifacts.image_size;
++    out->initramfs = artifacts.initramfs;
++    out->initramfs_size = artifacts.initramfs_size;
++    out->dtb = artifacts.dtb;
++    out->dtb_size = artifacts.dtb_size;
++    out->layout.ram_base = artifacts.layout.ram_base;
++    out->layout.ram_size = artifacts.layout.ram_size;
++    out->layout.kernel_load = artifacts.layout.kernel_load;
++    out->layout.initramfs_load = artifacts.layout.initramfs_load;
++    out->layout.dtb_base = artifacts.layout.dtb_base;
++    out->layout.dtb_size = artifacts.layout.dtb_size;
++    out->layout.mmio_base = artifacts.layout.mmio_base;
++    out->layout.mmio_size = artifacts.layout.mmio_size;
++    out->layout.channel_base = artifacts.layout.channel_base;
++    out->layout.channel_size = artifacts.layout.channel_size;
++    out->entry = artifacts.entry;
+     return true;
+ }
+ 
+@@ -251,7 +408,7 @@
+     if (el < 0 || el > 3 || el2 < 0 || vhe < 0) fail("DANGO EL2 DETECT FAIL\n");
+     dango_log("DANGO EL2 DETECT OK\n");
+ 
+-    const dango::VmLayout layout = dango::v3_layout();
++    const dango::VmLayout layout = have_linux ? linux.layout : dango::v3_layout();
+     if (!validate_layout(layout)) fail("DANGO LAYOUT FAIL\n");
+     const uint64_t active_ram_size = have_linux ? layout.ram_size : (16ull * 1024ull * 1024ull);
+ 
+@@ -303,17 +460,10 @@
+ 
+     if (have_linux) {
+         if (!contains(layout.ram_base, layout.ram_size, layout.kernel_load, linux.image_size) ||
+-            !contains(layout.ram_base, layout.ram_size, kLinuxBootStubLoad, sizeof(kLinuxBootStub)) ||
+             !contains(layout.ram_base, layout.ram_size, layout.initramfs_load, linux.initramfs_size) ||
+             !contains(layout.ram_base, layout.ram_size, layout.dtb_base, linux.dtb_size) ||
+-            linux.initramfs_size > (1024ull * 1024ull) ||
+             linux.dtb_size > layout.dtb_size ||
+-            overlaps(kLinuxBootStubLoad, sizeof(kLinuxBootStub),
+-                     layout.kernel_load, linux.image_size) ||
+-            overlaps(kLinuxBootStubLoad, sizeof(kLinuxBootStub),
+-                     layout.initramfs_load, linux.initramfs_size) ||
+-            overlaps(kLinuxBootStubLoad, sizeof(kLinuxBootStub),
+-                     layout.dtb_base, linux.dtb_size) ||
++            !contains(layout.ram_base, layout.ram_size, linux.entry, 4) ||
+             overlaps(layout.kernel_load, linux.image_size,
+                      layout.initramfs_load, linux.initramfs_size) ||
+             overlaps(layout.kernel_load, linux.image_size,
+@@ -349,14 +499,6 @@
+         }
+         dango_log("DANGO LINUX COPY DTB OK\n");
+ 
+-        dango_log("DANGO LINUX COPY BOOT STUB START\n");
+-        if (sys_vm_memory_write(memory,
+-                                guest_offset(layout, kLinuxBootStubLoad),
+-                                kLinuxBootStub,
+-                                sizeof(kLinuxBootStub)) != 0) {
+-            fail("DANGO LINUX LOAD FAIL\n");
+-        }
+-        dango_log("DANGO LINUX COPY BOOT STUB OK\n");
+         dango_log("DANGO LINUX LOAD OK\n");
+     }
+ 
+@@ -365,7 +507,7 @@
+     if (vcpu == kNullCap) fail("DANGO VCPU OBJECT FAIL\n");
+     dango_log("DANGO VCPU CREATE OK\n");
+ 
+-    const uint64_t entry_pc = have_linux ? kLinuxBootStubLoad : 0x4008'0000ull;
++    const uint64_t entry_pc = have_linux ? linux.entry : 0x4008'0000ull;
+     dango_log("DANGO VCPU SET ENTRY START\n");
+     if (sys_vcpu_set_entry(vcpu, entry_pc, layout.dtb_base, 0) != 0) {
+         fail("DANGO VCPU OBJECT FAIL\n");

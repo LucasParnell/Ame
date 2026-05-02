@@ -1,0 +1,31 @@
+# build outputs
+build/
+build-*/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+.ninja_*
+*.ninja
+*.o
+*.a
+*.so
+*.elf
+*.bin
+*.img
+*.iso
+
+# generated linux artifacts
+linux/Image
+linux/initramfs.cpio
+linux/*.dtb
+
+# logs
+*.log
+dango-guest.log
+
+# editor/os
+.vscode/
+.idea/
+.DS_Store

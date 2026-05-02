@@ -1,0 +1,262 @@
+diff --git a/linux-artifacts/agent/dango-agent.c b/linux-artifacts/agent/dango-agent.c
+--- a/linux-artifacts/agent/dango-agent.c
++++ b/linux-artifacts/agent/dango-agent.c
+@@ -1,6 +1,44 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#define AT_FDCWD (-100)
++#define O_RDWR 00000002
++
++static long sys_dup3(int oldfd, int newfd, int flags) {
++    register long x0 asm("x0") = oldfd;
++    register long x1 asm("x1") = newfd;
++    register long x2 asm("x2") = flags;
++    register long x8 asm("x8") = 24;
++    asm volatile("svc #0"
++                 : "+r"(x0)
++                 : "r"(x1), "r"(x2), "r"(x8)
++                 : "memory");
++    return x0;
++}
++
++static long sys_openat(int dirfd, const char* path, int flags, unsigned long mode) {
++    register long x0 asm("x0") = dirfd;
++    register const char* x1 asm("x1") = path;
++    register long x2 asm("x2") = flags;
++    register unsigned long x3 asm("x3") = mode;
++    register long x8 asm("x8") = 56;
++    asm volatile("svc #0"
++                 : "+r"(x0)
++                 : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
++                 : "memory");
++    return x0;
++}
++
++static long sys_close(int fd) {
++    register long x0 asm("x0") = fd;
++    register long x8 asm("x8") = 57;
++    asm volatile("svc #0"
++                 : "+r"(x0)
++                 : "r"(x8)
++                 : "memory");
++    return x0;
++}
++
+ static long sys_write(int fd, const void* buf, unsigned long len) {
+     register long x0 asm("x0") = fd;
+     register const void* x1 asm("x1") = buf;
+@@ -29,12 +67,33 @@ struct timespec_compat {
+     long tv_nsec;
+ };
+ 
++static void ensure_stdio_console(void) {
++    long fd = sys_openat(AT_FDCWD, "/dev/console", O_RDWR, 0);
++    if (fd < 0) {
++        return;
++    }
++
++    for (int target = 0; target < 3; ++target) {
++        if (fd != target) {
++            (void)sys_dup3((int)fd, target, 0);
++        }
++    }
++
++    if (fd > 2) {
++        (void)sys_close((int)fd);
++    }
++}
++
+ void _start(void) {
++    ensure_stdio_console();
++
+     const char msg[] =
+         "DANGO AGENT START\n"
+         "DANGO LINUX HELLO OK\n";
+ 
+-    sys_write(1, msg, sizeof(msg) - 1);
++    if (sys_write(1, msg, sizeof(msg) - 1) < 0) {
++        (void)sys_write(2, msg, sizeof(msg) - 1);
++    }
+ 
+     for (;;) {
+         struct timespec_compat ts;
+diff --git a/scripts/linux/build-initramfs.sh b/scripts/linux/build-initramfs.sh
+--- a/scripts/linux/build-initramfs.sh
++++ b/scripts/linux/build-initramfs.sh
+@@ -3,25 +3,18 @@ set -euo pipefail
+ 
+ AME="$(cd "$(dirname "$0")/../.." && pwd)"
+ OUT="${DANGO_LINUX_OUT:-${AME}/build/dango-linux}"
+-ROOTFS="${OUT}/rootfs"
++INITRAMFS="${OUT}/initramfs.cpio"
+ 
+ if [[ ! -x "${OUT}/dango-agent" ]]; then
+     echo "error: ${OUT}/dango-agent missing; run scripts/linux/build-agent.sh first" >&2
+     exit 1
+ fi
+ 
+-rm -rf "${ROOTFS}"
+-mkdir -p "${ROOTFS}"
+-cp "${OUT}/dango-agent" "${ROOTFS}/init"
+-chmod +x "${ROOTFS}/init"
++python3 "${AME}/scripts/linux/mkinitramfs.py" "${OUT}/dango-agent" "${INITRAMFS}"
+ 
+-(
+-    cd "${ROOTFS}"
+-    find . -print0 | LC_ALL=C sort -z | cpio --null -o --format=newc --quiet > "${OUT}/initramfs.cpio"
+-)
+-
+-if ! (cd "${OUT}" && cpio -it --quiet < initramfs.cpio | grep -Eq '^\.?/?init$'); then
+-    echo "error: initramfs.cpio does not contain ./init" >&2
+-    exit 1
+-fi
++entries=$(cd "${OUT}" && cpio -it --quiet < initramfs.cpio)
++for required in init dev dev/console dev/null proc sys; do
++    if ! grep -qx "${required}" <<<"${entries}"; then
++        echo "error: initramfs.cpio does not contain ${required}" >&2
++        exit 1
++    fi
++done
+diff --git a/scripts/linux/check-artifacts.sh b/scripts/linux/check-artifacts.sh
+--- a/scripts/linux/check-artifacts.sh
++++ b/scripts/linux/check-artifacts.sh
+@@ -18,9 +18,12 @@ file "${OUT}/dango-agent" | grep -q 'ARM aarch64' || {
+     exit 1
+ }
+ 
+-if ! (cd "${OUT}" && cpio -it --quiet < initramfs.cpio | grep -Eq '^\.?/?init$'); then
+-    echo "error: initramfs.cpio does not contain ./init" >&2
+-    exit 1
+-fi
++entries=$(cd "${OUT}" && cpio -it --quiet < initramfs.cpio)
++for required in init dev dev/console dev/null proc sys; do
++    if ! grep -qx "${required}" <<<"${entries}"; then
++        echo "error: initramfs.cpio does not contain ${required}" >&2
++        exit 1
++    fi
++done
+ 
+ # Validate that the DTB at least has the expected magic bytes.
+ python3 - "${OUT}/dango-linux.dtb" <<'PY'
+diff --git a/scripts/linux/mkinitramfs.py b/scripts/linux/mkinitramfs.py
+new file mode 100644
+--- /dev/null
++++ b/scripts/linux/mkinitramfs.py
+@@ -0,0 +1,116 @@
++#!/usr/bin/env python3
++"""Build the tiny Dango Linux initramfs without requiring root.
++
++The archive is written directly in the Linux initramfs "newc" format so we can
++include character device nodes such as /dev/console even when the build is run
++by an unprivileged user. Using host mknod(2) would make the Linux artifact build
++depend on root privileges or fakeroot, which is fragile for CI and normal
++developer machines.
++"""
++
++from __future__ import annotations
++
++import os
++import stat
++import sys
++from dataclasses import dataclass
++from pathlib import Path
++from typing import BinaryIO, Optional
++
++CPIO_MAGIC_NEWC = "070701"
++TRAILER = "TRAILER!!!"
++
++S_IFREG = 0o100000
++S_IFDIR = 0o040000
++S_IFCHR = 0o020000
++
++
++@dataclass(frozen=True)
++class Entry:
++    name: str
++    mode: int
++    data: bytes = b""
++    nlink: int = 1
++    rdev_major: int = 0
++    rdev_minor: int = 0
++
++
++def _pad4(out: BinaryIO, size: int) -> None:
++    pad = (-size) & 3
++    if pad:
++        out.write(b"\0" * pad)
++
++
++def _write_entry(out: BinaryIO, entry: Entry, ino: int) -> None:
++    name = entry.name.encode("utf-8") + b"\0"
++    size = len(entry.data)
++    fields = [
++        CPIO_MAGIC_NEWC,
++        f"{ino:08x}",
++        f"{entry.mode:08x}",
++        f"{0:08x}",  # uid
++        f"{0:08x}",  # gid
++        f"{entry.nlink:08x}",
++        f"{0:08x}",  # mtime: deterministic builds
++        f"{size:08x}",
++        f"{0:08x}",  # devmajor
++        f"{0:08x}",  # devminor
++        f"{entry.rdev_major:08x}",
++        f"{entry.rdev_minor:08x}",
++        f"{len(name):08x}",
++        f"{0:08x}",  # check
++    ]
++    header = "".join(fields).encode("ascii")
++    if len(header) != 110:
++        raise AssertionError(f"newc header has wrong size: {len(header)}")
++    out.write(header)
++    out.write(name)
++    _pad4(out, len(header) + len(name))
++    out.write(entry.data)
++    _pad4(out, size)
++
++
++def _file_entry(name: str, source: Path, mode: Optional[int] = None) -> Entry:
++    data = source.read_bytes()
++    if mode is None:
++        mode = stat.S_IMODE(source.stat().st_mode)
++    return Entry(name=name, mode=S_IFREG | mode, data=data)
++
++
++def build(agent: Path, output: Path) -> None:
++    if not agent.is_file():
++        raise SystemExit(f"error: missing agent executable: {agent}")
++
++    entries = [
++        Entry(".", S_IFDIR | 0o755, nlink=4),
++        Entry("dev", S_IFDIR | 0o755, nlink=2),
++        Entry("dev/console", S_IFCHR | 0o600, rdev_major=5, rdev_minor=1),
++        Entry("dev/null", S_IFCHR | 0o666, rdev_major=1, rdev_minor=3),
++        Entry("proc", S_IFDIR | 0o555, nlink=2),
++        Entry("sys", S_IFDIR | 0o555, nlink=2),
++        Entry("run", S_IFDIR | 0o755, nlink=2),
++        Entry("tmp", S_IFDIR | 0o1777, nlink=2),
++        _file_entry("init", agent, 0o755),
++    ]
++
++    output.parent.mkdir(parents=True, exist_ok=True)
++    tmp = output.with_suffix(output.suffix + ".tmp")
++    with tmp.open("wb") as out:
++        ino = 1
++        for entry in entries:
++            _write_entry(out, entry, ino)
++            ino += 1
++        _write_entry(out, Entry(TRAILER, S_IFREG | 0o644, nlink=1), ino)
++    os.replace(tmp, output)
++
++
++def main(argv: list[str]) -> int:
++    if len(argv) != 3:
++        print(f"usage: {argv[0]} DANGO_AGENT OUTPUT_CPIO", file=sys.stderr)
++        return 2
++    build(Path(argv[1]), Path(argv[2]))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main(sys.argv))

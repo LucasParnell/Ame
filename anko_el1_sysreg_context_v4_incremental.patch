@@ -1,0 +1,216 @@
+--- a/kernel/include/anko/vm.h	2026-05-02 18:29:53.193042414 +0000
++++ b/kernel/include/anko/vm.h	2026-05-02 18:32:02.282778435 +0000
+@@ -195,6 +195,40 @@
+      */
+     u64 guest_vmpidr;
+     u64 guest_vpidr;
++
++    /*
++     * EL1 is shared hardware state between the host kernel and the guest when
++     * Anko runs non-VHE.  Linux relies on more than the translation registers:
++     * SP_EL0 holds current task state, TPIDR_EL1 holds the percpu offset,
++     * CPACR/CNTKCTL are configured during bring-up, and exception registers can
++     * be live across an MMIO/HVC exit.  Keep host and guest copies explicit so a
++     * VM exit cannot silently replace guest EL1 state with host EL1 state, or
++     * vice versa.
++     */
++    u64 host_ttbr1;
++    u64 host_sp_el0;
++    u64 host_tpidr_el1;
++    u64 host_tpidr_el0;
++    u64 host_tpidrro_el0;
++    u64 host_contextidr_el1;
++    u64 host_cpacr_el1;
++    u64 host_cntkctl_el1;
++    u64 host_amair_el1;
++
++    u64 guest_sp_el0;
++    u64 guest_tpidr_el1;
++    u64 guest_tpidr_el0;
++    u64 guest_tpidrro_el0;
++    u64 guest_contextidr_el1;
++    u64 guest_cpacr_el1;
++    u64 guest_cntkctl_el1;
++    u64 guest_amair_el1;
++    u64 guest_elr_el1;
++    u64 guest_spsr_el1;
++    u64 guest_far_el1;
++    u64 guest_esr_el1;
++    u64 guest_afsr0_el1;
++    u64 guest_afsr1_el1;
+ };
+ 
+ struct VgicState {
+@@ -218,6 +252,9 @@
+ static_assert(__builtin_offsetof(El2RunState, exit_kind) == 496);
+ static_assert(__builtin_offsetof(El2RunState, guest_vmpidr) == 504);
+ static_assert(__builtin_offsetof(El2RunState, guest_vpidr) == 512);
++static_assert(__builtin_offsetof(El2RunState, host_ttbr1) == 520);
++static_assert(__builtin_offsetof(El2RunState, guest_sp_el0) == 592);
++static_assert(__builtin_offsetof(El2RunState, guest_afsr1_el1) == 696);
+ struct Vcpu {
+     u32 vcpu_id;
+     u32 owner_vm_id;
+--- a/kernel/arch/arm64/el2.S	2026-05-02 18:29:53.195523551 +0000
++++ b/kernel/arch/arm64/el2.S	2026-05-02 18:32:29.993642023 +0000
+@@ -40,6 +40,29 @@
+ .equ CTX_EXIT_KIND,        496
+ .equ CTX_GUEST_VMPIDR,    504
+ .equ CTX_GUEST_VPIDR,     512
++.equ CTX_HOST_TTBR1,      520
++.equ CTX_HOST_SP_EL0,     528
++.equ CTX_HOST_TPIDR_EL1,  536
++.equ CTX_HOST_TPIDR_EL0,  544
++.equ CTX_HOST_TPIDRRO_EL0,552
++.equ CTX_HOST_CONTEXTIDR, 560
++.equ CTX_HOST_CPACR,      568
++.equ CTX_HOST_CNTKCTL,    576
++.equ CTX_HOST_AMAIR,      584
++.equ CTX_GUEST_SP_EL0,    592
++.equ CTX_GUEST_TPIDR_EL1, 600
++.equ CTX_GUEST_TPIDR_EL0, 608
++.equ CTX_GUEST_TPIDRRO_EL0,616
++.equ CTX_GUEST_CONTEXTIDR,624
++.equ CTX_GUEST_CPACR,     632
++.equ CTX_GUEST_CNTKCTL,   640
++.equ CTX_GUEST_AMAIR,     648
++.equ CTX_GUEST_ELR_EL1,   656
++.equ CTX_GUEST_SPSR_EL1,  664
++.equ CTX_GUEST_FAR_EL1,   672
++.equ CTX_GUEST_ESR_EL1,   680
++.equ CTX_GUEST_AFSR0_EL1, 688
++.equ CTX_GUEST_AFSR1_EL1, 696
+ 
+ .equ EL2_RUN_STATE_MAX_CPUS, 4
+ 
+@@ -162,12 +185,30 @@
+     str     x0, [x21, #CTX_HOST_SCTLR]
+     mrs     x0, TTBR0_EL1
+     str     x0, [x21, #CTX_HOST_TTBR0]
++    mrs     x0, TTBR1_EL1
++    str     x0, [x21, #CTX_HOST_TTBR1]
+     mrs     x0, TCR_EL1
+     str     x0, [x21, #CTX_HOST_TCR]
+     mrs     x0, MAIR_EL1
+     str     x0, [x21, #CTX_HOST_MAIR]
+     mrs     x0, VBAR_EL1
+     str     x0, [x21, #CTX_HOST_VBAR]
++    mrs     x0, SP_EL0
++    str     x0, [x21, #CTX_HOST_SP_EL0]
++    mrs     x0, TPIDR_EL1
++    str     x0, [x21, #CTX_HOST_TPIDR_EL1]
++    mrs     x0, TPIDR_EL0
++    str     x0, [x21, #CTX_HOST_TPIDR_EL0]
++    mrs     x0, TPIDRRO_EL0
++    str     x0, [x21, #CTX_HOST_TPIDRRO_EL0]
++    mrs     x0, CONTEXTIDR_EL1
++    str     x0, [x21, #CTX_HOST_CONTEXTIDR]
++    mrs     x0, CPACR_EL1
++    str     x0, [x21, #CTX_HOST_CPACR]
++    mrs     x0, CNTKCTL_EL1
++    str     x0, [x21, #CTX_HOST_CNTKCTL]
++    mrs     x0, AMAIR_EL1
++    str     x0, [x21, #CTX_HOST_AMAIR]
+ 
+     ldr     x0, [x21, #CTX_VTCR]
+     msr     VTCR_EL2, x0
+@@ -188,6 +229,35 @@
+     ldr     x0, [x21, #CTX_GUEST_VPIDR]
+     msr     VPIDR_EL2, x0
+ 
++    ldr     x0, [x21, #CTX_GUEST_SP_EL0]
++    msr     SP_EL0, x0
++    ldr     x0, [x21, #CTX_GUEST_TPIDR_EL1]
++    msr     TPIDR_EL1, x0
++    ldr     x0, [x21, #CTX_GUEST_TPIDR_EL0]
++    msr     TPIDR_EL0, x0
++    ldr     x0, [x21, #CTX_GUEST_TPIDRRO_EL0]
++    msr     TPIDRRO_EL0, x0
++    ldr     x0, [x21, #CTX_GUEST_CONTEXTIDR]
++    msr     CONTEXTIDR_EL1, x0
++    ldr     x0, [x21, #CTX_GUEST_CPACR]
++    msr     CPACR_EL1, x0
++    ldr     x0, [x21, #CTX_GUEST_CNTKCTL]
++    msr     CNTKCTL_EL1, x0
++    ldr     x0, [x21, #CTX_GUEST_AMAIR]
++    msr     AMAIR_EL1, x0
++    ldr     x0, [x21, #CTX_GUEST_ELR_EL1]
++    msr     ELR_EL1, x0
++    ldr     x0, [x21, #CTX_GUEST_SPSR_EL1]
++    msr     SPSR_EL1, x0
++    ldr     x0, [x21, #CTX_GUEST_FAR_EL1]
++    msr     FAR_EL1, x0
++    ldr     x0, [x21, #CTX_GUEST_ESR_EL1]
++    msr     ESR_EL1, x0
++    ldr     x0, [x21, #CTX_GUEST_AFSR0_EL1]
++    msr     AFSR0_EL1, x0
++    ldr     x0, [x21, #CTX_GUEST_AFSR1_EL1]
++    msr     AFSR1_EL1, x0
++
+     ldr     x0, [x21, #CTX_GUEST_MAIR]
+     msr     MAIR_EL1, x0
+     ldr     x0, [x21, #CTX_GUEST_TCR]
+@@ -342,6 +412,34 @@
+     str     x0, [x22, #CTX_GUEST_MAIR]
+     mrs     x0, VBAR_EL1
+     str     x0, [x22, #CTX_GUEST_VBAR]
++    mrs     x0, SP_EL0
++    str     x0, [x22, #CTX_GUEST_SP_EL0]
++    mrs     x0, TPIDR_EL1
++    str     x0, [x22, #CTX_GUEST_TPIDR_EL1]
++    mrs     x0, TPIDR_EL0
++    str     x0, [x22, #CTX_GUEST_TPIDR_EL0]
++    mrs     x0, TPIDRRO_EL0
++    str     x0, [x22, #CTX_GUEST_TPIDRRO_EL0]
++    mrs     x0, CONTEXTIDR_EL1
++    str     x0, [x22, #CTX_GUEST_CONTEXTIDR]
++    mrs     x0, CPACR_EL1
++    str     x0, [x22, #CTX_GUEST_CPACR]
++    mrs     x0, CNTKCTL_EL1
++    str     x0, [x22, #CTX_GUEST_CNTKCTL]
++    mrs     x0, AMAIR_EL1
++    str     x0, [x22, #CTX_GUEST_AMAIR]
++    mrs     x0, ELR_EL1
++    str     x0, [x22, #CTX_GUEST_ELR_EL1]
++    mrs     x0, SPSR_EL1
++    str     x0, [x22, #CTX_GUEST_SPSR_EL1]
++    mrs     x0, FAR_EL1
++    str     x0, [x22, #CTX_GUEST_FAR_EL1]
++    mrs     x0, ESR_EL1
++    str     x0, [x22, #CTX_GUEST_ESR_EL1]
++    mrs     x0, AFSR0_EL1
++    str     x0, [x22, #CTX_GUEST_AFSR0_EL1]
++    mrs     x0, AFSR1_EL1
++    str     x0, [x22, #CTX_GUEST_AFSR1_EL1]
+ 
+     ldr     x3, [x22, #CTX_TIMER_HW_MASK]
+ 
+@@ -405,10 +503,28 @@
+     msr     TCR_EL1, x0
+     ldr     x0, [x22, #CTX_HOST_TTBR0]
+     msr     TTBR0_EL1, x0
++    ldr     x0, [x22, #CTX_HOST_TTBR1]
++    msr     TTBR1_EL1, x0
+     ldr     x0, [x22, #CTX_HOST_VBAR]
+     msr     VBAR_EL1, x0
+     ldr     x0, [x22, #CTX_HOST_SP_EL1]
+     msr     SP_EL1, x0
++    ldr     x0, [x22, #CTX_HOST_SP_EL0]
++    msr     SP_EL0, x0
++    ldr     x0, [x22, #CTX_HOST_TPIDR_EL1]
++    msr     TPIDR_EL1, x0
++    ldr     x0, [x22, #CTX_HOST_TPIDR_EL0]
++    msr     TPIDR_EL0, x0
++    ldr     x0, [x22, #CTX_HOST_TPIDRRO_EL0]
++    msr     TPIDRRO_EL0, x0
++    ldr     x0, [x22, #CTX_HOST_CONTEXTIDR]
++    msr     CONTEXTIDR_EL1, x0
++    ldr     x0, [x22, #CTX_HOST_CPACR]
++    msr     CPACR_EL1, x0
++    ldr     x0, [x22, #CTX_HOST_CNTKCTL]
++    msr     CNTKCTL_EL1, x0
++    ldr     x0, [x22, #CTX_HOST_AMAIR]
++    msr     AMAIR_EL1, x0
+     ldr     x0, [x22, #CTX_HOST_SCTLR]
+     msr     SCTLR_EL1, x0
+     isb

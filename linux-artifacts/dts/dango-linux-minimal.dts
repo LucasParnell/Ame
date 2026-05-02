@@ -1,0 +1,68 @@
+/dts-v1/;
+
+/ {
+    compatible = "linux,dummy-virt";
+    #address-cells = <2>;
+    #size-cells = <2>;
+    interrupt-parent = <&intc>;
+
+    chosen {
+        stdout-path = "serial0:115200n8";
+        bootargs = "console=ttyAMA0,115200n8 earlycon=pl011,0x09000000 loglevel=4 nosmp maxcpus=1 cma=0 coherent_pool=1M cpuidle.off=1 rdinit=/init panic=-1";
+        linux,initrd-start = <0x0 0x46000000>;
+        linux,initrd-end   = <0x0 0x46100000>;
+    };
+
+    memory@40000000 {
+        device_type = "memory";
+        reg = <0x0 0x40000000 0x0 0x08000000>;
+    };
+
+    psci {
+        compatible = "arm,psci-0.2";
+        method = "hvc";
+    };
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        cpu@0 {
+            device_type = "cpu";
+            compatible = "arm,arm-v8";
+            reg = <0>;
+            enable-method = "psci";
+        };
+    };
+
+    intc: interrupt-controller@8000000 {
+        compatible = "arm,cortex-a15-gic";
+        #interrupt-cells = <3>;
+        #address-cells = <0>;
+        interrupt-controller;
+        reg = <0x0 0x08000000 0x0 0x10000>,
+              <0x0 0x08010000 0x0 0x10000>;
+    };
+
+    timer {
+        compatible = "arm,armv8-timer";
+        interrupts = <1 13 0xf08>,
+                     <1 14 0xf08>,
+                     <1 11 0xf08>,
+                     <1 10 0xf08>;
+    };
+
+
+
+    uart0: serial@9000000 {
+        compatible = "arm,sbsa-uart";
+        reg = <0x0 0x09000000 0x0 0x1000>;
+        interrupts = <0 1 4>;
+        current-speed = <115200>;
+        status = "okay";
+    };
+
+    aliases {
+        serial0 = &uart0;
+    };
+};

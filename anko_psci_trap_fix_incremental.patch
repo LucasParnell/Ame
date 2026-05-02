@@ -1,0 +1,77 @@
+--- a/kernel/arch/arm64/el2.S	2026-05-02 18:03:50.840137419 +0000
++++ b/kernel/arch/arm64/el2.S	2026-05-02 18:03:52.513814479 +0000
+@@ -218,6 +218,7 @@
+     orr     x0, x0, #(1 << 5)
+     orr     x0, x0, #(1 << 13)
+     orr     x0, x0, #(1 << 14)
++    orr     x0, x0, #(1 << 19)
+     orr     x0, x0, #(1 << 31)
+     ldr     x1, [x21, #CTX_GUEST_IRQ_PENDING]
+     cbz     x1, 1f
+--- a/kernel/vm/vcpu.cc	2026-05-02 18:03:50.841198489 +0000
++++ b/kernel/vm/vcpu.cc	2026-05-02 18:03:52.512472013 +0000
+@@ -553,8 +553,12 @@
+     const u32 fn = static_cast<u32>(vcpu.el2.regs[0]);
+     switch (fn) {
+     case kPsciVersion32:
+-        // PSCI 1.0, which is enough for Linux's PSCI probing path.
+-        write_x0(vcpu.el2, 0x0001'0000);
++        /*
++         * Advertise PSCI 0.2, not 1.0.  Anko implements the mandatory 0.2
++         * calls needed by Linux for boot/reset/hotplug.  Do not claim 1.0
++         * until the optional 1.0 feature-discovery surface is complete.
++         */
++        write_x0(vcpu.el2, 0x0000'0002);
+         break;
+ 
+     case kPsciFeatures32: {
+@@ -607,13 +611,11 @@
+ 
+     case kPsciCpuOff32:
+         write_x0(vcpu.el2, kPsciSuccess);
+-        vcpu.el2.pc += 4;
+         return PsciAction::StopCurrent;
+ 
+     case kPsciSystemOff32:
+     case kPsciSystemReset32:
+         write_x0(vcpu.el2, kPsciSuccess);
+-        vcpu.el2.pc += 4;
+         return PsciAction::ShutdownVm;
+ 
+     case kPsciCpuSuspend32:
+@@ -625,7 +627,12 @@
+         return PsciAction::NotHandled;
+     }
+ 
+-    vcpu.el2.pc += 4;
++    /*
++     * For AArch64 HVC/SMC, ELR_EL2 already contains the architectural
++     * preferred return address: the instruction after the trapping call.
++     * Advancing it here skips one guest instruction and corrupts Linux's
++     * PSCI probe path.
++     */
+     return PsciAction::Continue;
+ }
+ 
+--- a/linux-artifacts/dts/dango-linux-minimal.dts.in	2026-05-02 18:03:50.841808611 +0000
++++ b/linux-artifacts/dts/dango-linux-minimal.dts.in	2026-05-02 18:03:52.512917676 +0000
+@@ -19,7 +19,7 @@
+     };
+ 
+     psci {
+-        compatible = "arm,psci-1.0", "arm,psci-0.2";
++        compatible = "arm,psci-0.2";
+         method = "hvc";
+     };
+ 
+--- a/linux-artifacts/dts/dango-linux-minimal.dts	2026-05-02 18:03:50.842029192 +0000
++++ b/linux-artifacts/dts/dango-linux-minimal.dts	2026-05-02 18:03:52.513474819 +0000
+@@ -19,7 +19,7 @@
+     };
+ 
+     psci {
+-        compatible = "arm,psci-1.0", "arm,psci-0.2";
++        compatible = "arm,psci-0.2";
+         method = "hvc";
+     };
+ 

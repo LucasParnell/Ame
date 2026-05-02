@@ -1,0 +1,58 @@
+--- a/kernel/arch/arm64/el2.S	2026-05-02 20:25:33.202739324 +0000
++++ b/kernel/arch/arm64/el2.S	2026-05-02 20:24:32.459602357 +0000
+@@ -283,6 +283,8 @@
+     orr     x0, x0, #(1 << 3)
+     orr     x0, x0, #(1 << 4)
+     orr     x0, x0, #(1 << 5)
++    orr     x0, x0, #(1 << 13)   // TWI: trap guest WFI so the VMM can schedule/tick.
++    orr     x0, x0, #(1 << 14)   // TWE: trap guest WFE for the same reason.
+     orr     x0, x0, #(1 << 19)
+     orr     x0, x0, #(1 << 31)
+     ldr     x1, [x21, #CTX_GUEST_IRQ_PENDING]
+--- a/kernel/vm/vcpu.cc	2026-05-02 20:25:33.203663177 +0000
++++ b/kernel/vm/vcpu.cc	2026-05-02 20:24:32.460122664 +0000
+@@ -957,11 +957,11 @@
+ 
+         if (ec == kEcWfx) {
+             /*
+-             * WFI/WFE are normal guest idle instructions, not diagnostic
+-             * exits.  HCR_EL2.TWI/TWE are normally left clear now, so this
+-             * path is only a defensive fallback for guests that still trap
+-             * WFx.  Treat the instruction as complete and keep running within
+-             * the caller's exit budget instead of flooding the host console.
++             * WFI/WFE are normal guest idle instructions.  We intentionally
++             * trap them instead of allowing the physical CPU to sleep because
++             * Anko must keep ownership of virtual timer/IRQ scheduling.
++             * Complete the instruction, account for it, and continue without
++             * printing per-idle-cycle diagnostics.
+              */
+             vcpu->el2.pc += 4;
+             metric_inc(VM_DEBUG_VCPU_WFX_EXITS);
+--- a/linux-artifacts/dts/dango-linux-minimal.dts	2026-05-02 20:25:33.203920234 +0000
++++ b/linux-artifacts/dts/dango-linux-minimal.dts	2026-05-02 20:24:32.460618459 +0000
+@@ -52,11 +52,24 @@
+                      <1 10 0xf08>;
+     };
+ 
++    uartclk: uartclk {
++        compatible = "fixed-clock";
++        #clock-cells = <0>;
++        clock-frequency = <24000000>;
++    };
++
++    apb_pclk: apb-pclk {
++        compatible = "fixed-clock";
++        #clock-cells = <0>;
++        clock-frequency = <24000000>;
++    };
++
+     uart0: serial@9000000 {
+         compatible = "arm,pl011", "arm,primecell";
+         reg = <0x0 0x09000000 0x0 0x1000>;
+         interrupts = <0 1 4>;
+-        clock-frequency = <24000000>;
++        clocks = <&uartclk>, <&apb_pclk>;
++        clock-names = "uartclk", "apb_pclk";
+     };
+ 
+     aliases {

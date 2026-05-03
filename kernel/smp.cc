@@ -14,6 +14,8 @@ namespace drivers::timer { void init_cpu(u32 irq_id); }
 extern "C" void vectors();
 extern "C" void secondary_start();
 extern "C" u64 g_boot_el;
+extern "C" u64 psci_hvc_call(u64 fn, u64 a0, u64 a1, u64 a2);
+extern "C" u64 psci_smc_call(u64 fn, u64 a0, u64 a1, u64 a2);
 
 namespace smp {
 
@@ -145,16 +147,8 @@ static CpuInfo parse_dtb(PhysAddr dtb_phys) {
 }
 
 static u64 psci_call(u64 fn, u64 a0, u64 a1, u64 a2) {
-    register u64 x0 asm("x0") = fn;
-    register u64 x1 asm("x1") = a0;
-    register u64 x2 asm("x2") = a1;
-    register u64 x3 asm("x3") = a2;
-    if (g_info.psci_hvc) {
-        asm volatile("hvc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
-    } else {
-        asm volatile("smc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
-    }
-    return x0;
+    if (g_info.psci_hvc) return psci_hvc_call(fn, a0, a1, a2);
+    else                  return psci_smc_call(fn, a0, a1, a2);
 }
 
 } // namespace

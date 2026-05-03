@@ -49,11 +49,11 @@ constexpr CapHandle kNsDoorbell = cap_slot(9);
 constexpr CapHandle kNsReplyDoorbell = cap_slot(10);
 constexpr uint32_t RIGHT_READ  = 1u << 0;
 constexpr uint32_t RIGHT_WRITE = 1u << 1;
-constexpr uint64_t kVaSendRing = 0x5000'0000ull;
-constexpr uint64_t kVaRecvRing = 0x5001'0000ull;
-constexpr uint64_t kVaConsoleRing = 0x5002'0000ull;
-constexpr uint64_t kVaNsRequestRing = 0x5003'0000ull;
-constexpr uint64_t kVaNsReplyRing = 0x5004'0000ull;
+constexpr uint64_t kVaSendRing = 0x2000'0000ull;
+constexpr uint64_t kVaRecvRing = 0x2001'0000ull;
+constexpr uint64_t kVaConsoleRing = 0x2002'0000ull;
+constexpr uint64_t kVaNsRequestRing = 0x2003'0000ull;
+constexpr uint64_t kVaNsReplyRing = 0x2004'0000ull;
 
 template <typename T>
 static T* wait_map(CapHandle cap, int64_t expected_type, uint64_t va, uint32_t rights) {

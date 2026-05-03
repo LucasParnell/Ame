@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(chmod +x:*)"
+      "Bash(chmod +x:*)",
+      "Bash(wc:*)",
+      "Bash(python3:*)"
     ]
   }
 }

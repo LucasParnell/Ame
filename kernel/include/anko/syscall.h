@@ -102,3 +102,46 @@ struct SysResult {
     long value;   // x0: return value or negative error
     long detail;  // x1: secondary information
 };
+
+// ---------------------------------------------------------------------------
+// Debug counter indices for SYS_DEBUG_COUNTERS (a0 argument)
+// ---------------------------------------------------------------------------
+enum DebugCounter : unsigned {
+    DBG_SYSCALL_COUNT         = 0,
+    DBG_IPC_SYSCALL_COUNT     = 1,
+    DBG_CONTEXT_SWITCHES      = 2,
+    DBG_DEBUG_PUTS            = 3,
+    DBG_EL0_FAULTS            = 4,
+    DBG_DOORBELL_SLEEPS       = 5,
+    DBG_DOORBELL_WAKES        = 6,
+    DBG_TIMER_TICKS           = 7,
+    DBG_DOORBELL_WAIT_CALLS   = 8,
+    DBG_DOORBELL_WAIT_IMMED   = 9,
+    DBG_NOTIFY_CALLS          = 10,
+    DBG_NOTIFY_NO_WAITER      = 11,
+    DBG_NOTIFY_WOKE           = 12,
+    DBG_YIELD_COUNT           = 13,
+    DBG_BLOCK_SWITCHES        = 14,
+    DBG_TIMER_PREEMPTS        = 15,
+    DBG_EXIT_SWITCHES         = 16,
+    DBG_ONLINE_CPUS           = 17,
+    DBG_CPU0_CTX_SWITCHES     = 18,
+    DBG_CPU1_CTX_SWITCHES     = 19,
+    DBG_CPU0_TIMER_PREEMPTS   = 20,
+    DBG_CPU1_TIMER_PREEMPTS   = 21,
+    DBG_LOCAL_WAKES           = 22,
+    DBG_REMOTE_WAKES          = 23,
+    DBG_IPI_SENT              = 24,
+    DBG_IPI_HANDLED           = 25,
+    DBG_PENDING_WAKE_DRAINS   = 26,
+    DBG_DOORBELL_LOCAL_WAKES  = 27,
+    DBG_DOORBELL_REMOTE_WAKES = 28,
+    DBG_FAIRNESS_LAG          = 29,
+    DBG_PRINCIPAL_TRUSTED_RT  = 30,
+    DBG_PRINCIPAL_SANDBOX_RT  = 31,
+    // Keep scheduler counters out of vm::VM_DEBUG_*'s 32..54 range;
+    // SYS_DEBUG_COUNTERS checks that range before this enum's switch.
+    DBG_WAKE_DOORBELL         = 64,
+    DBG_WAKE_REMOTE           = 65,
+    DBG_WAKE_RESUME           = 66,
+};

@@ -137,6 +137,38 @@ void tlbi_all() {
         : "memory");
 }
 
+} // namespace
+
+void sync_icache_range(PhysAddr pa, usize len) {
+    if (!pa || len == 0) return;
+
+    u64 ctr = 0;
+    asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
+
+    const usize dline = 4ull << ((ctr >> 16) & 0xf);
+    const PhysAddr start = pa & ~(static_cast<PhysAddr>(dline - 1));
+    const PhysAddr end = (pa + len + dline - 1) & ~(static_cast<PhysAddr>(dline - 1));
+
+    // `pa` is also a valid kernel VA in this kernel's identity map. Clean the
+    // bytes just copied through the data side out to PoU, then invalidate all
+    // instruction caches because the same physical page will be executed via a
+    // different EL0 VA.
+    for (PhysAddr p = start; p < end; p += dline) {
+        asm volatile("dc cvau, %0" :: "r"(p) : "memory");
+    }
+
+    asm volatile(
+        "dsb ish\n"
+        "ic ialluis\n"
+        "dsb ish\n"
+        "isb\n"
+        :
+        :
+        : "memory");
+}
+
+namespace {
+
 void enable_mmu(PhysAddr root) {
     constexpr u64 mair =
         (0xFFull << (platform::kMairNormal * 8)) |

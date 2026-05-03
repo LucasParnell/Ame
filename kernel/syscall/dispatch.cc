@@ -10,6 +10,8 @@
 #include "anko/init.h"
 #include "anko/platform.h"
 #include "anko/vm.h"
+#include "anko/log.h"
+#include "libk/metric.h"
 #include "libk/printf.h"
 #include "libk/string.h"
 
@@ -25,17 +27,15 @@ bool g_supervisor_event_pending = false;
 u32 g_supervisor_event_pid = 0;
 u32 g_supervisor_event_supervisor = 0;
 long g_supervisor_event_status = 0;
-constexpr u64 kUserCopyMin = 0x4000'0000ull;
-constexpr u64 kUserCopyMax = 0x8000'0000ull;
+constexpr u64 kUserCopyMin = 0x1000'0000ull;
+constexpr u64 kUserCopyMax = 0x4000'0000ull;
 constexpr u64 kMaxUserElfSize = 16ull * 1024ull * 1024ull;
+constexpr usize kMaxArenaPages    = 64;  // pages; also sizes allocs[] VLA
+constexpr u32   kMaxStackSlots    = 16;  // threads per process
+constexpr VirtAddr kStackFrameAlign = 16; // AArch64 ABI: SP must be 16-byte aligned
 
-inline void counter_inc(u64& counter) {
-    __atomic_add_fetch(&counter, 1ull, __ATOMIC_RELAXED);
-}
-
-inline u64 counter_load(const u64& counter) {
-    return __atomic_load_n(&counter, __ATOMIC_RELAXED);
-}
+using libk::metric_inc;
+using libk::metric_load;
 
 extern "C" char __text_start[];
 extern "C" char __kernel_end[];
@@ -139,17 +139,74 @@ void record_supervisor_event(Process* proc, long status) {
 } // namespace
 
 extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
-    (void)far;
-    (void)frame;
-    counter_inc(g_el0_fault_count);
-    record_supervisor_event(cur_proc(), static_cast<long>(esr));
+    auto* tf = static_cast<TrapFrame*>(frame);
+    Process* p = cur_proc();
+    const u32 ec = static_cast<u32>((esr >> 26) & 0x3fu);
+    const u32 iss = static_cast<u32>(esr & 0x01ff'ffffu);
+
+    if (ec == 0x3c) {
+        // BRK from EL0 is used by supervised demo services as an intentional
+        // crash signal. Keep notifying the supervisor, but don't make the
+        // expected death look like a kernel-fatal condition on the UART log.
+        ANKO_LOGF_WARN("kernel/fault",
+                       "EL0 brk pid=%u esr=%llx elr=%llx sp=%llx "
+                       "x0=%llx x1=%llx x8=%llx x9=%llx x16=%llx",
+                       p ? p->pid : 0,
+                       static_cast<unsigned long long>(esr),
+                       static_cast<unsigned long long>(tf ? tf->elr : 0),
+                       static_cast<unsigned long long>(tf ? tf->sp_el0 : 0),
+                       static_cast<unsigned long long>(tf ? tf->x[0] : 0),
+                       static_cast<unsigned long long>(tf ? tf->x[1] : 0),
+                       static_cast<unsigned long long>(tf ? tf->x[8] : 0),
+                       static_cast<unsigned long long>(tf ? tf->x[9] : 0),
+                       static_cast<unsigned long long>(tf ? tf->x[16] : 0));
+    } else {
+        ANKO_LOGF_FATAL("kernel/fault",
+                        "EL0 fault pid=%u esr=%llx ec=%u iss=%x far=%llx "
+                        "elr=%llx sp=%llx x0=%llx x1=%llx x2=%llx x3=%llx "
+                        "x4=%llx x5=%llx x6=%llx x7=%llx x8=%llx x9=%llx "
+                        "x10=%llx x11=%llx x12=%llx x13=%llx x14=%llx x15=%llx "
+                        "x16=%llx x17=%llx x19=%llx x20=%llx x21=%llx x22=%llx",
+                        p ? p->pid : 0,
+                        static_cast<unsigned long long>(esr),
+                        ec,
+                        iss,
+                        static_cast<unsigned long long>(far),
+                        static_cast<unsigned long long>(tf ? tf->elr : 0),
+                        static_cast<unsigned long long>(tf ? tf->sp_el0 : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[0] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[1] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[2] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[3] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[4] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[5] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[6] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[7] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[8] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[9] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[10] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[11] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[12] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[13] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[14] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[15] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[16] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[17] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[19] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[20] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[21] : 0),
+                        static_cast<unsigned long long>(tf ? tf->x[22] : 0));
+    }
+
+    metric_inc(g_el0_fault_count);
+    record_supervisor_event(p, static_cast<long>(esr));
     sched::mark_current_dead();
 }
 
 extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
                                       u64 a3, u64 a4, u64 a5) {
     (void)a5;
-    counter_inc(g_syscall_count);
+    metric_inc(g_syscall_count);
 
     Process* p = cur_proc();
     if (!p && nr != SYS_DEBUG_PUTS && nr != SYS_DEBUG_COUNTERS) {
@@ -209,6 +266,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     case SYS_KILL: {
         CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
+        if (!e) return err(E_NOTFOUND);
         if (!has_rights(e, RIGHT_KILL)) return err(E_PERM);
         auto* target = static_cast<Process*>(e->target);
         if (!target) return err(E_NOTFOUND);
@@ -280,9 +338,9 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         rounded_size &= ~(static_cast<u64>(PAGE_SIZE - 1));
 
         const usize pages = static_cast<usize>(rounded_size / PAGE_SIZE);
-        if (pages == 0 || pages > 64) return err(E_INVALID);
+        if (pages == 0 || pages > kMaxArenaPages) return err(E_INVALID);
 
-        PhysAddr allocs[64]{};
+        PhysAddr allocs[kMaxArenaPages]{};
         PhysAddr base = 0;
         PhysAddr expect = 0;
         for (usize i = 0; i < pages; ++i) {
@@ -380,14 +438,14 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     }
 
     case SYS_RING_CREATE: {
-        counter_inc(g_ipc_syscall_count);
+        metric_inc(g_ipc_syscall_count);
         CapHandle h = ipc::ring_create(p->pid, static_cast<u32>(a0), static_cast<u32>(a1));
         if (h == kNullCap) return err(E_NOMEM);
         return ok(static_cast<long>(h));
     }
 
     case SYS_RING_SHARE: {
-        counter_inc(g_ipc_syscall_count);
+        metric_inc(g_ipc_syscall_count);
         CapEntry* target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
         if (!target_e) return err(E_BADTYPE);
         if (!has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
@@ -400,14 +458,14 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     }
 
     case SYS_DOORBELL_CREATE: {
-        counter_inc(g_ipc_syscall_count);
+        metric_inc(g_ipc_syscall_count);
         CapHandle h = ipc::doorbell_create(p->pid);
         if (h == kNullCap) return err(E_NOMEM);
         return ok(static_cast<long>(h));
     }
 
     case SYS_DOORBELL_SHARE: {
-        counter_inc(g_ipc_syscall_count);
+        metric_inc(g_ipc_syscall_count);
         CapEntry* target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
         if (!target_e) return err(E_BADTYPE);
         if (!has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
@@ -419,40 +477,33 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         return ok(static_cast<long>(h));
     }
 
-    case SYS_NOTIFY:
-        counter_inc(g_ipc_syscall_count);
-        {
-            CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
-            if (!e) return err(E_NOTFOUND);
-            if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
-        }
-        {
-            const SysError rc = ipc::notify(static_cast<CapHandle>(a0), p->pid);
-            if (rc != E_OK) return err(rc);
-            return ok(E_OK);
-        }
+    case SYS_NOTIFY: {
+        metric_inc(g_ipc_syscall_count);
+        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
+        const SysError rc = ipc::notify(static_cast<CapHandle>(a0), p->pid);
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
+    }
 
-    case SYS_WAIT_DOORBELL:
-        counter_inc(g_ipc_syscall_count);
-        {
-            CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
-            if (!e) return err(E_NOTFOUND);
-            if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
-        }
-        {
-            const SysError rc = ipc::wait_doorbell(static_cast<CapHandle>(a0), a1, p->pid);
-            if (rc != E_OK) return err(rc);
-            return ok(E_OK);
-        }
+    case SYS_WAIT_DOORBELL: {
+        metric_inc(g_ipc_syscall_count);
+        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
+        const SysError rc = ipc::wait_doorbell(static_cast<CapHandle>(a0), a1, p->pid);
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
+    }
 
-    case SYS_DOORBELL_READ:
-        counter_inc(g_ipc_syscall_count);
-        {
-            CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
-            if (!e) return err(E_NOTFOUND);
-            if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
-        }
+    case SYS_DOORBELL_READ: {
+        metric_inc(g_ipc_syscall_count);
+        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
         return ok(static_cast<long>(ipc::doorbell_counter(static_cast<CapHandle>(a0), p->pid)));
+    }
 
     case SYS_SUPERVISOR_POLL: {
         CapEntry* supervisor_e =
@@ -483,7 +534,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
         u32 slot = target_proc->next_stack_slot;
         if (slot == 0) slot = 1;
-        if (slot > 16) return err(E_OVERFLOW);
+        if (slot > kMaxStackSlots) return err(E_OVERFLOW);
         const PhysAddr stack = mm::alloc_page();
         if (!stack) return err(E_NOMEM);
         libk::memset(reinterpret_cast<void*>(stack), 0, PAGE_SIZE);
@@ -497,7 +548,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
             return err(E_INVALID);
         }
         target_proc->next_stack_slot = slot + 1;
-        const VirtAddr sp_top = stack_base + PAGE_SIZE - 16;
+        const VirtAddr sp_top = stack_base + PAGE_SIZE - kStackFrameAlign;
 
         Thread* t = sched::thread_create(target_proc->pid,
                                          static_cast<VirtAddr>(a1),
@@ -650,7 +701,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         if (!a0 || len > 4096) return err(E_INVALID);
         if (!user_range_ok(a0, len)) return err(E_FAULT);
         const char* s = reinterpret_cast<const char*>(a0);
-        counter_inc(g_debug_puts_count);
+        metric_inc(g_debug_puts_count);
         for (u64 i = 0; i < len; ++i) libk::putchar(s[i]);
         return ok(E_OK);
     }
@@ -660,38 +711,41 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
             return ok(static_cast<long>(vm::debug_counter(a0)));
         }
         switch (a0) {
-        case 0: return ok(static_cast<long>(counter_load(g_syscall_count)));
-        case 1: return ok(static_cast<long>(counter_load(g_ipc_syscall_count)));
-        case 2: return ok(static_cast<long>(sched::context_switch_count()));
-        case 3: return ok(static_cast<long>(counter_load(g_debug_puts_count)));
-        case 4: return ok(static_cast<long>(counter_load(g_el0_fault_count)));
-        case 5: return ok(static_cast<long>(ipc::doorbell_sleep_count()));
-        case 6: return ok(static_cast<long>(ipc::doorbell_wake_count()));
-        case 7: return ok(static_cast<long>(drivers::timer::tick_count()));
-        case 8: return ok(static_cast<long>(ipc::doorbell_wait_calls()));
-        case 9: return ok(static_cast<long>(ipc::doorbell_wait_immediate()));
-        case 10: return ok(static_cast<long>(ipc::notify_calls()));
-        case 11: return ok(static_cast<long>(ipc::notify_no_waiter()));
-        case 12: return ok(static_cast<long>(ipc::notify_woke_thread()));
-        case 13: return ok(static_cast<long>(sched::yield_count()));
-        case 14: return ok(static_cast<long>(sched::block_switch_count()));
-        case 15: return ok(static_cast<long>(sched::timer_preempt_count()));
-        case 16: return ok(static_cast<long>(sched::exit_switch_count()));
-        case 17: return ok(static_cast<long>(sched::online_cpu_count()));
-        case 18: return ok(static_cast<long>(sched::cpu_context_switch_count(0)));
-        case 19: return ok(static_cast<long>(sched::cpu_context_switch_count(1)));
-        case 20: return ok(static_cast<long>(sched::cpu_timer_preempt_count(0)));
-        case 21: return ok(static_cast<long>(sched::cpu_timer_preempt_count(1)));
-        case 22: return ok(static_cast<long>(sched::local_wake_count()));
-        case 23: return ok(static_cast<long>(sched::remote_wake_count()));
-        case 24: return ok(static_cast<long>(sched::ipi_sent_count()));
-        case 25: return ok(static_cast<long>(sched::ipi_handled_count()));
-        case 26: return ok(static_cast<long>(sched::pending_wake_drain_count()));
-        case 27: return ok(static_cast<long>(ipc::doorbell_local_wake_count()));
-        case 28: return ok(static_cast<long>(ipc::doorbell_remote_wake_count()));
-        case 29: return ok(static_cast<long>(sched::fairness_max_lag()));
-        case 30: return ok(static_cast<long>(sched::principal_runtime(1)));
-        case 31: return ok(static_cast<long>(sched::principal_runtime(2)));
+        case DBG_SYSCALL_COUNT:         return ok(static_cast<long>(metric_load(g_syscall_count)));
+        case DBG_IPC_SYSCALL_COUNT:     return ok(static_cast<long>(metric_load(g_ipc_syscall_count)));
+        case DBG_CONTEXT_SWITCHES:      return ok(static_cast<long>(sched::context_switch_count()));
+        case DBG_DEBUG_PUTS:            return ok(static_cast<long>(metric_load(g_debug_puts_count)));
+        case DBG_EL0_FAULTS:            return ok(static_cast<long>(metric_load(g_el0_fault_count)));
+        case DBG_DOORBELL_SLEEPS:       return ok(static_cast<long>(ipc::doorbell_sleep_count()));
+        case DBG_DOORBELL_WAKES:        return ok(static_cast<long>(ipc::doorbell_wake_count()));
+        case DBG_TIMER_TICKS:           return ok(static_cast<long>(drivers::timer::tick_count()));
+        case DBG_DOORBELL_WAIT_CALLS:   return ok(static_cast<long>(ipc::doorbell_wait_calls()));
+        case DBG_DOORBELL_WAIT_IMMED:   return ok(static_cast<long>(ipc::doorbell_wait_immediate()));
+        case DBG_NOTIFY_CALLS:          return ok(static_cast<long>(ipc::notify_calls()));
+        case DBG_NOTIFY_NO_WAITER:      return ok(static_cast<long>(ipc::notify_no_waiter()));
+        case DBG_NOTIFY_WOKE:           return ok(static_cast<long>(ipc::notify_woke_thread()));
+        case DBG_YIELD_COUNT:           return ok(static_cast<long>(sched::yield_count()));
+        case DBG_BLOCK_SWITCHES:        return ok(static_cast<long>(sched::block_switch_count()));
+        case DBG_TIMER_PREEMPTS:        return ok(static_cast<long>(sched::timer_preempt_count()));
+        case DBG_EXIT_SWITCHES:         return ok(static_cast<long>(sched::exit_switch_count()));
+        case DBG_ONLINE_CPUS:           return ok(static_cast<long>(sched::online_cpu_count()));
+        case DBG_CPU0_CTX_SWITCHES:     return ok(static_cast<long>(sched::cpu_context_switch_count(0)));
+        case DBG_CPU1_CTX_SWITCHES:     return ok(static_cast<long>(sched::cpu_context_switch_count(1)));
+        case DBG_CPU0_TIMER_PREEMPTS:   return ok(static_cast<long>(sched::cpu_timer_preempt_count(0)));
+        case DBG_CPU1_TIMER_PREEMPTS:   return ok(static_cast<long>(sched::cpu_timer_preempt_count(1)));
+        case DBG_LOCAL_WAKES:           return ok(static_cast<long>(sched::local_wake_count()));
+        case DBG_REMOTE_WAKES:          return ok(static_cast<long>(sched::remote_wake_count()));
+        case DBG_IPI_SENT:              return ok(static_cast<long>(sched::ipi_sent_count()));
+        case DBG_IPI_HANDLED:           return ok(static_cast<long>(sched::ipi_handled_count()));
+        case DBG_PENDING_WAKE_DRAINS:   return ok(static_cast<long>(sched::pending_wake_drain_count()));
+        case DBG_DOORBELL_LOCAL_WAKES:  return ok(static_cast<long>(ipc::doorbell_local_wake_count()));
+        case DBG_DOORBELL_REMOTE_WAKES: return ok(static_cast<long>(ipc::doorbell_remote_wake_count()));
+        case DBG_FAIRNESS_LAG:          return ok(static_cast<long>(sched::fairness_max_lag()));
+        case DBG_PRINCIPAL_TRUSTED_RT:  return ok(static_cast<long>(sched::principal_runtime(PRINCIPAL_NATIVE_TRUSTED)));
+        case DBG_PRINCIPAL_SANDBOX_RT:  return ok(static_cast<long>(sched::principal_runtime(PRINCIPAL_NATIVE_SANDBOXED)));
+        case DBG_WAKE_DOORBELL:         return ok(static_cast<long>(sched::wake_doorbell_count()));
+        case DBG_WAKE_REMOTE:           return ok(static_cast<long>(sched::wake_remote_count()));
+        case DBG_WAKE_RESUME:           return ok(static_cast<long>(sched::wake_resume_count()));
         default: return err(E_INVALID);
         }
 

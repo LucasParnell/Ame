@@ -24,6 +24,7 @@ set(ANKO_SOURCES
 
     # ---- Phase 3/4: scheduler + capabilities -------------------------------
     arch/arm64/context.S
+    arch/arm64/psci.S
     sched/thread.cc
     sched/runqueue.cc
     cap/cap_table.cc

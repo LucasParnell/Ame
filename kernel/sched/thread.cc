@@ -62,6 +62,22 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
     t->remote_next = nullptr;
     t->waiting_doorbell = nullptr;
 
+    // Initialize scheduling attributes from the legacy priority level.
+    static constexpr u32 kPrioWeights[PRIO_COUNT] = {256, 512, 1024, 2048, 4096};
+    static_assert(sizeof(kPrioWeights) / sizeof(kPrioWeights[0]) == PRIO_COUNT,
+                  "kPrioWeights must have one entry per ThreadPriority");
+    static constexpr SchedClass kPrioClasses[PRIO_COUNT] = {
+        SCHED_IDLE, SCHED_BATCH, SCHED_NORMAL, SCHED_SERVICE, SCHED_INTERACTIVE
+    };
+    static_assert(sizeof(kPrioClasses) / sizeof(kPrioClasses[0]) == PRIO_COUNT,
+                  "kPrioClasses must have one entry per ThreadPriority");
+    const u32 prio_idx = (prio < PRIO_COUNT) ? static_cast<u32>(prio) : static_cast<u32>(PRIO_NORMAL);
+    t->sched.sched_class       = kPrioClasses[prio_idx];
+    t->sched.base_priority     = static_cast<u8>(prio_idx);
+    t->sched.effective_priority = static_cast<u8>(prio_idx);
+    t->sched.weight            = kPrioWeights[prio_idx];
+    t->sched.slice_budget_ns   = 0;
+
     Process* p = find_process(pid);
     if (p) {
         t->process_next = p->threads;
@@ -74,6 +90,12 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
 
 void thread_destroy(Thread* t) {
     if (!t) return;
+    // Unlink from owning process's thread list to prevent double-destroy.
+    if (Process* p = find_process(t->pid)) {
+        Thread** prev = &p->threads;
+        while (*prev && *prev != t) prev = &(*prev)->process_next;
+        if (*prev) *prev = t->process_next;
+    }
     ipc::doorbell_clear_waiter(t);
     t->state = TS_DEAD;
     unregister_thread(t);

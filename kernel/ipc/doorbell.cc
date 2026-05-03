@@ -11,6 +11,7 @@
 #include "anko/sched.h"
 #include "anko/cap.h"
 #include "anko/mm.h"
+#include "libk/metric.h"
 #include "libk/string.h"
 
 namespace ipc {
@@ -25,13 +26,8 @@ static u64 g_notify_woke_thread = 0;
 static u64 g_doorbell_local_wakes = 0;
 static u64 g_doorbell_remote_wakes = 0;
 
-static inline void metric_inc(u64& counter) {
-    __atomic_add_fetch(&counter, 1ull, __ATOMIC_RELAXED);
-}
-
-static inline u64 metric_load(const u64& counter) {
-    return __atomic_load_n(&counter, __ATOMIC_RELAXED);
-}
+using libk::metric_inc;
+using libk::metric_load;
 
 static inline u64 local_irq_save_disable() {
     u64 daif = 0;
@@ -126,6 +122,7 @@ SysError notify_object(Doorbell* db) {
     db->waiter = nullptr;
 
     if (waiter) {
+        waiter->last_wake_reason = WAKE_DOORBELL;
         __atomic_store_n(&waiter->waiting_doorbell, nullptr, __ATOMIC_RELEASE);
         metric_inc(g_wake_count);
         metric_inc(g_notify_woke_thread);
@@ -138,7 +135,9 @@ SysError notify_object(Doorbell* db) {
     unlock(db);
     local_irq_restore(irq);
 
-    if (waiter) sched::wake(waiter);
+    if (waiter) {
+        sched::wake(waiter);
+    }
     return E_OK;
 }
 
@@ -202,6 +201,8 @@ void doorbell_clear_waiter(Thread* thread) {
     const u64 irq = local_irq_save_disable();
     lock(db);
     if (db->waiter == thread) db->waiter = nullptr;
+    // Re-load under the lock: notify() may have cleared waiting_doorbell between
+    // our initial load above and acquiring the lock.
     Doorbell* waiting = __atomic_load_n(&thread->waiting_doorbell, __ATOMIC_ACQUIRE);
     if (waiting == db) {
         __atomic_store_n(&thread->waiting_doorbell, nullptr, __ATOMIC_RELEASE);

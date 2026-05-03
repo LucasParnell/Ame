@@ -27,8 +27,8 @@ constexpr CapHandle kCapLogDoorbell = cap_slot(1);
 constexpr uint32_t kCapLogRingBase = 2;
 constexpr uint32_t RIGHT_READ  = 1u << 0;
 constexpr uint32_t RIGHT_WRITE = 1u << 1;
-constexpr uint64_t kVaUart = 0x5000'0000ull;
-constexpr uint64_t kVaLogRingBase = 0x5001'0000ull;
+constexpr uint64_t kVaUart = 0x2000'0000ull;
+constexpr uint64_t kVaLogRingBase = 0x2001'0000ull;
 
 static void uart_putchar(volatile uint32_t* base, char c) {
     while (base[0x18 / 4] & (1u << 5)) { }
@@ -55,9 +55,10 @@ static void wait_cap(CapHandle cap, int64_t expected_type) {
     }
 }
 
-struct LogInput {
-    RingPage* ring;
-};
+static RingPage* log_ring_at(uint32_t index) {
+    return reinterpret_cast<RingPage*>(kVaLogRingBase +
+                                       (static_cast<uint64_t>(index) * 0x10000ull));
+}
 
 static bool drain_one(volatile uint32_t* uart, RingPage* ring) {
     bool any = false;
@@ -69,26 +70,28 @@ static bool drain_one(volatile uint32_t* uart, RingPage* ring) {
     return any;
 }
 
-static bool drain_all(volatile uint32_t* uart, LogInput* inputs, uint32_t count) {
+static bool drain_all(volatile uint32_t* uart) {
     bool any = false;
-    for (uint32_t i = 0; i < count; ++i) {
-        any = drain_one(uart, inputs[i].ring) || any;
+    for (uint32_t i = 0; i < kLogRingCount; ++i) {
+        any = drain_one(uart, log_ring_at(i)) || any;
     }
     return any;
 }
 
-static void publish_sleep(LogInput* inputs, uint32_t count, uint64_t counter) {
-    for (uint32_t i = 0; i < count; ++i) {
-        inputs[i].ring->flags.doorbell_counter_snapshot = counter;
-        __atomic_store_n(&inputs[i].ring->flags.receiver_about_to_sleep,
+static void publish_sleep(uint64_t counter) {
+    for (uint32_t i = 0; i < kLogRingCount; ++i) {
+        RingPage* ring = log_ring_at(i);
+        ring->flags.doorbell_counter_snapshot = counter;
+        __atomic_store_n(&ring->flags.receiver_about_to_sleep,
                          1u,
                          __ATOMIC_RELEASE);
     }
 }
 
-static void clear_sleep(LogInput* inputs, uint32_t count) {
-    for (uint32_t i = 0; i < count; ++i) {
-        __atomic_store_n(&inputs[i].ring->flags.receiver_about_to_sleep,
+static void clear_sleep() {
+    for (uint32_t i = 0; i < kLogRingCount; ++i) {
+        RingPage* ring = log_ring_at(i);
+        __atomic_store_n(&ring->flags.receiver_about_to_sleep,
                          0u,
                          __ATOMIC_RELEASE);
     }
@@ -113,32 +116,31 @@ extern "C" [[noreturn]] void _start() {
                                              kVaUart, RIGHT_READ | RIGHT_WRITE);
     wait_cap(kCapLogDoorbell, kCapTypeDoorbell);
 
-    LogInput inputs[kLogRingCount]{};
     for (uint32_t i = 0; i < kLogRingCount; ++i) {
-        inputs[i].ring = wait_map<RingPage>(cap_slot(kCapLogRingBase + i),
-                                            kCapTypeSharedRing,
-                                            kVaLogRingBase + (static_cast<uint64_t>(i) * 0x10000ull),
-                                            RIGHT_READ | RIGHT_WRITE);
+        (void)wait_map<RingPage>(cap_slot(kCapLogRingBase + i),
+                                 kCapTypeSharedRing,
+                                 kVaLogRingBase + (static_cast<uint64_t>(i) * 0x10000ull),
+                                 RIGHT_READ | RIGHT_WRITE);
     }
 
-    (void)drain_all(uart, inputs, kLogRingCount);
+    (void)drain_all(uart);
     uart_log(uart, mochi::LogLevel::Info, "io.console", "console: ready");
 
     while (true) {
-        if (drain_all(uart, inputs, kLogRingCount)) {
+        if (drain_all(uart)) {
             continue;
         }
 
         const uint64_t counter = sys_doorbell_read(kCapLogDoorbell);
-        publish_sleep(inputs, kLogRingCount, counter);
+        publish_sleep(counter);
 
-        if (drain_all(uart, inputs, kLogRingCount)) {
-            clear_sleep(inputs, kLogRingCount);
+        if (drain_all(uart)) {
+            clear_sleep();
             continue;
         }
 
         const int64_t rc = sys_wait_doorbell(kCapLogDoorbell, counter);
-        clear_sleep(inputs, kLogRingCount);
+        clear_sleep();
         if (rc < 0) {
             sys_yield();
         }

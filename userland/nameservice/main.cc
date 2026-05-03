@@ -43,9 +43,9 @@ constexpr CapHandle kPongProcess = cap_slot(5);
 constexpr CapHandle kDangoProcess = cap_slot(6);
 constexpr CapHandle kLogRing = cap_slot(7);
 constexpr CapHandle kLogDoorbell = cap_slot(8);
-constexpr uint64_t kVaRequestRing = 0x5000'0000ull;
-constexpr uint64_t kVaReplyRing = 0x5001'0000ull;
-constexpr uint64_t kVaLogRing = 0x5002'0000ull;
+constexpr uint64_t kVaRequestRing = 0x2000'0000ull;
+constexpr uint64_t kVaReplyRing = 0x2001'0000ull;
+constexpr uint64_t kVaLogRing = 0x2002'0000ull;
 
 static bool streq(const char* a, const char* b) {
     uint32_t i = 0;

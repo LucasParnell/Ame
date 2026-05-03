@@ -15,7 +15,7 @@
 
 constexpr usize PAGE_SIZE  = 4096;
 constexpr usize PAGE_SHIFT = 12;
-constexpr VirtAddr USER_STACK_TOP = 0x7FFF'0000ull;
+constexpr VirtAddr USER_STACK_TOP = 0x3FFF'0000ull;
 
 // ---------------------------------------------------------------------------
 // Physical page allocator state.
@@ -93,6 +93,10 @@ bool vm_map_device_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32
 void vm_unmap(VmSpace& space, VirtAddr va);
 void vm_space_destroy(VmSpace& space);
 void vm_activate(PhysAddr pgd_phys);
+// Make data written by the kernel visible to instruction fetch before a page
+// is entered as executable code. On AArch64, D-cache and I-cache are not
+// automatically coherent for freshly-copied code once caches are enabled.
+void sync_icache_range(PhysAddr pa, usize len);
 bool user_range_mapped(const VmSpace& space, VirtAddr va, u64 size, u32 rights);
 bool user_va_to_pa(const VmSpace& space, VirtAddr va, u32 rights, PhysAddr* out_pa);
 u64 vm_debug_pte(const VmSpace& space, VirtAddr va);

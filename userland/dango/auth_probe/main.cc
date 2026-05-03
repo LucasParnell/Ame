@@ -6,7 +6,7 @@
 #include "dango/vm.h"
 
 constexpr uint32_t kRingOrder = 6;
-constexpr uint64_t kVaConsoleRing = 0x5000'0000ull;
+constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
 
 constexpr CapHandle cap_slot(uint32_t idx) {
     return (static_cast<CapHandle>(1) << 32) | idx;

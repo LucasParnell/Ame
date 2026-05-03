@@ -1,0 +1,186 @@
+--- a/kernel/syscall/dispatch.cc
++++ b/kernel/syscall/dispatch.cc
+@@ -145,28 +145,63 @@
+ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
+     auto* tf = static_cast<TrapFrame*>(frame);
+     Process* p = cur_proc();
+-    ANKO_LOGF_FATAL("kernel/fault",
+-                    "EL0 fault pid=%u esr=%llx far=%llx elr=%llx sp=%llx "
+-                    "x0=%llx x1=%llx x2=%llx x3=%llx x4=%llx x5=%llx "
+-                    "x6=%llx x7=%llx x8=%llx x9=%llx x10=%llx x16=%llx x19=%llx",
+-                    p ? p->pid : 0,
+-                    static_cast<unsigned long long>(esr),
+-                    static_cast<unsigned long long>(far),
+-                    static_cast<unsigned long long>(tf ? tf->elr : 0),
+-                    static_cast<unsigned long long>(tf ? tf->sp_el0 : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[0] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[1] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[2] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[3] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[4] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[5] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[6] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[7] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[8] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[9] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[10] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[16] : 0),
+-                    static_cast<unsigned long long>(tf ? tf->x[19] : 0));
++    const u32 ec = static_cast<u32>((esr >> 26) & 0x3fu);
++    const u32 iss = static_cast<u32>(esr & 0x01ff'ffffu);
++
++    if (ec == 0x3c) {
++        // BRK from EL0 is used by supervised demo services as an intentional
++        // crash signal. Keep notifying the supervisor, but don't make the
++        // expected death look like a kernel-fatal condition on the UART log.
++        ANKO_LOGF_WARN("kernel/fault",
++                       "EL0 brk pid=%u esr=%llx elr=%llx sp=%llx "
++                       "x0=%llx x1=%llx x8=%llx x9=%llx x16=%llx",
++                       p ? p->pid : 0,
++                       static_cast<unsigned long long>(esr),
++                       static_cast<unsigned long long>(tf ? tf->elr : 0),
++                       static_cast<unsigned long long>(tf ? tf->sp_el0 : 0),
++                       static_cast<unsigned long long>(tf ? tf->x[0] : 0),
++                       static_cast<unsigned long long>(tf ? tf->x[1] : 0),
++                       static_cast<unsigned long long>(tf ? tf->x[8] : 0),
++                       static_cast<unsigned long long>(tf ? tf->x[9] : 0),
++                       static_cast<unsigned long long>(tf ? tf->x[16] : 0));
++    } else {
++        ANKO_LOGF_FATAL("kernel/fault",
++                        "EL0 fault pid=%u esr=%llx ec=%u iss=%x far=%llx "
++                        "elr=%llx sp=%llx x0=%llx x1=%llx x2=%llx x3=%llx "
++                        "x4=%llx x5=%llx x6=%llx x7=%llx x8=%llx x9=%llx "
++                        "x10=%llx x11=%llx x12=%llx x13=%llx x14=%llx x15=%llx "
++                        "x16=%llx x17=%llx x19=%llx x20=%llx x21=%llx x22=%llx",
++                        p ? p->pid : 0,
++                        static_cast<unsigned long long>(esr),
++                        ec,
++                        iss,
++                        static_cast<unsigned long long>(far),
++                        static_cast<unsigned long long>(tf ? tf->elr : 0),
++                        static_cast<unsigned long long>(tf ? tf->sp_el0 : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[0] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[1] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[2] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[3] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[4] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[5] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[6] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[7] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[8] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[9] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[10] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[11] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[12] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[13] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[14] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[15] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[16] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[17] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[19] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[20] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[21] : 0),
++                        static_cast<unsigned long long>(tf ? tf->x[22] : 0));
++    }
++
+     counter_inc(g_el0_fault_count);
+     record_supervisor_event(p, static_cast<long>(esr));
+     sched::mark_current_dead();
+--- a/userland/console/main.cc
++++ b/userland/console/main.cc
+@@ -55,9 +55,10 @@
+     }
+ }
+ 
+-struct LogInput {
+-    RingPage* ring;
+-};
++static RingPage* log_ring_at(uint32_t index) {
++    return reinterpret_cast<RingPage*>(kVaLogRingBase +
++                                       (static_cast<uint64_t>(index) * 0x10000ull));
++}
+ 
+ static bool drain_one(volatile uint32_t* uart, RingPage* ring) {
+     bool any = false;
+@@ -69,26 +70,28 @@
+     return any;
+ }
+ 
+-static bool drain_all(volatile uint32_t* uart, LogInput* inputs, uint32_t count) {
++static bool drain_all(volatile uint32_t* uart) {
+     bool any = false;
+-    for (uint32_t i = 0; i < count; ++i) {
+-        any = drain_one(uart, inputs[i].ring) || any;
++    for (uint32_t i = 0; i < kLogRingCount; ++i) {
++        any = drain_one(uart, log_ring_at(i)) || any;
+     }
+     return any;
+ }
+ 
+-static void publish_sleep(LogInput* inputs, uint32_t count, uint64_t counter) {
+-    for (uint32_t i = 0; i < count; ++i) {
+-        inputs[i].ring->flags.doorbell_counter_snapshot = counter;
+-        __atomic_store_n(&inputs[i].ring->flags.receiver_about_to_sleep,
++static void publish_sleep(uint64_t counter) {
++    for (uint32_t i = 0; i < kLogRingCount; ++i) {
++        RingPage* ring = log_ring_at(i);
++        ring->flags.doorbell_counter_snapshot = counter;
++        __atomic_store_n(&ring->flags.receiver_about_to_sleep,
+                          1u,
+                          __ATOMIC_RELEASE);
+     }
+ }
+ 
+-static void clear_sleep(LogInput* inputs, uint32_t count) {
+-    for (uint32_t i = 0; i < count; ++i) {
+-        __atomic_store_n(&inputs[i].ring->flags.receiver_about_to_sleep,
++static void clear_sleep() {
++    for (uint32_t i = 0; i < kLogRingCount; ++i) {
++        RingPage* ring = log_ring_at(i);
++        __atomic_store_n(&ring->flags.receiver_about_to_sleep,
+                          0u,
+                          __ATOMIC_RELEASE);
+     }
+@@ -113,32 +116,31 @@
+                                              kVaUart, RIGHT_READ | RIGHT_WRITE);
+     wait_cap(kCapLogDoorbell, kCapTypeDoorbell);
+ 
+-    LogInput inputs[kLogRingCount]{};
+     for (uint32_t i = 0; i < kLogRingCount; ++i) {
+-        inputs[i].ring = wait_map<RingPage>(cap_slot(kCapLogRingBase + i),
+-                                            kCapTypeSharedRing,
+-                                            kVaLogRingBase + (static_cast<uint64_t>(i) * 0x10000ull),
+-                                            RIGHT_READ | RIGHT_WRITE);
++        (void)wait_map<RingPage>(cap_slot(kCapLogRingBase + i),
++                                 kCapTypeSharedRing,
++                                 kVaLogRingBase + (static_cast<uint64_t>(i) * 0x10000ull),
++                                 RIGHT_READ | RIGHT_WRITE);
+     }
+ 
+-    (void)drain_all(uart, inputs, kLogRingCount);
++    (void)drain_all(uart);
+     uart_log(uart, mochi::LogLevel::Info, "io.console", "console: ready");
+ 
+     while (true) {
+-        if (drain_all(uart, inputs, kLogRingCount)) {
++        if (drain_all(uart)) {
+             continue;
+         }
+ 
+         const uint64_t counter = sys_doorbell_read(kCapLogDoorbell);
+-        publish_sleep(inputs, kLogRingCount, counter);
++        publish_sleep(counter);
+ 
+-        if (drain_all(uart, inputs, kLogRingCount)) {
+-            clear_sleep(inputs, kLogRingCount);
++        if (drain_all(uart)) {
++            clear_sleep();
+             continue;
+         }
+ 
+         const int64_t rc = sys_wait_doorbell(kCapLogDoorbell, counter);
+-        clear_sleep(inputs, kLogRingCount);
++        clear_sleep();
+         if (rc < 0) {
+             sys_yield();
+         }

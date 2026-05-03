@@ -4,6 +4,7 @@
 #include "anko/mm.h"
 #include "anko/smp.h"
 #include "anko/log.h"
+#include "libk/metric.h"
 #include "libk/printf.h"
 #include "libk/string.h"
 
@@ -12,15 +13,11 @@ namespace sched {
 static Eki g_eki[kMaxCpus]{};
 static u32 g_online_cpu_count = 1;
 static u64 g_yield_count = 0;
-static u64 g_principal_runtime[64]{};
+constexpr u32 kMaxPrincipals = 64;
+static PrincipalSchedState g_principal_sched[kMaxPrincipals]{};
 
-static inline void metric_inc(u64& counter) {
-    __atomic_add_fetch(&counter, 1ull, __ATOMIC_RELAXED);
-}
-
-static inline u64 metric_load(const u64& counter) {
-    return __atomic_load_n(&counter, __ATOMIC_RELAXED);
-}
+using libk::metric_inc;
+using libk::metric_load;
 
 static inline void send_event() {
     asm volatile("sev" ::: "memory");
@@ -141,9 +138,9 @@ static void pending_push(Eki& target, Thread* t) {
 static void remote_wake(Thread* t, u32 target_cpu) {
     Eki& src = current_eki();
     Eki& dst = eki_for_cpu(target_cpu);
-    t->state = TS_RUNNABLE;
-    t->cpu_id = target_cpu;
-    pending_push(dst, t);
+    __atomic_store_n(&t->state,  TS_RUNNABLE, __ATOMIC_RELAXED);
+    __atomic_store_n(&t->cpu_id, target_cpu,  __ATOMIC_RELAXED);
+    pending_push(dst, t); // __ATOMIC_RELEASE barrier covers the stores above
     metric_inc(src.remote_wakes);
     smp::send_wake_ipi(target_cpu);
 }
@@ -153,6 +150,7 @@ static void drain_pending_wakes(Eki& e) {
     if (!list) return;
     metric_inc(e.pending_wake_drains);
 
+    // Reverse the LIFO push-stack into FIFO order for fair wakeup.
     Thread* rev = nullptr;
     while (list) {
         Thread* next = list->remote_next;
@@ -166,10 +164,12 @@ static void drain_pending_wakes(Eki& e) {
         rev = rev->remote_next;
         t->remote_next = nullptr;
         if (t->state == TS_DEAD) continue;
+        metric_inc(e.wake_remote);
         if (t == e.current) {
             t->state = TS_RUNNABLE;
             continue;
         }
+        t->last_wake_reason = WAKE_REMOTE;
         enqueue_tail(e, t);
     }
 }
@@ -237,7 +237,8 @@ void tick() {
     metric_inc(cur->runtime_ticks);
     if (Process* p = find_process(cur->pid)) {
         metric_inc(p->runtime_ticks);
-        if (p->principal_id < 64) metric_inc(g_principal_runtime[p->principal_id]);
+        if (p->principal_id < kMaxPrincipals)
+            __atomic_add_fetch(&g_principal_sched[p->principal_id].runtime_ns, 1ull, __ATOMIC_RELAXED);
     }
     request_switch(true, SWITCH_TIMER);
 }
@@ -254,9 +255,11 @@ void block(Thread* t) {
 }
 
 void wake(Thread* t) {
-    if (!t || t->state == TS_DEAD) return;
-    if (t->state == TS_RUNNABLE && t != current_eki().current) return;
-    if (t->state == TS_RUNNING) return;
+    if (!t) return;
+    const ThreadState s = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
+    if (s == TS_DEAD) return;
+    if (s == TS_RUNNABLE && t != current_eki().current) return;
+    if (s == TS_RUNNING) return;
 
     const u32 target = target_cpu_for(t);
     if (target == current_cpu_id()) {
@@ -264,6 +267,8 @@ void wake(Thread* t) {
         t->state = TS_RUNNABLE;
         if (t != e.current) enqueue_tail(e, t);
         metric_inc(e.local_wakes);
+        if (t->last_wake_reason == WAKE_DOORBELL) metric_inc(e.wake_doorbell);
+        else if (t->last_wake_reason == WAKE_RESUME) metric_inc(e.wake_resume);
         send_event();
     } else {
         remote_wake(t, target);
@@ -305,6 +310,7 @@ SysError resume_thread(Thread* t) {
     if (t->state == TS_DEAD) return E_DEAD;
     if (t->state != TS_SUSPENDED) return E_INVALID;
     t->state = TS_RUNNABLE;
+    t->last_wake_reason = WAKE_RESUME;
     enqueue(t);
     return E_OK;
 }
@@ -395,6 +401,7 @@ extern "C" void post_syscall(void* frame_ptr) {
     next->state = TS_RUNNING;
     activate_thread_space(next);
     *frame = next->tf;
+    if (cur != next && cur->state == TS_DEAD) thread_destroy(cur);
 }
 
 u32 online_cpu_count() { return g_online_cpu_count; }
@@ -487,21 +494,40 @@ u64 pending_wake_drain_count() {
 }
 
 u64 principal_runtime(u32 principal_id) {
-    return principal_id < 64 ? metric_load(g_principal_runtime[principal_id]) : 0;
+    if (principal_id >= kMaxPrincipals) return 0;
+    return __atomic_load_n(&g_principal_sched[principal_id].runtime_ns, __ATOMIC_RELAXED);
 }
 
 u64 fairness_max_lag() {
     u64 min = ~0ull;
     u64 max = 0;
     bool any = false;
-    for (u32 i = 0; i < 64; ++i) {
-        const u64 runtime = metric_load(g_principal_runtime[i]);
+    for (u32 i = 0; i < kMaxPrincipals; ++i) {
+        const u64 runtime = __atomic_load_n(&g_principal_sched[i].runtime_ns, __ATOMIC_RELAXED);
         if (runtime == 0) continue;
         any = true;
         if (runtime < min) min = runtime;
         if (runtime > max) max = runtime;
     }
     return any ? (max - min) : 0;
+}
+
+u64 wake_doorbell_count() {
+    u64 total = 0;
+    for (u32 i = 0; i < kMaxCpus; ++i) total += metric_load(g_eki[i].wake_doorbell);
+    return total;
+}
+
+u64 wake_remote_count() {
+    u64 total = 0;
+    for (u32 i = 0; i < kMaxCpus; ++i) total += metric_load(g_eki[i].wake_remote);
+    return total;
+}
+
+u64 wake_resume_count() {
+    u64 total = 0;
+    for (u32 i = 0; i < kMaxCpus; ++i) total += metric_load(g_eki[i].wake_resume);
+    return total;
 }
 
 } // namespace sched

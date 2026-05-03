@@ -120,6 +120,10 @@ VirtAddr load_elf(VmSpace& space, const void* elf_data, usize elf_size) {
                 }
             }
 
+            if (rights & RIGHT_EXEC) {
+                mm::sync_icache_range(page, PAGE_SIZE);
+            }
+
             if (!mm::vm_map(space, va_start + off, page, rights)) return 0;
         }
     }

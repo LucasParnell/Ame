@@ -34,10 +34,10 @@ constexpr uint32_t PRINCIPAL_NATIVE_SANDBOXED = 2;
 constexpr int64_t kCapTypeDoorbell = 5;
 
 constexpr uint32_t kRingOrder = 6;
-constexpr uint64_t kVaManifest = 0x5000'0000ull;
-constexpr uint64_t kVaInitrd = 0x5100'0000ull;
-constexpr uint64_t kVaInitLogRing = 0x5200'0000ull;
-constexpr uint64_t kVaPingToPongRing = 0x5201'0000ull;
+constexpr uint64_t kVaManifest = 0x2000'0000ull;
+constexpr uint64_t kVaInitrd = 0x2400'0000ull;
+constexpr uint64_t kVaInitLogRing = 0x2800'0000ull;
+constexpr uint64_t kVaPingToPongRing = 0x2801'0000ull;
 
 constexpr CapHandle cap_slot(uint32_t idx) {
     return (static_cast<CapHandle>(1) << 32) | idx;
@@ -56,7 +56,7 @@ constexpr uint32_t kCapKernelLogRingBase = 7;
 
 constexpr uint32_t kMaxManifestServices = 8;
 constexpr uint32_t kManifestScanLimit = 1024;
-constexpr uint64_t kInitrdScanLimit = 16ull * 1024ull * 1024ull;
+constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;
 constexpr bool kEmitBootMetrics = false;
 
 struct ServiceSpec {

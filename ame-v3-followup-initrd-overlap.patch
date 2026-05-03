@@ -1,0 +1,61 @@
+--- a/userland/init/main.cc
++++ b/userland/init/main.cc
+@@ -35,9 +35,9 @@
+ 
+ constexpr uint32_t kRingOrder = 6;
+ constexpr uint64_t kVaManifest = 0x9000'0000ull;
+-constexpr uint64_t kVaInitrd = 0x9100'0000ull;
+-constexpr uint64_t kVaInitLogRing = 0x9200'0000ull;
+-constexpr uint64_t kVaPingToPongRing = 0x9201'0000ull;
++constexpr uint64_t kVaInitrd = 0x9400'0000ull;
++constexpr uint64_t kVaInitLogRing = 0x9800'0000ull;
++constexpr uint64_t kVaPingToPongRing = 0x9801'0000ull;
+ 
+ constexpr CapHandle cap_slot(uint32_t idx) {
+     return (static_cast<CapHandle>(1) << 32) | idx;
+@@ -56,7 +56,7 @@
+ 
+ constexpr uint32_t kMaxManifestServices = 8;
+ constexpr uint32_t kManifestScanLimit = 1024;
+-constexpr uint64_t kInitrdScanLimit = 16ull * 1024ull * 1024ull;
++constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;
+ constexpr bool kEmitBootMetrics = false;
+ 
+ struct ServiceSpec {
+--- a/kernel/syscall/dispatch.cc
++++ b/kernel/syscall/dispatch.cc
+@@ -144,14 +144,31 @@
+ 
+ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
+     auto* tf = static_cast<TrapFrame*>(frame);
++    Process* p = cur_proc();
+     ANKO_LOGF_FATAL("kernel/fault",
+-                    "EL0 fault esr=%llx far=%llx elr=%llx sp=%llx",
++                    "EL0 fault pid=%u esr=%llx far=%llx elr=%llx sp=%llx "
++                    "x0=%llx x1=%llx x2=%llx x3=%llx x4=%llx x5=%llx "
++                    "x6=%llx x7=%llx x8=%llx x9=%llx x10=%llx x16=%llx x19=%llx",
++                    p ? p->pid : 0,
+                     static_cast<unsigned long long>(esr),
+                     static_cast<unsigned long long>(far),
+                     static_cast<unsigned long long>(tf ? tf->elr : 0),
+-                    static_cast<unsigned long long>(tf ? tf->sp_el0 : 0));
++                    static_cast<unsigned long long>(tf ? tf->sp_el0 : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[0] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[1] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[2] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[3] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[4] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[5] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[6] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[7] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[8] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[9] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[10] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[16] : 0),
++                    static_cast<unsigned long long>(tf ? tf->x[19] : 0));
+     counter_inc(g_el0_fault_count);
+-    record_supervisor_event(cur_proc(), static_cast<long>(esr));
++    record_supervisor_event(p, static_cast<long>(esr));
+     sched::mark_current_dead();
+ }
+ 

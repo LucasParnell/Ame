@@ -10,8 +10,8 @@
 constexpr uint32_t kRingOrder = 6;
 constexpr uint32_t kLinuxRunSlices = 8;
 constexpr uint64_t kLinuxRunBudgetTicks = 4096;
-constexpr uint64_t kVaConsoleRing = 0x5000'0000ull;
-constexpr uint64_t kVaBootInitrd = 0x5100'0000ull;
+constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
+constexpr uint64_t kVaBootInitrd = 0x2400'0000ull;
 constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;
 constexpr CapHandle cap_slot(uint32_t idx) {
     return (static_cast<CapHandle>(1) << 32) | idx;
@@ -578,6 +578,7 @@ extern "C" [[noreturn]] void _start() {
             if (run_rc == 0) {
                 const int64_t saw_hello = sys_debug_counter(dango::VM_DEBUG_GUEST_LINUX_HELLO);
                 if (saw_hello > 0) break;
+                sys_yield();
                 continue;
             }
             dango_debug("dango: linux guest exited early\n");
@@ -601,7 +602,7 @@ extern "C" [[noreturn]] void _start() {
     while (true) {
         if (have_linux) {
             const int64_t run_rc = sys_vcpu_run(vcpu, kLinuxRunBudgetTicks);
-            if (run_rc == 0) continue;
+            if (run_rc == 0) { sys_yield(); continue; }
         }
         sys_yield();
     }

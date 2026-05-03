@@ -36,6 +36,21 @@ enum ThreadState : u8 {
 };
 
 // ---------------------------------------------------------------------------
+// Wake reasons — why a thread was transitioned out of a blocked state.
+// ---------------------------------------------------------------------------
+enum WakeReason : u8 {
+    WAKE_NONE     = 0,
+    WAKE_YIELD    = 1,
+    WAKE_TIMER    = 2,
+    WAKE_DOORBELL = 3,
+    WAKE_NOTIFY   = 4,
+    WAKE_REMOTE   = 5,
+    WAKE_RESUME   = 6,
+    WAKE_IRQ      = 7,
+    WAKE_DEBUG    = 8,
+};
+
+// ---------------------------------------------------------------------------
 // Principal classes (spec §5.6)
 // V0 uses these for syscall permission checks and spawn policy.
 // ---------------------------------------------------------------------------
@@ -44,6 +59,29 @@ enum Principal : u8 {
     PRINCIPAL_NATIVE_TRUSTED  = 1,
     PRINCIPAL_NATIVE_SANDBOXED = 2,
 };
+
+// ---------------------------------------------------------------------------
+// Scheduling classes and per-thread scheduling attributes.
+// ---------------------------------------------------------------------------
+enum SchedClass : u8 {
+    SCHED_IDLE        = 0,
+    SCHED_BATCH       = 1,
+    SCHED_NORMAL      = 2,
+    SCHED_SERVICE     = 3,
+    SCHED_INTERACTIVE = 4,
+    SCHED_RT          = 5,
+    SCHED_VM          = 6,
+};
+
+struct SchedAttrs {
+    SchedClass sched_class;
+    u8         base_priority;
+    u8         effective_priority;
+    u8         _pad;
+    u32        weight;           // NICE_0_WEIGHT = 1024
+    u64        slice_budget_ns;  // 0 = use class default
+};
+static_assert(__is_trivially_constructible(SchedAttrs));
 
 // ---------------------------------------------------------------------------
 // Saved CPU context — what context_switch() saves and restores.
@@ -79,7 +117,7 @@ struct Thread {
     u32          pid;          // owning process
     ThreadState  state;
     ThreadPriority priority;
-    u8           _pad0;
+    WakeReason   last_wake_reason;  // why this thread was last woken
     u32          cpu_id;
     u64          affinity_mask;
     TrapFrame    tf;
@@ -89,7 +127,9 @@ struct Thread {
     Doorbell*    waiting_doorbell;
     u64          switches;
     u64          runtime_ticks;
+    SchedAttrs   sched;             // scheduling class and weight
 };
+static_assert(__is_trivially_constructible(Thread));
 
 // ---------------------------------------------------------------------------
 // Process — one isolated address space + cap table.
@@ -127,6 +167,23 @@ struct PendingWakeQueue {
 };
 
 // ---------------------------------------------------------------------------
+// Per-principal scheduling state (Milestone 2 data model).
+// budget_exhausted is tracked but not yet enforced in pick_next.
+// ---------------------------------------------------------------------------
+struct PrincipalSchedState {
+    u32  principal_id;
+    u32  weight;
+    u64  runtime_ns;
+    u64  period_ns;
+    u64  budget_ns;
+    u64  used_in_period_ns;
+    u64  period_start_ns;
+    u32  runnable_threads;
+    bool budget_exhausted;
+    u8   _pad[3];
+};
+
+// ---------------------------------------------------------------------------
 // Switch reasons (V1 metrics only; V0 policy unchanged).
 // ---------------------------------------------------------------------------
 enum SwitchReason : u8 {
@@ -159,6 +216,9 @@ struct Eki {
     u64 block_switches;
     u64 exit_switches;
     u64 idle_switches;
+    u64 wake_doorbell;   // woken by doorbell notify
+    u64 wake_remote;     // woken from remote pending-wake queue
+    u64 wake_resume;     // woken by resume_thread
 };
 
 constexpr u32 kMaxCpus = 4;
@@ -215,5 +275,8 @@ u64 ipi_handled_count();
 u64 pending_wake_drain_count();
 u64 principal_runtime(u32 principal_id);
 u64 fairness_max_lag();
+u64 wake_doorbell_count();
+u64 wake_remote_count();
+u64 wake_resume_count();
 
 } // namespace sched

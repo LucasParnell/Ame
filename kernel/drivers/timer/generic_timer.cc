@@ -14,6 +14,7 @@
 
 #include "anko/platform.h"
 #include "anko/sched.h"
+#include "libk/metric.h"
 
 namespace drivers::gic { void irq_enable(u32 irq_id); }
 
@@ -25,13 +26,8 @@ constexpr u32 CNTP_CTL_ENABLE  = 1u << 0;
 static u64 g_tick_period = 0; // counter ticks between interrupts
 static u64 g_tick_count = 0;
 
-static inline void metric_inc(u64& counter) {
-    __atomic_add_fetch(&counter, 1ull, __ATOMIC_RELAXED);
-}
-
-static inline u64 metric_load(const u64& counter) {
-    return __atomic_load_n(&counter, __ATOMIC_RELAXED);
-}
+using libk::metric_inc;
+using libk::metric_load;
 
 static void rearm() {
     asm volatile("msr CNTP_TVAL_EL0, %0" : : "r"(g_tick_period) : "memory");

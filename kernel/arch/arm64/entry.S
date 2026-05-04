@@ -29,8 +29,19 @@ _start:
     b.ne    1f
 
     // EL2 -> EL1: configure HCR/SCTLR/SPSR, then ERET.
-    adrp    x0, __el2_stack_top
-    add     x0, x0, :lo12:__el2_stack_top
+    // Per-CPU EL2 stack.  EL2 can be entered concurrently on SMP guests,
+    // especially while Dango vCPU runner threads are active.
+    adrp    x0, g_el2_stacks
+    add     x0, x0, :lo12:g_el2_stacks
+    mrs     x1, MPIDR_EL1
+    and     x1, x1, #0xff
+    cmp     x1, #4
+    b.lo    0f
+    mov     x1, xzr
+0:
+    add     x1, x1, #1
+    lsl     x1, x1, #14
+    add     x0, x0, x1
     mov     sp, x0
     adrp    x0, el2_vectors
     add     x0, x0, :lo12:el2_vectors
@@ -101,8 +112,17 @@ secondary_start:
     cmp     x0, #2
     b.ne    5f
 
-    adrp    x1, __el2_stack_top
-    add     x1, x1, :lo12:__el2_stack_top
+    // Per-CPU EL2 stack for secondary CPUs too.  Do not share EL2 SP.
+    adrp    x1, g_el2_stacks
+    add     x1, x1, :lo12:g_el2_stacks
+    mov     x2, x19
+    cmp     x2, #4
+    b.lo    7f
+    mov     x2, xzr
+7:
+    add     x2, x2, #1
+    lsl     x2, x2, #14
+    add     x1, x1, x2
     mov     sp, x1
     adrp    x1, el2_vectors
     add     x1, x1, :lo12:el2_vectors

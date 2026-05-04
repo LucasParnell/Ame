@@ -97,11 +97,11 @@ static inline bool ring_push(RingPage* r, uint32_t order,
     // has not yet entered wait_doorbell(), this exchange still works because
     // sys_notify increments the doorbell counter.  The later wait sees the
     // counter changed and returns immediately instead of sleeping.
-    const uint32_t claimed_sleep =
-        __atomic_exchange_n(&r->flags.receiver_about_to_sleep, 0u, __ATOMIC_ACQ_REL);
-    if (claimed_sleep) {
-        (void)sys_notify(doorbell_cap);
-    }
+    (void)__atomic_exchange_n(&r->flags.receiver_about_to_sleep, 0u, __ATOMIC_ACQ_REL);
+
+    // Always notify after publishing.  Doorbells coalesce naturally, and this
+    // avoids a lost-wake race in the sleep-flag fast path.
+    (void)sys_notify(doorbell_cap);
 
     return true;
 }

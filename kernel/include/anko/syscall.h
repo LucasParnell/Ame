@@ -75,6 +75,10 @@ enum Syscall : unsigned {
     SYS_VM_CHANNEL_INSPECT = 40,
     SYS_VM_MEMORY_WRITE = 41,
 
+    // V2 scheduler: synchronous IPC handoff
+    SYS_NOTIFY_HANDOFF = 42, // notify_handoff(db_cap, payload_word) → reply_value
+    SYS_REPLY_HANDOFF  = 43, // reply_handoff(reply_value) → E_OK
+
     SYS_COUNT,
 };
 

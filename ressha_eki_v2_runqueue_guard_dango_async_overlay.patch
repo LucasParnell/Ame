@@ -1,0 +1,424 @@
+--- work_archive/kernel/include/anko/sched.h	2026-05-03 23:42:28.000000000 +0000
++++ ame_latest/kernel/include/anko/sched.h	2026-05-03 23:50:34.216373189 +0000
+@@ -142,7 +142,7 @@
+ // Fair thread queue — min-heap of Thread* keyed by effective_key().
+ // Capacity is deliberately small: V0 has few threads per principal per CPU.
+ // ---------------------------------------------------------------------------
+-constexpr u32 kFairQueueCap = 16;
++constexpr u32 kFairQueueCap = 64;
+ 
+ struct Thread; // forward declaration for FairThreadQueue
+ 
+@@ -313,7 +313,8 @@
+     // --- Boolean flags ---
+     bool        in_drain_quantum;
+     bool        has_donation;
+-    u8          _pad1[6];
++    bool        on_runqueue;       // true iff present in an RT/fair local queue
++    u8          _pad1[5];
+ 
+     // --- Scheduling class and weight ---
+     SchedAttrs  sched;
+--- work_archive/kernel/sched/runqueue.cc	2026-05-04 00:04:46.000000000 +0000
++++ ame_latest/kernel/sched/runqueue.cc	2026-05-03 23:50:34.217778920 +0000
+@@ -60,6 +60,18 @@
+ }
+ static Eki& current_eki() { return eki_for_cpu(current_cpu_id()); }
+ 
++static bool mark_on_runqueue(Thread* t) {
++    return !__atomic_exchange_n(&t->on_runqueue, true, __ATOMIC_ACQ_REL);
++}
++
++static bool clear_on_runqueue(Thread* t) {
++    return __atomic_exchange_n(&t->on_runqueue, false, __ATOMIC_ACQ_REL);
++}
++
++static bool is_on_runqueue(const Thread* t) {
++    return __atomic_load_n(&t->on_runqueue, __ATOMIC_ACQUIRE);
++}
++
+ static u64 online_mask() {
+     const u32 n = g_online_cpu_count > kMaxCpus ? kMaxCpus : g_online_cpu_count;
+     u64 m = 0;
+@@ -308,42 +320,39 @@
+ // min_vruntime so long-sleeping threads don't get unlimited catch-up.
+ // ---------------------------------------------------------------------------
+ static bool enqueue_fair(Eki& e, Thread* t) {
+-    if (!t || t->state == TS_DEAD) return false;
++    if (!t || t->state == TS_DEAD || t->state == TS_RUNNING) return false;
++
++    // Physical queue membership is separate from logical state.  This prevents
++    // stale/duplicate runnable entries from being dispatched after a thread has
++    // blocked, slept, or already been picked.
++    if (!mark_on_runqueue(t)) return false;
+ 
+     const u32 pid = t->principal_id;
+-    if (pid >= kMaxPrincipals) return false;
++    if (pid >= kMaxPrincipals) {
++        clear_on_runqueue(t);
++        return false;
++    }
+ 
+-    PrincipalEntity& pe   = e.principal_entities[pid];
++    PrincipalEntity& pe      = e.principal_entities[pid];
+     FairPrincipalQueue& band = band_for(e, t->sched.sched_class);
+-    u64& min_vr            = min_vruntime_for(e, t->sched.sched_class);
+-
+-    // Normalize: clamp back-pay from sleeping
+-    if (t->vruntime_ns < min_vr)  t->vruntime_ns  = min_vr;
+-    if (pe.vruntime_ns < min_vr)  pe.vruntime_ns   = min_vr;
++    u64& min_vr             = min_vruntime_for(e, t->sched.sched_class);
+ 
+-    // Initialize principal weight from first thread if not set
+-    if (pe.weight == 0) pe.weight = t->sched.weight;
+-
+-    // Compute or refresh slice
++    if (t->vruntime_ns < min_vr) t->vruntime_ns = min_vr;
++    if (pe.vruntime_ns < min_vr) pe.vruntime_ns = min_vr;
++    if (pe.weight == 0) pe.weight = t->sched.weight ? t->sched.weight : NICE_0_WEIGHT;
+     t->slice_ns = compute_slice_ns(t, pe.runnable_threads + 1);
+ 
+-    // Add thread to principal's thread heap
+     if (!ftq_push(pe.threads, t)) {
+-        // Queue full: keep the thread reachable by falling back to the
+-        // pending-wake path. This avoids silently dropping runnable threads
+-        // during boot bursts.
+-        t->state = TS_RUNNABLE_PENDING_REMOTE;
+-        t->cpu_id = e.cpu_id;
+-        pending_push(e, t);
++        clear_on_runqueue(t);
++        ANKO_LOGF_WARN("kernel/sched", "fair queue full: tid=%u pid=%u", t->tid, t->pid);
+         return false;
+     }
++
+     pe.runnable_threads++;
+-    t->state = TS_RUNNABLE_QUEUED;
++    t->state  = TS_RUNNABLE_QUEUED;
+     t->cpu_id = e.cpu_id;
+ 
+-    // Add principal to band if not already present
+-    bool& in_q = (&band_for(e, t->sched.sched_class) == &e.latency_principals)
+-        ? pe.in_latency_queue : pe.in_timeshare_queue;
++    bool& in_q = is_latency_class(t) ? pe.in_latency_queue : pe.in_timeshare_queue;
+     if (!in_q) {
+         fpq_push(band, &pe);
+         in_q = true;
+@@ -352,7 +361,6 @@
+     if (Process* p = find_process(t->pid)) ++p->runnable_threads;
+     return true;
+ }
+-
+ // ---------------------------------------------------------------------------
+ // dequeue_from_principal — remove thread from its principal's heap.
+ // Called by work stealing.
+@@ -364,29 +372,31 @@
+ 
+     PrincipalEntity& pe = e.principal_entities[pid];
+     if (!ftq_remove(pe.threads, t)) return false;
++    clear_on_runqueue(t);
+     if (pe.runnable_threads > 0) --pe.runnable_threads;
+ 
+-    // If principal is now empty and was in a band, remove it.
+-    // (band removal done lazily in pick_fair)
+-
+     if (Process* p = find_process(t->pid)) {
+         if (p->runnable_threads > 0) --p->runnable_threads;
+     }
+     return true;
+ }
+-
+ // Public: remove a thread from its CPU's fair queue (safe to call before TS_DEAD).
+ void dequeue_thread(Thread* t) {
+     if (!t) return;
+-    if (t->state != TS_RUNNABLE_QUEUED && t->state != TS_RUNNABLE_PENDING_REMOTE) return;
+-    const u32 cpu = (t->cpu_id < kMaxCpus) ? t->cpu_id : 0;
+-    dequeue_from_principal(g_eki[cpu], t);
++    if (t->state == TS_RUNNABLE_QUEUED || is_on_runqueue(t)) {
++        const u32 cpu = (t->cpu_id < kMaxCpus) ? t->cpu_id : 0;
++        (void)dequeue_from_principal(g_eki[cpu], t);
++    } else if (t->state == TS_RUNNABLE_PENDING_REMOTE) {
++        t->remote_next = nullptr;
++    }
+ }
+ 
+ // ---------------------------------------------------------------------------
+ // RT queue helpers
+ // ---------------------------------------------------------------------------
+-static void enqueue_rt(Eki& e, Thread* t) {
++static bool enqueue_rt(Eki& e, Thread* t) {
++    if (!t || t->state == TS_DEAD || t->state == TS_RUNNING) return false;
++    if (!mark_on_runqueue(t)) return false;
+     const u8 prio = t->sched.base_priority < kMaxRtPrio
+         ? t->sched.base_priority : static_cast<u8>(0);
+     RunQueue& q = e.rt.queues[prio];
+@@ -397,6 +407,7 @@
+     e.rt.bitmap |= (1u << prio);
+     t->state = TS_RUNNABLE_QUEUED;
+     t->cpu_id = e.cpu_id;
++    return true;
+ }
+ 
+ static Thread* pick_rt(Eki& e) {
+@@ -409,7 +420,8 @@
+             if (!q.head) { q.tail = nullptr; e.rt.bitmap &= ~(1u << prio); }
+             if (q.count) --q.count;
+             t->next = nullptr;
+-            if (t->state == TS_RUNNABLE_QUEUED) return t;
++            const bool was_queued = clear_on_runqueue(t);
++            if (was_queued && t->state == TS_RUNNABLE_QUEUED) return t;
+         }
+         e.rt.bitmap &= ~(1u << prio);
+     }
+@@ -435,16 +447,15 @@
+ 
+         Thread* t = ftq_pop_min(pe->threads);
+         if (!t) {
+-            // Principal has no more threads: remove from band
+             fpq_pop_min(band);
+             if (&band == &e.latency_principals) pe->in_latency_queue = false;
+             else                                pe->in_timeshare_queue = false;
+             continue;
+         }
+ 
++        const bool was_queued = clear_on_runqueue(t);
+         if (pe->runnable_threads > 0) --pe->runnable_threads;
+ 
+-        // Rekey principal: pop and re-insert so heap is consistent
+         fpq_pop_min(band);
+         if (pe->runnable_threads > 0) {
+             fpq_push(band, pe);
+@@ -453,7 +464,6 @@
+             else                                pe->in_timeshare_queue = false;
+         }
+ 
+-        // Update min_vruntime watermark
+         u64& min_vr = (&band == &e.latency_principals)
+             ? e.min_vruntime_latency : e.min_vruntime_timeshare;
+         if (pe->vruntime_ns > min_vr) min_vr = pe->vruntime_ns;
+@@ -461,7 +471,7 @@
+         if (Process* p = find_process(t->pid)) {
+             if (p->runnable_threads > 0) --p->runnable_threads;
+         }
+-        if (t->state == TS_DEAD) continue; // killed while queued; skip
++        if (!was_queued || t->state != TS_RUNNABLE_QUEUED) continue;
+         return t;
+     }
+     return nullptr;
+@@ -728,23 +738,21 @@
+     if (!t) return;
+     Eki& e = current_eki();
+ 
+-    if (t->sched.sched_class == SCHED_RT) {
+-        t->state = TS_RUNNABLE_QUEUED;
+-        t->cpu_id = e.cpu_id;
+-        enqueue_rt(e, t);
+-        maybe_request_preemption_on_wake(e, t);
+-        send_event();
+-        return;
+-    }
++    const ThreadState s = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
++    if (s == TS_DEAD || s == TS_RUNNING || s == TS_RUNNABLE_PENDING_REMOTE) return;
++    if (s == TS_RUNNABLE_QUEUED && is_on_runqueue(t)) return;
++
++    const bool enqueued = (t->sched.sched_class == SCHED_RT)
++        ? enqueue_rt(e, t)
++        : enqueue_fair(e, t);
+ 
+-    const bool enqueued = enqueue_fair(e, t);
+-    metric_inc(e.local_wakes);
+-    if (t->last_wake_reason == WAKE_DOORBELL) metric_inc(e.wake_doorbell);
+-    else if (t->last_wake_reason == WAKE_RESUME) metric_inc(e.wake_resume);
+     if (enqueued) {
++        metric_inc(e.local_wakes);
++        if (t->last_wake_reason == WAKE_DOORBELL) metric_inc(e.wake_doorbell);
++        else if (t->last_wake_reason == WAKE_RESUME) metric_inc(e.wake_resume);
+         maybe_request_preemption_on_wake(e, t);
++        send_event();
+     }
+-    send_event();
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -753,8 +761,13 @@
+ // ---------------------------------------------------------------------------
+ void wake_remote(Thread* t, u32 target_cpu) {
+     if (!t) return;
++    const ThreadState s = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
++    if (s == TS_DEAD || s == TS_RUNNING || s == TS_RUNNABLE_PENDING_REMOTE) return;
++    if (s == TS_RUNNABLE_QUEUED && is_on_runqueue(t)) return;
++
+     Eki& src = current_eki();
+-    __atomic_store_n(&t->state,  TS_RUNNABLE_PENDING_REMOTE, __ATOMIC_RELAXED);
++    clear_on_runqueue(t);
++    __atomic_store_n(&t->state,  TS_RUNNABLE_PENDING_REMOTE, __ATOMIC_RELEASE);
+     __atomic_store_n(&t->cpu_id, target_cpu,                 __ATOMIC_RELAXED);
+     pending_push(eki_for_cpu(target_cpu), t);
+     metric_inc(src.remote_wakes);
+@@ -786,6 +799,7 @@
+ // ---------------------------------------------------------------------------
+ static bool is_stealable(const Thread* t) {
+     if (!t) return false;
++    if (t->state != TS_RUNNABLE_QUEUED || !is_on_runqueue(t)) return false;
+     if (t->sched.sched_class == SCHED_RT)  return false;
+     // Hard affinity: pinned to one CPU
+     if (t->affinity_mask != 0 && __builtin_popcountll(t->affinity_mask) == 1) return false;
+@@ -1030,12 +1044,18 @@
+ // Enqueue public API
+ // ---------------------------------------------------------------------------
+ void enqueue(Thread* t) {
+-    if (!t || t->state == TS_DEAD) return;
++    if (!t || t->state == TS_DEAD || t->state == TS_RUNNING) return;
++    if (is_on_runqueue(t)) return;
++    if (t->state == TS_RUNNABLE_PENDING_REMOTE) return;
++
+     const u32 tgt = target_cpu_for(t);
+     if (tgt == current_cpu_id()) {
+-        (void)enqueue_fair(current_eki(), t);
+-        send_event();
++        const bool enqueued = (t->sched.sched_class == SCHED_RT)
++            ? enqueue_rt(current_eki(), t)
++            : enqueue_fair(current_eki(), t);
++        if (enqueued) send_event();
+     } else {
++        clear_on_runqueue(t);
+         t->state = TS_RUNNABLE_PENDING_REMOTE;
+         pending_push(eki_for_cpu(tgt), t);
+         smp::send_wake_ipi(tgt);
+@@ -1060,7 +1080,6 @@
+     if (t->state == TS_DEAD) return E_DEAD;
+     if (t->state != TS_SUSPENDED) return E_INVALID;
+     t->last_wake_reason = WAKE_RESUME;
+-    t->state = TS_RUNNABLE_QUEUED;
+     enqueue(t);
+     return E_OK;
+ }
+--- work_archive/kernel/syscall/dispatch.cc	2026-05-03 23:41:40.000000000 +0000
++++ ame_latest/kernel/syscall/dispatch.cc	2026-05-03 23:50:34.218350186 +0000
+@@ -529,12 +529,24 @@
+     }
+ 
+     case SYS_THREAD_CREATE: {
+-        CapEntry* target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
+-        if (!target_e || !has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
+-        auto* target_proc = static_cast<Process*>(target_e->target);
++        Process* target_proc = nullptr;
++        if (static_cast<CapHandle>(a0) == kNullCap) {
++            target_proc = p;
++        } else {
++            CapEntry* target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
++            if (!target_e || !has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
++            target_proc = static_cast<Process*>(target_e->target);
++        }
+         if (!target_proc || !target_proc->cap_table || !target_proc->ttbr0) return err(E_NOTFOUND);
+         if (a1 == 0) return err(E_INVALID);
+ 
++        VmSpace target_space{};
++        target_space.pgd_phys = target_proc->ttbr0;
++        target_space.pid = target_proc->pid;
++        if (!mm::user_range_mapped(target_space, static_cast<VirtAddr>(a1), 4, RIGHT_EXEC)) {
++            return err(E_FAULT);
++        }
++
+         u32 slot = target_proc->next_stack_slot;
+         if (slot == 0) slot = 1;
+         if (slot > kMaxStackSlots) return err(E_OVERFLOW);
+--- work_archive/userland/dango/manager/main.cc	2026-05-03 19:03:06.000000000 +0000
++++ ame_latest/userland/dango/manager/main.cc	2026-05-03 23:50:34.224656269 +0000
+@@ -8,8 +8,7 @@
+ #include "dango/layout.h"
+ 
+ constexpr uint32_t kRingOrder = 6;
+-constexpr uint32_t kLinuxRunSlices = 8;
+-constexpr uint64_t kLinuxRunBudgetTicks = 4096;
++constexpr uint64_t kLinuxRunBudgetTicks = 512;
+ constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
+ constexpr uint64_t kVaBootInitrd = 0x2400'0000ull;
+ constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;
+@@ -389,9 +388,7 @@
+ static void runner_entry(uint64_t vcpu_arg) {
+     const CapHandle vcpu = static_cast<CapHandle>(vcpu_arg);
+     while (true) {
+-        const int64_t run_rc = sys_vcpu_run(vcpu, kLinuxRunBudgetTicks);
+-        if (run_rc == 0) { sys_yield(); continue; }
+-        sys_yield();
++        (void)sys_vcpu_run(vcpu, kLinuxRunBudgetTicks);
+     }
+ }
+ 
+@@ -580,46 +577,46 @@
+         fail("dango: service failed\n");
+     }
+ 
++    bool runner_started = false;
+     if (have_linux) {
+         dango_log("dango: starting linux guest\n");
+-        bool run_ok = true;
+-        for (uint32_t i = 0; i < kLinuxRunSlices; ++i) {
+-            const int64_t run_rc = sys_vcpu_run(vcpu, kLinuxRunBudgetTicks);
+-            if (run_rc == 0) {
+-                const int64_t saw_hello = sys_debug_counter(dango::VM_DEBUG_GUEST_LINUX_HELLO);
+-                if (saw_hello > 0) break;
+-                sys_yield();
+-                continue;
++        const CapHandle runner_th = as_cap(
++            sys_thread_create(kSelfProc,
++                              reinterpret_cast<uint64_t>(runner_entry),
++                              static_cast<uint64_t>(vcpu),
++                              THREAD_SUSPENDED));
++        if (runner_th != kNullCap) {
++            (void)sys_thread_set_affinity(runner_th, 1ull << 1);
++            if (sys_thread_resume(runner_th) == 0) {
++                runner_started = true;
++                dango_debug("dango: vm runner started async\n");
+             }
+-            dango_debug("dango: linux guest exited early\n");
+-            run_ok = false;
+-            break;
+         }
+-        if (run_ok) {
+-            const int64_t saw_hello = sys_debug_counter(dango::VM_DEBUG_GUEST_LINUX_HELLO);
+-            const int64_t saw_agent = sys_debug_counter(dango::VM_DEBUG_GUEST_AGENT_START);
+-            const int64_t saw_stub = sys_debug_counter(dango::VM_DEBUG_GUEST_BOOT_STUB);
+-            if (saw_hello > 0) dango_log("dango: linux guest responded\n");
+-            else if (saw_agent > 0) dango_log("dango: linux guest agent started\n");
+-            else if (saw_stub > 0) dango_debug("dango: linux guest still running\n");
+-            else dango_debug("dango: linux guest still running\n");
++        if (!runner_started) {
++            dango_debug("dango: vm runner unavailable\n");
+         }
+     }
+ 
+     console_log("dango: service ready\n");
+     (void)sys_notify(kDoneDoorbell);
+ 
+-    if (have_linux) {
+-        const CapHandle runner_th = as_cap(
+-            sys_thread_create(kSelfProc,
+-                              reinterpret_cast<uint64_t>(runner_entry),
+-                              static_cast<uint64_t>(vcpu),
+-                              THREAD_SUSPENDED));
+-        if (runner_th != kNullCap) {
+-            sys_thread_set_affinity(runner_th, 1ull << 1);
+-            sys_thread_resume(runner_th);
++    bool logged_linux_progress = false;
++    while (true) {
++        if (have_linux && !logged_linux_progress) {
++            const int64_t saw_hello = sys_debug_counter(dango::VM_DEBUG_GUEST_LINUX_HELLO);
++            const int64_t saw_agent = sys_debug_counter(dango::VM_DEBUG_GUEST_AGENT_START);
++            const int64_t saw_stub = sys_debug_counter(dango::VM_DEBUG_GUEST_BOOT_STUB);
++            if (saw_hello > 0) {
++                dango_log("dango: linux guest responded\n");
++                logged_linux_progress = true;
++            } else if (saw_agent > 0) {
++                dango_log("dango: linux guest agent started\n");
++                logged_linux_progress = true;
++            } else if (saw_stub > 0) {
++                dango_debug("dango: linux guest still running\n");
++                logged_linux_progress = true;
++            }
+         }
++        sys_yield();
+     }
+-
+-    while (true) sys_yield();
+ }

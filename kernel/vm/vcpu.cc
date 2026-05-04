@@ -186,17 +186,17 @@ void note_guest_console_char(char c) {
         if (!saw_boot_stub && libk::strcmp(line, "dango: vm boot stub reached") == 0) {
             saw_boot_stub = true;
             metric_inc(VM_DEBUG_GUEST_BOOT_STUB);
-            ANKO_LOG_RAW("dango: guest boot stub reached\n");
+            ANKO_LOG_RAW("guest boot stub reached\n");
         }
         if (!saw_agent_start && libk::strcmp(line, "dango-agent: started") == 0) {
             saw_agent_start = true;
             metric_inc(VM_DEBUG_GUEST_AGENT_START);
-            ANKO_LOG_RAW("dango: guest agent started\n");
+            ANKO_LOG_RAW("guest agent started\n");
         }
         if (!saw_linux_hello && libk::strcmp(line, "dango: linux guest responded") == 0) {
             saw_linux_hello = true;
             metric_inc(VM_DEBUG_GUEST_LINUX_HELLO);
-            ANKO_LOG_RAW("dango: guest uart hello\n");
+            ANKO_LOG_RAW("guest uart hello\n");
         }
         len = 0;
         return;
@@ -957,15 +957,18 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, u64 budget_ticks) {
 
         if (ec == kEcWfx) {
             /*
-             * WFI/WFE are normal guest idle instructions.  We intentionally
-             * trap them instead of allowing the physical CPU to sleep because
-             * Anko must keep ownership of virtual timer/IRQ scheduling.
-             * Complete the instruction, account for it, and continue without
-             * printing per-idle-cycle diagnostics.
+             * WFI/WFE are normal guest idle instructions.  Do not spin inside
+             * one sys_vcpu_run() consuming the entire syscall budget on idle
+             * exits.  Complete the trapped instruction and return to the async
+             * runner so the host scheduler can run other work.
              */
             vcpu->el2.pc += 4;
+            sync_vcpu_from_el2(*vcpu);
+            vcpu->state = VCPU_READY;
+            owner->state = VM_READY;
+            vcpu->last_exit_reason = esr;
             metric_inc(VM_DEBUG_VCPU_WFX_EXITS);
-            continue;
+            return E_OK;
         }
 
         if (ec == kEcSysReg) {

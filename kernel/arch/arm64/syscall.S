@@ -91,6 +91,7 @@ syscall_entry:
     msr     SPSR_EL1, x10
     msr     SP_EL0,   x11
 
+
     // Restore ALL GP registers (including x9/x10/x11).
     ldp     x0,  x1,  [sp, #0]
     ldp     x2,  x3,  [sp, #16]
@@ -151,6 +152,7 @@ irq_entry:
     msr     ELR_EL1,  x9
     msr     SPSR_EL1, x10
     msr     SP_EL0,   x11
+
 
     // Restore ALL GP registers (including x9/x10/x11).
     ldp     x0,  x1,  [sp, #0]

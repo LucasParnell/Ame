@@ -11,6 +11,7 @@ set(ANKO_SOURCES
     drivers/gic/gicv2.cc
     drivers/timer/generic_timer.cc
     log/log.cc
+    panic.cc
     smp.cc
     kernel_main.cc
 

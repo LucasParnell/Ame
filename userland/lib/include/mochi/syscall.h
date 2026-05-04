@@ -37,6 +37,10 @@ constexpr CapHandle kNullCap = 0;
     "x5", "x6", "x7", \
     "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18", \
     "x30", "cc", "memory"
+#define MOCHI_SVC_CLOBBERS_5 \
+    "x6", "x7", \
+    "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18", \
+    "x30", "cc", "memory"
 
 // Raw SVC wrapper — 1 argument
 static inline int64_t _svc1(uint64_t nr, uint64_t a0) {
@@ -108,6 +112,23 @@ struct SysPair {
     int64_t value;
     int64_t detail;
 };
+
+// Raw SVC wrapper — 6 arguments, pair return
+static inline SysPair _svc6_pair(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
+                                 uint64_t a3, uint64_t a4, uint64_t a5) {
+    register uint64_t x0 asm("x0") = a0;
+    register uint64_t x1 asm("x1") = a1;
+    register uint64_t x2 asm("x2") = a2;
+    register uint64_t x3 asm("x3") = a3;
+    register uint64_t x4 asm("x4") = a4;
+    register uint64_t x5 asm("x5") = a5;
+    register uint64_t x8 asm("x8") = nr;
+    asm volatile("svc #0"
+                 : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x8)
+                 :
+                 : MOCHI_SVC_CLOBBERS_5);
+    return {static_cast<int64_t>(x0), static_cast<int64_t>(x1)};
+}
 
 // Raw SVC wrapper — 5 arguments, pair return
 static inline SysPair _svc5_pair(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
@@ -182,6 +203,8 @@ enum : uint64_t {
     NR_VM_CHANNEL_ENDPOINT = 39,
     NR_VM_CHANNEL_INSPECT = 40,
     NR_VM_MEMORY_WRITE = 41,
+    NR_NOTIFY_HANDOFF  = 42,
+    NR_REPLY_HANDOFF   = 43,
 };
 
 constexpr uint32_t SPAWN_SUSPENDED = 1u << 0;
@@ -194,13 +217,14 @@ static inline void sys_yield()                    { _svc1(NR_YIELD, 0); }
 static inline void sys_exit(int32_t code)         { _svc1(NR_EXIT, static_cast<uint64_t>(code)); }
 static inline SysPair sys_spawn(const void* image, uint64_t image_size,
                                 uint32_t principal, CapHandle supervisor,
-                                uint32_t flags = 0) {
-    return _svc5_pair(NR_SPAWN,
+                                uint32_t flags = 0, const char* name = nullptr) {
+    return _svc6_pair(NR_SPAWN,
                       reinterpret_cast<uint64_t>(image),
                       image_size,
                       principal,
                       supervisor,
-                      flags);
+                      flags,
+                      reinterpret_cast<uint64_t>(name));
 }
 static inline void sys_kill(CapHandle proc)        { _svc1(NR_KILL, proc); }
 static inline int64_t sys_map_page(CapHandle cap, uint64_t va, uint32_t rights) {
@@ -322,4 +346,17 @@ static inline int64_t sys_vm_channel_endpoint(CapHandle channel, uint32_t endpoi
 }
 static inline int64_t sys_vm_channel_inspect(CapHandle channel, void* info, uint64_t info_len) {
     return _svc3(NR_VM_CHANNEL_INSPECT, channel, reinterpret_cast<uint64_t>(info), info_len);
+}
+
+// sys_notify_handoff(db, payload) — synchronous handoff to doorbell waiter.
+// Sender blocks until receiver calls sys_reply_handoff; returns reply value.
+// Falls back to a regular notify if the receiver is not eligible for handoff.
+static inline int64_t sys_notify_handoff(CapHandle db, uint64_t payload) {
+    return _svc2(NR_NOTIFY_HANDOFF, db, payload);
+}
+
+// sys_reply_handoff(reply_val) — unblock the handoff sender with reply_val.
+// Must be called by the thread that received via notify_handoff.
+static inline int64_t sys_reply_handoff(uint64_t reply_val) {
+    return _svc1(NR_REPLY_HANDOFF, reply_val);
 }

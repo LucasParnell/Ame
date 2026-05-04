@@ -28,7 +28,6 @@ constexpr uint32_t RIGHT_DUP      = 1u << 6;
 constexpr uint32_t RIGHT_SPAWN    = 1u << 7;
 constexpr uint32_t RIGHT_VM_INSPECT = 1u << 13;
 constexpr uint32_t RIGHT_VM_CREATE = 1u << 23;
-constexpr uint32_t MSG_CRASH      = 0xDEAD;
 constexpr uint32_t PRINCIPAL_NATIVE_TRUSTED = 1;
 constexpr uint32_t PRINCIPAL_NATIVE_SANDBOXED = 2;
 constexpr int64_t kCapTypeDoorbell = 5;
@@ -175,6 +174,8 @@ static CapHandle as_cap(int64_t v) {
     return static_cast<CapHandle>(v);
 }
 
+
+
 static void console_log(const char* msg) {
     mochi::log_raw_marker(msg);
 }
@@ -254,7 +255,8 @@ static bool spawn_service(ServiceSpec& spec, uint32_t flags) {
     SysPair spawned = sys_spawn(spec.image_data, spec.image_size,
                                 principal_id(spec.principal),
                                 kCapSupervisor,
-                                flags);
+                                flags,
+                                spec.name);
     spec.proc = as_cap(spawned.value);
     spec.main_thread = as_cap(spawned.detail);
     return spec.proc != kNullCap && spec.main_thread != kNullCap;
@@ -478,14 +480,13 @@ extern "C" [[noreturn]] void _start() {
     const int64_t ipc_wait_rc = sys_wait_doorbell(db_ipc_done, ipc_done_base);
     if (ipc_wait_rc < 0) fail_halt("ipc: hot ring failed\n");
 
-    // Supervision demo: force a crash message to pong, wait for a supervisor
-    // death event, then restart according to the manifest policy.
-    uint32_t crash = MSG_CRASH;
-    if (ping_to_pong_ring) {
-        while (!ring_push(ping_to_pong_ring, kRingOrder, MSG_CRASH, &crash, sizeof(crash), db_pong)) {
-            sys_yield();
-        }
+    // Supervision demo: kill pong through the process/supervisor path, then
+    // restart it according to the manifest policy.
+    if (pong_proc == kNullCap) {
+        fail_halt("init: supervision failed\n");
     }
+    sys_kill(pong_proc);
+
     bool saw_death = false;
     for (int i = 0; i < 65536; ++i) {
         SysPair event = sys_supervisor_poll(kCapSupervisor);
@@ -498,7 +499,6 @@ extern "C" [[noreturn]] void _start() {
     if (!saw_death || !pong || !token_eq(pong->restart, "always")) {
         fail_halt("init: supervision failed\n");
     }
-
     if (!spawn_service(*pong, SPAWN_SUSPENDED)) fail_halt("init: supervision failed\n");
     pong_proc = pong->proc;
     if (pong_proc != kNullCap) {
@@ -521,7 +521,7 @@ extern "C" [[noreturn]] void _start() {
     } else {
         fail_halt("init: supervision failed\n");
     }
-    console_log("init: supervision ready\n");
+    console_log("supervision ready\n");
 
     const uint64_t doorbell_sleeps = static_cast<uint64_t>(sys_debug_counter(5));
     const uint64_t doorbell_wakes = static_cast<uint64_t>(sys_debug_counter(6));
@@ -529,18 +529,18 @@ extern "C" [[noreturn]] void _start() {
         fail_halt("ipc: doorbell sleep failed\n");
     }
 
-    if (static_cast<uint64_t>(sys_debug_counter(17)) >= 2) console_log("sched: local scheduling ready\n");
+    if (static_cast<uint64_t>(sys_debug_counter(17)) >= 2) console_log("local scheduling ready\n");
     if (static_cast<uint64_t>(sys_debug_counter(23)) > 0 &&
         static_cast<uint64_t>(sys_debug_counter(24)) > 0 &&
         static_cast<uint64_t>(sys_debug_counter(25)) > 0) {
-        console_log("sched: remote wake ready\n");
+        console_log("remote wake ready\n");
     }
     if (static_cast<uint64_t>(sys_debug_counter(28)) > 0) {
-        console_log("ipc: cross-core doorbell ready\n");
+        console_log("cross-core doorbell ready\n");
     }
-    console_log("sched: fairness check complete\n");
-    console_log("init: base services ready\n");
-    console_log("init: scheduler tests ready\n");
+    console_log("fairness check complete\n");
+    console_log("base services ready\n");
+    console_log("scheduler tests ready\n");
     console_log_counter("metric.syscalls", static_cast<uint64_t>(sys_debug_counter(0)));
     console_log_counter("metric.ipc.syscalls", static_cast<uint64_t>(sys_debug_counter(1)));
     console_log_counter("metric.context.switches", static_cast<uint64_t>(sys_debug_counter(2)));
@@ -606,6 +606,9 @@ extern "C" [[noreturn]] void _start() {
                "dango: wiring failed\n");
     require_ok(sys_cap_grant(dango_proc, kCapInitrd, RIGHT_READ | RIGHT_MAP),
                "dango: wiring failed\n");
+    require_ok(sys_cap_grant(dango_proc, dango_proc,
+                             RIGHT_SPAWN | RIGHT_READ | RIGHT_DUP),
+               "dango: wiring failed\n");
 
     require_ok(sys_ring_share(auth_probe->log_ring, auth_probe_proc,
                               RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
@@ -651,7 +654,7 @@ extern "C" [[noreturn]] void _start() {
     console_log_counter("metric.el.current", static_cast<uint64_t>(sys_debug_counter(46)));
     console_log_counter("metric.el2.available", static_cast<uint64_t>(sys_debug_counter(47)));
     console_log_counter("metric.vhe.available", static_cast<uint64_t>(sys_debug_counter(48)));
-    console_log("init: system ready\n");
+    console_log("system ready\n");
 
     while (true) {
         sys_yield();

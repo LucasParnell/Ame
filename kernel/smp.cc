@@ -204,6 +204,11 @@ void handle_ipi() {
 
 extern "C" [[noreturn]] void secondary_kernel_main(u64 cpu_id) {
     if (cpu_id >= kMaxCpus) cpu_id = 0;
+    asm volatile("msr TPIDR_EL1, %0\n"
+                 "isb\n"
+                 :
+                 : "r"(cpu_id)
+                 : "memory");
     mm::vm_enable_kernel();
     asm volatile(
         "msr VBAR_EL1, %0\n"

@@ -38,6 +38,14 @@ extern "C" void vectors();
 extern "C" PhysAddr g_dtb_phys;
 
 extern "C" [[noreturn]] void kernel_main() {
+    {
+        const u64 boot_cpu_id = 0;
+        asm volatile("msr TPIDR_EL1, %0\n"
+                     "isb\n"
+                     :
+                     : "r"(boot_cpu_id)
+                     : "memory");
+    }
     // -----------------------------------------------------------------------
     // Phase 0: early UART — first output before anything can fail silently.
     // -----------------------------------------------------------------------

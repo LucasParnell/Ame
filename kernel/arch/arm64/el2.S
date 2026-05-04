@@ -283,8 +283,10 @@ el2_lower_sync:
     orr     x0, x0, #(1 << 3)
     orr     x0, x0, #(1 << 4)
     orr     x0, x0, #(1 << 5)
-    orr     x0, x0, #(1 << 13)   // TWI: trap guest WFI so the VMM can schedule/tick.
-    orr     x0, x0, #(1 << 14)   // TWE: trap guest WFE for the same reason.
+    // Trap guest WFI/WFE so the host VMM can account idle exits and advance
+    // virtual timer/IRQ state from the vCPU run loop.
+    orr     x0, x0, #(1 << 13)   // TWI: trap guest WFI
+    orr     x0, x0, #(1 << 14)   // TWE: trap guest WFE
     orr     x0, x0, #(1 << 19)
     orr     x0, x0, #(1 << 31)
     ldr     x1, [x21, #CTX_GUEST_IRQ_PENDING]
@@ -491,10 +493,16 @@ el2_guest_exit_common:
 
     mov     x0, #0x80000000
     msr     HCR_EL2, x0
+
+    // Return host-visible virtual CPU ID registers to physical-looking values.
+    // Host scheduler code should not depend on MPIDR_EL1 anymore, but keeping
+    // VMPIDR_EL2 sane avoids future surprises.
+    mrs     x1, MPIDR_EL1
+    msr     VMPIDR_EL2, x1
+    mrs     x1, MIDR_EL1
+    msr     VPIDR_EL2, x1
+
     msr     VTTBR_EL2, xzr
-    dsb     ish
-    tlbi    vmalls12e1
-    dsb     ish
     isb
 
     ldr     x0, [x22, #CTX_HOST_MAIR]
@@ -564,8 +572,13 @@ g_el2_run_state:
     .quad 0
     .endr
 
-.align 12
+.align 14
+.global g_el2_stacks
+g_el2_stacks:
+    // 4 CPUs * 16 KiB.  Stack top for CPU n is:
+    //   g_el2_stacks + (n + 1) * 16384
+    .skip 65536
+
+// Compatibility symbol: top of the whole EL2 stack area.
 .global __el2_stack_top
-__el2_stack_bottom:
-    .skip 16384
 __el2_stack_top:

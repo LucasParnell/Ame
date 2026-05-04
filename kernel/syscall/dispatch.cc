@@ -11,6 +11,7 @@
 #include "anko/platform.h"
 #include "anko/vm.h"
 #include "anko/log.h"
+#include "anko/panic.h"
 #include "libk/metric.h"
 #include "libk/printf.h"
 #include "libk/string.h"
@@ -23,10 +24,6 @@ u64 g_syscall_count = 0;
 u64 g_ipc_syscall_count = 0;
 u64 g_debug_puts_count = 0;
 u64 g_el0_fault_count = 0;
-bool g_supervisor_event_pending = false;
-u32 g_supervisor_event_pid = 0;
-u32 g_supervisor_event_supervisor = 0;
-long g_supervisor_event_status = 0;
 constexpr u64 kUserCopyMin = 0x1000'0000ull;
 constexpr u64 kUserCopyMax = 0x4000'0000ull;
 constexpr u64 kMaxUserElfSize = 16ull * 1024ull * 1024ull;
@@ -127,20 +124,71 @@ bool map_object(Process& proc, VirtAddr va, PhysAddr pa, u64 size, u32 rights, b
                   : mm::vm_map_range(space, va, pa, size, rights);
 }
 
-void record_supervisor_event(Process* proc, long status) {
-    if (!proc || proc->supervisor_pid == 0) return;
-    if (g_supervisor_event_pending) return;
-    g_supervisor_event_pending = true;
-    g_supervisor_event_pid = proc->pid;
-    g_supervisor_event_supervisor = proc->supervisor_pid;
-    g_supervisor_event_status = status;
+
+
+
+static void supervisor_event_lock(Process* p) {
+    if (!p) return;
+    while (__atomic_exchange_n(&p->supervisor_event_lock, 1u, __ATOMIC_ACQUIRE) != 0) {
+        asm volatile("yield" ::: "memory");
+    }
 }
+
+static void supervisor_event_unlock(Process* p) {
+    if (!p) return;
+    __atomic_store_n(&p->supervisor_event_lock, 0u, __ATOMIC_RELEASE);
+}
+
+static void wake_supervisor_process(Process* supervisor) {
+    if (!supervisor) return;
+
+    for (Thread* t = supervisor->threads; t; t = t->process_next) {
+        if (t->state != TS_DEAD) {
+            sched::wake(t);
+        }
+    }
+
+    // Wake CPUs that may be sleeping in WFI.
+    asm volatile("sev" ::: "memory");
+}
+
+
+
+void record_supervisor_event(Process* proc, long status) {
+    if (!proc || proc->supervisor_pid == 0) {
+        return;
+    }
+
+    Process* supervisor = sched::find_process(proc->supervisor_pid);
+    if (!supervisor) {
+        return;
+    }
+
+    bool published = false;
+
+    supervisor_event_lock(supervisor);
+
+    if (__atomic_load_n(&supervisor->supervisor_event_pending, __ATOMIC_RELAXED) == 0) {
+        supervisor->supervisor_event_pid = proc->pid;
+        supervisor->supervisor_event_status = status;
+        __atomic_store_n(&supervisor->supervisor_event_pending, 1u, __ATOMIC_RELEASE);
+        published = true;
+    }
+
+    supervisor_event_unlock(supervisor);
+
+    if (published) {
+        wake_supervisor_process(supervisor);
+    }
+}
+
 
 } // namespace
 
 extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
     auto* tf = static_cast<TrapFrame*>(frame);
     Process* p = cur_proc();
+    Thread* ct = sched::current();
     const u32 ec = static_cast<u32>((esr >> 26) & 0x3fu);
     const u32 iss = static_cast<u32>(esr & 0x01ff'ffffu);
 
@@ -149,9 +197,10 @@ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
         // crash signal. Keep notifying the supervisor, but don't make the
         // expected death look like a kernel-fatal condition on the UART log.
         ANKO_LOGF_WARN("kernel/fault",
-                       "EL0 brk pid=%u esr=%llx elr=%llx sp=%llx "
+                       "EL0 brk pid=%u tid=%u esr=%llx elr=%llx sp=%llx "
                        "x0=%llx x1=%llx x8=%llx x9=%llx x16=%llx",
                        p ? p->pid : 0,
+                       ct ? ct->tid : 0,
                        static_cast<unsigned long long>(esr),
                        static_cast<unsigned long long>(tf ? tf->elr : 0),
                        static_cast<unsigned long long>(tf ? tf->sp_el0 : 0),
@@ -162,12 +211,20 @@ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
                        static_cast<unsigned long long>(tf ? tf->x[16] : 0));
     } else {
         ANKO_LOGF_FATAL("kernel/fault",
-                        "EL0 fault pid=%u esr=%llx ec=%u iss=%x far=%llx "
+                        "EL0 fault pid=%u(%s) tid=%u svpid=%u principal=%u "
+                        "sched_class=%u principal_id=%u "
+                        "esr=%llx ec=%u iss=%x far=%llx "
                         "elr=%llx sp=%llx x0=%llx x1=%llx x2=%llx x3=%llx "
                         "x4=%llx x5=%llx x6=%llx x7=%llx x8=%llx x9=%llx "
                         "x10=%llx x11=%llx x12=%llx x13=%llx x14=%llx x15=%llx "
                         "x16=%llx x17=%llx x19=%llx x20=%llx x21=%llx x22=%llx",
                         p ? p->pid : 0,
+                        (p && p->name[0]) ? p->name : "?",
+                        ct ? ct->tid : 0,
+                        p ? p->supervisor_pid : 0,
+                        p ? static_cast<u32>(p->principal) : 0,
+                        ct ? static_cast<u32>(ct->sched.sched_class) : 0,
+                        ct ? ct->principal_id : 0,
                         static_cast<unsigned long long>(esr),
                         ec,
                         iss,
@@ -252,6 +309,14 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
                                                   static_cast<u32>(a4),
                                                   &main_thread);
         if (!child) return err(E_NOMEM);
+        if (a5 != 0 && user_range_ok(a5, 1)) {
+            const char* uname = reinterpret_cast<const char*>(a5);
+            char kname[32];
+            u32 i = 0;
+            for (; i < 31 && uname[i] != '\0'; ++i) kname[i] = uname[i];
+            kname[i] = '\0';
+            sched::process_set_name(child, kname);
+        }
         CapHandle h = cap::alloc(*p->cap_table, CAP_PROCESS, child,
                                  RIGHT_READ | RIGHT_KILL | RIGHT_DUP | RIGHT_SPAWN);
         if (h == kNullCap) return err(E_OVERFLOW);
@@ -510,27 +575,52 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
             cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_SUPERVISOR);
         if (!supervisor_e) return err(E_NOTFOUND);
         if (!has_rights(supervisor_e, RIGHT_READ)) return err(E_PERM);
+
         auto* supervisor = static_cast<Process*>(supervisor_e->target);
         if (!supervisor) return err(E_NOTFOUND);
-        if (!g_supervisor_event_pending ||
-            g_supervisor_event_supervisor != supervisor->pid) {
+
+        if (__atomic_load_n(&supervisor->supervisor_event_pending, __ATOMIC_ACQUIRE) == 0) {
             return err(E_NOTFOUND);
         }
-        const u32 dead_pid = g_supervisor_event_pid;
-        const long status = g_supervisor_event_status;
-        g_supervisor_event_pending = false;
-        g_supervisor_event_pid = 0;
-        g_supervisor_event_supervisor = 0;
-        g_supervisor_event_status = 0;
+
+        supervisor_event_lock(supervisor);
+
+        if (__atomic_load_n(&supervisor->supervisor_event_pending, __ATOMIC_ACQUIRE) == 0) {
+            supervisor_event_unlock(supervisor);
+            return err(E_NOTFOUND);
+        }
+
+        const u32 dead_pid = supervisor->supervisor_event_pid;
+        const long status = supervisor->supervisor_event_status;
+
+        supervisor->supervisor_event_pid = 0;
+        supervisor->supervisor_event_status = 0;
+        __atomic_store_n(&supervisor->supervisor_event_pending, 0u, __ATOMIC_RELEASE);
+
+        supervisor_event_unlock(supervisor);
+
         return ok(static_cast<long>(dead_pid), status);
     }
 
     case SYS_THREAD_CREATE: {
-        CapEntry* target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
-        if (!target_e || !has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
-        auto* target_proc = static_cast<Process*>(target_e->target);
+        Process* target_proc = nullptr;
+        if (static_cast<CapHandle>(a0) == kNullCap) {
+            // proc_cap==0 means "create a helper thread in my own process".
+            target_proc = p;
+        } else {
+            CapEntry* target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
+            if (!target_e || !has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
+            target_proc = static_cast<Process*>(target_e->target);
+        }
         if (!target_proc || !target_proc->cap_table || !target_proc->ttbr0) return err(E_NOTFOUND);
         if (a1 == 0) return err(E_INVALID);
+
+        VmSpace target_space{};
+        target_space.pgd_phys = target_proc->ttbr0;
+        target_space.pid = target_proc->pid;
+        if (!mm::user_range_mapped(target_space, static_cast<VirtAddr>(a1), 4, RIGHT_EXEC)) {
+            return err(E_FAULT);
+        }
 
         u32 slot = target_proc->next_stack_slot;
         if (slot == 0) slot = 1;
@@ -748,6 +838,23 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         case DBG_WAKE_RESUME:           return ok(static_cast<long>(sched::wake_resume_count()));
         default: return err(E_INVALID);
         }
+
+    case SYS_NOTIFY_HANDOFF: {
+        metric_inc(g_ipc_syscall_count);
+        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
+        const SysError rc = ipc::notify_handoff(static_cast<CapHandle>(a0), a1, p->pid);
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
+    }
+
+    case SYS_REPLY_HANDOFF: {
+        metric_inc(g_ipc_syscall_count);
+        const SysError rc = ipc::reply_handoff(a0, p->pid);
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
+    }
 
     default:
         return err(E_INVALID);

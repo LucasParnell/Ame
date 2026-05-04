@@ -24,10 +24,9 @@ u64 g_dropped[kMaxCpus]{};
 u64 g_truncated[kMaxCpus]{};
 
 u32 cpu_index() {
-    u64 mpidr = 0;
-    asm volatile("mrs %0, MPIDR_EL1" : "=r"(mpidr));
-    const u32 id = static_cast<u32>(mpidr & 0xFFu);
-    return id < kMaxCpus ? id : 0;
+    u64 id = 0;
+    asm volatile("mrs %0, TPIDR_EL1" : "=r"(id));
+    return id < kMaxCpus ? static_cast<u32>(id) : 0;
 }
 
 u64 read_counter() {
@@ -267,29 +266,6 @@ bool console_attached_for(u32 cpu) {
     return g_doorbell && cpu < g_ring_count && g_rings[cpu] != nullptr;
 }
 
-void emit_drop_notice(u32 cpu) {
-    if (!console_attached_for(cpu)) return;
-    const u64 dropped = __atomic_exchange_n(&g_dropped[cpu], 0ull, __ATOMIC_ACQ_REL);
-    const u64 truncated = __atomic_exchange_n(&g_truncated[cpu], 0ull, __ATOMIC_ACQ_REL);
-    if (dropped == 0 && truncated == 0) return;
-
-    char line[96];
-    Writer w{line, sizeof(line), 0, false};
-    append_timestamp(w);
-    append_str(w, " [W] cpu");
-    append_u64(w, cpu, 10, false);
-    append_str(w, " kernel/log: dropped=");
-    append_u64(w, dropped, 10, false);
-    append_str(w, " truncated=");
-    append_u64(w, truncated, 10, false);
-    append_char(w, '\n');
-    const usize len = finish(w);
-
-    if (!push_bytes(g_rings[cpu], line, len)) {
-        __atomic_add_fetch(&g_dropped[cpu], dropped, __ATOMIC_RELAXED);
-        __atomic_add_fetch(&g_truncated[cpu], truncated, __ATOMIC_RELAXED);
-    }
-}
 
 void emit_line(const char* line, usize len, bool force_uart) {
     const u32 cpu = cpu_index();
@@ -303,7 +279,6 @@ void emit_line(const char* line, usize len, bool force_uart) {
     }
 
     if (console_attached_for(cpu)) {
-        emit_drop_notice(cpu);
         if (!push_bytes(g_rings[cpu], line, len)) {
             __atomic_add_fetch(&g_dropped[cpu], 1ull, __ATOMIC_RELAXED);
         }

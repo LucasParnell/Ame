@@ -1,0 +1,674 @@
+// userland/init/main.cc — Mochi init process.
+//
+// Spec ref: §7.1 Init, §7.2 Boot Manifest, §8 V0 Boot Flow steps 11–16
+//
+// init is the first userspace process. It receives a fixed set of capabilities
+// from the kernel (manifest, initrd, supervisor, nameservice placeholder, UART)
+// and no other authority.
+//
+// Responsibilities:
+//   1. Parse the boot manifest (static TOML-like structure, not code).
+//   2. Spawn services in order: nameservice → io.console → demo.pong → demo.ping.
+//   3. Assign principals and pass declared capabilities to each service.
+//   4. Register services with nameservice.
+//   5. Supervise children: on death, apply restart policy.
+//
+// init is policy. The kernel does not know service names (spec §11).
+
+#include "mochi/syscall.h"
+#include "mochi/ring.h"
+#include "mochi/log.h"
+
+constexpr uint32_t RIGHT_READ     = 1u << 0;
+constexpr uint32_t RIGHT_WRITE    = 1u << 1;
+constexpr uint32_t RIGHT_MAP      = 1u << 2;
+constexpr uint32_t RIGHT_NOTIFY   = 1u << 4;
+constexpr uint32_t RIGHT_WAIT     = 1u << 5;
+constexpr uint32_t RIGHT_DUP      = 1u << 6;
+constexpr uint32_t RIGHT_SPAWN    = 1u << 7;
+constexpr uint32_t RIGHT_VM_INSPECT = 1u << 13;
+constexpr uint32_t RIGHT_VM_CREATE = 1u << 23;
+constexpr uint32_t MSG_CRASH      = 0xDEAD;
+constexpr uint32_t PRINCIPAL_NATIVE_TRUSTED = 1;
+constexpr uint32_t PRINCIPAL_NATIVE_SANDBOXED = 2;
+constexpr int64_t kCapTypeDoorbell = 5;
+
+constexpr uint32_t kRingOrder = 6;
+constexpr uint64_t kVaManifest = 0x2000'0000ull;
+constexpr uint64_t kVaInitrd = 0x2400'0000ull;
+constexpr uint64_t kVaInitLogRing = 0x2800'0000ull;
+constexpr uint64_t kVaPingToPongRing = 0x2801'0000ull;
+
+constexpr CapHandle cap_slot(uint32_t idx) {
+    return (static_cast<CapHandle>(1) << 32) | idx;
+}
+
+// Boot capability slots.
+constexpr CapHandle kCapManifest    = cap_slot(0);
+constexpr CapHandle kCapInitrd      = cap_slot(1);
+constexpr CapHandle kCapSupervisor  = cap_slot(2);
+constexpr CapHandle kCapNameservice = cap_slot(3);
+constexpr CapHandle kCapUart        = cap_slot(4);
+constexpr CapHandle kCapVmRoot      = cap_slot(5);
+constexpr CapHandle kCapLogDoorbell = cap_slot(6);
+constexpr uint32_t kKernelLogRingCount = 4;
+constexpr uint32_t kCapKernelLogRingBase = 7;
+
+constexpr uint32_t kMaxManifestServices = 8;
+constexpr uint32_t kManifestScanLimit = 1024;
+constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;
+constexpr bool kEmitBootMetrics = false;
+
+struct ServiceSpec {
+    char name[32];
+    char image[32];
+    char principal[24];
+    char restart[16];
+    char caps[64];
+    const uint8_t* image_data;
+    uint64_t image_size;
+    CapHandle proc;
+    CapHandle main_thread;
+    CapHandle log_ring;
+};
+
+struct TarHeader {
+    char name[100];
+    char mode[8];
+    char uid[8];
+    char gid[8];
+    char size[12];
+    char mtime[12];
+    char checksum[8];
+    char typeflag;
+    char linkname[100];
+    char magic[6];
+    char version[2];
+    char uname[32];
+    char gname[32];
+    char devmajor[8];
+    char devminor[8];
+    char prefix[155];
+    char pad[12];
+};
+static_assert(sizeof(TarHeader) == 512, "ustar header must be 512 bytes");
+
+static uint32_t slen(const char* s) {
+    uint32_t n = 0;
+    while (s[n]) ++n;
+    return n;
+}
+
+static bool streq(const char* a, const char* b) {
+    uint32_t i = 0;
+    while (a[i] && b[i]) {
+        if (a[i] != b[i]) return false;
+        ++i;
+    }
+    return a[i] == b[i];
+}
+
+static bool token_eq(const char* token, const char* literal) {
+    return streq(token, literal);
+}
+
+static void copy_token(char* dst, uint32_t dst_len, const char* src, uint32_t len) {
+    if (!dst || dst_len == 0) return;
+    uint32_t n = 0;
+    while (n + 1 < dst_len && n < len) {
+        dst[n] = src[n];
+        ++n;
+    }
+    dst[n] = '\0';
+}
+
+static bool is_ws(char c) {
+    return c == ' ' || c == '\n' || c == '\t' || c == '\r';
+}
+
+static uint32_t parse_manifest_services(const char* manifest, ServiceSpec* out) {
+    if (!manifest || !out) return 0;
+    uint32_t count = 0;
+    uint32_t i = 0;
+    while (i < kManifestScanLimit && manifest[i] && count < kMaxManifestServices) {
+        while (i < kManifestScanLimit && is_ws(manifest[i])) {
+            ++i;
+        }
+        if (i >= kManifestScanLimit || !manifest[i]) break;
+        if (manifest[i] == '#') {
+            while (i < kManifestScanLimit && manifest[i] && manifest[i] != '\n') ++i;
+            continue;
+        }
+
+        char* fields[5] = {
+            out[count].name,
+            out[count].image,
+            out[count].principal,
+            out[count].restart,
+            out[count].caps,
+        };
+        const uint32_t field_lens[5] = {32, 32, 24, 16, 64};
+        uint32_t field = 0;
+        while (i < kManifestScanLimit && manifest[i] && manifest[i] != '\n' && field < 5) {
+            while (i < kManifestScanLimit && manifest[i] && manifest[i] != '\n' && is_ws(manifest[i])) ++i;
+            if (i >= kManifestScanLimit || !manifest[i] || manifest[i] == '\n') break;
+            const uint32_t start = i;
+            while (i < kManifestScanLimit && manifest[i] && !is_ws(manifest[i])) ++i;
+            copy_token(fields[field], field_lens[field], manifest + start, i - start);
+            ++field;
+        }
+        while (i < kManifestScanLimit && manifest[i] && manifest[i] != '\n') ++i;
+        if (field == 5 && out[count].name[0] && out[count].image[0]) {
+            out[count].image_data = nullptr;
+            out[count].image_size = 0;
+            out[count].proc = kNullCap;
+            out[count].main_thread = kNullCap;
+            out[count].log_ring = kNullCap;
+            ++count;
+        }
+    }
+    return count;
+}
+
+static CapHandle as_cap(int64_t v) {
+    if (v <= 0) return kNullCap;
+    return static_cast<CapHandle>(v);
+}
+
+
+static void debug_marker(const char* msg) {
+    sys_debug_puts(msg, slen(msg));
+}
+
+static void console_log(const char* msg) {
+    mochi::log_raw_marker(msg);
+}
+
+static void console_log_counter(const char* key, uint64_t value) {
+    if constexpr (!kEmitBootMetrics) {
+        (void)key;
+        (void)value;
+        return;
+    }
+    mochi::log_counter(key, value);
+}
+
+static bool block_zero(const uint8_t* data) {
+    for (uint32_t i = 0; i < 512; ++i) {
+        if (data[i] != 0) return false;
+    }
+    return true;
+}
+
+static uint64_t octal_value(const char* s, uint32_t len) {
+    uint64_t value = 0;
+    for (uint32_t i = 0; i < len; ++i) {
+        const char c = s[i];
+        if (c == '\0' || c == ' ') break;
+        if (c < '0' || c > '7') continue;
+        value = (value << 3) + static_cast<uint64_t>(c - '0');
+    }
+    return value;
+}
+
+static bool tar_name_matches(const TarHeader* h, const char* wanted) {
+    char full[160];
+    uint32_t n = 0;
+    if (h->prefix[0]) {
+        for (uint32_t i = 0; i < sizeof(h->prefix) && h->prefix[i] && n + 1 < sizeof(full); ++i) {
+            full[n++] = h->prefix[i];
+        }
+        if (n + 1 < sizeof(full)) full[n++] = '/';
+    }
+    for (uint32_t i = 0; i < sizeof(h->name) && h->name[i] && n + 1 < sizeof(full); ++i) {
+        full[n++] = h->name[i];
+    }
+    full[n] = '\0';
+    return streq(full, wanted);
+}
+
+static const uint8_t* tar_find(const uint8_t* base, const char* name, uint64_t* out_size) {
+    if (!base || !name || !out_size) return nullptr;
+
+    uint64_t off = 0;
+    while (off + sizeof(TarHeader) <= kInitrdScanLimit) {
+        const auto* h = reinterpret_cast<const TarHeader*>(base + off);
+        if (block_zero(base + off)) return nullptr;
+        const uint64_t size = octal_value(h->size, sizeof(h->size));
+        const uint64_t data_off = off + sizeof(TarHeader);
+        const uint64_t rounded = (size + 511ull) & ~511ull;
+        if (data_off + rounded < data_off || data_off + rounded > kInitrdScanLimit) return nullptr;
+        if ((h->typeflag == '\0' || h->typeflag == '0') && tar_name_matches(h, name)) {
+            *out_size = size;
+            return base + data_off;
+        }
+        off = data_off + rounded;
+    }
+    return nullptr;
+}
+
+static uint32_t principal_id(const char* principal) {
+    if (token_eq(principal, "native_trusted") || token_eq(principal, "trusted")) {
+        return PRINCIPAL_NATIVE_TRUSTED;
+    }
+    return PRINCIPAL_NATIVE_SANDBOXED;
+}
+
+static bool spawn_service(ServiceSpec& spec, uint32_t flags) {
+    if (!spec.image_data || spec.image_size == 0) return false;
+    SysPair spawned = sys_spawn(spec.image_data, spec.image_size,
+                                principal_id(spec.principal),
+                                kCapSupervisor,
+                                flags,
+                                spec.name);
+    spec.proc = as_cap(spawned.value);
+    spec.main_thread = as_cap(spawned.detail);
+    return spec.proc != kNullCap && spec.main_thread != kNullCap;
+}
+
+static ServiceSpec* find_service(ServiceSpec* specs, uint32_t count, const char* name) {
+    for (uint32_t i = 0; i < count; ++i) {
+        if (streq(specs[i].name, name)) return &specs[i];
+    }
+    return nullptr;
+}
+
+extern "C" [[noreturn]] void fail_halt(const char* marker) {
+    sys_debug_puts(marker, slen(marker));
+    while (true) {
+        sys_yield();
+    }
+}
+
+static void require_ok(int64_t rc, const char* marker) {
+    if (rc < 0) fail_halt(marker);
+}
+
+extern "C" [[noreturn]] void _start() {
+    (void)kCapNameservice;
+
+    static ServiceSpec fallback_services[] = {
+        {"nameservice", "nameservice", "native_trusted", "never", "-", nullptr, 0, kNullCap, kNullCap, kNullCap},
+        {"io.console", "io.console", "native_trusted", "always", "uart", nullptr, 0, kNullCap, kNullCap, kNullCap},
+        {"demo.pong", "demo.pong", "native_sandboxed", "always", "-", nullptr, 0, kNullCap, kNullCap, kNullCap},
+        {"demo.ping", "demo.ping", "native_sandboxed", "never", "-", nullptr, 0, kNullCap, kNullCap, kNullCap},
+        {"dango.manager", "dango.manager", "native_trusted", "never", "vm", nullptr, 0, kNullCap, kNullCap, kNullCap},
+        {"dango.auth_probe", "dango.auth_probe", "native_sandboxed", "never", "-", nullptr, 0, kNullCap, kNullCap, kNullCap},
+    };
+    const int64_t manifest_map = sys_map_page(kCapManifest, kVaManifest, RIGHT_READ);
+    const int64_t initrd_map = sys_map_page(kCapInitrd, kVaInitrd, RIGHT_READ);
+    static ServiceSpec manifest_services[kMaxManifestServices]{};
+    uint32_t service_count = 0;
+    if (manifest_map == 0) {
+        service_count = parse_manifest_services(reinterpret_cast<const char*>(kVaManifest),
+                                                manifest_services);
+    }
+    const bool use_manifest = (service_count > 0);
+    ServiceSpec* services = use_manifest ? manifest_services : fallback_services;
+    if (!use_manifest) service_count = 6;
+
+    const auto* initrd = reinterpret_cast<const uint8_t*>(initrd_map == 0 ? kVaInitrd : 0);
+    for (uint32_t i = 0; i < service_count; ++i) {
+        services[i].image_data = tar_find(initrd, services[i].image, &services[i].image_size);
+    }
+
+    for (uint32_t i = 0; i < service_count; ++i) {
+        if (!services[i].image_data || services[i].image_size == 0) {
+            fail_halt("init: manifest failed\n");
+        }
+        if (!spawn_service(services[i], SPAWN_SUSPENDED)) fail_halt("init: spawn failed\n");
+    }
+
+    ServiceSpec* nameservice = find_service(services, service_count, "nameservice");
+    ServiceSpec* console = find_service(services, service_count, "io.console");
+    ServiceSpec* pong = find_service(services, service_count, "demo.pong");
+    ServiceSpec* ping = find_service(services, service_count, "demo.ping");
+    ServiceSpec* dango = find_service(services, service_count, "dango.manager");
+    ServiceSpec* auth_probe = find_service(services, service_count, "dango.auth_probe");
+    const CapHandle nameservice_proc = nameservice ? nameservice->proc : kNullCap;
+    const CapHandle console_proc = console ? console->proc : kNullCap;
+    CapHandle pong_proc = pong ? pong->proc : kNullCap;
+    const CapHandle ping_proc = ping ? ping->proc : kNullCap;
+    const CapHandle dango_proc = dango ? dango->proc : kNullCap;
+    const CapHandle auth_probe_proc = auth_probe ? auth_probe->proc : kNullCap;
+
+    // Console startup caps: UART + shared log doorbell + one ring per producer.
+    const CapHandle console_db =
+        (sys_cap_identify(kCapLogDoorbell) == kCapTypeDoorbell)
+            ? kCapLogDoorbell
+            : as_cap(sys_doorbell_create());
+    const CapHandle init_log_ring = as_cap(sys_ring_create(kRingOrder, 0));
+    if (console_db == kNullCap || init_log_ring == kNullCap || console_proc == kNullCap) {
+        fail_halt("init: wiring failed\n");
+    }
+    for (uint32_t i = 0; i < service_count; ++i) {
+        services[i].log_ring = as_cap(sys_ring_create(kRingOrder, 0));
+        if (services[i].log_ring == kNullCap) fail_halt("init: wiring failed\n");
+    }
+    if (sys_map_page(init_log_ring, kVaInitLogRing, RIGHT_READ | RIGHT_WRITE) != 0) {
+        fail_halt("init: wiring failed\n");
+    }
+    mochi::log_set_sink(reinterpret_cast<RingPage*>(kVaInitLogRing),
+                        kRingOrder,
+                        console_db,
+                        "init");
+
+    if (console_proc != kNullCap) {
+        require_ok(sys_cap_grant(console_proc, kCapUart,
+                                 RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+                   "init: wiring failed\n");
+        require_ok(sys_doorbell_share(console_db, console_proc,
+                                      RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+                   "init: wiring failed\n");
+        for (uint32_t cpu = 0; cpu < kKernelLogRingCount; ++cpu) {
+            const CapHandle kernel_ring = cap_slot(kCapKernelLogRingBase + cpu);
+            require_ok(sys_ring_share(kernel_ring, console_proc,
+                                      RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+                       "init: wiring failed\n");
+        }
+        require_ok(sys_ring_share(init_log_ring, console_proc,
+                                  RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+                   "init: wiring failed\n");
+        for (uint32_t i = 0; i < service_count; ++i) {
+            require_ok(sys_ring_share(services[i].log_ring, console_proc,
+                                      RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+                       "init: wiring failed\n");
+        }
+    }
+    if (!console || console->main_thread == kNullCap) fail_halt("init: wiring failed\n");
+    require_ok(sys_thread_set_affinity(console->main_thread, 1ull << 0), "init: wiring failed\n");
+    require_ok(sys_thread_resume(console->main_thread), "init: wiring failed\n");
+
+    // IPC demo wiring.
+    const CapHandle ring_ping_to_pong = as_cap(sys_ring_create(kRingOrder, 0));
+    const CapHandle ring_pong_to_ping = as_cap(sys_ring_create(kRingOrder, 0));
+    const CapHandle db_pong = as_cap(sys_doorbell_create());
+    const CapHandle db_ping = as_cap(sys_doorbell_create());
+    const CapHandle db_ipc_done = as_cap(sys_doorbell_create());
+    const CapHandle ns_request_ring = as_cap(sys_ring_create(kRingOrder, 0));
+    const CapHandle ns_reply_ring = as_cap(sys_ring_create(kRingOrder, 0));
+    const CapHandle db_nameservice = as_cap(sys_doorbell_create());
+    const CapHandle db_ns_reply = as_cap(sys_doorbell_create());
+    if (sys_map_page(ring_ping_to_pong, kVaPingToPongRing, RIGHT_READ | RIGHT_WRITE) != 0) {
+        fail_halt("init: wiring failed\n");
+    }
+    RingPage* ping_to_pong_ring = reinterpret_cast<RingPage*>(kVaPingToPongRing);
+    if (ring_ping_to_pong == kNullCap || ring_pong_to_ping == kNullCap ||
+        db_pong == kNullCap || db_ping == kNullCap || db_ipc_done == kNullCap ||
+        ns_request_ring == kNullCap || ns_reply_ring == kNullCap ||
+        db_nameservice == kNullCap || db_ns_reply == kNullCap ||
+        nameservice_proc == kNullCap || pong_proc == kNullCap || ping_proc == kNullCap ||
+        !ping_to_pong_ring) {
+        fail_halt("init: wiring failed\n");
+    }
+
+    if (!nameservice || !pong || !ping ||
+        nameservice->main_thread == kNullCap ||
+        pong->main_thread == kNullCap ||
+        ping->main_thread == kNullCap) {
+        fail_halt("init: wiring failed\n");
+    }
+
+    // Nameservice cap layout [0..8]
+    require_ok(sys_ring_share(ns_request_ring, nameservice_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_ring_share(ns_reply_ring, nameservice_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(db_nameservice, nameservice_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(db_ns_reply, nameservice_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_cap_grant(nameservice_proc, ping_proc, RIGHT_SPAWN),
+               "init: wiring failed\n");
+    require_ok(sys_cap_grant(nameservice_proc, pong_proc, RIGHT_READ | RIGHT_DUP),
+               "init: wiring failed\n");
+    if (dango_proc != kNullCap) {
+        require_ok(sys_cap_grant(nameservice_proc, dango_proc, RIGHT_READ | RIGHT_DUP),
+                   "init: wiring failed\n");
+    }
+    require_ok(sys_ring_share(nameservice->log_ring, nameservice_proc,
+                              RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(console_db, nameservice_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "init: wiring failed\n");
+
+    // Pong cap layout [0..5]
+    require_ok(sys_ring_share(ring_ping_to_pong, pong_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_ring_share(ring_pong_to_ping, pong_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(db_pong, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(db_ping, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_ring_share(pong->log_ring, pong_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(console_db, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "init: wiring failed\n");
+
+    // Ping cap layout [0..5]
+    require_ok(sys_ring_share(ring_ping_to_pong, ping_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_ring_share(ring_pong_to_ping, ping_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(db_pong, ping_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(db_ping, ping_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_ring_share(ping->log_ring, ping_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(console_db, ping_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(db_ipc_done, ping_proc, RIGHT_NOTIFY),
+               "init: wiring failed\n");
+    require_ok(sys_ring_share(ns_request_ring, ping_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_ring_share(ns_reply_ring, ping_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(db_nameservice, ping_proc, RIGHT_NOTIFY | RIGHT_DUP),
+               "init: wiring failed\n");
+    require_ok(sys_doorbell_share(db_ns_reply, ping_proc, RIGHT_WAIT | RIGHT_DUP),
+               "init: wiring failed\n");
+
+    require_ok(sys_thread_set_affinity(nameservice->main_thread, 1ull << 0),
+               "init: wiring failed\n");
+    require_ok(sys_thread_resume(nameservice->main_thread), "init: wiring failed\n");
+    require_ok(sys_thread_set_affinity(pong->main_thread, 1ull << 1),
+               "init: wiring failed\n");
+    require_ok(sys_thread_resume(pong->main_thread), "init: wiring failed\n");
+    require_ok(sys_thread_set_affinity(ping->main_thread, 1ull << 0),
+               "init: wiring failed\n");
+    require_ok(sys_thread_resume(ping->main_thread), "init: wiring failed\n");
+
+    const uint64_t ipc_done_base = sys_doorbell_read(db_ipc_done);
+    const int64_t ipc_wait_rc = sys_wait_doorbell(db_ipc_done, ipc_done_base);
+    if (ipc_wait_rc < 0) fail_halt("ipc: hot ring failed\n");
+
+    // Supervision demo: force a crash message to pong, wait for a supervisor
+    // death event, then restart according to the manifest policy.
+    debug_marker("DBG init: supervision block entered\n");
+    uint32_t crash = MSG_CRASH;
+    if (ping_to_pong_ring) {
+        while (!ring_push(ping_to_pong_ring, kRingOrder, MSG_CRASH, &crash, sizeof(crash), db_pong)) {
+            sys_yield();
+        }
+        debug_marker("DBG init: crash message pushed\n");
+    }
+    bool saw_death = false;
+    for (int i = 0; i < 65536; ++i) {
+        SysPair event = sys_supervisor_poll(kCapSupervisor);
+        if (event.value > 0) {
+            debug_marker("DBG init: supervisor event received\n");
+            saw_death = true;
+            break;
+        }
+        sys_yield();
+    }
+    if (!saw_death || !pong || !token_eq(pong->restart, "always")) {
+        debug_marker("DBG init: supervision poll failed\n");
+        fail_halt("init: supervision failed\n");
+    }
+
+    debug_marker("DBG init: respawning pong\n");
+    if (!spawn_service(*pong, SPAWN_SUSPENDED)) fail_halt("init: supervision failed\n");
+    pong_proc = pong->proc;
+    if (pong_proc != kNullCap) {
+        require_ok(sys_ring_share(ring_ping_to_pong, pong_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+                   "init: supervision failed\n");
+        require_ok(sys_ring_share(ring_pong_to_ping, pong_proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+                   "init: supervision failed\n");
+        require_ok(sys_doorbell_share(db_pong, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+                   "init: supervision failed\n");
+        require_ok(sys_doorbell_share(db_ping, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+                   "init: supervision failed\n");
+        require_ok(sys_ring_share(pong->log_ring, pong_proc,
+                                  RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+                   "init: supervision failed\n");
+        require_ok(sys_doorbell_share(console_db, pong_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+                   "init: supervision failed\n");
+        require_ok(sys_thread_set_affinity(pong->main_thread, 1ull << 1),
+                   "init: supervision failed\n");
+        require_ok(sys_thread_resume(pong->main_thread), "init: supervision failed\n");
+        debug_marker("DBG init: pong resumed\n");
+    } else {
+        fail_halt("init: supervision failed\n");
+    }
+    console_log("init: supervision ready\n");
+
+    const uint64_t doorbell_sleeps = static_cast<uint64_t>(sys_debug_counter(5));
+    const uint64_t doorbell_wakes = static_cast<uint64_t>(sys_debug_counter(6));
+    if (doorbell_sleeps == 0 || doorbell_wakes == 0) {
+        fail_halt("ipc: doorbell sleep failed\n");
+    }
+
+    if (static_cast<uint64_t>(sys_debug_counter(17)) >= 2) console_log("sched: local scheduling ready\n");
+    if (static_cast<uint64_t>(sys_debug_counter(23)) > 0 &&
+        static_cast<uint64_t>(sys_debug_counter(24)) > 0 &&
+        static_cast<uint64_t>(sys_debug_counter(25)) > 0) {
+        console_log("sched: remote wake ready\n");
+    }
+    if (static_cast<uint64_t>(sys_debug_counter(28)) > 0) {
+        console_log("ipc: cross-core doorbell ready\n");
+    }
+    console_log("sched: fairness check complete\n");
+    console_log("init: base services ready\n");
+    console_log("init: scheduler tests ready\n");
+    console_log_counter("metric.syscalls", static_cast<uint64_t>(sys_debug_counter(0)));
+    console_log_counter("metric.ipc.syscalls", static_cast<uint64_t>(sys_debug_counter(1)));
+    console_log_counter("metric.context.switches", static_cast<uint64_t>(sys_debug_counter(2)));
+    console_log_counter("metric.debug.puts", static_cast<uint64_t>(sys_debug_counter(3)));
+    console_log_counter("metric.el0.faults", static_cast<uint64_t>(sys_debug_counter(4)));
+    console_log_counter("metric.doorbell.sleeps", static_cast<uint64_t>(sys_debug_counter(5)));
+    console_log_counter("metric.doorbell.wakes", static_cast<uint64_t>(sys_debug_counter(6)));
+    console_log_counter("metric.timer.ticks", static_cast<uint64_t>(sys_debug_counter(7)));
+    console_log_counter("metric.doorbell.wait.calls", static_cast<uint64_t>(sys_debug_counter(8)));
+    console_log_counter("metric.doorbell.wait.immediate", static_cast<uint64_t>(sys_debug_counter(9)));
+    console_log_counter("metric.notify.calls", static_cast<uint64_t>(sys_debug_counter(10)));
+    console_log_counter("metric.notify.no.waiter", static_cast<uint64_t>(sys_debug_counter(11)));
+    console_log_counter("metric.notify.woke.thread", static_cast<uint64_t>(sys_debug_counter(12)));
+    console_log_counter("metric.yields", static_cast<uint64_t>(sys_debug_counter(13)));
+    console_log_counter("metric.block.switches", static_cast<uint64_t>(sys_debug_counter(14)));
+    console_log_counter("metric.timer.preempts", static_cast<uint64_t>(sys_debug_counter(15)));
+    console_log_counter("metric.exit.switches", static_cast<uint64_t>(sys_debug_counter(16)));
+    console_log_counter("metric.cpus.online", static_cast<uint64_t>(sys_debug_counter(17)));
+    console_log_counter("metric.cpu0.context.switches", static_cast<uint64_t>(sys_debug_counter(18)));
+    console_log_counter("metric.cpu1.context.switches", static_cast<uint64_t>(sys_debug_counter(19)));
+    console_log_counter("metric.cpu0.timer.preempts", static_cast<uint64_t>(sys_debug_counter(20)));
+    console_log_counter("metric.cpu1.timer.preempts", static_cast<uint64_t>(sys_debug_counter(21)));
+    console_log_counter("metric.local.wakes", static_cast<uint64_t>(sys_debug_counter(22)));
+    console_log_counter("metric.remote.wakes", static_cast<uint64_t>(sys_debug_counter(23)));
+    console_log_counter("metric.ipi.sent", static_cast<uint64_t>(sys_debug_counter(24)));
+    console_log_counter("metric.ipi.handled", static_cast<uint64_t>(sys_debug_counter(25)));
+    console_log_counter("metric.pending.wake.drains", static_cast<uint64_t>(sys_debug_counter(26)));
+    console_log_counter("metric.doorbell.local.wakes", static_cast<uint64_t>(sys_debug_counter(27)));
+    console_log_counter("metric.doorbell.remote.wakes", static_cast<uint64_t>(sys_debug_counter(28)));
+    console_log_counter("metric.ressha.fairness.max.lag", static_cast<uint64_t>(sys_debug_counter(29)));
+    console_log_counter("metric.principal.a.runtime", static_cast<uint64_t>(sys_debug_counter(30)));
+    console_log_counter("metric.principal.b.runtime", static_cast<uint64_t>(sys_debug_counter(31)));
+
+    if (!dango || !auth_probe ||
+        dango_proc == kNullCap ||
+        auth_probe_proc == kNullCap ||
+        dango->main_thread == kNullCap ||
+        auth_probe->main_thread == kNullCap) {
+        fail_halt("dango: wiring failed\n");
+    }
+
+    const CapHandle db_dango_done = as_cap(sys_doorbell_create());
+    const CapHandle db_dango_auth_gate = as_cap(sys_doorbell_create());
+    const CapHandle db_dango_layout_done = as_cap(sys_doorbell_create());
+    if (db_dango_done == kNullCap ||
+        db_dango_auth_gate == kNullCap ||
+        db_dango_layout_done == kNullCap) {
+        fail_halt("dango: wiring failed\n");
+    }
+
+    require_ok(sys_ring_share(dango->log_ring, dango_proc,
+                              RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "dango: wiring failed\n");
+    require_ok(sys_doorbell_share(console_db, dango_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "dango: wiring failed\n");
+    require_ok(sys_cap_grant(dango_proc, kCapVmRoot, RIGHT_VM_CREATE | RIGHT_VM_INSPECT),
+               "dango: wiring failed\n");
+    require_ok(sys_doorbell_share(db_dango_done, dango_proc, RIGHT_NOTIFY),
+               "dango: wiring failed\n");
+    require_ok(sys_doorbell_share(db_dango_auth_gate, dango_proc, RIGHT_WAIT),
+               "dango: wiring failed\n");
+    require_ok(sys_doorbell_share(db_dango_layout_done, dango_proc, RIGHT_NOTIFY),
+               "dango: wiring failed\n");
+    require_ok(sys_cap_grant(dango_proc, kCapInitrd, RIGHT_READ | RIGHT_MAP),
+               "dango: wiring failed\n");
+    require_ok(sys_cap_grant(dango_proc, dango_proc,
+                             RIGHT_SPAWN | RIGHT_READ | RIGHT_DUP),
+               "dango: wiring failed\n");
+
+    require_ok(sys_ring_share(auth_probe->log_ring, auth_probe_proc,
+                              RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+               "dango: wiring failed\n");
+    require_ok(sys_doorbell_share(console_db, auth_probe_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+               "dango: wiring failed\n");
+    require_ok(sys_cap_grant(auth_probe_proc, kCapVmRoot, RIGHT_VM_INSPECT),
+               "dango: wiring failed\n");
+    require_ok(sys_doorbell_share(db_dango_auth_gate, auth_probe_proc, RIGHT_NOTIFY),
+               "dango: wiring failed\n");
+
+    const uint64_t layout_base = sys_doorbell_read(db_dango_layout_done);
+    const uint64_t dango_done_base = sys_doorbell_read(db_dango_done);
+
+    require_ok(sys_thread_set_affinity(dango->main_thread, 1ull << 0),
+               "dango: wiring failed\n");
+    require_ok(sys_thread_resume(dango->main_thread), "dango: wiring failed\n");
+    if (sys_wait_doorbell(db_dango_layout_done, layout_base) != 0) {
+        fail_halt("dango: wiring failed\n");
+    }
+
+    require_ok(sys_thread_set_affinity(auth_probe->main_thread, 1ull << 0),
+               "dango: wiring failed\n");
+    require_ok(sys_thread_resume(auth_probe->main_thread), "dango: wiring failed\n");
+    if (sys_wait_doorbell(db_dango_done, dango_done_base) != 0) {
+        fail_halt("dango: wiring failed\n");
+    }
+
+    console_log_counter("metric.vm.create.calls", static_cast<uint64_t>(sys_debug_counter(32)));
+    console_log_counter("metric.vm.created", static_cast<uint64_t>(sys_debug_counter(33)));
+    console_log_counter("metric.vm.destroyed", static_cast<uint64_t>(sys_debug_counter(34)));
+    console_log_counter("metric.vm.memory.created", static_cast<uint64_t>(sys_debug_counter(35)));
+    console_log_counter("metric.vm.memory.mapped", static_cast<uint64_t>(sys_debug_counter(36)));
+    console_log_counter("metric.vm.memory.unmapped", static_cast<uint64_t>(sys_debug_counter(37)));
+    console_log_counter("metric.vm.stage2.tables.created", static_cast<uint64_t>(sys_debug_counter(38)));
+    console_log_counter("metric.vm.stage2.pages.mapped", static_cast<uint64_t>(sys_debug_counter(39)));
+    console_log_counter("metric.vm.vcpus.created", static_cast<uint64_t>(sys_debug_counter(40)));
+    console_log_counter("metric.vm.vcpu.configured", static_cast<uint64_t>(sys_debug_counter(41)));
+    console_log_counter("metric.vm.vcpu.run.attempts", static_cast<uint64_t>(sys_debug_counter(42)));
+    console_log_counter("metric.vm.vcpu.run.notimpl", static_cast<uint64_t>(sys_debug_counter(43)));
+    console_log_counter("metric.vm.channels.created", static_cast<uint64_t>(sys_debug_counter(44)));
+    console_log_counter("metric.vm.errors", static_cast<uint64_t>(sys_debug_counter(45)));
+    console_log_counter("metric.el.current", static_cast<uint64_t>(sys_debug_counter(46)));
+    console_log_counter("metric.el2.available", static_cast<uint64_t>(sys_debug_counter(47)));
+    console_log_counter("metric.vhe.available", static_cast<uint64_t>(sys_debug_counter(48)));
+    console_log("init: system ready\n");
+
+    while (true) {
+        sys_yield();
+    }
+}

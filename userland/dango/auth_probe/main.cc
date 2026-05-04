@@ -52,9 +52,9 @@ extern "C" [[noreturn]] void _start() {
     wait_cap(kAuthGateDoorbell, dango::CAP_DOORBELL);
 
     const int64_t rc = sys_vm_create(kRestrictedVmRoot, 0);
-    if (rc != dango::E_PERM) fail("dango: authority check failed\n");
+    if (rc != dango::E_PERM) fail("authority check failed\n");
 
-    console_log("dango: authority check passed\n");
+    console_log("authority check passed\n");
     (void)sys_notify(kAuthGateDoorbell);
     while (true) sys_yield();
 }

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "sonnet",
+  "statusLine": {
+    "type": "command",
+    "command": "bash scripts/claude/ame-statusline.sh",
+    "padding": 0
+  },
+  "permissions": {
+    "deny": [
+      "Read(./.git/**)",
+      "Read(./build/**)",
+      "Read(./build-*/**)",
+      "Read(./out/**)",
+      "Read(./cmake-build-*/**)",
+      "Read(./linux-artifacts/**)",
+      "Read(./docs/**)",
+      "Read(./Midix_Architecture_3.md)",
+      "Read(./sched_spec_v_2.md)",
+      "Read(./*.zip)",
+      "Read(./*.zip.b64)",
+      "Read(./*.b64)",
+      "Read(./*.log)",
+      "Read(./*.patch)",
+      "Read(./*.rej)",
+      "Write(./.git/**)",
+      "Write(./build/**)",
+      "Write(./build-*/**)",
+      "Write(./out/**)",
+      "Write(./linux-artifacts/**)"
+    ],
+    "allow": [
+      "Bash(scripts/claude/*)",
+      "Bash(cmake:*)",
+      "Bash(ninja:*)",
+      "Bash(scripts/run-qemu.sh:*)",
+      "Bash(DANGO_GUEST_TERMINAL=0:*)",
+      "Bash(timeout:*)",
+      "Bash(tar -tf build/initrd.tar:*)",
+      "Bash(rg:*)",
+      "Bash(fd:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(wc:*)",
+      "Bash(du:*)",
+      "Bash(sed:*)",
+      "Bash(awk:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(python3:*)",
+      "Bash(chmod +x:*)"
+    ]
+  },
+  "env": {
+    "MAX_THINKING_TOKENS": "10000",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "haiku"
+  }
+}

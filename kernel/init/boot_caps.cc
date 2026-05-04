@@ -131,7 +131,9 @@ Process* spawn_service(const char* service_name, Principal principal, u32 superv
     const void* blob = nullptr;
     usize blob_size = 0;
     if (!archive_get(service_name, &blob, &blob_size)) return nullptr;
-    return spawn_image(blob, blob_size, principal, supervisor_pid, flags, out_main_thread);
+    Process* p = spawn_image(blob, blob_size, principal, supervisor_pid, flags, out_main_thread);
+    if (p) sched::process_set_name(p, service_name);
+    return p;
 }
 
 void create_init_process() {

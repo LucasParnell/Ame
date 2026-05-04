@@ -124,7 +124,7 @@ extern "C" [[noreturn]] void _start() {
     }
 
     (void)drain_all(uart);
-    uart_log(uart, mochi::LogLevel::Info, "io.console", "console: ready");
+    uart_log(uart, mochi::LogLevel::Info, "io.console", "ready");
 
     while (true) {
         if (drain_all(uart)) {

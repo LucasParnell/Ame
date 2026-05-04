@@ -109,12 +109,17 @@ struct Ring {
 // This gives the futex-shaped race-free handoff required by the architecture.
 // ---------------------------------------------------------------------------
 struct alignas(64) Doorbell {
-    u64  counter;       // incremented by notify; compared by wait
-    Thread* waiter;     // sleeping thread, or null
-    u32  owner_pid;
-    u32  rights;
-    u32  lock;
-    u8   pad[36];
+    u64     counter;          // incremented by notify; compared by wait
+    Thread* waiter;           // sleeping thread, or null
+    u32     owner_pid;
+    u32     rights;
+    u32     lock;
+    u32     sched_hints;      // IpcSchedHint flags; set by privileged cap holders
+    u32     bound_server_tid; // preferred server thread tid (0 = unbound)
+    u32     home_cpu;         // preferred CPU for wake-affine (kInvalidCpu = none)
+    u64     wake_count;       // total notify-woke-thread events
+    u64     handoff_count;    // total successful handoffs
+    u8      pad[8];
 };
 static_assert(sizeof(Doorbell) == 64);
 
@@ -134,6 +139,8 @@ Doorbell* doorbell_create_object(u32 pid);
 CapHandle doorbell_cap_alloc(u32 target_pid, Doorbell* db, u32 rights);
 SysError notify(CapHandle cap, u32 caller_pid);
 SysError notify_object(Doorbell* db);
+SysError notify_handoff(CapHandle cap, u64 payload_word, u32 caller_pid);
+SysError reply_handoff(u64 reply_val, u32 caller_pid);
 SysError wait_doorbell(CapHandle cap, u64 expected, u32 caller_pid);
 u64 doorbell_counter(CapHandle cap, u32 caller_pid);
 void doorbell_clear_waiter(Thread* thread);

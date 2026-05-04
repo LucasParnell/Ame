@@ -152,7 +152,7 @@ extern "C" [[noreturn]] void _start() {
         }
     }
     if (my_cpu == 0 && pong_cpu == 1) {
-        try_console_log("demo: affinity ready\n");
+        try_console_log("affinity ready\n");
     }
 
     uint32_t hot_count = kMessageCount;

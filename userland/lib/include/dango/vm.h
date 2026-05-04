@@ -15,6 +15,7 @@ constexpr uint32_t CAP_VM = 12;
 constexpr uint32_t CAP_VCPU = 13;
 constexpr uint32_t CAP_VM_MEMORY = 14;
 constexpr uint32_t CAP_VM_CHANNEL = 15;
+constexpr uint32_t CAP_SCHED_CONTEXT = 16;
 
 constexpr uint32_t RIGHT_READ = 1u << 0;
 constexpr uint32_t RIGHT_WRITE = 1u << 1;
@@ -59,6 +60,60 @@ constexpr uint64_t VM_DEBUG_GUEST_LINUX_HELLO = 51;
 constexpr uint64_t VM_DEBUG_VCPU_WFX_EXITS = 52;
 constexpr uint64_t VM_DEBUG_VCPU_IRQ_EXITS = 53;
 constexpr uint64_t VM_DEBUG_VCPU_UNSUPPORTED_EXITS = 54;
+
+enum SchedBand : uint32_t {
+    SCHED_BAND_RT_NATIVE = 0,
+    SCHED_BAND_LATENCY = 1,
+    SCHED_BAND_FAIR = 2,
+    SCHED_BAND_VM_LATENCY = 3,
+    SCHED_BAND_VM_FAIR = 4,
+    SCHED_BAND_BATCH = 5,
+    SCHED_BAND_IDLE = 6,
+};
+
+constexpr uint32_t SCHED_CTX_NO_STEAL = 1u << 0;
+constexpr uint32_t SCHED_CTX_VM_RUNNER = 1u << 1;
+constexpr uint32_t SCHED_CTX_STEALABLE = 1u << 2;
+
+struct SchedContext {
+    uint32_t principal_id;
+    uint32_t owner_thread_or_vcpu;
+    uint32_t band;
+    uint32_t weight;
+    uint64_t budget_ns;
+    uint64_t period_ns;
+    uint64_t deadline_ns;
+    uint64_t used_ns;
+    uint64_t period_start_ns;
+    uint64_t core_mask;
+    uint32_t home_cpu;
+    uint32_t flags;
+    uint32_t id;
+};
+
+enum VcpuExitReason : uint32_t {
+    VCPU_EXIT_QUANTUM_EXPIRED = 0,
+    VCPU_EXIT_WFI_BLOCKED = 1,
+    VCPU_EXIT_VIRTUAL_IRQ_PENDING = 2,
+    VCPU_EXIT_MMIO_BATCH_READY = 3,
+    VCPU_EXIT_UNSUPPORTED_TRAP = 4,
+    VCPU_EXIT_SHUTDOWN = 5,
+    VCPU_EXIT_HOST_PREEMPTED = 6,
+};
+
+struct VcpuRunBudget {
+    uint64_t budget_ns;
+    uint64_t deadline_ns;
+    uint32_t max_exits;
+    uint32_t flags;
+};
+
+struct VcpuRunResult {
+    uint32_t exit_reason;
+    uint32_t exit_batch_count;
+    uint64_t last_esr;
+    uint64_t used_ns;
+};
 
 struct VmInfo {
     uint32_t vm_id;

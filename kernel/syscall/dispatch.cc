@@ -29,6 +29,7 @@ constexpr u64 kUserCopyMax = 0x4000'0000ull;
 constexpr u64 kMaxUserElfSize = 16ull * 1024ull * 1024ull;
 constexpr usize kMaxArenaPages    = 64;  // pages; also sizes allocs[] VLA
 constexpr u32   kMaxStackSlots    = 16;  // threads per process
+constexpr u64 kLegacyVcpuInfoSize = 56;  // VcpuInfo ABI before sched-context fields.
 constexpr VirtAddr kStackFrameAlign = 16; // AArch64 ABI: SP must be 16-byte aligned
 
 using libk::metric_inc;
@@ -89,10 +90,10 @@ bool user_range_ok(u64 ptr, u64 len, u32 rights = RIGHT_READ) {
     return true;
 }
 
-bool principal_from_id(u64 raw, Principal* out) {
+bool principal_from_id(u64 raw, PrincipalClass* out) {
     if (!out) return false;
     if (raw == PRINCIPAL_NATIVE_TRUSTED || raw == PRINCIPAL_NATIVE_SANDBOXED) {
-        *out = static_cast<Principal>(raw);
+        *out = static_cast<PrincipalClass>(raw);
         return true;
     }
     return false;
@@ -222,7 +223,7 @@ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
                         (p && p->name[0]) ? p->name : "?",
                         ct ? ct->tid : 0,
                         p ? p->supervisor_pid : 0,
-                        p ? static_cast<u32>(p->principal) : 0,
+                        p ? static_cast<u32>(p->principal_class) : 0,
                         ct ? static_cast<u32>(ct->sched.sched_class) : 0,
                         ct ? ct->principal_id : 0,
                         static_cast<unsigned long long>(esr),
@@ -291,7 +292,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         if (!a0 || a1 == 0 || a1 > kMaxUserElfSize) return err(E_INVALID);
         if (!user_range_ok(a0, a1)) return err(E_FAULT);
 
-        Principal principal = PRINCIPAL_NATIVE_SANDBOXED;
+        PrincipalClass principal = PRINCIPAL_NATIVE_SANDBOXED;
         if (!principal_from_id(a2, &principal)) return err(E_INVALID);
 
         CapEntry* supervisor_e =
@@ -430,7 +431,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
         Arena* arena = &p->arena_table->entries[idx];
         CapHandle cap_h = cap::alloc(*p->cap_table, CAP_ARENA, arena,
-                                     RIGHT_READ | RIGHT_WRITE | RIGHT_REGISTER | RIGHT_DUP);
+                                     RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
         if (cap_h == kNullCap) {
             for (usize j = 0; j < pages; ++j) mm::free_page(allocs[j]);
             libk::memset(arena, 0, sizeof(*arena));
@@ -449,7 +450,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         }
         Arena* arena = &p->arena_table->entries[idx];
         CapHandle cap_h = cap::alloc(*p->cap_table, CAP_ARENA, arena,
-                                     RIGHT_READ | RIGHT_WRITE | RIGHT_REGISTER | RIGHT_DUP);
+                                     RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
         if (cap_h == kNullCap) {
             libk::memset(arena, 0, sizeof(*arena));
             if (p->arena_table->count == idx + 1) p->arena_table->count = idx;
@@ -750,15 +751,70 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     }
 
     case SYS_VCPU_INSPECT: {
-        if (!a1 || a2 < sizeof(vm::VcpuInfo)) return err(E_INVALID);
+        /*
+         * VcpuInfo grew when sched-context metadata was added.  Keep the
+         * syscall ABI append-only: older managers may pass the original
+         * shorter struct and should receive the prefix they understand, while
+         * newer managers receive the full extended view.
+         */
+        if (!a1 || a2 < kLegacyVcpuInfoSize) return err(E_INVALID);
         vm::VcpuInfo info{};
         const SysError rc = vm::inspect_vcpu(*p, static_cast<CapHandle>(a0), &info);
         if (rc != E_OK) return err(rc);
-        return copy_to_user(a1, &info, sizeof(info)) ? ok(E_OK) : err(E_FAULT);
+        const u64 copy_len = (a2 < sizeof(info)) ? a2 : sizeof(info);
+        return copy_to_user(a1, &info, copy_len) ? ok(E_OK) : err(E_FAULT);
     }
 
     case SYS_VCPU_RUN: {
-        const SysError rc = vm::run_vcpu(*p, static_cast<CapHandle>(a0), a1);
+        if (!a1 || !a2) return err(E_INVALID);
+        vm::VcpuRunBudget budget{};
+        if (!copy_from_user(&budget, a1, sizeof(budget))) return err(E_FAULT);
+        vm::VcpuRunResult result{};
+        const SysError rc = vm::run_vcpu(*p, static_cast<CapHandle>(a0), budget, &result);
+        if (!copy_to_user(a2, &result, sizeof(result))) return err(E_FAULT);
+        return rc == E_OK ? ok(E_OK) : err(rc);
+    }
+
+    case SYS_SCHED_CONTEXT_CREATE: {
+        if (!a0 || a1 < sizeof(SchedContext)) return err(E_INVALID);
+        SchedContext ctx{};
+        if (!copy_from_user(&ctx, a0, sizeof(ctx))) return err(E_FAULT);
+        SysError rc = E_OK;
+        CapHandle h = sched::sched_context_create(*p, ctx, &rc);
+        if (h == kNullCap) return err(rc);
+        return ok(static_cast<long>(h));
+    }
+
+    case SYS_SCHED_CONTEXT_BIND_THREAD: {
+        const SysError rc = sched::sched_context_bind_thread(*p, static_cast<CapHandle>(a0),
+                                                            static_cast<CapHandle>(a1));
+        return rc == E_OK ? ok(E_OK) : err(rc);
+    }
+
+    case SYS_VCPU_BIND_SCHED_CONTEXT: {
+        const SysError rc = vm::vcpu_bind_sched_context(*p, static_cast<CapHandle>(a0),
+                                                        static_cast<CapHandle>(a1));
+        return rc == E_OK ? ok(E_OK) : err(rc);
+    }
+
+    case SYS_VCPU_SET_CORE_MASK: {
+        const SysError rc = vm::vcpu_set_affinity(*p, static_cast<CapHandle>(a0), a1,
+                                                  static_cast<u32>(a2));
+        return rc == E_OK ? ok(E_OK) : err(rc);
+    }
+
+    case SYS_VCPU_KICK: {
+        const SysError rc = vm::vcpu_kick(*p, static_cast<CapHandle>(a0), static_cast<u32>(a1));
+        return rc == E_OK ? ok(E_OK) : err(rc);
+    }
+
+    case SYS_VCPU_INJECT_IRQ: {
+        const SysError rc = vm::vcpu_inject_irq(*p, static_cast<CapHandle>(a0), static_cast<u32>(a1));
+        return rc == E_OK ? ok(E_OK) : err(rc);
+    }
+
+    case SYS_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER: {
+        const SysError rc = vm::vcpu_block_until_irq_or_timer(*p, static_cast<CapHandle>(a0));
         return rc == E_OK ? ok(E_OK) : err(rc);
     }
 
@@ -831,8 +887,8 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         case DBG_DOORBELL_LOCAL_WAKES:  return ok(static_cast<long>(ipc::doorbell_local_wake_count()));
         case DBG_DOORBELL_REMOTE_WAKES: return ok(static_cast<long>(ipc::doorbell_remote_wake_count()));
         case DBG_FAIRNESS_LAG:          return ok(static_cast<long>(sched::fairness_max_lag()));
-        case DBG_PRINCIPAL_TRUSTED_RT:  return ok(static_cast<long>(sched::principal_runtime(PRINCIPAL_NATIVE_TRUSTED)));
-        case DBG_PRINCIPAL_SANDBOX_RT:  return ok(static_cast<long>(sched::principal_runtime(PRINCIPAL_NATIVE_SANDBOXED)));
+        case DBG_PRINCIPAL_TRUSTED_RT:  return ok(static_cast<long>(sched::principal_class_runtime(PRINCIPAL_NATIVE_TRUSTED)));
+        case DBG_PRINCIPAL_SANDBOX_RT:  return ok(static_cast<long>(sched::principal_class_runtime(PRINCIPAL_NATIVE_SANDBOXED)));
         case DBG_WAKE_DOORBELL:         return ok(static_cast<long>(sched::wake_doorbell_count()));
         case DBG_WAKE_REMOTE:           return ok(static_cast<long>(sched::wake_remote_count()));
         case DBG_WAKE_RESUME:           return ok(static_cast<long>(sched::wake_resume_count()));

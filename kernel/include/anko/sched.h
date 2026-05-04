@@ -53,25 +53,76 @@ enum WakeReason : u8 {
 };
 
 // ---------------------------------------------------------------------------
-// Principal classes — identity for capability checks and scheduling fairness.
+// Principal classes — identity for capability checks and authorization.
+// Principal IDs are now unique fairness buckets allocated per process/VM.
 // ---------------------------------------------------------------------------
-enum Principal : u8 {
+enum PrincipalClass : u8 {
     PRINCIPAL_KERNEL           = 0,
     PRINCIPAL_NATIVE_TRUSTED   = 1,
     PRINCIPAL_NATIVE_SANDBOXED = 2,
 };
 
+struct Principal {
+    u32 id;
+    PrincipalClass class_;
+    u32 weight;
+    u64 budget_ns;
+    u64 period_ns;
+};
+static_assert(__is_trivially_constructible(Principal));
+
 // ---------------------------------------------------------------------------
-// Scheduling classes (V2)
+// Scheduling bands.  Legacy SchedClass names are kept as aliases so the old
+// thread_create/syscall ABI keeps building while policy moves to SchedContext.
 // ---------------------------------------------------------------------------
-enum SchedClass : u8 {
-    SCHED_IDLE        = 0,
-    SCHED_BATCH       = 1,
-    SCHED_NORMAL      = 2,
-    SCHED_SERVICE     = 3,
-    SCHED_INTERACTIVE = 4,
-    SCHED_RT          = 5,
-    SCHED_VM          = 6,
+enum SchedBand : u8 {
+    SCHED_BAND_RT_NATIVE = 0,
+    SCHED_BAND_LATENCY = 1,
+    SCHED_BAND_FAIR = 2,
+    SCHED_BAND_VM_LATENCY = 3,
+    SCHED_BAND_VM_FAIR = 4,
+    SCHED_BAND_BATCH = 5,
+    SCHED_BAND_IDLE = 6,
+};
+
+using SchedClass = SchedBand;
+constexpr SchedBand SCHED_RT          = SCHED_BAND_RT_NATIVE;
+constexpr SchedBand SCHED_INTERACTIVE = SCHED_BAND_LATENCY;
+constexpr SchedBand SCHED_SERVICE     = SCHED_BAND_LATENCY;
+constexpr SchedBand SCHED_NORMAL      = SCHED_BAND_FAIR;
+constexpr SchedBand SCHED_VM_LATENCY  = SCHED_BAND_VM_LATENCY;
+constexpr SchedBand SCHED_VM_FAIR     = SCHED_BAND_VM_FAIR;
+constexpr SchedBand SCHED_VM          = SCHED_BAND_VM_FAIR;
+constexpr SchedBand SCHED_BATCH       = SCHED_BAND_BATCH;
+constexpr SchedBand SCHED_IDLE        = SCHED_BAND_IDLE;
+
+constexpr u32 NUM_BANDS = 7;
+
+struct SchedContext {
+    u32 principal_id;
+    u32 owner_thread_or_vcpu;
+
+    SchedBand band;
+    u32 weight;
+
+    u64 budget_ns;
+    u64 period_ns;
+    u64 deadline_ns;
+    u64 used_ns;
+    u64 period_start_ns;
+
+    u64 core_mask;
+    u32 home_cpu;
+
+    u32 flags;
+    u32 id;
+};
+static_assert(__is_trivially_constructible(SchedContext));
+
+enum SchedContextFlags : u32 {
+    SCHED_CTX_NO_STEAL = 1u << 0,
+    SCHED_CTX_VM_RUNNER = 1u << 1,
+    SCHED_CTX_STEALABLE = 1u << 2,
 };
 
 // ---------------------------------------------------------------------------
@@ -155,7 +206,7 @@ static_assert(__is_trivially_constructible(FairThreadQueue));
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-constexpr u32 kMaxPrincipals = 16;
+constexpr u32 kMaxPrincipals = 64;
 constexpr u32 kMaxRtPrio     = 16;
 constexpr u32 kMaxCpus       = 4;
 constexpr u32 kInvalidCpu    = ~0u;
@@ -166,6 +217,9 @@ constexpr u32 NICE_0_WEIGHT  = 1024;
 // ---------------------------------------------------------------------------
 struct PrincipalSchedState {
     u32  principal_id;
+    PrincipalClass class_;
+    u8   allocated;
+    u16  _pad0;
     u32  weight;
     u64  runtime_ns;
     u64  period_ns;
@@ -183,17 +237,25 @@ static_assert(__is_trivially_constructible(PrincipalSchedState));
 // Per-CPU, per-principal scheduling node.
 // One of these exists in each Eki for each principal that has work on that CPU.
 // ---------------------------------------------------------------------------
+using BandQueue = FairThreadQueue;
+
 struct PrincipalEntity {
     u32             principal_id;
     u32             weight;
-    u64             vruntime_ns;
+    u64             vruntime[NUM_BANDS];
     u64             runtime_ns;
-    u32             runnable_threads;
+    u32             runnable[NUM_BANDS];
     bool            throttled;
-    bool            in_latency_queue;
-    bool            in_timeshare_queue;
-    u8              heap_idx;        // position in FairPrincipalQueue heap
-    FairThreadQueue threads;         // runnable threads on this CPU
+    bool            in_queue[NUM_BANDS];
+    u8              heap_idx[NUM_BANDS]; // position in each FairPrincipalQueue heap
+
+    BandQueue       rt;
+    BandQueue       latency;
+    BandQueue       fair;
+    BandQueue       vm_latency;
+    BandQueue       vm_fair;
+    BandQueue       batch;
+    BandQueue       idle;
 };
 static_assert(__is_trivially_constructible(PrincipalEntity));
 
@@ -203,6 +265,8 @@ static_assert(__is_trivially_constructible(PrincipalEntity));
 struct FairPrincipalQueue {
     PrincipalEntity* data[kMaxPrincipals];
     u32              size;
+    SchedBand        band;
+    u8               _pad[3];
 };
 static_assert(__is_trivially_constructible(FairPrincipalQueue));
 
@@ -303,18 +367,24 @@ struct Thread {
     u64         slice_ns;
     u64         last_start_ns;   // sched_clock_ns() when last switched in
     u64         last_wake_ns;    // sched_clock_ns() when last woken
+    u64         slice_start_ns;  // start of current scheduling slice
 
     // --- IPC state ---
     u64         ipc_hot_until_ns;      // sticky window: don't steal until this time
     u64         drain_quantum_start_ns;
     u64         handoff_deadline_ns;   // when handoff quantum expires
-    u64         donated_priority;      // non-transitive effective_key donation from sender
+    u64         donated_key;           // non-transitive effective_key donation from sender
 
     // --- Boolean flags ---
     bool        in_drain_quantum;
     bool        has_donation;
     bool        on_runqueue;      // physically present in an Eki fair/RT queue
     u8          _pad1[5];
+
+    // --- Scheduling context binding ---
+    u32          sched_context_id;
+    u32          _pad2;
+    SchedContext* sched_context;
 
     // --- Scheduling class and weight ---
     SchedAttrs  sched;
@@ -326,7 +396,7 @@ static_assert(__is_trivially_constructible(Thread));
 // ---------------------------------------------------------------------------
 struct Process {
     u32         pid;
-    Principal   principal;
+    PrincipalClass principal_class;
     u8          _pad[3];
     char        name[32];      // human-readable identity (e.g. "init", "io.console")
     u32         supervisor_pid;
@@ -359,8 +429,12 @@ struct Eki {
 
     // --- Queues ---
     RtQueue              rt;
-    FairPrincipalQueue   latency_principals;   // INTERACTIVE + SERVICE
-    FairPrincipalQueue   timeshare_principals; // NORMAL + BATCH + VM
+    FairPrincipalQueue   latency_principals;
+    FairPrincipalQueue   vm_latency_principals;
+    FairPrincipalQueue   fair_principals;
+    FairPrincipalQueue   vm_fair_principals;
+    FairPrincipalQueue   batch_principals;
+    FairPrincipalQueue   idle_principals;
     PrincipalEntity      principal_entities[kMaxPrincipals];
 
     // --- Cross-CPU coordination ---
@@ -370,8 +444,7 @@ struct Eki {
     bool              steal_req_in_flight;
 
     // --- Min-vruntime watermarks (lag detection and normalization) ---
-    u64 min_vruntime_latency;
-    u64 min_vruntime_timeshare;
+    u64 min_vruntime[NUM_BANDS];
 
     // --- Context switch state ---
     bool         switch_pending;
@@ -399,6 +472,7 @@ struct Eki {
     u64 steals_granted;
     u64 steals_denied;
     u64 ipc_wake_preemptions;
+    u64 fair_queue_overflows;
     u64 handoff_success;
     u64 handoff_fallback;
 };
@@ -419,6 +493,7 @@ void init();
 // ---------------------------------------------------------------------------
 // Scheduler operations
 // ---------------------------------------------------------------------------
+u64 sched_clock_ns();
 void tick();
 void yield();
 void block(Thread* t);
@@ -438,6 +513,13 @@ u32 target_cpu_for_wake(Thread* waiter, Thread* waker,
 // V2: handoff plumbing
 void set_handoff_next(Thread* receiver);
 bool principal_throttled(u32 principal_id);
+bool switch_pending();
+u32 allocate_principal(PrincipalClass class_, u32 weight, u64 budget_ns, u64 period_ns);
+CapHandle sched_context_create(Process& caller, const SchedContext& request, SysError* out_error);
+SysError sched_context_bind_thread(Process& caller, CapHandle thread_cap, CapHandle sched_context_cap);
+SchedContext* sched_context_from_cap(Process& caller, CapHandle sched_context_cap, SysError* out_error);
+SchedContext* sched_context_by_id(u32 sched_context_id);
+SysError bind_current_to_sched_context_id(u32 sched_context_id);
 
 // ---------------------------------------------------------------------------
 // Thread / process lifecycle
@@ -448,7 +530,7 @@ Process* current_process();
 Thread*  thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
                        u64 arg0, u32 flags = 0);
 void     thread_destroy(Thread* t);
-Process* process_create(Principal principal, u32 supervisor_pid);
+Process* process_create(PrincipalClass principal, u32 supervisor_pid);
 void     process_destroy(Process* p);
 void     process_set_name(Process* p, const char* name);
 
@@ -490,6 +572,7 @@ u64 ipi_sent_count();
 u64 ipi_handled_count();
 u64 pending_wake_drain_count();
 u64 principal_runtime(u32 principal_id);
+u64 principal_class_runtime(PrincipalClass class_);
 u64 fairness_max_lag();
 u64 wake_doorbell_count();
 u64 wake_remote_count();

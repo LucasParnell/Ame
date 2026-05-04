@@ -50,18 +50,22 @@ extern "C" [[noreturn]] void kernel_main() {
     // Phase 0: early UART — first output before anything can fail silently.
     // -----------------------------------------------------------------------
     drivers::uart::early_init(platform::kUartBase);
-    anko::log::early_init();
-    libk::set_putchar(drivers::uart::putchar_thunk);
-    ANKO_LOG_INFO("kernel/boot", "anko booting");
-    (void)g_dtb_phys;
 
-    // Install exception vectors early so EL0 SVC has a defined handler.
+    // Install exception vectors before the first formatted log line.  The log
+    // path touches counters, stack buffers, and MMIO; if any of that faults
+    // before VBAR_EL1 is live, EL1 vectors through address 0x0 and lands at
+    // 0x200 on QEMU, which looks like a silent boot hang.
     asm volatile(
         "msr VBAR_EL1, %0\n"
         "isb\n"
         :
         : "r"(&vectors)
         : "memory");
+
+    anko::log::early_init();
+    libk::set_putchar(drivers::uart::putchar_thunk);
+    ANKO_LOG_INFO("kernel/boot", "anko booting");
+    (void)g_dtb_phys;
 
     // Direct-QEMU bootstrap: use the RAM size expected by scripts/run-qemu.sh.
     // Linux VM bring-up needs enough physical pages for the embedded initrd,

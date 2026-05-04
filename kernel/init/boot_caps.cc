@@ -94,7 +94,7 @@ void issue_boot_caps(Process& init_proc,
     anko::log::attach_console(kernel_log_rings, log_db, kMaxCpus);
 }
 
-Process* spawn_image(const void* elf_data, usize elf_size, Principal principal,
+Process* spawn_image(const void* elf_data, usize elf_size, PrincipalClass principal,
                      u32 supervisor_pid, u32 flags, Thread** out_main_thread) {
     if (!elf_data || elf_size == 0) return nullptr;
 
@@ -124,7 +124,7 @@ Process* spawn_image(const void* elf_data, usize elf_size, Principal principal,
     return p;
 }
 
-Process* spawn_service(const char* service_name, Principal principal, u32 supervisor_pid,
+Process* spawn_service(const char* service_name, PrincipalClass principal, u32 supervisor_pid,
                        u32 flags, Thread** out_main_thread) {
     if (!service_name) return nullptr;
 

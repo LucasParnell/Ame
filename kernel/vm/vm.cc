@@ -109,6 +109,16 @@ void note_error() {
     counter_inc(g_vm_errors);
 }
 
+void poll_blocked_vcpu_timers() {
+    for (u32 i = 0; i < kMaxVms; ++i) {
+        Vm* v = g_vms[i];
+        if (!is_vm_live(v)) continue;
+        for (u32 j = 0; j < v->vcpu_count; ++j) {
+            if (v->vcpus[j]) poll_vcpu_timer(*v->vcpus[j]);
+        }
+    }
+}
+
 void metric_inc(VmDebugCounter id) {
     switch (id) {
     case VM_DEBUG_CREATE_CALLS: counter_inc(g_vm_create_calls); break;

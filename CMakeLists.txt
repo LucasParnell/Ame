@@ -16,7 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Global flags — freestanding, no exceptions/RTTI
 # ---------------------------------------------------------------------------
 add_compile_options(
-    -O0
+    -O3
     -ffreestanding
     -mgeneral-regs-only
     -fno-exceptions

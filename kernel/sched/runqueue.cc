@@ -1,9 +1,9 @@
 // kernel/sched/runqueue.cc — Ressha/Eki V2 per-CPU fair scheduler.
 //
-// Pick order: RT (bitmap) → latency-fair (INTERACTIVE+SERVICE) →
-//             timeshare-fair (NORMAL+BATCH+VM) → steal request → idle.
-// Fairness is hierarchical: pick principal (min vruntime), then pick thread
-// (min effective_key = vruntime - min(wake_credit, class_cap)).
+// Pick order: native RT → native latency → VM latency → native fair →
+//             VM fair → batch → idle.
+// Fairness is hierarchical: pick principal (per-band min vruntime), then pick
+// a thread/vCPU runner from that same band-specific principal queue.
 
 #include "anko/sched.h"
 #include "anko/ipc.h"
@@ -26,8 +26,15 @@ static u64   g_cntfrq = 0;          // cached at init
 
 constexpr u32 kMaxPrincipalsLocal = kMaxPrincipals; // alias for clarity
 static PrincipalSchedState g_principal_sched[kMaxPrincipalsLocal]{};
+static u32 g_next_principal_id = 1; // principal 0 is reserved for the kernel/bootstrap bucket
+
+constexpr u32 kMaxSchedContexts = 128;
+static SchedContext g_sched_contexts[kMaxSchedContexts]{};
+static bool g_sched_context_allocated[kMaxSchedContexts]{};
+static u32 g_next_sched_context_id = 1;
 
 static void pending_push(Eki& target, Thread* t);
+static bool bind_thread_to_context(Thread* t, SchedContext* ctx);
 
 using libk::metric_inc;
 using libk::metric_load;
@@ -35,7 +42,7 @@ using libk::metric_load;
 // ---------------------------------------------------------------------------
 // Clock
 // ---------------------------------------------------------------------------
-static inline u64 sched_clock_ns() {
+u64 sched_clock_ns() {
     u64 cnt;
     asm volatile("mrs %0, CNTPCT_EL0" : "=r"(cnt) :: "memory");
     if (!g_cntfrq) return cnt; // before init; return ticks
@@ -76,39 +83,62 @@ static u64 online_mask() {
 }
 
 // ---------------------------------------------------------------------------
-// Class helpers
+// Band helpers
 // ---------------------------------------------------------------------------
-static bool is_latency_class(const Thread* t) {
-    return t->sched.sched_class == SCHED_INTERACTIVE
-        || t->sched.sched_class == SCHED_SERVICE;
+static u32 band_index(SchedBand band) {
+    const u32 i = static_cast<u32>(band);
+    return (i < NUM_BANDS) ? i : static_cast<u32>(SCHED_BAND_FAIR);
 }
 
-static u64 wake_credit_cap(SchedClass cls) {
-    switch (cls) {
-    case SCHED_INTERACTIVE: return 300000ULL; // 300 us
-    case SCHED_SERVICE:     return 200000ULL; // 200 us
-    case SCHED_NORMAL:      return  75000ULL; //  75 us (only with IPC_HINT_LATENCY)
-    default:                return 0ULL;
+static bool is_vm_band(SchedBand band) {
+    return band == SCHED_BAND_VM_LATENCY || band == SCHED_BAND_VM_FAIR;
+}
+
+static u64 wake_credit_cap(const Thread* t) {
+    if (!t) return 0;
+    switch (t->sched.sched_class) {
+    case SCHED_BAND_LATENCY:
+        return (t->latency_hint == LATENCY_IPC_SERVER) ? 200000ULL : 300000ULL;
+    case SCHED_BAND_FAIR:
+        return 75000ULL;
+    case SCHED_BAND_VM_LATENCY:
+        return 150000ULL;
+    default:
+        return 0ULL;
     }
 }
 
-static u64 wake_credit_for(SchedClass cls, u32 hints) {
-    if (cls == SCHED_BATCH || cls == SCHED_VM || cls == SCHED_IDLE || cls == SCHED_RT)
+static u64 wake_credit_for(const Thread* t, WakeReason reason, u32 hints) {
+    if (!t) return 0;
+    const SchedBand band = t->sched.sched_class;
+    if (band == SCHED_BAND_RT_NATIVE || band == SCHED_BAND_BATCH ||
+        band == SCHED_BAND_VM_FAIR || band == SCHED_BAND_IDLE) {
         return 0;
-    if (cls == SCHED_NORMAL && !(hints & IPC_HINT_LATENCY))
+    }
+
+    if (band == SCHED_BAND_VM_LATENCY) {
+        // VM latency credit is only for host-visible events: injected IRQs or
+        // explicitly latency-tagged virtio/doorbell kicks.  VM_FAIR gets none.
+        if (reason == WAKE_IRQ || (hints & IPC_HINT_LATENCY)) return wake_credit_cap(t);
         return 0;
-    return wake_credit_cap(cls);
+    }
+
+    if (band == SCHED_BAND_FAIR && !(hints & IPC_HINT_LATENCY)) return 0;
+    if (band == SCHED_BAND_LATENCY &&
+        !(hints & IPC_HINT_LATENCY) && t->latency_hint != LATENCY_IPC_SERVER) return 0;
+    return wake_credit_cap(t);
 }
 
-// Default per-class target latency / min granularity / max slice (all ns)
+// Default per-band target latency / min granularity / max slice (all ns)
 static u64 class_target_latency_ns(SchedClass cls) {
     switch (cls) {
-    case SCHED_INTERACTIVE: return  4000000ULL; //  4 ms
-    case SCHED_SERVICE:     return  4000000ULL; //  4 ms
-    case SCHED_NORMAL:      return 12000000ULL; // 12 ms
-    case SCHED_BATCH:       return 24000000ULL; // 24 ms
-    case SCHED_VM:          return 12000000ULL; // 12 ms (same as NORMAL)
-    default:                return 12000000ULL;
+    case SCHED_BAND_LATENCY:    return  4000000ULL; //  4 ms
+    case SCHED_BAND_VM_LATENCY: return  6000000ULL; //  6 ms
+    case SCHED_BAND_FAIR:       return 12000000ULL; // 12 ms
+    case SCHED_BAND_VM_FAIR:    return 12000000ULL; // 12 ms
+    case SCHED_BAND_BATCH:      return 24000000ULL; // 24 ms
+    case SCHED_BAND_IDLE:       return 50000000ULL; // 50 ms
+    default:                    return 12000000ULL;
     }
 }
 static u64 class_min_gran_ns(SchedClass cls) {
@@ -116,16 +146,19 @@ static u64 class_min_gran_ns(SchedClass cls) {
     return 500000ULL; // 0.5 ms for all classes
 }
 static u64 class_max_slice_ns(SchedClass cls) {
-    (void)cls;
-    return 8000000ULL; // 8 ms hard cap
+    switch (cls) {
+    case SCHED_BAND_VM_LATENCY: return 6000000ULL;
+    case SCHED_BAND_BATCH:      return 12000000ULL;
+    default:                    return 8000000ULL;
+    }
 }
 
 static u64 wakeup_preempt_margin_ns(SchedClass cls) {
     switch (cls) {
-    case SCHED_INTERACTIVE:
-    case SCHED_SERVICE:     return  50000ULL; //  50 us
-    case SCHED_NORMAL:      return 250000ULL; // 250 us
-    default:                return 0ULL;      // no wake preemption for batch/VM
+    case SCHED_BAND_LATENCY:    return  50000ULL; //  50 us
+    case SCHED_BAND_VM_LATENCY: return 100000ULL; // 100 us
+    case SCHED_BAND_FAIR:       return 250000ULL; // 250 us
+    default:                    return 0ULL;
     }
 }
 
@@ -135,12 +168,12 @@ constexpr u64 kIpcDrainQuantumNs = 100000ULL; // 100 us
 // Effective pick key for fair queue ordering
 // ---------------------------------------------------------------------------
 static u64 effective_key(const Thread* t) {
-    const i64 cap    = static_cast<i64>(wake_credit_cap(t->sched.sched_class));
+    const i64 cap    = static_cast<i64>(wake_credit_cap(t));
     const i64 credit = t->wake_credit_ns < cap ? t->wake_credit_ns : cap;
     const i64 key    = static_cast<i64>(t->vruntime_ns) - credit;
     u64 k = static_cast<u64>(key < 0 ? 0 : key);
     // Non-transitive priority donation from handoff sender
-    if (t->has_donation && t->donated_priority < k) k = t->donated_priority;
+    if (t->has_donation && t->donated_key < k) k = t->donated_key;
     return k;
 }
 
@@ -246,47 +279,56 @@ static bool ftq_remove(FairThreadQueue& q, Thread* t) {
 }
 
 // ---------------------------------------------------------------------------
-// FairPrincipalQueue min-heap (keyed by vruntime_ns)
+// FairPrincipalQueue min-heap (keyed by per-band vruntime)
 // ---------------------------------------------------------------------------
+static u64 pe_key(const FairPrincipalQueue& q, const PrincipalEntity* pe) {
+    return pe ? pe->vruntime[band_index(q.band)] : ~0ull;
+}
+
 static void fpq_sift_up(FairPrincipalQueue& q, u32 i) {
+    const u32 bi = band_index(q.band);
     while (i > 0) {
         u32 parent = (i - 1) / 2;
-        if (q.data[parent]->vruntime_ns <= q.data[i]->vruntime_ns) break;
+        if (pe_key(q, q.data[parent]) <= pe_key(q, q.data[i])) break;
         PrincipalEntity* tmp = q.data[parent];
         q.data[parent] = q.data[i];
         q.data[i]      = tmp;
-        q.data[parent]->heap_idx = static_cast<u8>(parent);
-        q.data[i]->heap_idx      = static_cast<u8>(i);
+        q.data[parent]->heap_idx[bi] = static_cast<u8>(parent);
+        q.data[i]->heap_idx[bi]      = static_cast<u8>(i);
         i = parent;
     }
 }
 
 static void fpq_sift_down(FairPrincipalQueue& q, u32 i) {
+    const u32 bi = band_index(q.band);
     while (true) {
         u32 left     = 2 * i + 1;
         u32 right    = 2 * i + 2;
         u32 smallest = i;
-        if (left  < q.size && q.data[left]->vruntime_ns  < q.data[smallest]->vruntime_ns) smallest = left;
-        if (right < q.size && q.data[right]->vruntime_ns < q.data[smallest]->vruntime_ns) smallest = right;
+        if (left  < q.size && pe_key(q, q.data[left])  < pe_key(q, q.data[smallest])) smallest = left;
+        if (right < q.size && pe_key(q, q.data[right]) < pe_key(q, q.data[smallest])) smallest = right;
         if (smallest == i) break;
         PrincipalEntity* tmp = q.data[i];
         q.data[i]            = q.data[smallest];
         q.data[smallest]     = tmp;
-        q.data[i]->heap_idx      = static_cast<u8>(i);
-        q.data[smallest]->heap_idx = static_cast<u8>(smallest);
+        q.data[i]->heap_idx[bi] = static_cast<u8>(i);
+        q.data[smallest]->heap_idx[bi] = static_cast<u8>(smallest);
         i = smallest;
     }
 }
 
-static void fpq_push(FairPrincipalQueue& q, PrincipalEntity* pe) {
-    if (q.size >= kMaxPrincipals) return;
+static bool fpq_push(FairPrincipalQueue& q, PrincipalEntity* pe) {
+    if (q.size >= kMaxPrincipals) return false;
+    const u32 bi = band_index(q.band);
     q.data[q.size] = pe;
-    pe->heap_idx   = static_cast<u8>(q.size);
+    pe->heap_idx[bi] = static_cast<u8>(q.size);
     ++q.size;
     fpq_sift_up(q, q.size - 1);
+    return true;
 }
 
 static void fpq_rebuild(FairPrincipalQueue& q) {
+    const u32 bi = band_index(q.band);
     u32 n = q.size;
     if (n > kMaxPrincipals) n = kMaxPrincipals;
 
@@ -303,15 +345,14 @@ static void fpq_rebuild(FairPrincipalQueue& q) {
         fpq_sift_down(q, i - 1);
     }
     for (u32 i = 0; i < w; ++i) {
-        if (q.data[i]) q.data[i]->heap_idx = static_cast<u8>(i);
+        if (q.data[i]) q.data[i]->heap_idx[bi] = static_cast<u8>(i);
     }
 }
 
 static PrincipalEntity* fpq_pop_min(FairPrincipalQueue& q) {
     if (q.size == 0) return nullptr;
+    const u32 bi = band_index(q.band);
 
-    // Corruption guard.  The observed crash was q.size underflowing and the
-    // generated load indexing q.data[0xffffffff].
     if (q.size > kMaxPrincipals || q.data[0] == nullptr) {
         fpq_rebuild(q);
         if (q.size == 0) return nullptr;
@@ -329,7 +370,7 @@ static PrincipalEntity* fpq_pop_min(FairPrincipalQueue& q) {
         q.data[0] = moved;
 
         if (moved) {
-            moved->heap_idx = 0;
+            moved->heap_idx[bi] = 0;
             fpq_sift_down(q, 0);
         } else {
             fpq_rebuild(q);
@@ -338,7 +379,7 @@ static PrincipalEntity* fpq_pop_min(FairPrincipalQueue& q) {
         q.data[0] = nullptr;
     }
 
-    if (min) min->heap_idx = 0xff;
+    if (min) min->heap_idx[bi] = 0xff;
     return min;
 }
 
@@ -347,19 +388,41 @@ static PrincipalEntity* fpq_peek_min(const FairPrincipalQueue& q) {
 }
 
 // ---------------------------------------------------------------------------
-// Band routing: which FairPrincipalQueue does this thread belong to?
+// Band routing.  The principal queue and per-principal thread heap must be
+// selected by the same band; otherwise a latency-selected principal can pop a
+// fair or VM thread from a shared heap.
 // ---------------------------------------------------------------------------
-static FairPrincipalQueue& band_for(Eki& e, SchedClass cls) {
-    return (cls == SCHED_INTERACTIVE || cls == SCHED_SERVICE)
-        ? e.latency_principals : e.timeshare_principals;
+static FairPrincipalQueue& band_for(Eki& e, SchedBand band) {
+    switch (band) {
+    case SCHED_BAND_LATENCY:    return e.latency_principals;
+    case SCHED_BAND_VM_LATENCY: return e.vm_latency_principals;
+    case SCHED_BAND_FAIR:       return e.fair_principals;
+    case SCHED_BAND_VM_FAIR:    return e.vm_fair_principals;
+    case SCHED_BAND_BATCH:      return e.batch_principals;
+    case SCHED_BAND_IDLE:       return e.idle_principals;
+    default:                    return e.fair_principals;
+    }
 }
-static u64& min_vruntime_for(Eki& e, SchedClass cls) {
-    return (cls == SCHED_INTERACTIVE || cls == SCHED_SERVICE)
-        ? e.min_vruntime_latency : e.min_vruntime_timeshare;
+
+static BandQueue& band_threads(PrincipalEntity& pe, SchedBand band) {
+    switch (band) {
+    case SCHED_BAND_RT_NATIVE:  return pe.rt;
+    case SCHED_BAND_LATENCY:    return pe.latency;
+    case SCHED_BAND_FAIR:       return pe.fair;
+    case SCHED_BAND_VM_LATENCY: return pe.vm_latency;
+    case SCHED_BAND_VM_FAIR:    return pe.vm_fair;
+    case SCHED_BAND_BATCH:      return pe.batch;
+    case SCHED_BAND_IDLE:       return pe.idle;
+    default:                    return pe.fair;
+    }
+}
+
+static u64& min_vruntime_for(Eki& e, SchedBand band) {
+    return e.min_vruntime[band_index(band)];
 }
 
 // ---------------------------------------------------------------------------
-// enqueue_fair — add thread to its principal entity's fair queue.
+// enqueue_fair — add thread to its principal entity's band-specific fair queue.
 // On first thread for this principal on this CPU, normalize vruntimes to
 // min_vruntime so long-sleeping threads don't get unlimited catch-up.
 // ---------------------------------------------------------------------------
@@ -376,35 +439,53 @@ static bool enqueue_fair(Eki& e, Thread* t) {
     const u32 pid = t->principal_id;
     if (pid >= kMaxPrincipals) return false;
 
+    const SchedBand sb = t->sched.sched_class;
+    const u32 bi = band_index(sb);
     PrincipalEntity& pe      = e.principal_entities[pid];
-    FairPrincipalQueue& band = band_for(e, t->sched.sched_class);
-    u64& min_vr             = min_vruntime_for(e, t->sched.sched_class);
+    FairPrincipalQueue& band = band_for(e, sb);
+    BandQueue& threads       = band_threads(pe, sb);
+    u64& min_vr              = min_vruntime_for(e, sb);
 
     // Normalize: clamp back-pay from sleeping.
     if (t->vruntime_ns < min_vr) t->vruntime_ns = min_vr;
-    if (pe.vruntime_ns < min_vr) pe.vruntime_ns = min_vr;
+    if (pe.vruntime[bi] < min_vr) pe.vruntime[bi] = min_vr;
 
-    if (pe.weight == 0) pe.weight = t->sched.weight ? t->sched.weight : NICE_0_WEIGHT;
-    t->slice_ns = compute_slice_ns(t, pe.runnable_threads + 1);
+    const u32 global_weight = (pid < kMaxPrincipalsLocal && g_principal_sched[pid].weight)
+        ? g_principal_sched[pid].weight : NICE_0_WEIGHT;
+    if (pe.weight == 0) pe.weight = global_weight;
+    t->slice_ns = compute_slice_ns(t, pe.runnable[bi] + 1);
 
-    if (!ftq_push(pe.threads, t)) {
-        // Do not feed full queues back into pending_wakes: that creates a
-        // self-sustaining duplicate runnable entry.  Leave the thread runnable
-        // but off-queue so the fault is visible through lag/metrics instead of
-        // corrupting another thread's trapframe.
+    if (!ftq_push(threads, t)) {
+        metric_inc(e.fair_queue_overflows);
+        ANKO_LOGF_ERROR("kernel/sched",
+                        "fair queue overflow cpu=%u principal=%u band=%u tid=%u",
+                        e.cpu_id, pid, static_cast<u32>(sb), t->tid);
+        // Hard diagnostic: do not leave a runnable thread off-queue.  Parking the
+        // thread is safer than creating a duplicate/stale entry that can corrupt
+        // another process's trapframe.
         t->on_runqueue = false;
+        t->state = TS_BLOCKED;
         return false;
     }
 
     t->on_runqueue = true;
     t->cpu_id = e.cpu_id;
-    ++pe.runnable_threads;
+    ++pe.runnable[bi];
 
-    bool& in_q = (&band == &e.latency_principals)
-        ? pe.in_latency_queue : pe.in_timeshare_queue;
-    if (!in_q) {
-        fpq_push(band, &pe);
-        in_q = true;
+    if (!pe.in_queue[bi]) {
+        if (fpq_push(band, &pe)) {
+            pe.in_queue[bi] = true;
+        } else {
+            metric_inc(e.fair_queue_overflows);
+            ANKO_LOGF_ERROR("kernel/sched",
+                            "principal queue overflow cpu=%u principal=%u band=%u",
+                            e.cpu_id, pid, static_cast<u32>(sb));
+            (void)ftq_remove(threads, t);
+            if (pe.runnable[bi] > 0) --pe.runnable[bi];
+            t->on_runqueue = false;
+            t->state = TS_BLOCKED;
+            return false;
+        }
     }
 
     if (Process* p = find_process(t->pid)) ++p->runnable_threads;
@@ -412,20 +493,22 @@ static bool enqueue_fair(Eki& e, Thread* t) {
 }
 
 // ---------------------------------------------------------------------------
-// dequeue_from_principal — remove thread from its principal's heap.
-// Called by work stealing.
+// dequeue_from_principal — remove thread from its principal's band heap.
+// Called by work stealing and destruction.
 // ---------------------------------------------------------------------------
 static bool dequeue_from_principal(Eki& e, Thread* t) {
     if (!t) return false;
     const u32 pid = t->principal_id;
     if (pid >= kMaxPrincipals) return false;
 
+    const SchedBand sb = t->sched.sched_class;
+    const u32 bi = band_index(sb);
     PrincipalEntity& pe = e.principal_entities[pid];
-    if (!ftq_remove(pe.threads, t)) return false;
-    if (pe.runnable_threads > 0) --pe.runnable_threads;
+    BandQueue& threads = band_threads(pe, sb);
+    if (!ftq_remove(threads, t)) return false;
+    if (pe.runnable[bi] > 0) --pe.runnable[bi];
 
-    // If principal is now empty and was in a band, remove it.
-    // (band removal done lazily in pick_fair)
+    // Principal queue removal is lazy in pick_fair.
 
     if (Process* p = find_process(t->pid)) {
         if (p->runnable_threads > 0) --p->runnable_threads;
@@ -481,45 +564,49 @@ static Thread* pick_rt(Eki& e) {
 }
 
 // ---------------------------------------------------------------------------
-// pick_fair — pick min-vruntime principal, then min-effective-key thread.
-// Skips throttled principals (lazily removes them from band).
+// pick_fair — pick min-vruntime principal, then min-effective-key thread from
+// the same band.  Skips globally throttled principals lazily.
 // ---------------------------------------------------------------------------
 static Thread* pick_fair(Eki& e, FairPrincipalQueue& band) {
+    const SchedBand sb = band.band;
+    const u32 bi = band_index(sb);
     while (band.size > 0) {
         PrincipalEntity* pe = fpq_peek_min(band);
         if (!pe) break;
 
-        if (pe->throttled) {
+        const bool global_throttled =
+            pe->principal_id < kMaxPrincipalsLocal &&
+            __atomic_load_n(&g_principal_sched[pe->principal_id].throttled, __ATOMIC_RELAXED);
+        if (pe->throttled || global_throttled) {
+            pe->throttled = true;
             fpq_pop_min(band);
-            if (&band == &e.latency_principals) pe->in_latency_queue = false;
-            else                                pe->in_timeshare_queue = false;
+            pe->in_queue[bi] = false;
             continue;
         }
 
-        Thread* t = ftq_pop_min(pe->threads);
+        BandQueue& threads = band_threads(*pe, sb);
+        Thread* t = ftq_pop_min(threads);
         if (!t) {
             fpq_pop_min(band);
-            if (&band == &e.latency_principals) pe->in_latency_queue = false;
-            else                                pe->in_timeshare_queue = false;
+            pe->in_queue[bi] = false;
+            pe->runnable[bi] = 0;
             continue;
         }
 
-        if (pe->runnable_threads > 0) --pe->runnable_threads;
+        if (pe->runnable[bi] > 0) --pe->runnable[bi];
         if (Process* p = find_process(t->pid)) {
             if (p->runnable_threads > 0) --p->runnable_threads;
         }
 
         fpq_pop_min(band);
-        if (pe->runnable_threads > 0) {
-            fpq_push(band, pe);
+        if (pe->runnable[bi] > 0) {
+            (void)fpq_push(band, pe);
         } else {
-            if (&band == &e.latency_principals) pe->in_latency_queue = false;
-            else                                pe->in_timeshare_queue = false;
+            pe->in_queue[bi] = false;
         }
 
-        u64& min_vr = (&band == &e.latency_principals)
-            ? e.min_vruntime_latency : e.min_vruntime_timeshare;
-        if (pe->vruntime_ns > min_vr) min_vr = pe->vruntime_ns;
+        u64& min_vr = min_vruntime_for(e, sb);
+        if (pe->vruntime[bi] > min_vr) min_vr = pe->vruntime[bi];
 
         // Lazy stale-entry filter.  This is intentionally stricter than just
         // checking TS_DEAD: a stale entry for a running, blocked, pending, or
@@ -554,15 +641,25 @@ static void account_current(Eki& e) {
         __atomic_add_fetch(&ps.runtime_ns,        delta, __ATOMIC_RELAXED);
         __atomic_add_fetch(&ps.used_in_period_ns, delta, __ATOMIC_RELAXED);
 
-        // Per-CPU principal entity vruntime
+        // Per-CPU principal entity vruntime, tracked per band so a principal
+        // cannot carry latency placement into fair/VM queues.
         PrincipalEntity& pe = e.principal_entities[pid];
         pe.runtime_ns   += delta;
         const u32 pw     = pe.weight ? pe.weight : NICE_0_WEIGHT;
-        pe.vruntime_ns  += delta * NICE_0_WEIGHT / pw;
+        pe.vruntime[band_index(t->sched.sched_class)] += delta * NICE_0_WEIGHT / pw;
 
         // Thread vruntime
         const u32 tw     = t->sched.weight ? t->sched.weight : NICE_0_WEIGHT;
         t->vruntime_ns  += delta * NICE_0_WEIGHT / tw;
+
+        // Bound explicit sched contexts independently from principal budgets.
+        if (t->sched_context) {
+            SchedContext* ctx = t->sched_context;
+            ctx->used_ns += delta;
+            if (ctx->budget_ns > 0 && ctx->used_ns >= ctx->budget_ns) {
+                request_switch(false, SWITCH_BUDGET);
+            }
+        }
 
         // Decay IPC wake credit
         const u64 decay  = static_cast<u64>(t->wake_credit_ns) < delta
@@ -596,15 +693,27 @@ static void refill_principal_budgets() {
     for (u32 i = 0; i < kMaxPrincipalsLocal; ++i) {
         PrincipalSchedState& ps = g_principal_sched[i];
         if (ps.budget_ns == 0) continue;
-        if (now - ps.period_start_ns < ps.period_ns) continue;
+        if (ps.period_ns == 0 || now - ps.period_start_ns < ps.period_ns) continue;
         ps.used_in_period_ns = 0;
         ps.period_start_ns   = now;
         if (ps.throttled) {
             ps.throttled = false;
-            // Unthrottle on current CPU; remote CPUs will see it on next pick
-            Eki& e = current_eki();
-            if (i < kMaxPrincipals) e.principal_entities[i].throttled = false;
+            for (u32 cpu = 0; cpu < kMaxCpus; ++cpu) {
+                if (i < kMaxPrincipals) g_eki[cpu].principal_entities[i].throttled = false;
+            }
         }
+    }
+}
+
+static void refill_sched_context_budgets() {
+    const u64 now = sched_clock_ns();
+    for (u32 i = 0; i < kMaxSchedContexts; ++i) {
+        if (!g_sched_context_allocated[i]) continue;
+        SchedContext& ctx = g_sched_contexts[i];
+        if (ctx.budget_ns == 0 || ctx.period_ns == 0) continue;
+        if (now - ctx.period_start_ns < ctx.period_ns) continue;
+        ctx.used_ns = 0;
+        ctx.period_start_ns = now;
     }
 }
 
@@ -675,7 +784,11 @@ static u32 least_loaded_cpu_for(const Thread* t) {
     for (u32 i = 0; i < n; ++i) {
         if (!(allowed & (1ull << i))) continue;
         const u32 load = g_eki[i].latency_principals.size
-                       + g_eki[i].timeshare_principals.size
+                       + g_eki[i].vm_latency_principals.size
+                       + g_eki[i].fair_principals.size
+                       + g_eki[i].vm_fair_principals.size
+                       + g_eki[i].batch_principals.size
+                       + g_eki[i].idle_principals.size
                        + (g_eki[i].rt.bitmap ? 1u : 0u);
         if (load < best_load) { best_load = load; best_cpu = i; }
     }
@@ -728,23 +841,16 @@ void apply_wake_metadata(Thread* t, WakeReason reason, u32 sched_hints) {
     t->last_wake_reason = reason;
     t->last_wake_ns     = sched_clock_ns();
 
-    // Only doorbell and IRQ wakes get credit
+    // Only doorbell and IRQ wakes get credit.  The credit remains non-transferable
+    // per thread and is charged away as the receiver's principal runs.
     if (reason != WAKE_DOORBELL && reason != WAKE_IRQ) return;
-    if (t->sched.sched_class == SCHED_BATCH
-        || t->sched.sched_class == SCHED_VM
-        || t->sched.sched_class == SCHED_IDLE
-        || t->sched.sched_class == SCHED_RT) return;
-
-    const bool hint_latency = (sched_hints & IPC_HINT_LATENCY) != 0;
-    const bool server_hint  = (t->latency_hint == LATENCY_IPC_SERVER);
-    if (!hint_latency && !server_hint) return;
 
     const u32 pid = t->principal_id;
     if (pid < kMaxPrincipalsLocal && g_principal_sched[pid].throttled) return;
 
-    const u64 credit = wake_credit_for(t->sched.sched_class, sched_hints);
+    const u64 credit = wake_credit_for(t, reason, sched_hints);
     if (credit == 0) return;
-    const i64 cap = static_cast<i64>(wake_credit_cap(t->sched.sched_class));
+    const i64 cap = static_cast<i64>(wake_credit_cap(t));
     t->wake_credit_ns = t->wake_credit_ns + static_cast<i64>(credit);
     if (t->wake_credit_ns > cap) t->wake_credit_ns = cap;
 
@@ -763,17 +869,20 @@ static void maybe_request_preemption_on_wake(Eki& e, Thread* woken) {
         return;
     }
     if (cur->state != TS_RUNNING) return;
-    if (cur->sched.sched_class == SCHED_RT) return; // RT never preempted by fair
+    if (cur->sched.sched_class == SCHED_BAND_RT_NATIVE) return; // native RT never preempted by fair
 
-    // Band preemption: latency thread woke while timeshare runs
-    if (is_latency_class(woken) && !is_latency_class(cur)) {
+    const u32 wbi = band_index(woken->sched.sched_class);
+    const u32 cbi = band_index(cur->sched.sched_class);
+
+    // Pick-order preemption: a higher band woke while a lower band runs.
+    if (wbi < cbi) {
         request_switch(true, SWITCH_WAKE);
         metric_inc(e.ipc_wake_preemptions);
         return;
     }
 
     // Same-band margin-based preemption
-    if (is_latency_class(woken) == is_latency_class(cur)) {
+    if (wbi == cbi) {
         const u64 margin  = wakeup_preempt_margin_ns(woken->sched.sched_class);
         if (margin > 0) {
             const u64 wk = effective_key(woken);
@@ -865,28 +974,37 @@ void wake(Thread* t) {
 static bool is_stealable(const Thread* t) {
     if (!t) return false;
     if (!t->on_runqueue || t->state != TS_RUNNABLE_QUEUED) return false;
-    if (t->sched.sched_class == SCHED_RT)  return false;
+    const SchedBand band = t->sched.sched_class;
+    if (band == SCHED_BAND_RT_NATIVE || band == SCHED_BAND_LATENCY ||
+        band == SCHED_BAND_VM_LATENCY) return false;
+    if (t->sched_context && (t->sched_context->flags & SCHED_CTX_NO_STEAL)) return false;
+    if (is_vm_band(band) &&
+        (!t->sched_context || !(t->sched_context->flags & SCHED_CTX_STEALABLE))) return false;
     // Hard affinity: pinned to one CPU
     if (t->affinity_mask != 0 && __builtin_popcountll(t->affinity_mask) == 1) return false;
-    // Service threads with no-steal flag
-    if (t->sched.sched_class == SCHED_SERVICE &&
-        (t->ipc_hot_until_ns > sched_clock_ns())) return false;
-    // VM threads with single-CPU affinity — don't steal pinned vCPUs
-    if (t->sched.sched_class == SCHED_VM &&
-        t->affinity_mask != 0 && __builtin_popcountll(t->affinity_mask) == 1) return false;
-    return t->sched.sched_class == SCHED_NORMAL
-        || t->sched.sched_class == SCHED_BATCH
-        || t->sched.sched_class == SCHED_VM;
+    if (t->ipc_hot_until_ns > sched_clock_ns()) return false;
+    return band == SCHED_BAND_FAIR || band == SCHED_BAND_BATCH || band == SCHED_BAND_VM_FAIR;
+}
+
+static Thread* select_stealable_from_band(FairPrincipalQueue& q) {
+    const SchedBand sb = q.band;
+    for (u32 i = 0; i < q.size; ++i) {
+        PrincipalEntity* pe = q.data[i];
+        if (!pe) continue;
+        BandQueue& threads = band_threads(*pe, sb);
+        for (u32 j = 0; j < threads.size; ++j) {
+            if (is_stealable(threads.data[j])) return threads.data[j];
+        }
+    }
+    return nullptr;
 }
 
 static Thread* select_stealable(Eki& victim) {
-    // Prefer timeshare band for stealing
-    for (u32 i = 0; i < victim.timeshare_principals.size; ++i) {
-        PrincipalEntity* pe = victim.timeshare_principals.data[i];
-        for (u32 j = 0; j < pe->threads.size; ++j) {
-            if (is_stealable(pe->threads.data[j])) return pe->threads.data[j];
-        }
-    }
+    // Steal only lower-priority, migration-safe work.  VM fair vCPUs are
+    // migration-exempt by default unless SCHED_CTX_STEALABLE is set.
+    if (Thread* t = select_stealable_from_band(victim.fair_principals)) return t;
+    if (Thread* t = select_stealable_from_band(victim.vm_fair_principals)) return t;
+    if (Thread* t = select_stealable_from_band(victim.batch_principals)) return t;
     return nullptr;
 }
 
@@ -940,7 +1058,7 @@ static void maybe_send_steal_request(Eki& thief) {
     const u32 n    = g_online_cpu_count < kMaxCpus ? g_online_cpu_count : kMaxCpus;
     for (u32 c = 0; c < n; ++c) {
         if (c == thief.cpu_id) continue;
-        u32 load = g_eki[c].timeshare_principals.size;
+        u32 load = g_eki[c].fair_principals.size + g_eki[c].vm_fair_principals.size + g_eki[c].batch_principals.size;
         if (load > max_load) { max_load = load; victim_cpu = c; }
     }
     if (victim_cpu == kInvalidCpu) return;
@@ -968,9 +1086,13 @@ static Thread* pick_next(Eki& e) {
     drain_pending_wakes(e);
     handle_pending_steal_requests(e);
 
-    if (Thread* t = pick_rt(e))                     return t;
-    if (Thread* t = pick_fair(e, e.latency_principals))  return t;
-    if (Thread* t = pick_fair(e, e.timeshare_principals)) return t;
+    if (Thread* t = pick_rt(e))                         return t;
+    if (Thread* t = pick_fair(e, e.latency_principals))    return t;
+    if (Thread* t = pick_fair(e, e.vm_latency_principals)) return t;
+    if (Thread* t = pick_fair(e, e.fair_principals))       return t;
+    if (Thread* t = pick_fair(e, e.vm_fair_principals))    return t;
+    if (Thread* t = pick_fair(e, e.batch_principals))      return t;
+    if (Thread* t = pick_fair(e, e.idle_principals))       return t;
     return nullptr;
 }
 
@@ -1006,8 +1128,16 @@ static void init_eki(u32 cpu_id) {
     libk::memset(&e, 0, sizeof(e));
     e.cpu_id          = cpu_id;
     e.pending_reason  = SWITCH_NONE;
-    for (u32 i = 0; i < kMaxPrincipals; ++i)
+    e.latency_principals.band    = SCHED_BAND_LATENCY;
+    e.vm_latency_principals.band = SCHED_BAND_VM_LATENCY;
+    e.fair_principals.band       = SCHED_BAND_FAIR;
+    e.vm_fair_principals.band    = SCHED_BAND_VM_FAIR;
+    e.batch_principals.band      = SCHED_BAND_BATCH;
+    e.idle_principals.band       = SCHED_BAND_IDLE;
+    for (u32 i = 0; i < kMaxPrincipals; ++i) {
         e.principal_entities[i].principal_id = i;
+        for (u32 b = 0; b < NUM_BANDS; ++b) e.principal_entities[i].heap_idx[b] = 0xff;
+    }
 }
 
 void init() {
@@ -1015,17 +1145,20 @@ void init() {
     asm volatile("mrs %0, CNTFRQ_EL0" : "=r"(g_cntfrq));
     for (u32 i = 0; i < kMaxCpus; ++i) init_eki(i);
 
-    // Initialize global principal weights
-    g_principal_sched[PRINCIPAL_KERNEL].principal_id           = PRINCIPAL_KERNEL;
-    g_principal_sched[PRINCIPAL_KERNEL].weight                 = NICE_0_WEIGHT;
-    g_principal_sched[PRINCIPAL_NATIVE_TRUSTED].principal_id   = PRINCIPAL_NATIVE_TRUSTED;
-    g_principal_sched[PRINCIPAL_NATIVE_TRUSTED].weight         = 2048; // service-class
-    g_principal_sched[PRINCIPAL_NATIVE_SANDBOXED].principal_id = PRINCIPAL_NATIVE_SANDBOXED;
-    g_principal_sched[PRINCIPAL_NATIVE_SANDBOXED].weight       = NICE_0_WEIGHT;
+    // Reserve principal 0 for kernel/bootstrap work.  User processes and VMs get
+    // unique IDs; PrincipalClass is now authorization metadata, not the fairness
+    // bucket.
+    g_principal_sched[0].principal_id = 0;
+    g_principal_sched[0].class_ = PRINCIPAL_KERNEL;
+    g_principal_sched[0].allocated = 1;
+    g_principal_sched[0].weight = NICE_0_WEIGHT;
+    g_principal_sched[0].period_start_ns = sched_clock_ns();
 
-    // Mirror weights into per-CPU entities on CPU 0
-    for (u32 i = 0; i < kMaxPrincipals; ++i)
-        g_eki[0].principal_entities[i].weight = g_principal_sched[i].weight;
+    // Mirror weights into per-CPU entities.
+    for (u32 cpu = 0; cpu < kMaxCpus; ++cpu) {
+        for (u32 i = 0; i < kMaxPrincipals; ++i)
+            g_eki[cpu].principal_entities[i].weight = g_principal_sched[i].weight;
+    }
 
     g_online_cpu_count = 1;
     mark_cpu_online(0);
@@ -1050,6 +1183,7 @@ void init() {
         e.current = next;
         next->state = TS_RUNNING;
         next->last_start_ns = sched_clock_ns();
+        next->slice_start_ns = next->last_start_ns;
         activate_thread_space(next);
         ANKO_LOGF_INFO("kernel/sched",
                        "dispatch tid=%u pid=%u elr=%llx",
@@ -1071,11 +1205,19 @@ void tick() {
     if (!cur || cur->state != TS_RUNNING) return;
     metric_inc(e.timer_preempts);
 
+    const u64 now = sched_clock_ns();
+    const u64 ran_in_slice = (cur->slice_start_ns && now >= cur->slice_start_ns)
+        ? (now - cur->slice_start_ns) : 0;
+
     account_current(e); // charges delta, updates vruntime, may set switch_pending
     refill_principal_budgets();
+    refill_sched_context_budgets();
 
-    // Always request requeue on timer tick — fair pick will choose who runs next.
-    request_switch(true, SWITCH_TIMER);
+    if (e.switch_pending) return;
+    if ((cur->slice_ns > 0 && ran_in_slice >= cur->slice_ns) ||
+        (cur->handoff_deadline_ns != 0 && now >= cur->handoff_deadline_ns)) {
+        request_switch(true, SWITCH_TIMER);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,6 +1247,151 @@ bool principal_throttled(u32 pid) {
     return __atomic_load_n(&g_principal_sched[pid].throttled, __ATOMIC_RELAXED);
 }
 
+bool switch_pending() {
+    return current_eki().switch_pending;
+}
+
+u32 allocate_principal(PrincipalClass class_, u32 weight, u64 budget_ns, u64 period_ns) {
+    if (g_next_principal_id >= kMaxPrincipalsLocal) return 0;
+    const u32 id = g_next_principal_id++;
+    PrincipalSchedState& ps = g_principal_sched[id];
+    libk::memset(&ps, 0, sizeof(ps));
+    ps.principal_id = id;
+    ps.class_ = class_;
+    ps.allocated = 1;
+    ps.weight = weight ? weight : NICE_0_WEIGHT;
+    ps.budget_ns = budget_ns;
+    ps.period_ns = period_ns;
+    ps.period_start_ns = sched_clock_ns();
+    for (u32 cpu = 0; cpu < kMaxCpus; ++cpu)
+        g_eki[cpu].principal_entities[id].weight = ps.weight;
+    return id;
+}
+
+SchedContext* sched_context_by_id(u32 id) {
+    if (id == 0) return nullptr;
+    for (u32 i = 0; i < kMaxSchedContexts; ++i) {
+        if (g_sched_context_allocated[i] && g_sched_contexts[i].id == id) return &g_sched_contexts[i];
+    }
+    return nullptr;
+}
+
+SchedContext* sched_context_from_cap(Process& caller, CapHandle sched_context_cap, SysError* out_error) {
+    CapEntry* e = cap::lookup(*caller.cap_table, sched_context_cap, CAP_SCHED_CONTEXT);
+    if (!e) { if (out_error) *out_error = E_NOTFOUND; return nullptr; }
+    if ((e->rights_mask & RIGHT_SCHED_CONTEXT_CONTROL) == 0) {
+        if (out_error) *out_error = E_PERM;
+        return nullptr;
+    }
+    auto* ctx = static_cast<SchedContext*>(e->target);
+    if (!ctx) { if (out_error) *out_error = E_NOTFOUND; return nullptr; }
+    if (out_error) *out_error = E_OK;
+    return ctx;
+}
+
+static bool valid_sched_band(SchedBand band) {
+    return static_cast<u32>(band) < NUM_BANDS;
+}
+
+static bool sanitize_context_for_caller(Process& caller, SchedContext& ctx) {
+    if (!valid_sched_band(ctx.band)) return false;
+    if (ctx.weight == 0) ctx.weight = NICE_0_WEIGHT;
+    if (ctx.core_mask == 0) ctx.core_mask = online_mask();
+    ctx.core_mask &= online_mask();
+    if (ctx.core_mask == 0) return false;
+    if (ctx.home_cpu >= kMaxCpus || ((ctx.core_mask >> ctx.home_cpu) & 1u) == 0)
+        ctx.home_cpu = first_allowed_cpu(ctx.core_mask);
+
+    // Native hard RT is intentionally not available to sandboxed principals, and
+    // VM contexts are never allowed to masquerade as hard RT.
+    if (ctx.band == SCHED_BAND_RT_NATIVE && caller.principal_class != PRINCIPAL_KERNEL &&
+        caller.principal_class != PRINCIPAL_NATIVE_TRUSTED) return false;
+
+    if (ctx.principal_id == 0) ctx.principal_id = caller.principal_id;
+    if (caller.principal_class != PRINCIPAL_KERNEL && ctx.principal_id != caller.principal_id)
+        return false;
+    if (ctx.principal_id >= kMaxPrincipalsLocal || !g_principal_sched[ctx.principal_id].allocated)
+        return false;
+    return true;
+}
+
+CapHandle sched_context_create(Process& caller, const SchedContext& request, SysError* out_error) {
+    u32 slot = kMaxSchedContexts;
+    for (u32 i = 0; i < kMaxSchedContexts; ++i) {
+        if (!g_sched_context_allocated[i]) { slot = i; break; }
+    }
+    if (slot == kMaxSchedContexts) { if (out_error) *out_error = E_OVERFLOW; return kNullCap; }
+
+    SchedContext ctx = request;
+    if (!sanitize_context_for_caller(caller, ctx)) {
+        if (out_error) *out_error = E_INVALID;
+        return kNullCap;
+    }
+
+    ctx.id = g_next_sched_context_id++;
+    ctx.used_ns = 0;
+    ctx.period_start_ns = sched_clock_ns();
+    g_sched_contexts[slot] = ctx;
+    g_sched_context_allocated[slot] = true;
+
+    CapHandle h = cap::alloc(*caller.cap_table, CAP_SCHED_CONTEXT, &g_sched_contexts[slot],
+                             RIGHT_READ | RIGHT_DUP | RIGHT_SCHED_CONTEXT_CONTROL);
+    if (h == kNullCap) {
+        g_sched_context_allocated[slot] = false;
+        if (out_error) *out_error = E_OVERFLOW;
+        return kNullCap;
+    }
+    if (out_error) *out_error = E_OK;
+    return h;
+}
+
+static bool bind_thread_to_context(Thread* t, SchedContext* ctx) {
+    if (!t || !ctx) return false;
+    if (t->state == TS_DEAD || t->on_runqueue || t->state == TS_RUNNING ||
+        t->state == TS_RUNNABLE_PENDING_REMOTE || t->state == TS_RUNNABLE_QUEUED) return false;
+    t->principal_id = ctx->principal_id;
+    t->sched_context_id = ctx->id;
+    t->sched_context = ctx;
+    t->sched.sched_class = ctx->band;
+    t->sched.weight = ctx->weight ? ctx->weight : NICE_0_WEIGHT;
+    t->sched.slice_budget_ns = ctx->budget_ns;
+    t->affinity_mask = ctx->core_mask;
+    t->home_cpu = ctx->home_cpu;
+    t->cpu_id = first_allowed_cpu(ctx->core_mask);
+    if (ctx->band == SCHED_BAND_LATENCY) t->latency_hint = LATENCY_INTERACTIVE;
+    else if (ctx->band == SCHED_BAND_BATCH) t->latency_hint = LATENCY_BATCH;
+    else t->latency_hint = LATENCY_NORMAL;
+    return true;
+}
+
+SysError sched_context_bind_thread(Process& caller, CapHandle thread_cap, CapHandle sched_context_cap) {
+    CapEntry* te = cap::lookup(*caller.cap_table, thread_cap, CAP_THREAD);
+    if (!te) return E_NOTFOUND;
+    if ((te->rights_mask & RIGHT_THREAD_CONTROL) == 0) return E_PERM;
+    auto* t = static_cast<Thread*>(te->target);
+    SysError rc = E_OK;
+    SchedContext* ctx = sched_context_from_cap(caller, sched_context_cap, &rc);
+    if (!ctx) return rc;
+    return bind_thread_to_context(t, ctx) ? E_OK : E_BUSY;
+}
+
+SysError bind_current_to_sched_context_id(u32 sched_context_id) {
+    Thread* t = current();
+    SchedContext* ctx = sched_context_by_id(sched_context_id);
+    if (!t || !ctx) return E_NOTFOUND;
+    // Current runner is already running, so bind only fields that affect future
+    // accounting and re-enqueue.  Do not migrate it mid-syscall.
+    t->principal_id = ctx->principal_id;
+    t->sched_context_id = ctx->id;
+    t->sched_context = ctx;
+    t->sched.sched_class = ctx->band;
+    t->sched.weight = ctx->weight ? ctx->weight : NICE_0_WEIGHT;
+    t->sched.slice_budget_ns = ctx->budget_ns;
+    t->affinity_mask = ctx->core_mask;
+    t->home_cpu = ctx->home_cpu;
+    return E_OK;
+}
+
 // ---------------------------------------------------------------------------
 // Enqueue public API
 // ---------------------------------------------------------------------------
@@ -1116,8 +1403,8 @@ void enqueue(Thread* t) {
 
     const u32 tgt = target_cpu_for(t);
     if (tgt == current_cpu_id()) {
-        if (t->sched.sched_class == SCHED_RT) enqueue_rt(current_eki(), t);
-        else                                  (void)enqueue_fair(current_eki(), t);
+        if (t->sched.sched_class == SCHED_BAND_RT_NATIVE) enqueue_rt(current_eki(), t);
+        else                                             (void)enqueue_fair(current_eki(), t);
         send_event();
     } else {
         t->state = TS_RUNNABLE_PENDING_REMOTE;
@@ -1229,9 +1516,11 @@ extern "C" void post_syscall(void* frame_ptr) {
 
     if (requeue && cur->state == TS_RUNNING) {
         cur->state = TS_RUNNABLE_QUEUED;
-        enqueue_fair(e, cur);
+        if (cur->sched.sched_class == SCHED_BAND_RT_NATIVE) enqueue_rt(e, cur);
+        else enqueue_fair(e, cur);
     } else if (requeue && cur->state == TS_RUNNABLE_QUEUED) {
-        enqueue_fair(e, cur);
+        if (cur->sched.sched_class == SCHED_BAND_RT_NATIVE) enqueue_rt(e, cur);
+        else enqueue_fair(e, cur);
     }
 
     // Handoff override: skip fair pick
@@ -1275,6 +1564,7 @@ extern "C" void post_syscall(void* frame_ptr) {
     e.current = next;
     next->state = TS_RUNNING;
     next->last_start_ns = sched_clock_ns();
+    next->slice_start_ns = next->last_start_ns;
     next->last_cpu  = next->cpu_id;
     next->cpu_id    = e.cpu_id;
 
@@ -1389,6 +1679,17 @@ u64 pending_wake_drain_count() {
 u64 principal_runtime(u32 pid) {
     if (pid >= kMaxPrincipalsLocal) return 0;
     return __atomic_load_n(&g_principal_sched[pid].runtime_ns, __ATOMIC_RELAXED);
+}
+
+u64 principal_class_runtime(PrincipalClass class_) {
+    u64 total = 0;
+    for (u32 i = 0; i < kMaxPrincipalsLocal; ++i) {
+        PrincipalSchedState& ps = g_principal_sched[i];
+        if (ps.allocated && ps.class_ == class_) {
+            total += __atomic_load_n(&ps.runtime_ns, __ATOMIC_RELAXED);
+        }
+    }
+    return total;
 }
 u64 fairness_max_lag() {
     u64 min_v = ~0ull, max_v = 0;

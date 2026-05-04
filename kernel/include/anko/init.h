@@ -13,9 +13,9 @@ bool archive_materialize(PhysAddr* out_base, usize* out_size);
 
 VirtAddr load_elf(VmSpace& space, const void* elf_data, usize elf_size);
 bool load_service_elf(const char* service_name, VmSpace& space, VirtAddr* out_entry);
-Process* spawn_image(const void* elf_data, usize elf_size, Principal principal,
+Process* spawn_image(const void* elf_data, usize elf_size, PrincipalClass principal,
                      u32 supervisor_pid, u32 flags = 0, Thread** out_main_thread = nullptr);
-Process* spawn_service(const char* service_name, Principal principal, u32 supervisor_pid,
+Process* spawn_service(const char* service_name, PrincipalClass principal, u32 supervisor_pid,
                        u32 flags = 0, Thread** out_main_thread = nullptr);
 void create_init_process();
 

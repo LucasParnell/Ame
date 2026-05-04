@@ -47,7 +47,42 @@ enum VcpuState : u32 {
     VCPU_RUNNING = 3,
     VCPU_BLOCKED = 4,
     VCPU_DEAD = 5,
+    VCPU_BLOCKED_WFI = 6,
+    VCPU_BLOCKED_OFF = 7,
+    VCPU_OFF = 8,
 };
+
+enum VcpuExitReason : u32 {
+    VCPU_EXIT_QUANTUM_EXPIRED = 0,
+    VCPU_EXIT_WFI_BLOCKED = 1,
+    VCPU_EXIT_VIRTUAL_IRQ_PENDING = 2,
+    VCPU_EXIT_MMIO_BATCH_READY = 3,
+    VCPU_EXIT_UNSUPPORTED_TRAP = 4,
+    VCPU_EXIT_SHUTDOWN = 5,
+    VCPU_EXIT_HOST_PREEMPTED = 6,
+};
+
+enum VcpuBlockReason : u32 {
+    VCPU_BLOCK_NONE = 0,
+    VCPU_BLOCK_GUEST_IDLE = 1,
+    VCPU_BLOCK_GUEST_OFF = 2,
+};
+
+struct VcpuRunBudget {
+    u64 budget_ns;
+    u64 deadline_ns;
+    u32 max_exits;
+    u32 flags;
+};
+static_assert(__is_trivially_constructible(VcpuRunBudget));
+
+struct VcpuRunResult {
+    u32 exit_reason;
+    u32 exit_batch_count;
+    u64 last_esr;
+    u64 used_ns;
+};
+static_assert(__is_trivially_constructible(VcpuRunResult));
 
 enum VmChannelEndpoint : u32 {
     VM_CHANNEL_HOST_TO_GUEST_RING = 0,
@@ -255,6 +290,33 @@ static_assert(__builtin_offsetof(El2RunState, guest_vpidr) == 512);
 static_assert(__builtin_offsetof(El2RunState, host_ttbr1) == 520);
 static_assert(__builtin_offsetof(El2RunState, guest_sp_el0) == 592);
 static_assert(__builtin_offsetof(El2RunState, guest_afsr1_el1) == 696);
+struct VcpuSched {
+    u32 sched_context_id;
+    u32 runner_tid;
+
+    u32 home_cpu;
+    u32 blocked_reason;
+    u64 core_mask;
+
+    u64 budget_ns;
+    u64 period_ns;
+    u64 deadline_ns;
+    u64 used_ns;
+
+    u64 last_entry_ns;
+    u64 last_exit_ns;
+
+    u64 next_guest_timer_cnt;
+    bool timer_armed;
+    bool blocked_wfi;
+    bool virtual_irq_pending;
+    u8 _pad0;
+
+    u32 wake_reason;
+    u32 exit_batch_count;
+};
+static_assert(__is_trivially_constructible(VcpuSched));
+
 struct Vcpu {
     u32 vcpu_id;
     u32 owner_vm_id;
@@ -273,6 +335,7 @@ struct Vcpu {
     u64 last_exit_reason;
     u64 virtual_mpidr;
     u64 virtual_midr;
+    VcpuSched sched;
     VgicState vgic;
 };
 
@@ -348,6 +411,11 @@ struct VcpuInfo {
     u64 arg1;
     u64 run_count;
     u64 last_exit_reason;
+    u32 sched_context_id;
+    u32 runner_tid;
+    u64 core_mask;
+    u32 home_cpu;
+    u32 blocked_reason;
 };
 
 struct VmChannelInfo {
@@ -376,6 +444,8 @@ VmChannel* channel_from_cap(Process& caller, CapHandle channel_cap,
                             u32 need_rights, SysError* out_error);
 Vm* find_vm_by_id(u32 vm_id);
 void refresh_vm_state(Vm* vm);
+void poll_blocked_vcpu_timers();
+void poll_vcpu_timer(Vcpu& vcpu);
 
 SysError stage2_create(Stage2AddressSpace* s2);
 SysError stage2_map_page(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights);
@@ -403,7 +473,12 @@ CapHandle create_vcpu(Process& caller, CapHandle vm_cap, u64 flags, SysError* ou
 SysError set_vcpu_entry(Process& caller, CapHandle vcpu_cap, u64 entry_pc,
                         u64 arg0, u64 arg1);
 SysError inspect_vcpu(Process& caller, CapHandle vcpu_cap, VcpuInfo* out);
-SysError run_vcpu(Process& caller, CapHandle vcpu_cap, u64 budget_ticks);
+SysError vcpu_bind_sched_context(Process& caller, CapHandle vcpu_cap, CapHandle sched_context_cap);
+SysError vcpu_set_affinity(Process& caller, CapHandle vcpu_cap, u64 core_mask, u32 home_cpu);
+SysError vcpu_kick(Process& caller, CapHandle vcpu_cap, u32 reason);
+SysError vcpu_inject_irq(Process& caller, CapHandle vcpu_cap, u32 irq);
+SysError vcpu_block_until_irq_or_timer(Process& caller, CapHandle vcpu_cap);
+SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budget, VcpuRunResult* out);
 
 CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags,
                          SysError* out_error);

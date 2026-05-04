@@ -72,11 +72,12 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
     t->wake_credit_ns       = 0;
     t->last_start_ns        = 0;
     t->last_wake_ns         = 0;
+    t->slice_start_ns       = 0;
     t->slice_ns             = 0;
     t->ipc_hot_until_ns     = 0;
     t->drain_quantum_start_ns = 0;
     t->handoff_deadline_ns  = 0;
-    t->donated_priority     = 0;
+    t->donated_key          = 0;
     t->in_drain_quantum     = false;
     t->has_donation         = false;
     t->on_runqueue          = false;
@@ -96,17 +97,21 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
     t->sched.weight             = kPrioWeights[prio_idx];
     t->sched.slice_budget_ns    = 0;
 
-    // Latency hint from sched_class.
-    switch (t->sched.sched_class) {
-    case SCHED_INTERACTIVE: t->latency_hint = LATENCY_INTERACTIVE; break;
-    case SCHED_SERVICE:     t->latency_hint = LATENCY_IPC_SERVER;  break;
-    case SCHED_BATCH:       t->latency_hint = LATENCY_BATCH;       break;
-    default:                t->latency_hint = LATENCY_NORMAL;      break;
+    // Latency hint remains separate from the band. SERVICE and INTERACTIVE both
+    // route through SCHED_BAND_LATENCY, but IPC servers get a tighter wake-credit
+    // contract than ordinary interactive work.
+    switch (prio_idx) {
+    case PRIO_SERVICE:  t->latency_hint = LATENCY_IPC_SERVER;  break;
+    case PRIO_CRITICAL: t->latency_hint = LATENCY_INTERACTIVE; break;
+    case PRIO_BACKGROUND: t->latency_hint = LATENCY_BATCH;     break;
+    default:           t->latency_hint = LATENCY_NORMAL;      break;
     }
 
     Process* p = find_process(pid);
     if (p) {
         t->principal_id = p->principal_id;
+        t->sched_context_id = 0;
+        t->sched_context = nullptr;
         t->process_next = p->threads;
         p->threads = t;
     } else {
@@ -131,16 +136,23 @@ void thread_destroy(Thread* t) {
     unregister_thread(t);
 }
 
-Process* process_create(Principal principal, u32 supervisor_pid) {
+Process* process_create(PrincipalClass principal, u32 supervisor_pid) {
     if (g_next_pid > kMaxProcs) return nullptr;
     Process* p = static_cast<Process*>(mm::heap_alloc(sizeof(Process), alignof(Process)));
     if (!p) return nullptr;
     libk::memset(p, 0, sizeof(*p));
 
     p->pid = g_next_pid++;
-    p->principal = principal;
+    p->principal_class = principal;
     p->supervisor_pid = supervisor_pid;
-    p->principal_id = static_cast<u32>(principal);
+    if (principal == PRINCIPAL_KERNEL) {
+        p->principal_id = 0;
+    } else {
+        p->principal_id = allocate_principal(principal,
+                                             principal == PRINCIPAL_NATIVE_TRUSTED ? 2048 : NICE_0_WEIGHT,
+                                             0, 0);
+        if (p->principal_id == 0) return nullptr;
+    }
     p->next_stack_slot = 0;
     p->runtime_ns = 0;
     p->runnable_threads = 0;

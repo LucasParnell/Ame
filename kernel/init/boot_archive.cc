@@ -30,17 +30,11 @@
 #include "anko/log.h"
 #include "libk/string.h"
 #include "libk/printf.h"
+#include "anko/fdt.h"
 
 namespace kernel::init {
 
 namespace {
-
-constexpr u32 kFdtMagic = 0xD00D'FEEDu;
-constexpr u32 FDT_BEGIN_NODE = 1;
-constexpr u32 FDT_END_NODE = 2;
-constexpr u32 FDT_PROP = 3;
-constexpr u32 FDT_NOP = 4;
-constexpr u32 FDT_END = 9;
 
 struct TarEntry {
     char name[100];
@@ -165,11 +159,6 @@ void add_embedded(const char* name, const u8* start, const u8* end) {
     e.size = static_cast<usize>(end - start);
 }
 
-const u8* read_prop_data(const u8* p, u32 len, const u8* end) {
-    if (!p || p + len > end) return nullptr;
-    return p;
-}
-
 bool parse_tar_archive(const u8* base, usize size) {
     if (!base || size < 512) return false;
 
@@ -269,108 +258,61 @@ bool copy_source_tar_to_pages(PhysAddr* out_base, usize* out_size) {
     return true;
 }
 
+struct InitrdVisitorCtx {
+    i64 chosen_depth = -1;
+    PhysAddr initrd_start = 0;
+    PhysAddr initrd_end = 0;
+};
+
+static bool initrd_begin_node(void* v, const char* name, u32 depth) {
+    auto& ctx = *static_cast<InitrdVisitorCtx*>(v);
+    if (depth == 1 && libk::strcmp(name, "chosen") == 0) {
+        ctx.chosen_depth = static_cast<i64>(depth);
+        ANKO_LOG_DEBUG("kernel/dtb", "chosen");
+    }
+    return true;
+}
+
+static void initrd_end_node(void* v, u32 depth) {
+    auto& ctx = *static_cast<InitrdVisitorCtx*>(v);
+    if (static_cast<i64>(depth) == ctx.chosen_depth) ctx.chosen_depth = -1;
+}
+
+static void initrd_prop(void* v, const char* name, const u8* data, u32 len, u32 depth) {
+    auto& ctx = *static_cast<InitrdVisitorCtx*>(v);
+    if (ctx.chosen_depth < 0 || static_cast<i64>(depth) != ctx.chosen_depth) return;
+    if (libk::strcmp(name, "linux,initrd-start") == 0 && (len == 4 || len >= 8)) {
+        ctx.initrd_start = (len == 4) ? static_cast<PhysAddr>(libk::be32(data))
+                                       : libk::be64(data);
+        ANKO_LOGF_DEBUG("kernel/dtb", "initrd-start len=%u", len);
+    } else if (libk::strcmp(name, "linux,initrd-end") == 0 && (len == 4 || len >= 8)) {
+        ctx.initrd_end = (len == 4) ? static_cast<PhysAddr>(libk::be32(data))
+                                     : libk::be64(data);
+        ANKO_LOGF_DEBUG("kernel/dtb", "initrd-end len=%u", len);
+    }
+}
+
 } // namespace
 
 bool discover_initrd(PhysAddr dtb_phys, PhysAddr* out_base, usize* out_size) {
     if (!dtb_phys || !out_base || !out_size) return false;
 
-    auto* dtb = reinterpret_cast<const u8*>(dtb_phys);
-    if (libk::be32(dtb + 0) != kFdtMagic) {
-        ANKO_LOG_WARN("kernel/dtb", "bad magic");
+    const auto* dtb = reinterpret_cast<const u8*>(dtb_phys);
+    InitrdVisitorCtx ctx;
+    if (!fdt::walk(dtb, {&ctx, initrd_begin_node, initrd_end_node, initrd_prop})) {
+        ANKO_LOG_WARN("kernel/dtb", "bad or malformed DTB");
         return false;
     }
 
-    const u32 total_size = libk::be32(dtb + 4);
-    const u32 off_struct = libk::be32(dtb + 8);
-    const u32 off_strings = libk::be32(dtb + 12);
-    const u32 size_strings = libk::be32(dtb + 32);
-    const u32 size_struct = libk::be32(dtb + 36);
-
-    if (total_size < 40) return false;
-    if (off_struct >= total_size || off_strings >= total_size) return false;
-    if (off_struct + size_struct > total_size) return false;
-    if (off_strings + size_strings > total_size) return false;
-
-    const u8* p = dtb + off_struct;
-    const u8* end = p + size_struct;
-    const char* strings = reinterpret_cast<const char*>(dtb + off_strings);
-
-    i64 depth = -1;
-    i64 chosen_depth = -1;
-    PhysAddr initrd_start = 0;
-    PhysAddr initrd_end = 0;
-
-    while (p + 4 <= end) {
-        const u32 tok = libk::be32(p);
-        p += 4;
-
-        if (tok == FDT_BEGIN_NODE) {
-            if (p >= end) return false;
-
-            const char* name = reinterpret_cast<const char*>(p);
-            const usize nlen = libk::strlen(name);
-            p = reinterpret_cast<const u8*>(
-                align_up(reinterpret_cast<usize>(p + nlen + 1), 4));
-
-            ++depth;
-
-            if (depth == 1 && libk::strcmp(name, "chosen") == 0) {
-                chosen_depth = depth;
-                ANKO_LOG_DEBUG("kernel/dtb", "chosen");
-            }
-
-            continue;
-        }
-
-        if (tok == FDT_END_NODE) {
-            if (depth == chosen_depth) chosen_depth = -1;
-            --depth;
-            continue;
-        }
-
-        if (tok == FDT_NOP) continue;
-        if (tok == FDT_END) break;
-        if (tok != FDT_PROP) return false;
-        if (p + 8 > end) return false;
-
-        const u32 len = libk::be32(p);
-        const u32 name_off = libk::be32(p + 4);
-        p += 8;
-
-        const u8* prop_data = read_prop_data(p, len, end);
-        if (!prop_data) return false;
-
-        const char* prop_name = strings + name_off;
-
-        if (chosen_depth >= 0 && depth == chosen_depth) {
-            if (libk::strcmp(prop_name, "linux,initrd-start") == 0 &&
-                (len == 4 || len >= 8)) {
-                initrd_start = (len == 4)
-                    ? static_cast<PhysAddr>(libk::be32(prop_data))
-                    : libk::be64(prop_data);
-                ANKO_LOGF_DEBUG("kernel/dtb", "initrd-start len=%u", len);
-            } else if (libk::strcmp(prop_name, "linux,initrd-end") == 0 &&
-                       (len == 4 || len >= 8)) {
-                initrd_end = (len == 4)
-                    ? static_cast<PhysAddr>(libk::be32(prop_data))
-                    : libk::be64(prop_data);
-                ANKO_LOGF_DEBUG("kernel/dtb", "initrd-end len=%u", len);
-            }
-        }
-
-        p = reinterpret_cast<const u8*>(
-            align_up(reinterpret_cast<usize>(p + len), 4));
-    }
-
-    if (initrd_start == 0 || initrd_end <= initrd_start) {
+    if (ctx.initrd_start == 0 || ctx.initrd_end <= ctx.initrd_start) {
         ANKO_LOGF_WARN("kernel/dtb", "missing initrd start=%llx end=%llx",
-                       static_cast<unsigned long long>(initrd_start),
-                       static_cast<unsigned long long>(initrd_end));
+                       static_cast<unsigned long long>(ctx.initrd_start),
+                       static_cast<unsigned long long>(ctx.initrd_end));
         return false;
     }
 
-    *out_base = initrd_start;
-    *out_size = static_cast<usize>(initrd_end - initrd_start);
+    *out_base = ctx.initrd_start;
+    *out_size = static_cast<usize>(ctx.initrd_end - ctx.initrd_start);
     return true;
 }
 

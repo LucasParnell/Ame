@@ -58,6 +58,33 @@ void uart_write(const char* s, usize len) {
     for (usize i = 0; i < len; ++i) drivers::uart::putchar(s[i]);
 }
 
+void uart_write_cstr_limited(const char* s, usize max_len) {
+    if (!g_uart_ready) return;
+    if (!s) s = "(null)";
+    for (usize i = 0; i < max_len && s[i]; ++i) {
+        drivers::uart::putchar(s[i]);
+    }
+}
+
+void emit_early_direct(Level level, const char* component, const char* msg) {
+    // Do not build early log lines in a stack buffer. Before the MMU has
+    // installed Normal-memory attributes, optimized C++ may use unaligned
+    // word stores for byte-buffer appends; that faults under O2 on QEMU.
+    uart_write("[early] [", 9);
+    drivers::uart::putchar(level_char(level));
+    uart_write("] cpu0 ", 7);
+    uart_write_cstr_limited(component ? component : "kernel", 64);
+    uart_write(": ", 2);
+    uart_write_cstr_limited(msg ? msg : "(null)", kMaxMessage);
+    if (!msg || msg[0] == '\0') {
+        drivers::uart::putchar('\n');
+        return;
+    }
+    usize i = 0;
+    while (i < kMaxMessage && msg[i]) ++i;
+    if (i == 0 || msg[i - 1] != '\n') drivers::uart::putchar('\n');
+}
+
 struct Writer {
     char* out;
     usize cap;
@@ -269,33 +296,39 @@ bool console_attached_for(u32 cpu) {
 
 void emit_line(const char* line, usize len, bool force_uart) {
     const u32 cpu = cpu_index();
+    const bool console_attached = console_attached_for(cpu);
+
+    // Before the log console is attached this path is the early-boot UART
+    // fallback.  Do not use C/C++ atomics here: on AArch64 the compiler may
+    // implement them with exclusive load/store loops, and the boot path reaches
+    // this code before the kernel has established its final normal-memory
+    // attributes.  The early UART path is allowed to interleave if another CPU
+    // manages to log this early; it must never be able to deadlock before the
+    // first boot line.
+    if (!console_attached) {
+        if (force_uart || g_uart_ready) {
+            uart_write(line, len);
+        }
+        return;
+    }
+
     if (__atomic_exchange_n(&g_in_log[cpu], 1u, __ATOMIC_ACQUIRE) != 0) {
         __atomic_add_fetch(&g_dropped[cpu], 1ull, __ATOMIC_RELAXED);
         return;
     }
 
-    if (force_uart || !console_attached_for(cpu)) {
+    if (force_uart) {
         uart_write(line, len);
     }
 
-    if (console_attached_for(cpu)) {
-        if (!push_bytes(g_rings[cpu], line, len)) {
-            __atomic_add_fetch(&g_dropped[cpu], 1ull, __ATOMIC_RELAXED);
-        }
+    if (!push_bytes(g_rings[cpu], line, len)) {
+        __atomic_add_fetch(&g_dropped[cpu], 1ull, __ATOMIC_RELAXED);
     }
 
     __atomic_store_n(&g_in_log[cpu], 0u, __ATOMIC_RELEASE);
 }
 
-usize make_prefixed_line(Level level, const char* component, const char* msg,
-                         char* out, usize cap, bool* truncated) {
-    Writer w{out, cap, 0, false};
-    append_timestamp(w);
-    append_str(w, " [");
-    append_char(w, level_char(level));
-    append_str(w, "] cpu");
-    append_u64(w, cpu_index(), 10, false);
-    append_char(w, ' ');
+usize append_log_body(Writer& w, const char* component, const char* msg) {
     append_str(w, component ? component : "kernel");
     append_str(w, ": ");
 
@@ -308,11 +341,26 @@ usize make_prefixed_line(Level level, const char* component, const char* msg,
     }
     for (usize i = 0; i < msg_len; ++i) append_char(w, msg[i]);
     if (msg_len == 0 || msg[msg_len - 1] != '\n') append_char(w, '\n');
+    return msg_len;
+}
+
+usize make_prefixed_line(Level level, const char* component, const char* msg,
+                         char* out, usize cap, bool* truncated) {
+    Writer w{out, cap, 0, false};
+    append_timestamp(w);
+    append_str(w, " [");
+    append_char(w, level_char(level));
+    append_str(w, "] cpu");
+    append_u64(w, cpu_index(), 10, false);
+    append_char(w, ' ');
+
+    (void)append_log_body(w, component, msg);
 
     const usize len = finish(w);
     if (truncated) *truncated = w.truncated;
     return len;
 }
+
 
 } // namespace
 
@@ -331,16 +379,33 @@ void attach_console(Ring* const* rings, Doorbell* doorbell, u32 ring_count) {
 }
 
 void write(Level level, const char* component, const char* msg) {
+    if (!g_doorbell) {
+        emit_early_direct(level, component, msg);
+        return;
+    }
+
+    const u32 cpu = cpu_index();
+    const bool console_attached = console_attached_for(cpu);
+    if (!console_attached) {
+        emit_early_direct(level, component, msg);
+        return;
+    }
+
     char line[kMaxLine];
     bool truncated = false;
     const usize len = make_prefixed_line(level, component, msg, line, sizeof(line), &truncated);
     if (truncated) {
-        __atomic_add_fetch(&g_truncated[cpu_index()], 1ull, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_truncated[cpu], 1ull, __ATOMIC_RELAXED);
     }
     emit_line(line, len, level == Level::Fatal);
 }
 
 void vwritef(Level level, const char* component, const char* fmt, va_list ap) {
+    if (!g_doorbell) {
+        emit_early_direct(level, component, fmt ? fmt : "(null)");
+        return;
+    }
+
     char msg[kMaxMessage + 1];
     bool truncated = false;
     (void)vformat(msg, sizeof(msg), fmt, ap, &truncated);
@@ -363,6 +428,11 @@ void raw(const char* msg) {
 }
 
 void vrawf(const char* fmt, va_list ap) {
+    if (!g_doorbell) {
+        emit_early_direct(Level::Info, "kernel", fmt ? fmt : "(null)");
+        return;
+    }
+
     char line[kMaxMessage + 1];
     bool truncated = false;
     const usize len = vformat(line, sizeof(line), fmt, ap, &truncated);

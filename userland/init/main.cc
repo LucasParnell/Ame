@@ -18,6 +18,7 @@
 #include "mochi/syscall.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
+#include "mochi/console_config.h"
 
 constexpr uint32_t RIGHT_READ     = 1u << 0;
 constexpr uint32_t RIGHT_WRITE    = 1u << 1;
@@ -37,6 +38,7 @@ constexpr uint64_t kVaManifest = 0x2000'0000ull;
 constexpr uint64_t kVaInitrd = 0x2400'0000ull;
 constexpr uint64_t kVaInitLogRing = 0x2800'0000ull;
 constexpr uint64_t kVaPingToPongRing = 0x2801'0000ull;
+constexpr uint64_t kVaConsoleConfig  = 0x2802'0000ull;
 
 constexpr CapHandle cap_slot(uint32_t idx) {
     return (static_cast<CapHandle>(1) << 32) | idx;
@@ -328,7 +330,7 @@ extern "C" [[noreturn]] void _start() {
     const CapHandle dango_proc = dango ? dango->proc : kNullCap;
     const CapHandle auth_probe_proc = auth_probe ? auth_probe->proc : kNullCap;
 
-    // Console startup caps: UART + shared log doorbell + one ring per producer.
+    // Console startup caps: config page + UART + shared log doorbell + one ring per producer.
     const CapHandle console_db =
         (sys_cap_identify(kCapLogDoorbell) == kCapTypeDoorbell)
             ? kCapLogDoorbell
@@ -349,31 +351,68 @@ extern "C" [[noreturn]] void _start() {
                         console_db,
                         "init");
 
-    if (console_proc != kNullCap) {
-        require_ok(sys_cap_grant(console_proc, kCapUart,
-                                 RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                   "init: wiring failed\n");
-        require_ok(sys_doorbell_share(console_db, console_proc,
-                                      RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-                   "init: wiring failed\n");
-        for (uint32_t cpu = 0; cpu < kKernelLogRingCount; ++cpu) {
-            const CapHandle kernel_ring = cap_slot(kCapKernelLogRingBase + cpu);
-            require_ok(sys_ring_share(kernel_ring, console_proc,
-                                      RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                       "init: wiring failed\n");
-        }
-        require_ok(sys_ring_share(init_log_ring, console_proc,
-                                  RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                   "init: wiring failed\n");
-        for (uint32_t i = 0; i < service_count; ++i) {
-            require_ok(sys_ring_share(services[i].log_ring, console_proc,
-                                      RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-                       "init: wiring failed\n");
-        }
+    // Allocate config page shared with io.console.
+    const CapHandle config_arena = as_cap(sys_arena_create(4096, 0));
+    if (config_arena == kNullCap) fail_halt("init: wiring failed\n");
+    if (sys_map_page(config_arena, kVaConsoleConfig, RIGHT_READ | RIGHT_WRITE) != 0) {
+        fail_halt("init: wiring failed\n");
     }
+    auto* cfg = reinterpret_cast<ConsoleBootConfig*>(kVaConsoleConfig);
+    cfg->magic = 0;  // written last as ready flag
+
+    // Grant caps to io.console — capture handles as they appear in console's cap table.
+    // Config arena is slot 0; subsequent grants follow sequentially.
+    const CapHandle cons_config = as_cap(
+        sys_cap_grant(console_proc, config_arena,
+                      RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP));
+    const CapHandle cons_uart = as_cap(
+        sys_cap_grant(console_proc, kCapUart,
+                      RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP));
+    const CapHandle cons_doorbell = as_cap(
+        sys_doorbell_share(console_db, console_proc,
+                           RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP));
+    if (cons_config == kNullCap || cons_uart == kNullCap || cons_doorbell == kNullCap) {
+        fail_halt("init: wiring failed\n");
+    }
+
+    uint32_t ring_idx = 0;
+    for (uint32_t cpu = 0; cpu < kKernelLogRingCount; ++cpu) {
+        const CapHandle h = as_cap(
+            sys_ring_share(cap_slot(kCapKernelLogRingBase + cpu), console_proc,
+                           RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP));
+        if (h == kNullCap || ring_idx >= ConsoleBootConfig::kMaxRings)
+            fail_halt("init: wiring failed\n");
+        cfg->log_ring_caps[ring_idx++] = h;
+    }
+    {
+        const CapHandle h = as_cap(
+            sys_ring_share(init_log_ring, console_proc,
+                           RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP));
+        if (h == kNullCap || ring_idx >= ConsoleBootConfig::kMaxRings)
+            fail_halt("init: wiring failed\n");
+        cfg->log_ring_caps[ring_idx++] = h;
+    }
+    for (uint32_t i = 0; i < service_count; ++i) {
+        const CapHandle h = as_cap(
+            sys_ring_share(services[i].log_ring, console_proc,
+                           RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP));
+        if (h == kNullCap || ring_idx >= ConsoleBootConfig::kMaxRings)
+            fail_halt("init: wiring failed\n");
+        cfg->log_ring_caps[ring_idx++] = h;
+    }
+
+    cfg->uart_cap         = cons_uart;
+    cfg->log_doorbell_cap = cons_doorbell;
+    cfg->total_ring_count = ring_idx;
+    cfg->version          = ConsoleBootConfig::kVersion;
+    cfg->flags            = 0;
+    cfg->reserved0        = 0;
+    __atomic_store_n(&cfg->magic, ConsoleBootConfig::kMagic, __ATOMIC_RELEASE);
+
     if (!console || console->main_thread == kNullCap) fail_halt("init: wiring failed\n");
     require_ok(sys_thread_set_affinity(console->main_thread, 1ull << 0), "init: wiring failed\n");
     require_ok(sys_thread_resume(console->main_thread), "init: wiring failed\n");
+    console_log("console ready\n");
 
     // IPC demo wiring.
     const CapHandle ring_ping_to_pong = as_cap(sys_ring_create(kRingOrder, 0));
@@ -574,86 +613,85 @@ extern "C" [[noreturn]] void _start() {
     console_log_counter("metric.principal.a.runtime", static_cast<uint64_t>(sys_debug_counter(30)));
     console_log_counter("metric.principal.b.runtime", static_cast<uint64_t>(sys_debug_counter(31)));
 
-    if (!dango || !auth_probe ||
-        dango_proc == kNullCap ||
-        auth_probe_proc == kNullCap ||
-        dango->main_thread == kNullCap ||
-        auth_probe->main_thread == kNullCap) {
-        fail_halt("dango: wiring failed\n");
+    if (dango && auth_probe &&
+        dango_proc != kNullCap &&
+        auth_probe_proc != kNullCap &&
+        dango->main_thread != kNullCap &&
+        auth_probe->main_thread != kNullCap) {
+        const CapHandle db_dango_done = as_cap(sys_doorbell_create());
+        const CapHandle db_dango_auth_gate = as_cap(sys_doorbell_create());
+        const CapHandle db_dango_layout_done = as_cap(sys_doorbell_create());
+        if (db_dango_done == kNullCap ||
+            db_dango_auth_gate == kNullCap ||
+            db_dango_layout_done == kNullCap) {
+            fail_halt("dango: wiring failed\n");
+        }
+
+        require_ok(sys_ring_share(dango->log_ring, dango_proc,
+                                  RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+                   "dango: wiring failed\n");
+        require_ok(sys_doorbell_share(console_db, dango_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+                   "dango: wiring failed\n");
+        require_ok(sys_cap_grant(dango_proc, kCapVmRoot, RIGHT_VM_CREATE | RIGHT_VM_INSPECT),
+                   "dango: wiring failed\n");
+        require_ok(sys_doorbell_share(db_dango_done, dango_proc, RIGHT_NOTIFY),
+                   "dango: wiring failed\n");
+        require_ok(sys_doorbell_share(db_dango_auth_gate, dango_proc, RIGHT_WAIT),
+                   "dango: wiring failed\n");
+        require_ok(sys_doorbell_share(db_dango_layout_done, dango_proc, RIGHT_NOTIFY),
+                   "dango: wiring failed\n");
+        require_ok(sys_cap_grant(dango_proc, kCapInitrd, RIGHT_READ | RIGHT_MAP),
+                   "dango: wiring failed\n");
+        require_ok(sys_cap_grant(dango_proc, dango_proc,
+                                 RIGHT_SPAWN | RIGHT_READ | RIGHT_DUP),
+                   "dango: wiring failed\n");
+
+        require_ok(sys_ring_share(auth_probe->log_ring, auth_probe_proc,
+                                  RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
+                   "dango: wiring failed\n");
+        require_ok(sys_doorbell_share(console_db, auth_probe_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
+                   "dango: wiring failed\n");
+        require_ok(sys_cap_grant(auth_probe_proc, kCapVmRoot, RIGHT_VM_INSPECT),
+                   "dango: wiring failed\n");
+        require_ok(sys_doorbell_share(db_dango_auth_gate, auth_probe_proc, RIGHT_NOTIFY),
+                   "dango: wiring failed\n");
+
+        const uint64_t layout_base = sys_doorbell_read(db_dango_layout_done);
+        const uint64_t dango_done_base = sys_doorbell_read(db_dango_done);
+
+        require_ok(sys_thread_set_affinity(dango->main_thread, 1ull << 0),
+                   "dango: wiring failed\n");
+        require_ok(sys_thread_resume(dango->main_thread), "dango: wiring failed\n");
+        if (sys_wait_doorbell(db_dango_layout_done, layout_base) != 0) {
+            fail_halt("dango: wiring failed\n");
+        }
+
+        require_ok(sys_thread_set_affinity(auth_probe->main_thread, 1ull << 0),
+                   "dango: wiring failed\n");
+        require_ok(sys_thread_resume(auth_probe->main_thread), "dango: wiring failed\n");
+        if (sys_wait_doorbell(db_dango_done, dango_done_base) != 0) {
+            fail_halt("dango: wiring failed\n");
+        }
+
+        console_log_counter("metric.vm.create.calls", static_cast<uint64_t>(sys_debug_counter(32)));
+        console_log_counter("metric.vm.created", static_cast<uint64_t>(sys_debug_counter(33)));
+        console_log_counter("metric.vm.destroyed", static_cast<uint64_t>(sys_debug_counter(34)));
+        console_log_counter("metric.vm.memory.created", static_cast<uint64_t>(sys_debug_counter(35)));
+        console_log_counter("metric.vm.memory.mapped", static_cast<uint64_t>(sys_debug_counter(36)));
+        console_log_counter("metric.vm.memory.unmapped", static_cast<uint64_t>(sys_debug_counter(37)));
+        console_log_counter("metric.vm.stage2.tables.created", static_cast<uint64_t>(sys_debug_counter(38)));
+        console_log_counter("metric.vm.stage2.pages.mapped", static_cast<uint64_t>(sys_debug_counter(39)));
+        console_log_counter("metric.vm.vcpus.created", static_cast<uint64_t>(sys_debug_counter(40)));
+        console_log_counter("metric.vm.vcpu.configured", static_cast<uint64_t>(sys_debug_counter(41)));
+        console_log_counter("metric.vm.vcpu.run.attempts", static_cast<uint64_t>(sys_debug_counter(42)));
+        console_log_counter("metric.vm.vcpu.run.notimpl", static_cast<uint64_t>(sys_debug_counter(43)));
+        console_log_counter("metric.vm.channels.created", static_cast<uint64_t>(sys_debug_counter(44)));
+        console_log_counter("metric.vm.errors", static_cast<uint64_t>(sys_debug_counter(45)));
+        console_log_counter("metric.el.current", static_cast<uint64_t>(sys_debug_counter(46)));
+        console_log_counter("metric.el2.available", static_cast<uint64_t>(sys_debug_counter(47)));
+        console_log_counter("metric.vhe.available", static_cast<uint64_t>(sys_debug_counter(48)));
+        console_log("dango ready\n");
     }
-
-    const CapHandle db_dango_done = as_cap(sys_doorbell_create());
-    const CapHandle db_dango_auth_gate = as_cap(sys_doorbell_create());
-    const CapHandle db_dango_layout_done = as_cap(sys_doorbell_create());
-    if (db_dango_done == kNullCap ||
-        db_dango_auth_gate == kNullCap ||
-        db_dango_layout_done == kNullCap) {
-        fail_halt("dango: wiring failed\n");
-    }
-
-    require_ok(sys_ring_share(dango->log_ring, dango_proc,
-                              RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "dango: wiring failed\n");
-    require_ok(sys_doorbell_share(console_db, dango_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "dango: wiring failed\n");
-    require_ok(sys_cap_grant(dango_proc, kCapVmRoot, RIGHT_VM_CREATE | RIGHT_VM_INSPECT),
-               "dango: wiring failed\n");
-    require_ok(sys_doorbell_share(db_dango_done, dango_proc, RIGHT_NOTIFY),
-               "dango: wiring failed\n");
-    require_ok(sys_doorbell_share(db_dango_auth_gate, dango_proc, RIGHT_WAIT),
-               "dango: wiring failed\n");
-    require_ok(sys_doorbell_share(db_dango_layout_done, dango_proc, RIGHT_NOTIFY),
-               "dango: wiring failed\n");
-    require_ok(sys_cap_grant(dango_proc, kCapInitrd, RIGHT_READ | RIGHT_MAP),
-               "dango: wiring failed\n");
-    require_ok(sys_cap_grant(dango_proc, dango_proc,
-                             RIGHT_SPAWN | RIGHT_READ | RIGHT_DUP),
-               "dango: wiring failed\n");
-
-    require_ok(sys_ring_share(auth_probe->log_ring, auth_probe_proc,
-                              RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP),
-               "dango: wiring failed\n");
-    require_ok(sys_doorbell_share(console_db, auth_probe_proc, RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP),
-               "dango: wiring failed\n");
-    require_ok(sys_cap_grant(auth_probe_proc, kCapVmRoot, RIGHT_VM_INSPECT),
-               "dango: wiring failed\n");
-    require_ok(sys_doorbell_share(db_dango_auth_gate, auth_probe_proc, RIGHT_NOTIFY),
-               "dango: wiring failed\n");
-
-    const uint64_t layout_base = sys_doorbell_read(db_dango_layout_done);
-    const uint64_t dango_done_base = sys_doorbell_read(db_dango_done);
-
-    require_ok(sys_thread_set_affinity(dango->main_thread, 1ull << 0),
-               "dango: wiring failed\n");
-    require_ok(sys_thread_resume(dango->main_thread), "dango: wiring failed\n");
-    if (sys_wait_doorbell(db_dango_layout_done, layout_base) != 0) {
-        fail_halt("dango: wiring failed\n");
-    }
-
-    require_ok(sys_thread_set_affinity(auth_probe->main_thread, 1ull << 0),
-               "dango: wiring failed\n");
-    require_ok(sys_thread_resume(auth_probe->main_thread), "dango: wiring failed\n");
-    if (sys_wait_doorbell(db_dango_done, dango_done_base) != 0) {
-        fail_halt("dango: wiring failed\n");
-    }
-
-    console_log_counter("metric.vm.create.calls", static_cast<uint64_t>(sys_debug_counter(32)));
-    console_log_counter("metric.vm.created", static_cast<uint64_t>(sys_debug_counter(33)));
-    console_log_counter("metric.vm.destroyed", static_cast<uint64_t>(sys_debug_counter(34)));
-    console_log_counter("metric.vm.memory.created", static_cast<uint64_t>(sys_debug_counter(35)));
-    console_log_counter("metric.vm.memory.mapped", static_cast<uint64_t>(sys_debug_counter(36)));
-    console_log_counter("metric.vm.memory.unmapped", static_cast<uint64_t>(sys_debug_counter(37)));
-    console_log_counter("metric.vm.stage2.tables.created", static_cast<uint64_t>(sys_debug_counter(38)));
-    console_log_counter("metric.vm.stage2.pages.mapped", static_cast<uint64_t>(sys_debug_counter(39)));
-    console_log_counter("metric.vm.vcpus.created", static_cast<uint64_t>(sys_debug_counter(40)));
-    console_log_counter("metric.vm.vcpu.configured", static_cast<uint64_t>(sys_debug_counter(41)));
-    console_log_counter("metric.vm.vcpu.run.attempts", static_cast<uint64_t>(sys_debug_counter(42)));
-    console_log_counter("metric.vm.vcpu.run.notimpl", static_cast<uint64_t>(sys_debug_counter(43)));
-    console_log_counter("metric.vm.channels.created", static_cast<uint64_t>(sys_debug_counter(44)));
-    console_log_counter("metric.vm.errors", static_cast<uint64_t>(sys_debug_counter(45)));
-    console_log_counter("metric.el.current", static_cast<uint64_t>(sys_debug_counter(46)));
-    console_log_counter("metric.el2.available", static_cast<uint64_t>(sys_debug_counter(47)));
-    console_log_counter("metric.vhe.available", static_cast<uint64_t>(sys_debug_counter(48)));
     console_log("system ready\n");
 
     while (true) {

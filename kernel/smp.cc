@@ -7,6 +7,7 @@
 #include "anko/log.h"
 #include "libk/printf.h"
 #include "libk/string.h"
+#include "anko/fdt.h"
 
 namespace drivers::gic { void init_cpu(); void send_sgi(u32 cpu_id, u32 sgi_id); }
 namespace drivers::timer { void init_cpu(u32 irq_id); }
@@ -21,12 +22,6 @@ namespace smp {
 
 namespace {
 
-constexpr u32 FDT_BEGIN_NODE = 1;
-constexpr u32 FDT_END_NODE = 2;
-constexpr u32 FDT_PROP = 3;
-constexpr u32 FDT_NOP = 4;
-constexpr u32 FDT_END = 9;
-constexpr u32 kFdtMagic = 0xD00DFEED;
 constexpr u32 kWakeSgi = 1;
 constexpr u64 kPsciCpuOn64 = 0xC4000003ull;
 
@@ -39,11 +34,6 @@ struct CpuInfo {
 
 static CpuInfo g_info{1, {0, 1, 2, 3}, true, kPsciCpuOn64};
 static volatile u32 g_cpu_started[kMaxCpus]{};
-
-static const u8* align4(const u8* p) {
-    const u64 v = reinterpret_cast<u64>(p);
-    return reinterpret_cast<const u8*>((v + 3ull) & ~3ull);
-}
 
 static bool streq(const char* a, const char* b) {
     return libk::strcmp(a, b) == 0;
@@ -64,6 +54,37 @@ static u64 read_reg_cells(const u8* data, u32 len) {
     return 0;
 }
 
+struct SmpVisitorCtx {
+    CpuInfo& info;
+    u8 kind_stack[16]{};
+    u32 parsed_cpus{};
+};
+
+static bool smp_begin_node(void* v, const char* name, u32 depth) {
+    auto& ctx = *static_cast<SmpVisitorCtx*>(v);
+    const u8 parent = depth > 0 ? ctx.kind_stack[depth - 1] : 0;
+    u8 kind = 0;
+    if      (depth == 1 && streq(name, "psci"))            kind = 1;
+    else if (depth == 1 && streq(name, "cpus"))            kind = 2;
+    else if (parent == 2 && starts_with(name, "cpu@"))     kind = 3;
+    else kind = (parent == 1) ? 1 : 0;
+    if (depth < 16) ctx.kind_stack[depth] = kind;
+    return true;
+}
+
+static void smp_end_node(void*, u32) {}
+
+static void smp_prop(void* v, const char* name, const u8* data, u32 len, u32 depth) {
+    auto& ctx = *static_cast<SmpVisitorCtx*>(v);
+    const u8 kind = depth < 16 ? ctx.kind_stack[depth] : 0;
+    if (kind == 1 && streq(name, "method") && len >= 4)
+        ctx.info.psci_hvc = !streq(reinterpret_cast<const char*>(data), "smc");
+    else if (kind == 1 && streq(name, "cpu_on") && len >= 4)
+        ctx.info.psci_cpu_on = read_reg_cells(data, len);
+    else if (kind == 3 && streq(name, "reg") && ctx.parsed_cpus < kMaxCpus)
+        ctx.info.mpidr[ctx.parsed_cpus++] = read_reg_cells(data, len);
+}
+
 static CpuInfo parse_dtb(PhysAddr dtb_phys) {
     CpuInfo info{};
     info.count = 1;
@@ -74,74 +95,9 @@ static CpuInfo parse_dtb(PhysAddr dtb_phys) {
 
     if (!dtb_phys) return info;
     const auto* dtb = reinterpret_cast<const u8*>(dtb_phys);
-    if (libk::be32(dtb) != kFdtMagic) return info;
-
-    const u32 total_size = libk::be32(dtb + 4);
-    const u32 off_struct = libk::be32(dtb + 8);
-    const u32 off_strings = libk::be32(dtb + 12);
-    const u32 size_strings = libk::be32(dtb + 32);
-    const u32 size_struct = libk::be32(dtb + 36);
-    if (!total_size || off_struct >= total_size || off_strings >= total_size) return info;
-    if (off_strings + size_strings > total_size || off_struct + size_struct > total_size) return info;
-
-    const u8* p = dtb + off_struct;
-    const u8* end = p + size_struct;
-    const char* strings = reinterpret_cast<const char*>(dtb + off_strings);
-    u8 kind_stack[16]{};
-    u32 depth = 0;
-    u32 parsed_cpus = 0;
-
-    while (p + 4 <= end) {
-        const u32 token = libk::be32(p);
-        p += 4;
-        if (token == FDT_BEGIN_NODE) {
-            const char* name = reinterpret_cast<const char*>(p);
-            while (p < end && *p) ++p;
-            if (p < end) ++p;
-            p = align4(p);
-
-            const u8 parent = depth ? kind_stack[depth - 1] : 0;
-            u8 kind = 0;
-            if (depth == 0 && streq(name, "")) kind = 0;
-            else if (depth == 1 && streq(name, "psci")) kind = 1;
-            else if (depth == 1 && streq(name, "cpus")) kind = 2;
-            else if (parent == 2 && starts_with(name, "cpu@")) kind = 3;
-            else kind = parent == 1 ? 1 : 0;
-
-            if (depth < sizeof(kind_stack)) kind_stack[depth] = kind;
-            ++depth;
-            continue;
-        }
-        if (token == FDT_END_NODE) {
-            if (depth) --depth;
-            continue;
-        }
-        if (token == FDT_PROP) {
-            if (p + 8 > end) break;
-            const u32 len = libk::be32(p);
-            const u32 nameoff = libk::be32(p + 4);
-            p += 8;
-            if (p + len > end || nameoff >= size_strings) break;
-            const char* prop = strings + nameoff;
-            const u8 kind = depth ? kind_stack[depth - 1] : 0;
-
-            if (kind == 1 && streq(prop, "method") && len >= 4) {
-                const char* method = reinterpret_cast<const char*>(p);
-                info.psci_hvc = !streq(method, "smc");
-            } else if (kind == 1 && streq(prop, "cpu_on") && len >= 4) {
-                info.psci_cpu_on = read_reg_cells(p, len);
-            } else if (kind == 3 && streq(prop, "reg") && parsed_cpus < kMaxCpus) {
-                info.mpidr[parsed_cpus++] = read_reg_cells(p, len);
-            }
-            p = align4(p + len);
-            continue;
-        }
-        if (token == FDT_NOP) continue;
-        if (token == FDT_END) break;
-        break;
-    }
-
-    if (parsed_cpus > 0) info.count = parsed_cpus;
+    SmpVisitorCtx vctx{info};
+    fdt::walk(dtb, {&vctx, smp_begin_node, smp_end_node, smp_prop});
+    if (vctx.parsed_cpus > 0) info.count = vctx.parsed_cpus;
     if (info.count > kMaxCpus) info.count = kMaxCpus;
     return info;
 }

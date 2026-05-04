@@ -20,6 +20,7 @@ set(ANKO_SOURCES
     mm/vm_space.cc
     syscall/dispatch.cc
     init/elf_loader.cc
+    init/fdt.cc
     init/boot_archive.cc
     init/boot_caps.cc
 
@@ -104,6 +105,13 @@ target_include_directories(anko PRIVATE
 )
 
 target_link_libraries(anko PRIVATE libk)
+
+# Boot reaches C++ before the MMU has established Normal memory attributes.
+# At -O2, Clang may widen byte-buffer operations into unaligned word/dword
+# accesses. Keep kernel C++ safe across the early no-MMU window.
+target_compile_options(anko PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-mstrict-align>
+)
 
 target_link_options(anko PRIVATE
     -T ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/linker/kernel.ld

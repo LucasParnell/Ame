@@ -14,6 +14,7 @@
 
 #include "anko/platform.h"
 #include "anko/sched.h"
+#include "anko/vm.h"
 #include "libk/metric.h"
 
 namespace drivers::gic { void irq_enable(u32 irq_id); }
@@ -55,6 +56,7 @@ void init_cpu(u32 irq_id) {
 void handle_tick() {
     metric_inc(g_tick_count);
     rearm();
+    vm::poll_blocked_vcpu_timers();
     sched::tick();
 }
 

@@ -3,6 +3,7 @@
 #include "anko/log.h"
 #include "libk/printf.h"
 #include "libk/string.h"
+#include "anko/arm64_esr.h"
 
 extern "C" u64 g_boot_el;
 extern "C" u64 vm_el2_run(vm::El2RunState* state);
@@ -16,14 +17,7 @@ u32 g_next_vcpu_id = 1;
 
 constexpr u64 kLinuxBootProbeEntry = 0x4008'0000ull;
 constexpr u64 kHcrExitUnsupported = 0;
-constexpr u64 kEcWfx = 0x01;
-constexpr u64 kEcHvc64 = 0x16;
-constexpr u64 kEcSmc64 = 0x17;
-constexpr u64 kEcSysReg = 0x18;
-constexpr u64 kEcInstrAbortLower = 0x20;
-constexpr u64 kEcInstrAbortCurrent = 0x21;
-constexpr u64 kEcDataAbortLower = 0x24;
-constexpr u64 kEcDataAbortCurrent = 0x25;
+using namespace arm64;
 constexpr u64 kQemuUartBase = 0x0900'0000ull;
 constexpr u64 kQemuGicDistBase = 0x0800'0000ull;
 constexpr u64 kQemuGicCpuBase = 0x0801'0000ull;
@@ -49,14 +43,14 @@ constexpr u32 kPsciAffinityInfo64 = 0xC4000004u;
 constexpr i64 kPsciSuccess = 0;
 constexpr i64 kPsciNotSupported = -1;
 constexpr i64 kPsciInvalidParameters = -2;
-constexpr i64 kPsciDenied = -3;
 constexpr i64 kPsciAlreadyOn = -4;
 
 enum class PsciAction : u32 {
     NotHandled = 0,
     Continue = 1,
     StopCurrent = 2,
-    ShutdownVm = 3,
+    SuspendCurrent = 3,
+    ShutdownVm = 4,
 };
 
 constexpr u32 GICD_CTLR       = 0x000;
@@ -83,14 +77,6 @@ constexpr u32 GICC_RPR   = 0x014;
 constexpr u32 GICC_HPPIR = 0x018;
 constexpr u32 GICC_IIDR  = 0x0FC;
 constexpr u32 GICC_DIR   = 0x1000;
-
-u64 esr_ec(u64 esr) {
-    return (esr >> 26) & 0x3Full;
-}
-
-u64 esr_iss(u64 esr) {
-    return esr & 0x01FF'FFFFull;
-}
 
 u64 read_cntpct() {
     u64 value = 0;
@@ -510,6 +496,8 @@ bool psci_function_supported(u32 fn) {
     switch (fn) {
     case kPsciVersion32:
     case kPsciCpuOff32:
+    case kPsciCpuSuspend32:
+    case kPsciCpuSuspend64:
     case kPsciCpuOn32:
     case kPsciCpuOn64:
     case kPsciAffinityInfo32:
@@ -534,6 +522,9 @@ Vcpu* find_vcpu_by_mpidr(Vm& owner, u64 mpidr) {
     return nullptr;
 }
 
+void sync_vcpu_from_el2(Vcpu& vcpu);
+void wake_bound_runner(Vcpu& vcpu, WakeReason reason, u32 hints);
+
 void reset_target_vcpu_for_psci_on(Vcpu& target, u64 entry, u64 context_id) {
     target.entry_pc = entry;
     target.arg0 = context_id;
@@ -545,6 +536,9 @@ void reset_target_vcpu_for_psci_on(Vcpu& target, u64 entry, u64 context_id) {
     target.regs[0] = context_id;
     libk::memset(&target.el2, 0, sizeof(target.el2));
     target.state = VCPU_READY;
+    target.sched.blocked_wfi = false;
+    target.sched.blocked_reason = VCPU_BLOCK_NONE;
+    target.sched.virtual_irq_pending = true;
 }
 
 PsciAction emulate_psci(Vcpu& vcpu, Vm& owner, u64 ec) {
@@ -604,6 +598,7 @@ PsciAction emulate_psci(Vcpu& vcpu, Vm& owner, u64 ec) {
             write_x0(vcpu.el2, kPsciAlreadyOn);
         } else {
             reset_target_vcpu_for_psci_on(*target, entry, context_id);
+            wake_bound_runner(*target, WAKE_IRQ, IPC_HINT_LATENCY);
             write_x0(vcpu.el2, kPsciSuccess);
         }
         break;
@@ -620,8 +615,8 @@ PsciAction emulate_psci(Vcpu& vcpu, Vm& owner, u64 ec) {
 
     case kPsciCpuSuspend32:
     case kPsciCpuSuspend64:
-        write_x0(vcpu.el2, kPsciDenied);
-        break;
+        write_x0(vcpu.el2, kPsciSuccess);
+        return PsciAction::SuspendCurrent;
 
     default:
         return PsciAction::NotHandled;
@@ -668,6 +663,88 @@ void update_timer_lines(Vcpu& vcpu) {
     vgic_set_level(vcpu, kGuestPhysTimerIrq, phys_asserted);
     vgic_set_level(vcpu, kGuestVirtTimerIrq, virt_asserted);
 }
+
+bool vcpu_has_pending_virtual_irq(Vcpu& vcpu) {
+    update_timer_lines(vcpu);
+    return vgic_peek_irq(vcpu.vgic) != kGicSpuriousIrq;
+}
+
+u64 next_guest_timer_deadline_cnt(const Vcpu& vcpu) {
+    const u64 now = read_cntpct();
+    u64 deadline = 0;
+    if (timer_enabled_unmasked(vcpu.el2.guest_cntp_ctl)) {
+        deadline = vcpu.el2.guest_cntp_cval;
+    }
+    if (timer_enabled_unmasked(vcpu.el2.guest_cntv_ctl) &&
+        (deadline == 0 || vcpu.el2.guest_cntv_cval < deadline)) {
+        deadline = vcpu.el2.guest_cntv_cval;
+    }
+    if (deadline && deadline < now) deadline = now;
+    return deadline;
+}
+
+void record_guest_timer_source(Vcpu& vcpu) {
+    const u64 deadline = next_guest_timer_deadline_cnt(vcpu);
+    vcpu.sched.next_guest_timer_cnt = deadline;
+    vcpu.sched.timer_armed = deadline != 0;
+}
+
+void wake_bound_runner(Vcpu& vcpu, WakeReason reason, u32 hints) {
+    vcpu.sched.blocked_wfi = false;
+    vcpu.sched.blocked_reason = VCPU_BLOCK_NONE;
+    vcpu.sched.virtual_irq_pending = true;
+    if (vcpu.state == VCPU_BLOCKED_OFF || vcpu.state == VCPU_OFF) {
+        return; // PSCI CPU_OFF stays off until CPU_ON resets the target vCPU.
+    }
+    if (vcpu.state == VCPU_BLOCKED_WFI || vcpu.state == VCPU_BLOCKED) {
+        vcpu.state = VCPU_READY;
+    }
+
+    Thread* runner = sched::find_thread(vcpu.sched.runner_tid);
+    if (!runner || runner->state == TS_DEAD || runner->state == TS_RUNNING ||
+        runner->state == TS_RUNNABLE_QUEUED || runner->state == TS_RUNNABLE_PENDING_REMOTE) {
+        return;
+    }
+
+    sched::apply_wake_metadata(runner, reason, hints);
+    const u32 target = sched::target_cpu_for_wake(runner, sched::current(), hints, vcpu.sched.home_cpu);
+    if (target == sched::current_cpu_id()) sched::wake_local(runner);
+    else sched::wake_remote(runner, target);
+}
+
+void block_runner_for_vcpu(Vcpu& vcpu, VcpuBlockReason reason) {
+    Thread* runner = sched::current();
+    if (runner) {
+        vcpu.sched.runner_tid = runner->tid;
+        sched::block(runner);
+    }
+    vcpu.sched.blocked_reason = static_cast<u32>(reason);
+}
+
+void finish_vcpu_run(Vcpu& vcpu, Vm& owner, VcpuState state, VcpuExitReason reason,
+                     u64 last_esr, u64 used_ns, VcpuRunResult* out) {
+    sync_vcpu_from_el2(vcpu);
+    vcpu.state = state;
+    owner.state = (state == VCPU_RUNNING) ? VM_RUNNING : (state == VCPU_DEAD ? VM_DEAD : VM_READY);
+    vcpu.last_exit_reason = last_esr ? last_esr : static_cast<u64>(reason);
+    vcpu.sched.last_exit_ns = sched::sched_clock_ns();
+    vcpu.sched.used_ns += used_ns;
+    if (out) {
+        out->exit_reason = static_cast<u32>(reason);
+        out->exit_batch_count = vcpu.sched.exit_batch_count;
+        out->last_esr = vcpu.last_exit_reason;
+        out->used_ns = used_ns;
+    }
+}
+
+bool run_budget_expired(const VcpuRunBudget& budget, u64 start_ns, u32 exits) {
+    const u64 now = sched::sched_clock_ns();
+    if (budget.budget_ns && now - start_ns >= budget.budget_ns) return true;
+    if (budget.deadline_ns && now >= budget.deadline_ns) return true;
+    if (budget.max_exits && exits >= budget.max_exits) return true;
+    return false;
+}
+
 
 
 void sync_vcpu_from_el2(Vcpu& vcpu) {
@@ -750,6 +827,9 @@ CapHandle create_vcpu(Process& caller, CapHandle vm_cap, u64 flags, SysError* ou
     vcpu->flags = flags;
     vcpu->virtual_mpidr = static_cast<u64>(v->vcpu_count);
     vcpu->virtual_midr = kDefaultGuestMidr;
+    vcpu->sched.home_cpu = kInvalidCpu;
+    vcpu->sched.core_mask = 0;
+    vcpu->sched.blocked_reason = VCPU_BLOCK_NONE;
 
     const CapHandle cap_h = cap::alloc(*caller.cap_table, CAP_VCPU, vcpu,
                                        RIGHT_VCPU_CONTROL |
@@ -790,6 +870,9 @@ SysError set_vcpu_entry(Process& caller, CapHandle vcpu_cap, u64 entry_pc,
     vcpu->pstate = 0x3C5;
     libk::memset(&vcpu->el2, 0, sizeof(vcpu->el2));
     vcpu->state = VCPU_READY;
+    vcpu->sched.blocked_wfi = false;
+    vcpu->sched.blocked_reason = VCPU_BLOCK_NONE;
+    vcpu->sched.virtual_irq_pending = false;
     metric_inc(VM_DEBUG_VCPU_CONFIGURED);
 
     Vm* owner = find_vm_by_id(vcpu->owner_vm_id);
@@ -812,6 +895,11 @@ SysError inspect_vcpu(Process& caller, CapHandle vcpu_cap, VcpuInfo* out) {
     info.arg1 = vcpu->arg1;
     info.run_count = vcpu->run_count;
     info.last_exit_reason = vcpu->last_exit_reason;
+    info.sched_context_id = vcpu->sched.sched_context_id;
+    info.runner_tid = vcpu->sched.runner_tid;
+    info.core_mask = vcpu->sched.core_mask;
+    info.home_cpu = vcpu->sched.home_cpu;
+    info.blocked_reason = vcpu->sched.blocked_reason;
     *out = info;
     return E_OK;
 }
@@ -837,7 +925,93 @@ void prepare_guest_irq_state(Vcpu& vcpu) {
     vcpu.el2.timer_hw_mask = timer_mask;
 }
 
-SysError run_vcpu(Process& caller, CapHandle vcpu_cap, u64 budget_ticks) {
+SysError vcpu_bind_sched_context(Process& caller, CapHandle vcpu_cap, CapHandle sched_context_cap) {
+    SysError rc = E_OK;
+    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    if (!vcpu) return rc;
+
+    SchedContext* ctx = sched::sched_context_from_cap(caller, sched_context_cap, &rc);
+    if (!ctx) return rc;
+    if (ctx->band == SCHED_BAND_RT_NATIVE) return E_PERM; // VM RT is soft RT only.
+    if (ctx->band != SCHED_BAND_VM_LATENCY && ctx->band != SCHED_BAND_VM_FAIR &&
+        ctx->band != SCHED_BAND_BATCH) {
+        return E_INVALID;
+    }
+
+    vcpu->sched.sched_context_id = ctx->id;
+    vcpu->sched.home_cpu = ctx->home_cpu;
+    vcpu->sched.core_mask = ctx->core_mask;
+    vcpu->sched.budget_ns = ctx->budget_ns;
+    vcpu->sched.period_ns = ctx->period_ns;
+    vcpu->sched.deadline_ns = ctx->deadline_ns;
+    ctx->owner_thread_or_vcpu = vcpu->vcpu_id;
+    ctx->flags |= SCHED_CTX_VM_RUNNER;
+    if ((ctx->flags & SCHED_CTX_STEALABLE) == 0) ctx->flags |= SCHED_CTX_NO_STEAL;
+    return E_OK;
+}
+
+SysError vcpu_set_affinity(Process& caller, CapHandle vcpu_cap, u64 core_mask, u32 home_cpu) {
+    SysError rc = E_OK;
+    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    if (!vcpu) return rc;
+    if (core_mask == 0) return E_INVALID;
+    vcpu->sched.core_mask = core_mask;
+    vcpu->sched.home_cpu = home_cpu;
+    if (SchedContext* ctx = sched::sched_context_by_id(vcpu->sched.sched_context_id)) {
+        ctx->core_mask = core_mask;
+        ctx->home_cpu = home_cpu;
+    }
+    return E_OK;
+}
+
+SysError vcpu_kick(Process& caller, CapHandle vcpu_cap, u32 reason) {
+    SysError rc = E_OK;
+    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    if (!vcpu) return rc;
+    vcpu->sched.wake_reason = reason;
+    wake_bound_runner(*vcpu, WAKE_IRQ, IPC_HINT_LATENCY);
+    return E_OK;
+}
+
+SysError vcpu_inject_irq(Process& caller, CapHandle vcpu_cap, u32 irq) {
+    SysError rc = E_OK;
+    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    if (!vcpu) return rc;
+    if (!irq_in_range(irq)) return E_INVALID;
+    vgic_bit_set(vcpu->vgic.pending, irq);
+    vcpu->sched.virtual_irq_pending = true;
+    wake_bound_runner(*vcpu, WAKE_IRQ, IPC_HINT_LATENCY);
+    return E_OK;
+}
+
+SysError vcpu_block_until_irq_or_timer(Process& caller, CapHandle vcpu_cap) {
+    SysError rc = E_OK;
+    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    if (!vcpu) return rc;
+    if (vcpu_has_pending_virtual_irq(*vcpu)) return E_BUSY;
+    record_guest_timer_source(*vcpu);
+    vcpu->state = VCPU_BLOCKED_WFI;
+    vcpu->sched.blocked_wfi = true;
+    block_runner_for_vcpu(*vcpu, VCPU_BLOCK_GUEST_IDLE);
+    return E_OK;
+}
+
+void poll_vcpu_timer(Vcpu& vcpu) {
+    if (vcpu.state != VCPU_BLOCKED_WFI || !vcpu.sched.timer_armed ||
+        vcpu.sched.next_guest_timer_cnt == 0) {
+        return;
+    }
+    if (read_cntpct() < vcpu.sched.next_guest_timer_cnt) return;
+    vcpu.sched.timer_armed = false;
+    update_timer_lines(vcpu);
+    if (vgic_peek_irq(vcpu.vgic) != kGicSpuriousIrq) {
+        wake_bound_runner(vcpu, WAKE_IRQ, IPC_HINT_LATENCY);
+    }
+}
+
+SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budget, VcpuRunResult* out) {
+    if (out) libk::memset(out, 0, sizeof(*out));
+
     SysError rc = E_OK;
     Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
     if (!vcpu) return rc;
@@ -847,11 +1021,20 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, u64 budget_ticks) {
         return E_INVALID;
     }
 
+    Thread* runner = sched::current();
+    if (runner) {
+        vcpu->sched.runner_tid = runner->tid;
+        if (vcpu->sched.sched_context_id) {
+            (void)sched::bind_current_to_sched_context_id(vcpu->sched.sched_context_id);
+        }
+    }
+
     metric_inc(VM_DEBUG_VCPU_RUN_ATTEMPTS);
 
     if (vcpu->entry_pc == kLinuxBootProbeEntry || g_boot_el < 2) {
         metric_inc(VM_DEBUG_VCPU_RUN_NOTIMPL);
         vcpu->last_exit_reason = static_cast<u64>(E_NOTIMPL);
+        if (out) out->exit_reason = static_cast<u32>(VCPU_EXIT_UNSUPPORTED_TRAP);
         return E_NOTIMPL;
     }
 
@@ -873,44 +1056,36 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, u64 budget_ticks) {
 
     vcpu->state = VCPU_RUNNING;
     owner->state = VM_RUNNING;
+    vcpu->sched.last_entry_ns = sched::sched_clock_ns();
+    vcpu->sched.exit_batch_count = 0;
 
-    const u64 max_exits = budget_ticks ? budget_ticks : 1;
+    const u64 start_ns = vcpu->sched.last_entry_ns;
+    const u32 max_exits = budget.max_exits ? budget.max_exits : 1;
 
-    for (u64 exits = 0; exits < max_exits; ++exits) {
+    for (u32 exits = 0; exits < max_exits; ++exits) {
         prepare_guest_irq_state(*vcpu);
 
         const u64 esr = vm_el2_run(&vcpu->el2);
         ++vcpu->run_count;
+        ++vcpu->sched.exit_batch_count;
 
-        /*
-         * This is the important fix.
-         *
-         * With HCR_EL2.IMO/FMO/AMO set, physical host interrupts are routed to
-         * EL2 while the guest is running. They are not guest exits and they do
-         * not have a valid ESR_EL2.
-         *
-         * The old code treated ESR==0 as a normal return to userland. That
-         * means a host timer IRQ can repeatedly pull execution out of a long
-         * non-MMIO guest phase, such as Linux setup_per_cpu_areas(), without
-         * actually dispatching the host interrupt here.
-         *
-         * Consume the host IRQ in-kernel and immediately resume the guest.
-         */
+        const u64 used_ns = sched::sched_clock_ns() - start_ns;
+
         if (vcpu->el2.exit_kind == 1) {
             metric_inc(VM_DEBUG_VCPU_IRQ_EXITS);
             irq_dispatch();
+            if (sched::switch_pending() ||
+                sched::principal_throttled(runner ? runner->principal_id : caller.principal_id) ||
+                run_budget_expired(budget, start_ns, exits + 1)) {
+                finish_vcpu_run(*vcpu, *owner, VCPU_READY, VCPU_EXIT_HOST_PREEMPTED, esr, used_ns, out);
+                return E_OK;
+            }
             continue;
         }
 
-        /*
-         * FIQ/SError are not normal guest progress events. Return cleanly so
-         * the outer VM monitor can decide what to do, but do not decode ESR_EL2.
-         */
         if (vcpu->el2.exit_kind != 0) {
-            sync_vcpu_from_el2(*vcpu);
-            vcpu->state = VCPU_READY;
-            owner->state = VM_READY;
-            vcpu->last_exit_reason = vcpu->el2.exit_kind;
+            finish_vcpu_run(*vcpu, *owner, VCPU_READY, VCPU_EXIT_HOST_PREEMPTED,
+                            vcpu->el2.exit_kind, used_ns, out);
             metric_inc(VM_DEBUG_VCPU_IRQ_EXITS);
             return E_OK;
         }
@@ -919,55 +1094,55 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, u64 budget_ticks) {
 
         if (ec == kEcHvc64 || ec == kEcSmc64) {
             const PsciAction psci = emulate_psci(*vcpu, *owner, ec);
-            if (psci == PsciAction::Continue) continue;
+            if (psci == PsciAction::Continue) {
+                if (run_budget_expired(budget, start_ns, exits + 1)) break;
+                continue;
+            }
             if (psci == PsciAction::StopCurrent) {
-                sync_vcpu_from_el2(*vcpu);
-                vcpu->state = VCPU_BLOCKED;
-                owner->state = VM_READY;
-                vcpu->last_exit_reason = 0;
+                finish_vcpu_run(*vcpu, *owner, VCPU_BLOCKED_OFF, VCPU_EXIT_WFI_BLOCKED, esr, used_ns, out);
+                vcpu->sched.blocked_wfi = false;
+                block_runner_for_vcpu(*vcpu, VCPU_BLOCK_GUEST_OFF);
+                return E_OK;
+            }
+            if (psci == PsciAction::SuspendCurrent) {
+                record_guest_timer_source(*vcpu);
+                finish_vcpu_run(*vcpu, *owner, VCPU_BLOCKED_WFI, VCPU_EXIT_WFI_BLOCKED, esr, used_ns, out);
+                vcpu->sched.blocked_wfi = true;
+                block_runner_for_vcpu(*vcpu, VCPU_BLOCK_GUEST_IDLE);
                 return E_OK;
             }
             if (psci == PsciAction::ShutdownVm) {
-                sync_vcpu_from_el2(*vcpu);
-                vcpu->state = VCPU_DEAD;
-                owner->state = VM_DEAD;
-                vcpu->last_exit_reason = 0;
+                finish_vcpu_run(*vcpu, *owner, VCPU_DEAD, VCPU_EXIT_SHUTDOWN, esr, used_ns, out);
                 return E_OK;
             }
         }
 
-        /*
-         * Defensive fallback. Synchronous ESR==0 should not normally happen,
-         * but keep it as a budget-style exit rather than reporting a bogus
-         * unsupported trap.
-         */
         if (esr == 0) {
-            sync_vcpu_from_el2(*vcpu);
-            vcpu->state = VCPU_READY;
-            owner->state = VM_READY;
-            vcpu->last_exit_reason = 0;
+            finish_vcpu_run(*vcpu, *owner, VCPU_READY, VCPU_EXIT_HOST_PREEMPTED, esr, used_ns, out);
             metric_inc(VM_DEBUG_VCPU_IRQ_EXITS);
             return E_OK;
         }
 
         if (ec == kEcDataAbortLower || ec == kEcDataAbortCurrent) {
             const u64 ipa = data_abort_ipa(vcpu->el2);
-            if (emulate_mmio(*vcpu, ipa, esr)) continue;
+            if (emulate_mmio(*vcpu, ipa, esr)) {
+                if (run_budget_expired(budget, start_ns, exits + 1)) break;
+                continue;
+            }
         }
 
         if (ec == kEcWfx) {
-            /*
-             * WFI/WFE are normal guest idle instructions.  Do not spin inside
-             * one sys_vcpu_run() consuming the entire syscall budget on idle
-             * exits.  Complete the trapped instruction and return to the async
-             * runner so the host scheduler can run other work.
-             */
             vcpu->el2.pc += 4;
-            sync_vcpu_from_el2(*vcpu);
-            vcpu->state = VCPU_READY;
-            owner->state = VM_READY;
-            vcpu->last_exit_reason = esr;
+            const bool pending_irq = vcpu_has_pending_virtual_irq(*vcpu);
+            if (pending_irq) {
+                finish_vcpu_run(*vcpu, *owner, VCPU_READY, VCPU_EXIT_VIRTUAL_IRQ_PENDING, esr, used_ns, out);
+                return E_OK;
+            }
             metric_inc(VM_DEBUG_VCPU_WFX_EXITS);
+            record_guest_timer_source(*vcpu);
+            finish_vcpu_run(*vcpu, *owner, VCPU_BLOCKED_WFI, VCPU_EXIT_WFI_BLOCKED, esr, used_ns, out);
+            vcpu->sched.blocked_wfi = true;
+            block_runner_for_vcpu(*vcpu, VCPU_BLOCK_GUEST_IDLE);
             return E_OK;
         }
 
@@ -983,26 +1158,20 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, u64 budget_ticks) {
                          static_cast<unsigned long long>(esr));
         }
 
-        sync_vcpu_from_el2(*vcpu);
-        vcpu->state = VCPU_READY;
-        owner->state = VM_READY;
-
         const u64 reason = esr ? esr : kHcrExitUnsupported;
         if (vcpu->last_exit_reason != reason) {
             log_unsupported_exit(*vcpu, *owner, esr, ec);
         }
-
-        vcpu->last_exit_reason = reason;
+        finish_vcpu_run(*vcpu, *owner, VCPU_READY, VCPU_EXIT_UNSUPPORTED_TRAP, reason, used_ns, out);
         metric_inc(VM_DEBUG_VCPU_UNSUPPORTED_EXITS);
         metric_inc(VM_DEBUG_VCPU_RUN_NOTIMPL);
         return E_NOTIMPL;
     }
 
-    sync_vcpu_from_el2(*vcpu);
-    vcpu->state = VCPU_READY;
-    owner->state = VM_READY;
-    vcpu->last_exit_reason = vcpu->el2.exit_esr;
-
+    const u64 used_ns = sched::sched_clock_ns() - start_ns;
+    finish_vcpu_run(*vcpu, *owner, VCPU_READY, VCPU_EXIT_QUANTUM_EXPIRED,
+                    vcpu->el2.exit_esr, used_ns, out);
     return E_OK;
 }
+
 } // namespace vm

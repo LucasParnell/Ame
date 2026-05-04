@@ -248,7 +248,7 @@ SysError notify_handoff(CapHandle handle, u64 payload_word, u32 caller_pid) {
 
     // Non-transitive priority donation: lend our vruntime as a lower-bound key
     // so the receiver is not unfairly penalized for being woken late.
-    receiver->donated_priority = sender->vruntime_ns;
+    receiver->donated_key = sender->vruntime_ns;
     receiver->has_donation = true;
 
     // Cross-link for reply path.
@@ -286,7 +286,7 @@ SysError reply_handoff(u64 reply_val, u32 caller_pid) {
 
     // Release donation.
     cur->has_donation = false;
-    cur->donated_priority = 0;
+    cur->donated_key = 0;
     cur->reply_target = nullptr;
     sender->reply_target = nullptr;
 

@@ -42,6 +42,7 @@ enum CapType : u16 {
     CAP_VCPU        = 13,
     CAP_VM_MEMORY   = 14,
     CAP_VM_CHANNEL  = 15,
+    CAP_SCHED_CONTEXT = 16,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,6 +73,7 @@ enum CapRights : u32 {
     RIGHT_VM_CHANNEL_NOTIFY = 1u << 21,
     RIGHT_VM_CHANNEL_INSPECT = 1u << 22,
     RIGHT_VM_CREATE = 1u << 23,
+    RIGHT_SCHED_CONTEXT_CONTROL = 1u << 24,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,7 +95,7 @@ static_assert(sizeof(CapEntry) == 64, "CapEntry must be 64 bytes (spec §5.5)");
 // V0: dense flat array of CapEntry[kCapTableSize].
 // Lookup is O(1): extract index from handle, check generation.
 // ---------------------------------------------------------------------------
-constexpr u32 kCapTableSize = 256; // fixed quota per process for V0
+constexpr u32 kCapTableSize = 1024; // spec §7: flat-table threshold; 64 KB per process
 
 struct CapTable {
     CapEntry entries[kCapTableSize];

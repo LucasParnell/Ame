@@ -8,7 +8,9 @@
 #include "dango/layout.h"
 
 constexpr uint32_t kRingOrder = 6;
-constexpr uint64_t kLinuxRunBudgetTicks = 512;
+constexpr uint64_t kLinuxRunBudgetNs = 6ull * 1000ull * 1000ull;
+constexpr uint64_t kLinuxRunPeriodNs = 16666667ull;
+constexpr uint32_t kLinuxRunMaxExits = 512;
 constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
 constexpr uint64_t kVaBootInitrd = 0x2400'0000ull;
 constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;
@@ -387,9 +389,22 @@ static uint64_t guest_offset(const dango::VmLayout& layout, uint64_t guest_pa) {
 static void runner_entry(uint64_t vcpu_arg) {
     const CapHandle vcpu = static_cast<CapHandle>(vcpu_arg);
     while (true) {
-        (void)sys_vcpu_run(vcpu, kLinuxRunBudgetTicks);
-        sys_yield();
+        dango::VcpuRunBudget budget{};
+        budget.budget_ns = kLinuxRunBudgetNs;
+        budget.deadline_ns = kLinuxRunPeriodNs;
+        budget.max_exits = kLinuxRunMaxExits;
+
+        dango::VcpuRunResult result{};
+        const int64_t rc = sys_vcpu_run(vcpu, &budget, &result);
+        if (rc == dango::E_NOTIMPL || result.exit_reason == dango::VCPU_EXIT_UNSUPPORTED_TRAP ||
+            result.exit_reason == dango::VCPU_EXIT_SHUTDOWN) {
+            break;
+        }
+        if (rc < 0) {
+            sys_yield();
+        }
     }
+    sys_thread_exit(0);
 }
 
 extern "C" [[noreturn]] void _start() {
@@ -535,8 +550,28 @@ extern "C" [[noreturn]] void _start() {
     }
     dango_debug("vcpu ready\n");
 
+    dango::SchedContext vcpu_sched{};
+    vcpu_sched.band = dango::SCHED_BAND_VM_LATENCY;
+    vcpu_sched.weight = 1024;
+    vcpu_sched.budget_ns = kLinuxRunBudgetNs;
+    vcpu_sched.period_ns = kLinuxRunPeriodNs;
+    vcpu_sched.deadline_ns = kLinuxRunPeriodNs;
+    vcpu_sched.core_mask = 1ull << 1;
+    vcpu_sched.home_cpu = 1;
+    vcpu_sched.flags = dango::SCHED_CTX_VM_RUNNER | dango::SCHED_CTX_NO_STEAL;
+    const CapHandle vcpu_sched_ctx = as_cap(sys_sched_context_create(&vcpu_sched, sizeof(vcpu_sched)));
+    if (vcpu_sched_ctx == kNullCap || sys_vcpu_bind_sched_context(vcpu, vcpu_sched_ctx) != 0 ||
+        sys_vcpu_set_core_mask(vcpu, vcpu_sched.core_mask, vcpu_sched.home_cpu) != 0) {
+        fail("vcpu scheduler setup failed\n");
+    }
+
     if (!have_linux) {
-        if (sys_vcpu_run(vcpu, 100) != dango::E_NOTIMPL) {
+        dango::VcpuRunBudget probe_budget{};
+        probe_budget.budget_ns = kLinuxRunBudgetNs;
+        probe_budget.deadline_ns = kLinuxRunPeriodNs;
+        probe_budget.max_exits = 100;
+        dango::VcpuRunResult probe_result{};
+        if (sys_vcpu_run(vcpu, &probe_budget, &probe_result) != dango::E_NOTIMPL) {
             fail("vcpu stub run failed\n");
         }
         console_log("vcpu stub run complete\n");
@@ -586,6 +621,9 @@ extern "C" [[noreturn]] void _start() {
                               THREAD_SUSPENDED));
         if (runner_th != kNullCap) {
             sys_thread_set_affinity(runner_th, 1ull << 1);
+            if (sys_sched_context_bind_thread(runner_th, vcpu_sched_ctx) != 0) {
+                fail("vcpu scheduler setup failed\n");
+            }
             sys_thread_resume(runner_th);
             dango_log("vm runner started async\n");
         } else {

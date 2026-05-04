@@ -69,7 +69,7 @@ enum Syscall : unsigned {
     SYS_VCPU_CREATE      = 34,
     SYS_VCPU_SET_ENTRY   = 35,
     SYS_VCPU_INSPECT     = 36,
-    SYS_VCPU_RUN         = 37,
+    SYS_VCPU_RUN         = 37, // (vcpu_cap, VcpuRunBudget* in, VcpuRunResult* out)
     SYS_VM_CHANNEL_CREATE = 38,
     SYS_VM_CHANNEL_ENDPOINT = 39,
     SYS_VM_CHANNEL_INSPECT = 40,
@@ -78,6 +78,15 @@ enum Syscall : unsigned {
     // V2 scheduler: synchronous IPC handoff
     SYS_NOTIFY_HANDOFF = 42, // notify_handoff(db_cap, payload_word) → reply_value
     SYS_REPLY_HANDOFF  = 43, // reply_handoff(reply_value) → E_OK
+
+    // Scheduler contexts and scheduler-visible vCPU run ABI.
+    SYS_SCHED_CONTEXT_CREATE = 44,      // (SchedContext* in, size) -> sched_context_cap
+    SYS_SCHED_CONTEXT_BIND_THREAD = 45, // (thread_cap, sched_context_cap)
+    SYS_VCPU_BIND_SCHED_CONTEXT = 46,   // (vcpu_cap, sched_context_cap)
+    SYS_VCPU_SET_CORE_MASK = 47,        // (vcpu_cap, core_mask, home_cpu)
+    SYS_VCPU_KICK = 48,                 // (vcpu_cap, reason)
+    SYS_VCPU_INJECT_IRQ = 49,           // (vcpu_cap, irq)
+    SYS_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER = 50, // (vcpu_cap)
 
     SYS_COUNT,
 };

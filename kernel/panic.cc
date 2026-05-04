@@ -6,6 +6,7 @@
 #include "anko/panic.h"
 #include "anko/log.h"
 #include "anko/types.h"
+#include "anko/arm64_esr.h"
 
 #include <cstdarg>
 
@@ -15,13 +16,13 @@
 
 static const char* ec_name(u32 ec) {
     switch (ec) {
-    case 0x21: return "instruction abort (EL1)";
-    case 0x22: return "PC alignment fault";
-    case 0x25: return "data abort (EL1)";
-    case 0x26: return "SP alignment fault";
-    case 0x2f: return "SError";
-    case 0x3c: return "breakpoint";
-    default:   return "unknown";
+    case static_cast<u32>(arm64::kEcInstrAbortCurrent): return "instruction abort (EL1)";
+    case static_cast<u32>(arm64::kEcPcAlignFault):      return "PC alignment fault";
+    case static_cast<u32>(arm64::kEcDataAbortCurrent):  return "data abort (EL1)";
+    case static_cast<u32>(arm64::kEcSpAlignFault):      return "SP alignment fault";
+    case static_cast<u32>(arm64::kEcSError):            return "SError";
+    case static_cast<u32>(arm64::kEcBreakpoint):        return "breakpoint";
+    default:                                             return "unknown";
     }
 }
 
@@ -51,12 +52,23 @@ static void walk_frames(u64 fp) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared epilogue: walk frames then halt forever.
+// ---------------------------------------------------------------------------
+
+[[noreturn]] static void do_halt(u64 fp) {
+    walk_frames(fp);
+    anko::log::write(anko::log::Level::Fatal, "panic",
+                     "--- KERNEL PANIC: system halted ---");
+    for (;;) asm volatile("wfe" ::: "memory");
+}
+
+// ---------------------------------------------------------------------------
 // dump_frame — full register dump
 // ---------------------------------------------------------------------------
 
 static void dump_frame(TrapFrame* tf, u64 esr, u64 far) {
-    const u32 ec  = static_cast<u32>((esr >> 26) & 0x3fu);
-    const u32 iss = static_cast<u32>(esr & 0x00FFFFFFu);
+    const u32 ec  = static_cast<u32>(arm64::esr_ec(esr));
+    const u32 iss = static_cast<u32>(arm64::esr_iss(esr));
     const char* name = ec_name(ec);
 
     anko::log::writef(anko::log::Level::Fatal, "panic",
@@ -99,17 +111,11 @@ static void dump_frame(TrapFrame* tf, u64 esr, u64 far) {
 // ---------------------------------------------------------------------------
 
 extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* frame) {
-    const u32 ec = static_cast<u32>((esr >> 26) & 0x3fu);
+    const u32 ec = static_cast<u32>(arm64::esr_ec(esr));
     anko::log::writef(anko::log::Level::Fatal, "panic",
                       "panic: %s", ec_name(ec));
-
     dump_frame(frame, esr, far);
-    walk_frames(frame->x[29]);
-
-    anko::log::write(anko::log::Level::Fatal, "panic",
-                     "--- KERNEL PANIC: system halted ---");
-
-    for (;;) asm volatile("wfe" ::: "memory");
+    do_halt(frame->x[29]); // walk from saved FP of the trapped context
 }
 
 // ---------------------------------------------------------------------------
@@ -118,35 +124,17 @@ extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* fram
 
 [[noreturn]] void panic(const char* msg) {
     anko::log::writef(anko::log::Level::Fatal, "panic", "\npanic: %s", msg);
-
     u64 fp = 0;
     asm volatile("mov %0, x29" : "=r"(fp));
-    walk_frames(fp);
-
-    anko::log::write(anko::log::Level::Fatal, "panic",
-                     "--- KERNEL PANIC: system halted ---");
-
-    for (;;) asm volatile("wfe" ::: "memory");
+    do_halt(fp);
 }
 
 [[noreturn]] void panicf(const char* fmt, ...) {
-    char buf[256];
     va_list ap;
     va_start(ap, fmt);
-    anko::log::vrawf(fmt, ap);   // emit the formatted line
+    anko::log::vrawf(fmt, ap);
     va_end(ap);
-
-    // Delegate to panic with a sentinel — walk + halt done there.
-    // We can't call panic(buf) through the format path cleanly without
-    // duplicating the buffer; instead just halt here with the same walk.
-    (void)buf;
-
     u64 fp = 0;
     asm volatile("mov %0, x29" : "=r"(fp));
-    walk_frames(fp);
-
-    anko::log::write(anko::log::Level::Fatal, "panic",
-                     "--- KERNEL PANIC: system halted ---");
-
-    for (;;) asm volatile("wfe" ::: "memory");
+    do_halt(fp);
 }

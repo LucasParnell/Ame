@@ -205,6 +205,13 @@ enum : uint64_t {
     NR_VM_MEMORY_WRITE = 41,
     NR_NOTIFY_HANDOFF  = 42,
     NR_REPLY_HANDOFF   = 43,
+    NR_SCHED_CONTEXT_CREATE = 44,
+    NR_SCHED_CONTEXT_BIND_THREAD = 45,
+    NR_VCPU_BIND_SCHED_CONTEXT = 46,
+    NR_VCPU_SET_CORE_MASK = 47,
+    NR_VCPU_KICK = 48,
+    NR_VCPU_INJECT_IRQ = 49,
+    NR_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER = 50,
 };
 
 constexpr uint32_t SPAWN_SUSPENDED = 1u << 0;
@@ -334,8 +341,31 @@ static inline int64_t sys_vcpu_set_entry(CapHandle vcpu, uint64_t entry_pc,
 static inline int64_t sys_vcpu_inspect(CapHandle vcpu, void* info, uint64_t info_len) {
     return _svc3(NR_VCPU_INSPECT, vcpu, reinterpret_cast<uint64_t>(info), info_len);
 }
-static inline int64_t sys_vcpu_run(CapHandle vcpu, uint64_t budget_ticks) {
-    return _svc2(NR_VCPU_RUN, vcpu, budget_ticks);
+static inline int64_t sys_vcpu_run(CapHandle vcpu, const void* budget, void* result) {
+    return _svc3(NR_VCPU_RUN, vcpu,
+                 reinterpret_cast<uint64_t>(budget),
+                 reinterpret_cast<uint64_t>(result));
+}
+static inline int64_t sys_sched_context_create(const void* ctx, uint64_t ctx_len) {
+    return _svc2(NR_SCHED_CONTEXT_CREATE, reinterpret_cast<uint64_t>(ctx), ctx_len);
+}
+static inline int64_t sys_sched_context_bind_thread(CapHandle thread, CapHandle sched_context) {
+    return _svc2(NR_SCHED_CONTEXT_BIND_THREAD, thread, sched_context);
+}
+static inline int64_t sys_vcpu_bind_sched_context(CapHandle vcpu, CapHandle sched_context) {
+    return _svc2(NR_VCPU_BIND_SCHED_CONTEXT, vcpu, sched_context);
+}
+static inline int64_t sys_vcpu_set_core_mask(CapHandle vcpu, uint64_t core_mask, uint32_t home_cpu) {
+    return _svc3(NR_VCPU_SET_CORE_MASK, vcpu, core_mask, home_cpu);
+}
+static inline int64_t sys_vcpu_kick(CapHandle vcpu, uint32_t reason) {
+    return _svc2(NR_VCPU_KICK, vcpu, reason);
+}
+static inline int64_t sys_vcpu_inject_irq(CapHandle vcpu, uint32_t irq) {
+    return _svc2(NR_VCPU_INJECT_IRQ, vcpu, irq);
+}
+static inline int64_t sys_vcpu_block_until_irq_or_timer(CapHandle vcpu) {
+    return _svc1(NR_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER, vcpu);
 }
 static inline int64_t sys_vm_channel_create(CapHandle vm, uint32_t order, uint32_t flags) {
     return _svc3(NR_VM_CHANNEL_CREATE, vm, order, flags);

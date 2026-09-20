@@ -31,6 +31,16 @@ ctest --preset qemu-dev
 Linux guest construction is optional and disabled in the presets. Enable
 `DANGO_BUILD_LINUX_ARTIFACTS` explicitly when preparing guest regression runs.
 
+For a single end-to-end health check — configure, build, host regressions, a
+headless direct boot, and the kernel lifecycle matrix — run:
+
+```sh
+scripts/verify.sh
+```
+
+It records the exact toolchain it validated (Homebrew Clang 23.1.1, CMake
+4.4.0, QEMU 11.1.1 at the last pass) and exits non-zero on the first failure.
+
 Release builds require an Ed25519 private key in PKCS8 format and explicitly
 configured trusted public keys (PEM or raw 32-byte files). Keep private keys
 outside the repository. The release configuration rejects the development key.

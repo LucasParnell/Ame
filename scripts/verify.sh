@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+#
+# scripts/verify.sh — green-baseline gate for Ame.
+#
+# Proves a checkout is healthy with the smallest set of checks that matters:
+#
+#   configure → build → host regressions → direct boot → kernel lifecycle matrix
+#
+# The checks are declared as data in CHECKS; the loop below is the only control
+# flow. Every check is a shell function that returns non-zero on failure, so the
+# gate composes and reads top-to-bottom. Runs on macOS and Linux.
+#
+# Usage:
+#   scripts/verify.sh                                  # out/verify, CPUs 1 2 4
+#   AME_VERIFY_BUILD=out/qemu-dev scripts/verify.sh    # reuse an existing tree
+#   AME_VERIFY_CPUS="2" scripts/verify.sh              # single-CPU matrix
+#
+# Exit status is 0 only when every check passes.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+# shellcheck source=scripts/host.sh
+source "${ROOT}/scripts/host.sh"
+ame_host_tools
+
+BUILD_DIR="${AME_VERIFY_BUILD:-${ROOT}/out/verify}"
+CPUS="${AME_VERIFY_CPUS:-1 2 4}"
+BOOT_TIMEOUT="${AME_VERIFY_BOOT_TIMEOUT:-120}"
+
+bold() { printf '\n\033[1;34m== %s\033[0m\n' "$*"; }
+note() { printf '   %s\n' "$*"; }
+fail() { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
+
+# Print the exact toolchain that this gate validated. Kept explicit so a build
+# that passes here can be reproduced (and so toolchain drift is visible).
+record_toolchain() {
+    bold "toolchain"
+    note "$(clang --version | head -1)"
+    note "$(cmake --version | head -1)"
+    note "$(qemu-system-aarch64 --version | head -1)"
+}
+
+do_configure() {
+    local args=(-S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Debug
+                -DANKO_BOARD=qemu-virt -DANKO_BUILD_DEV=ON
+                -DDANGO_BUILD_LINUX_ARTIFACTS=OFF)
+    # CMake only honours the toolchain on the first configure; passing it again
+    # just emits an unused-variable warning.
+    [[ -f "$BUILD_DIR/CMakeCache.txt" ]] \
+        || args+=(-DCMAKE_TOOLCHAIN_FILE=scripts/build/toolchain-aarch64.cmake)
+    cmake "${args[@]}" >/dev/null
+}
+
+do_build() {
+    cmake --build "$BUILD_DIR" --target anko mochi_system >/dev/null
+}
+
+do_host_tests() {
+    ctest --test-dir "$BUILD_DIR" --output-on-failure >/dev/null
+}
+
+# boot <marker> <cpus> [bundle] — run one bounded QEMU boot and report a
+# one-line summary; the exit status is boot.py's, so the gate can rely on it.
+run_boot() {
+    local marker="$1" cpus="$2" bundle="${3:-}"
+    python3 scripts/test/boot.py --build "$BUILD_DIR" --mode direct \
+        --cpus "$cpus" --timeout "$BOOT_TIMEOUT" \
+        ${bundle:+--bundle "$bundle"} --marker "$marker" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> {} ({:.2f}s)".format(d["reason"], d["elapsed"])); sys.exit(0 if d["success"] else 1)'
+}
+
+do_boot() {
+    run_boot 'all services ready' 2
+}
+
+do_lifecycle() {
+    cmake --build "$BUILD_DIR" --target kernel_regressions >/dev/null
+    local c
+    for c in $CPUS; do
+        note "cpus=$c"
+        run_boot 'lifecycle regression passed' "$c" "$BUILD_DIR/lifecycle.mxb"
+    done
+}
+
+# Ordered checks: "name:function". Add a row to extend the gate; do not add
+# bespoke control flow below.
+CHECKS=(
+    "configure:do_configure"
+    "build:do_build"
+    "host-regressions:do_host_tests"
+    "boot-direct:do_boot"
+    "lifecycle-matrix:do_lifecycle"
+)
+
+record_toolchain
+for check in "${CHECKS[@]}"; do
+    name="${check%%:*}"
+    fn="${check#*:}"
+    bold "check: $name"
+    "$fn" || fail "$name"
+done
+bold "verify: all checks passed"

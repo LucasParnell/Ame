@@ -17,8 +17,8 @@
 
 constexpr mx_vaddr_t kVaBootInfo = 0x1000'0000ull;
 constexpr mx_vaddr_t kVaLogRing = 0x1800'0000ull;
-constexpr mx_vaddr_t kVaFsCmdRing = 0x2000'0000ull;
-constexpr mx_vaddr_t kVaFsReplyRing = 0x2001'0000ull;
+[[maybe_unused]] constexpr mx_vaddr_t kVaFsCmdRing = 0x2000'0000ull;
+[[maybe_unused]] constexpr mx_vaddr_t kVaFsReplyRing = 0x2001'0000ull;
 constexpr mx_vaddr_t kVaBlkReqRing = 0x2002'0000ull;
 constexpr mx_vaddr_t kVaBlkReplyRing = 0x2003'0000ull;
 constexpr mx_vaddr_t kVaBlkDma = 0x2100'0000ull;
@@ -112,7 +112,7 @@ static SnapshotState g_snapshots[kMaxSnapshots];
 static OpenHandle g_handles[kMaxHandles];
 static mx_u32_t g_handle_generations[kMaxHandles];
 static mx_u32_t g_session;
-static mx_u32_t g_tmp_inode;
+[[maybe_unused]] static mx_u32_t g_tmp_inode;
 static mochi::ServerSessions g_sessions;
 
 static fs_handle_t handle_token(mx_u32_t index) {
@@ -541,7 +541,7 @@ static mx_i32_t flush_block_device_if_available() {
     return reply.status;
 }
 
-static mx_i32_t sync_ordered_metadata() {
+[[maybe_unused]] static mx_i32_t sync_ordered_metadata() {
     const mx_i32_t rc = verify_refcount_index();
     if (rc != MX_OK) return rc;
     if (!g_metadata_dirty) return MX_OK;

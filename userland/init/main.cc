@@ -570,6 +570,8 @@ static void refresh_exports() {
     auto& server = g_servers[1];
     auto* nameservice = find_service(g_rt.services, g_rt.service_count, server.name);
     if (!server.directory || !nameservice || !nameservice->proc) return;
+    // Never grant into a child before its BootInfo arena has claimed slot 0.
+    if (!nameservice->boot_info) return;
     for (uint32_t i = 0; i < g_rt.service_count && i < MX_MAX_EXPORTS; ++i) {
         auto& svc = g_rt.services[i];
         auto& entry = server.directory->exports[i];
@@ -1052,8 +1054,12 @@ static bool start_service_now(ServiceSpec& svc) {
     if (svc.ready || !dependencies_ready(svc)) return false;
     svc.desired = true;
     if (!svc.proc && !spawn_service(svc, MX_SPAWN_SUSPENDED)) return false;
-    refresh_exports();
+    // Order is load-bearing: BootInfo must claim the child's cap slot 0 before any
+    // other capability is granted into it (mochi::boot::kBootInfoCap == slot 0).
+    // refresh_exports() grants peer process caps into the nameservice child, so it
+    // must run after boot_init_for_service() has reserved slot 0.
     boot_init_for_service(svc, service_ordinal(&svc));
+    refresh_exports();
     if (wire_and_resume_service(svc) && await_ready(svc)) return true;
     svc.restart_pending = true;
     (void)stop_mask(1u << service_ordinal(&svc));

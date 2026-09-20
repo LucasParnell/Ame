@@ -26,18 +26,42 @@ Implemented and initially exercised:
   their creator. These are kernel process tests, not full init service-restart coverage.
 - Readable bundle and executable validation stages, a small Ed25519 interface, and a common
   C++ formatting configuration. The wider readability and module separation work is unfinished.
-- Incremental RelWithDebInfo build reports no work; direct boot reaches readiness after the
-  parser refactor. A fresh full boot matrix and clean Debug/Release validation remain pending.
+- Declarative boot manifest extended to channels, `start_after` dependencies (with cycle
+  detection), readiness doorbells, and dependency-aware restart with backoff. Exercised by the
+  normal boot reaching `init: all services ready`.
+- Single verification gate `scripts/verify.sh`: configure → build → host regressions → direct
+  boot → kernel lifecycle matrix, all green on the toolchain recorded below.
+
+### Session 2026-09-20 (development-readiness pass)
+
+- **Fixed build breakage under LLVM 23.** `userland/fs/main.cc` failed with four `-Werror`
+  unused-entity diagnostics (`unused-const-variable` ×2, `unused-function`,
+  `unused-but-set-global`). The dead entities are marked `[[maybe_unused]]`; no behaviour change.
+- **Fixed BootInfo slot-0 ordering bug in init.** `start_service_now()` called
+  `refresh_exports()` (which grants peer process caps into the nameservice child) *before*
+  `boot_init_for_service()` reserved the child's slot-0 BootInfo arena, so nameservice's BootInfo
+  grant landed in a non-zero slot and init halted with `init: bootinfo slot failed`. BootInfo now
+  claims slot 0 first, and `refresh_exports()` refuses to grant into a server before its BootInfo
+  exists. Boot now completes to `init: all services ready`.
+- Added `scripts/verify.sh`; recorded the validated toolchain (Homebrew Clang 23.1.1, CMake 4.4.0,
+  QEMU 11.1.1).
 
 Still required before completion:
 
 1. Finish build/launcher/packaging/docs integration and provenance recording; validate clean/no-op Debug/Release/Switch builds.
 2. Finish the object-lifetime audit (including VM final ownership and failed page-table allocation)
    and separate scheduler queue, accounting, handoff, and lifecycle modules.
-3. Consume the new exit records in normal supervision; implement declarative manifests/channels/
-   dependencies, common first/restart launch, readiness, and dependency restarts/backoff.
+3. Consume the new exit records in normal supervision (steady-state path) and verify dependency
+   restarts/backoff under injected faults; add a regression fixture for the restart path.
 4. Per-client SPSC discovery/FS sessions, timeout/peer-death handling.
 5. Explicit read-only disk root + volatile /tmp, session-owned generation handles; FS/shell modules; example application and tests.
 6. Full CPU/boot matrix, 100 lifecycle cycles, guest Linux/auth regression and final feature documentation.
+
+Notes:
+
+- The `init` service already implements channels/dependencies/readiness/dependency restarts; earlier
+  revisions of this file listed them as pending. Tracker entries are now aligned with the code.
+- `.git/cleanup-baseline-20260920-154756/` is referenced above but was not present in the
+  2026-09-20 source archive; re-create it before further large edits.
 
 This file is a progress record, not a completion claim.

@@ -210,6 +210,12 @@ CfgWriteAction classify_config_write(const GuestConfig& cfg, u32 fn_index, u32 o
     if (offset >= 0x0C && offset < kRegBar0) {
         return CfgWriteAction::Accept;
     }
+    // MSI/MSI-X capability windows are mediated: the guest may program them,
+    // but the value is bent into an Anko route, never a raw host MSI target.
+    const u32 msi_off = cfg.msi_cap_off[fn_index];
+    if (msi_off != 0 && offset >= msi_off && offset < msi_off + 24u) {
+        return CfgWriteAction::Mediate;
+    }
     // Anything else (device-specific read-only fields, power management, reset)
     // is rejected rather than blindly stored.
     return CfgWriteAction::Reject;

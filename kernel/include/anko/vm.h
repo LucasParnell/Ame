@@ -718,6 +718,22 @@ SysError device_attach(VmDeviceAssignment* a, const DeviceAssignSpec& spec);
 // Run the full §8.12 revoke state machine and release the assignment body.
 SysError device_revoke(VmDeviceAssignment* a);
 
+// Mediate a guest config-space write through the §6.3 policy. Returns E_PERM
+// when the write is rejected, E_OK otherwise.
+SysError device_mediate_config_write(VmDeviceAssignment* a, u32 fn_index, u32 offset, u64 value,
+                                     u32 size);
+// Assigned BAR subrange -> guest IPA as a stage-2 Device mapping (internal).
+SysError device_map_bar_internal(VmDeviceAssignment* a, u32 bar_index, u32 bar_offset, u64 size,
+                                 u64 guest_ipa, u32 rights);
+// Record (and, once past the route step, install) a host IRQ route (internal).
+SysError device_add_route(VmDeviceAssignment* a, u32 fn_index, u32 host_irq, u32 guest_irq,
+                          u32 trigger, Vcpu* target, bool msi);
+// Map every authorised RAM range into the domain (internal step 5).
+SysError device_map_authorized_ram(VmDeviceAssignment* a);
+
+// Opt-in Phase D proof (§8.11/§8.12/§7). Dev-build only; a no-op otherwise.
+void vm_device_selftest_if_testdev();
+
 void device_dispose(void* target);
 void device_release_for_vm(Vm* v);
 void device_owner_died(u64 identity);

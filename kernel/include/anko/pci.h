@@ -180,7 +180,7 @@ struct GuestConfig {
     u8 space[kMaxAssignFns][kCfgSpaceBytes];
     bool present[kMaxAssignFns];
     bool bme_allowed[kMaxAssignFns]; // guest bus-master has been authorised
-    u8 pad1[2];
+    u16 msi_cap_off[kMaxAssignFns];  // config offset of each MSI/MSI-X capability (0 = none)
 };
 
 // Classify a guest config write. `offset` is within the function's 256 bytes.

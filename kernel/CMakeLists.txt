@@ -64,6 +64,7 @@ set(ANKO_SOURCES
     # ---- Phase D: PCI device assignment + interrupt virtualization --------
     vm/vm_device.cc
     vm/vm_device_irq.cc
+    vm/vm_device_selftest.cc
 
     # ---- Phase B: backend-independent IOMMU core --------------------------
     iommu/core.cc

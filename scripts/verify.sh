@@ -115,6 +115,15 @@ do_iommu_dma() {
     | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("counters", {}); print("   -> {} faults={} quarantines={} ({:.2f}s)".format(d["reason"], c.get("faults"), c.get("quarantines"), d.get("elapsed") or 0)); sys.exit(0 if d["success"] else 1)'
 }
 
+# Phase D: PCI device assignment + interrupt virtualization (spec §6, §7,
+# §8.11/§8.12).  Opt-in for the same reason as Phase C: it needs the
+# iommu-testdev reference device and an SMMU-backed topology.  The default gate
+# is unchanged unless AME_VERIFY_ASSIGN=1 is set.
+do_assign() {
+    python3 scripts/test/assignment.py --build "$BUILD_DIR" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("counters", {}); print("   -> {} active={} bar={} routes={} injected={} deny={} ({:.2f}s)".format(d["reason"], c.get("active"), c.get("bar_mapped"), c.get("irq_routes"), c.get("irq_injected"), c.get("mediated_deny"), d.get("elapsed") or 0)); sys.exit(0 if d["success"] else 1)'
+}
+
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
 # bespoke control flow below.
 CHECKS=(
@@ -131,6 +140,11 @@ CHECKS=(
 # Opt-in Phase C row.  Absent by default so the default gate is unchanged.
 if [[ "${AME_VERIFY_IOMMU:-0}" == "1" ]]; then
     CHECKS+=("iommu-dma:do_iommu_dma")
+fi
+
+# Opt-in Phase D row.  Absent by default so the default gate is unchanged.
+if [[ "${AME_VERIFY_ASSIGN:-0}" == "1" ]]; then
+    CHECKS+=("assignment:do_assign")
 fi
 
 record_toolchain

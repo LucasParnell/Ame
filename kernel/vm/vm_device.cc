@@ -480,6 +480,7 @@ SysError step_expose(VmDeviceAssignment* a) {
         a->msi[i].cap_offset = cap;
         a->msi[i].nvectors = 1;
         a->msi[i].msg = pci::MsiMessage{};
+        a->cfg.msi_cap_off[i] = static_cast<u16>(cap);
         // Enable host memory decoding so the assigned BAR is reachable.
         pci::set_memory_enable(a->fns[i].info.bus, a->fns[i].info.device, a->fns[i].info.function,
                                true);

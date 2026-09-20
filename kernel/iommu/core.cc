@@ -15,6 +15,7 @@
 
 #include "anko/iommu.h"
 
+#include "anko/log.h"
 #include "libk/string.h"
 
 namespace iommu {
@@ -575,7 +576,16 @@ SysError IommuDomain::attach(IommuDeviceId device) {
             return E_OK; // redundant attach
         }
         if (binding.domain_index != kQuarantineIndex) {
-            return E_BUSY; // already owned by another active domain
+            // A requester already bound to a *quarantined* (deny) domain, or to
+            // a slot that no longer exists, may be re-attached to a fresh active
+            // domain: a quarantined domain translates nothing, so this is a
+            // rebinding away from a faulting context, not a bypass (§8.12).
+            IommuDomain* current = domain_by_index(binding.domain_index);
+            const bool current_denies =
+                current == nullptr || current->state() == DomainState::Quarantined;
+            if (!current_denies) {
+                return E_BUSY; // owned by another live domain
+            }
         }
         // Program the backend context before committing the binding, so a
         // failed install leaves the requester on its previous (deny) context.

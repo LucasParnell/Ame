@@ -267,6 +267,10 @@ extern "C" [[noreturn]] void kernel_main() {
     vm::init();
     sched::init();
     smp::init(g_dtb_phys);
+    // Phase D proof: no-op unless a dev build boots with an SMMUv3 and the
+    // iommu-testdev reference device. Runs before init so the assignment routes
+    // and vGIC state are exercised against a quiet machine.
+    vm::vm_device_selftest_if_testdev();
     kernel::init::create_init_process();
     ANKO_LOG_INFO("kernel/boot", "scheduler ready");
     sched::enter();

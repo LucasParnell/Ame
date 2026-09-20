@@ -190,5 +190,15 @@ if(ANKO_BUILD_DEV)
                 ${CMAKE_CURRENT_BINARY_DIR}/test.share.mxi
                 ${CMAKE_SOURCE_DIR}/scripts/test/package-lifecycle.py
         VERBATIM)
-    add_custom_target(kernel_regressions DEPENDS ${CMAKE_BINARY_DIR}/lifecycle.mxb)
+    # Supervision restart fixture — shares userland/init/supervision.h policy.
+    mochi_service(test.restart ${CMAKE_SOURCE_DIR}/tests/kernel/restart.cc 0x11300000)
+    target_include_directories(test.restart PRIVATE ${CMAKE_SOURCE_DIR}/userland/init)
+    add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/restart.mxb
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test/package-restart.py ${CMAKE_BINARY_DIR}
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/test.restart.mxi
+                ${CMAKE_CURRENT_BINARY_DIR}/test.busy.mxi
+                ${CMAKE_SOURCE_DIR}/scripts/test/package-restart.py
+        VERBATIM)
+    add_custom_target(kernel_regressions DEPENDS ${CMAKE_BINARY_DIR}/lifecycle.mxb
+                                              ${CMAKE_BINARY_DIR}/restart.mxb)
 endif()

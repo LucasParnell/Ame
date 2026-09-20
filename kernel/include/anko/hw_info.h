@@ -43,6 +43,17 @@ struct HwInfo {
     // T210 XUSB: Hekate pre-loads FALCON firmware into IMEM.
     // When true, the xHCI driver must skip HCRST (which would erase FALCON).
     bool xhci_noreset;
+
+    // virtio-mmio transports.  probe() records every "virtio,mmio" node it
+    // finds in the DTB, not just the first.  virtio_bases[0] is the instance the
+    // legacy has_virtio_blk/virtio_base fields point at.
+    static constexpr u32 kMaxVirtioMmio = 32;
+    u32      virtio_count = 0;
+    PhysAddr virtio_bases[kMaxVirtioMmio] = {};
+
+    // SMMUv3 (compatible = "arm,smmu-v3") presence and register base, from DTB.
+    bool     has_smmu = false;
+    PhysAddr smmu_base = 0;
 };
 
 // Single global hardware description.

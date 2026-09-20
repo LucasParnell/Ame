@@ -34,6 +34,11 @@ static const HwInfo kFallback = {
     .t210_dc_fb_height = 0,
     // T210 XUSB FALCON firmware is pre-loaded by Hekate; never issue HCRST.
     .xhci_noreset  = true,
+    // No virtio-mmio transports and no SMMUv3 on this board fallback.
+    .virtio_count  = 0,
+    .virtio_bases  = {},
+    .has_smmu      = false,
+    .smmu_base     = 0,
 };
 
 const HwInfo& get_board_fallback() { return kFallback; }

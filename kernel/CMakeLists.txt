@@ -64,6 +64,9 @@ set(ANKO_SOURCES
     # ---- Framebuffer + PCI driver support (M2 / M3.5) --------------------
     drivers/fwcfg.cc
     drivers/pci_probe.cc
+
+    # ---- Phase A: PCI / IOMMU inventory -----------------------------------
+    pci/enumerate.cc
 )
 
 add_executable(anko ${ANKO_SOURCES})

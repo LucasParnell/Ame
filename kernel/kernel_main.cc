@@ -188,7 +188,8 @@ extern "C" [[noreturn]] void kernel_main() {
     // signal we returned from probe() and are continuing init.
     fb_stage(0x000000FFu); // blue XRGB
     ANKO_LOGF_INFO("kernel/probe",
-                   "boot_el=%u ram=0x%llx+0x%llx console=0x%llx gic=0x%llx/0x%llx fwcfg=%d pcie=%d vblk=%d",
+                   "boot_el=%u ram=0x%llx+0x%llx console=0x%llx gic=0x%llx/0x%llx fwcfg=%d pcie=%d "
+                   "vblk=%d virtio_n=%u smmu=%d smmu_base=0x%llx",
                    g_hw.boot_el,
                    static_cast<unsigned long long>(g_hw.ram_base),
                    static_cast<unsigned long long>(g_hw.ram_size),
@@ -197,7 +198,10 @@ extern "C" [[noreturn]] void kernel_main() {
                    static_cast<unsigned long long>(g_hw.gic_cpu_base),
                    g_hw.has_fwcfg,
                    g_hw.has_pcie,
-                   g_hw.has_virtio_blk);
+                   g_hw.has_virtio_blk,
+                   g_hw.virtio_count,
+                   g_hw.has_smmu,
+                   static_cast<unsigned long long>(g_hw.smmu_base));
 
     mm::phys_init(g_hw.ram_base, g_hw.ram_size);
     if (g_dtb_phys && libk::be32(reinterpret_cast<const void*>(g_dtb_phys)) == fdt::kMagic) {

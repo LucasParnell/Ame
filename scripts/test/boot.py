@@ -8,6 +8,7 @@ regression in scripts/test/durable-persistence.py).
 """
 import argparse
 import json
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -20,11 +21,20 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
     output = pathlib.Path(output) if output else pathlib.Path(tempfile.mkdtemp(prefix='ame-boot-'))
     output.mkdir(parents=True, exist_ok=True)
     host, guest = output / 'host.log', output / 'guest.log'
-    args = ['qemu-system-aarch64', '-machine', 'virt,virtualization=on,gic-version=2',
+    # Opt-in Phase A topology: attach an SMMUv3 (no default bus bypass) and a
+    # virtio-gpu-pci display function, while keeping ramfb.  The default gate
+    # topology below stays byte-for-byte unchanged unless the env opts in.
+    iommu = os.environ.get('AME_QEMU_IOMMU') == '1'
+    machine = 'virt,virtualization=on,gic-version=2'
+    if iommu:
+        machine += ',iommu=smmuv3,default-bus-bypass-iommu=off'
+    args = ['qemu-system-aarch64', '-machine', machine,
             '-cpu', 'cortex-a57', '-smp', str(cpus), '-m', '512M', '-device', 'ramfb',
             '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,bus=xhci.0',
             '-device', 'usb-mouse,bus=xhci.0', '-display', 'none', '-monitor', 'none',
             '-serial', f'file:{host}', '-serial', f'file:{guest}']
+    if iommu:
+        args += ['-device', 'virtio-gpu-pci']
     if disk:
         snapshot_arg = 'snapshot=on' if snapshot else 'snapshot=off'
         args += ['-drive',
@@ -59,7 +69,7 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
                 except subprocess.TimeoutExpired: proc.kill(); proc.wait()
     result = dict(success=success, reason=reason, mode=mode, cpus=cpus,
                   elapsed=time.monotonic() - started, logs=str(output), command=args,
-                  snapshot=snapshot)
+                  snapshot=snapshot, iommu=iommu)
     (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result))
     return success

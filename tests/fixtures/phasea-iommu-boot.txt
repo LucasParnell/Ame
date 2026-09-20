@@ -1,0 +1,30 @@
+Phase A evidence — opt-in SMMUv3 topology, direct boot (observed Ame kernel log).
+
+Reproduce:
+  AME_QEMU_IOMMU=1 python3 scripts/test/boot.py --build out/verify --mode direct \
+      --cpus 2 --marker "all services ready"
+
+QEMU topology (opt-in):
+  -machine virt,virtualization=on,gic-version=2,iommu=smmuv3,default-bus-bypass-iommu=off
+  -device ramfb -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0
+  -device usb-mouse,bus=xhci.0 -device virtio-gpu-pci
+
+Result: success, reason=ready. Serial excerpt (host UART, PL011):
+--------------------------------------------------------------------------
+[early] [I] cpu0 kernel/probe: dtb_phys=0x48200000 align=0
+[early] [I] cpu0 kernel/probe: boot_el=2 ram=0x40000000+0x20000000 console=0x9000000 gic=0x8000000/0x8010000 fwcfg=1 pcie=1 vblk=1 virtio_n=32 smmu=1 smmu_base=0x9050000
+[    0.212788] [I] cpu0 pci: inventory: 4 function(s) via ECAM 0x4010000000
+[    0.212858] [I] cpu0 pci:   bdf 0:0.0 vendor=1b36 device=8 class=60000 reqid=0 cmd=0 bm=0 mem=0
+[    0.212890] [I] cpu0 pci:   bdf 0:1.0 vendor=1af4 device=1000 class=20000 reqid=8 cmd=0 bm=0 mem=0
+[    0.212938] [I] cpu0 pci:     bar0 io base=0x0 size=0x20 prefetch=0
+[    0.212952] [I] cpu0 pci:     bar1 mmio32 base=0x0 size=0x1000 prefetch=0
+[    0.212964] [I] cpu0 pci:     bar4 mmio64 base=0x0 size=0x4000 prefetch=1
+[    0.212970] [I] cpu0 pci:   bdf 0:2.0 vendor=1b36 device=d class=c0330 reqid=10 cmd=6 bm=1 mem=1
+[    0.212976] [I] cpu0 pci:     bar0 mmio64 base=0x10000000 size=0x4000 prefetch=0
+[    0.212982] [I] cpu0 pci:   bdf 0:3.0 vendor=1af4 device=1050 class=38000 reqid=18 cmd=0 bm=0 mem=0
+[    0.212988] [I] cpu0 pci:     bar1 mmio32 base=0x0 size=0x1000 prefetch=0
+[    0.212992] [I] cpu0 pci:     bar4 mmio64 base=0x0 size=0x4000 prefetch=1
+[    1.280000] [I] drv.pci: drv.pci: placeholder — M10 not yet implemented
+[    1.280000] [I] drv.usb.xhci: drv.usb.xhci: controller ready
+[    1.680000] [I] init: all services ready
+--------------------------------------------------------------------------

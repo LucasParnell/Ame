@@ -53,7 +53,7 @@ exec docker run --rm \
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends \
             build-essential bc bison flex libelf-dev libssl-dev cpio kmod \
-            file python3 ca-certificates >/dev/null
+            file device-tree-compiler python3 ca-certificates >/dev/null
         cd /ame
         ./scripts/linux/build-gpu-linux.sh
     '

@@ -772,6 +772,35 @@ extern "C" [[noreturn]] void _start() {
     dango_counter("vcpu.owner_vm_id", vcpu_info.owner_vm_id);
     dango_debug("vcpu ready\n");
 
+    // Phase E: build the virtio-gpu appliance assignment when Dango was granted
+    // the GPU function authority (spec §6.1/§8.11) and the guest carries the GPU
+    // PCI description. The order is the secure-attach contract: assign -> map
+    // BARs -> route INTx -> expose ECAM, all before the vCPU is resumed.
+    const CapHandle gpu_function = mochi::boot::handle(boot, "gpu.function");
+    const CapHandle gpu_irq = mochi::boot::handle(boot, "gpu.irq");
+    if (have_linux && gpu_function != kNullCap) {
+        const CapHandle assign = as_cap(sys_vm_assign_device(vm, gpu_function, 0));
+        if (assign == kNullCap) fail("gpu assign failed\n");
+
+        // BAR1 (mmio32, 4 KiB) and BAR4 (mmio64, 16 KiB) inside the DTB MMIO
+        // window at 0x4000_0000; the ECAM reports these IPAs as the BAR bases.
+        const uint32_t bar_rights = dango::RIGHT_READ | dango::RIGHT_WRITE;
+        if (sys_vm_assign_map_mmio(assign, 1, 0x4000'0000ull, 0x1000, bar_rights, 0) != 0 ||
+            sys_vm_assign_map_mmio(assign, 4, 0x4000'1000ull, 0x4000, bar_rights, 0) != 0) {
+            fail("gpu bar map failed\n");
+        }
+        // PCI INTx -> guest SPI 12 (dango-linux-gpu.dts.in interrupt-map).
+        if (gpu_irq != kNullCap && sys_vm_assign_route_irq(assign, gpu_irq, vcpu, 12, 0) != 0) {
+            fail("gpu irq route failed\n");
+        }
+        // Synthetic ECAM aperture (1 MiB); reads/writes trap through the
+        // stage-2 handler in kernel/pci/ecam.cc.
+        if (sys_vm_assign_expose_ecam(assign, 0x3f00'0000ull, 0x10'0000ull) != 0) {
+            fail("gpu ecam expose failed\n");
+        }
+        dango_log("gpu appliance ready\n");
+    }
+
     dango::SchedContext vcpu_sched{};
     vcpu_sched.band = kLinuxRunnerSchedBand;
     vcpu_sched.weight = 1024;

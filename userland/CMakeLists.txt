@@ -105,13 +105,19 @@ set(DANGO_LINUX_TARGET_DEPS)
 set(DANGO_LINUX_BUNDLE_OBJECT_ARGS)
 
 if(DANGO_BUILD_LINUX_ARTIFACTS)
-    set(DANGO_LINUX_ARTIFACT_DIR "${CMAKE_BINARY_DIR}/dango-linux" CACHE PATH "Dango Linux artifact directory" FORCE)
+    if(NOT DANGO_LINUX_ARTIFACT_DIR)
+        set(DANGO_LINUX_ARTIFACT_DIR "${CMAKE_BINARY_DIR}/dango-linux" CACHE PATH "Dango Linux artifact directory")
+    endif()
     set(DANGO_LINUX_ARCHIVE_FILES
         "${DANGO_LINUX_ARTIFACT_DIR}/Image"
         "${DANGO_LINUX_ARTIFACT_DIR}/initramfs.cpio"
         "${DANGO_LINUX_ARTIFACT_DIR}/dango-linux.dtb"
         "${DANGO_LINUX_ARTIFACT_DIR}/manifest.toml"
     )
+    # When prebuilt artifacts are supplied (e.g. built in the Linux container on a
+    # host that cannot build the guest kernel), do not re-run the builder: the
+    # rule below only exists for hosts that build the guest locally.
+    if(NOT EXISTS "${DANGO_LINUX_ARTIFACT_DIR}/Image")
     add_custom_command(
         OUTPUT ${DANGO_LINUX_ARCHIVE_FILES}
         COMMAND ${CMAKE_COMMAND} -E env
@@ -132,6 +138,7 @@ if(DANGO_BUILD_LINUX_ARTIFACTS)
     )
     add_custom_target(dango_linux_artifacts DEPENDS ${DANGO_LINUX_ARCHIVE_FILES})
     list(APPEND DANGO_LINUX_TARGET_DEPS dango_linux_artifacts)
+    endif()
 endif()
 
 if(DANGO_LINUX_ARTIFACT_DIR)

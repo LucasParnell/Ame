@@ -102,3 +102,24 @@ void _start(void) {
         sys_nanosleep(&ts, 0);
     }
 }
+
+/* Freestanding runtime shims. The agent links with -nostdlib -fno-builtin, but
+ * a compiler may still emit calls to these for block copies/clears: clang
+ * usually inlines them, gcc does not. Keep them trivial and dependency-free so
+ * the same source links under both. */
+void* memcpy(void* dst, const void* src, unsigned long n) {
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
+    for (unsigned long i = 0; i < n; ++i) {
+        d[i] = s[i];
+    }
+    return dst;
+}
+
+void* memset(void* dst, int c, unsigned long n) {
+    unsigned char* d = (unsigned char*)dst;
+    for (unsigned long i = 0; i < n; ++i) {
+        d[i] = (unsigned char)c;
+    }
+    return dst;
+}

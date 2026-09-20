@@ -835,6 +835,7 @@ extern "C" [[noreturn]] void _start() {
     }
     console_log("channel ready\n");
     console_log("layout ready\n");
+    mochi::boot::ready(boot);
 
     if (sys_notify(kLayoutDoneDoorbell) != 0) fail("service failed\n");
     if (sys_wait_doorbell(kAuthGateDoorbell, auth_gate_base) != 0) {

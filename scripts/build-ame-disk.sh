@@ -8,6 +8,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT}/scripts/host.sh"
+ame_host_tools
 BUILD_DIR="${AME_BUILD_DIR:-${ROOT}/build}"
 DISK="${AME_DISK:-${BUILD_DIR}/ame-disk.img}"
 DISK_SIZE="${AME_DISK_SIZE:-256M}"
@@ -51,11 +53,9 @@ part_field() {
         awk -F: -v key="${field}" '$1 ~ key { gsub(/^[ \t]+|[ \t]+$/, "", $2); split($2, a, /[ \t]+/); print a[1]; exit }'
 }
 
-need truncate
 need sgdisk
 need dd
 need python3
-need stat
 
 KERNEL_BIN="${BUILD_DIR}/kernel/anko.bin"
 SYSTEM_BUNDLE="${BUILD_DIR}/system.mxb"
@@ -71,7 +71,7 @@ fi
 
 mkdir -p "$(dirname "${DISK}")"
 rm -f "${DISK}" "${ROOT_IMG}"
-truncate -s "${DISK_SIZE}" "${DISK}"
+ame_sparse_file "${DISK}" "${DISK_SIZE}"
 
 sgdisk --clear \
        --set-alignment=1 \
@@ -97,7 +97,7 @@ BOOT_SECTORS=$((BOOT_LAST - BOOT_FIRST + 1))
 ROOT_SECTORS=$((ROOT_LAST - ROOT_FIRST + 1))
 ROOT_BYTES=$((((ROOT_SECTORS * 512) / 4096) * 4096))
 BOOT_BYTES=$((BOOT_SECTORS * 512))
-KERNEL_BYTES="$(stat -c%s "${KERNEL_BIN}")"
+KERNEL_BYTES="$(ame_file_size "${KERNEL_BIN}")"
 KERNEL_BLOCKS=$(((KERNEL_BYTES + 511) / 512))
 KERNEL_LBA_HEX="$(printf '%x' "${BOOT_FIRST}")"
 KERNEL_BLOCKS_HEX="$(printf '%x' "${KERNEL_BLOCKS}")"
@@ -115,17 +115,18 @@ virtio dev 0
 virtio read ${kernel_addr_r} __AME_KERNEL_LBA__ __AME_KERNEL_BLOCKS__
 booti ${kernel_addr_r} - ${fdtcontroladdr}
 EOF_BOOT_CMD
-sed -i \
+sed \
     -e "s/__AME_KERNEL_LBA__/${KERNEL_LBA_HEX}/g" \
     -e "s/__AME_KERNEL_BLOCKS__/${KERNEL_BLOCKS_HEX}/g" \
-    "${BOOT_CMD}"
+    "${BOOT_CMD}" > "${BOOT_CMD}.tmp"
+mv "${BOOT_CMD}.tmp" "${BOOT_CMD}"
 
 python3 "${ROOT}/scripts/mx/mkamefs.py" create \
     --output "${ROOT_IMG}" \
     --build-dir "${BUILD_DIR}" \
     --size "${ROOT_BYTES}"
-dd if="${ROOT_IMG}" of="${DISK}" bs=512 seek="${ROOT_FIRST}" conv=notrunc status=none
-dd if="${KERNEL_BIN}" of="${DISK}" bs=512 seek="${BOOT_FIRST}" conv=notrunc status=none
+dd if="${ROOT_IMG}" of="${DISK}" bs=512 seek="${ROOT_FIRST}" conv=notrunc
+dd if="${KERNEL_BIN}" of="${DISK}" bs=512 seek="${BOOT_FIRST}" conv=notrunc
 
 echo "built Ame disk image: ${DISK}"
 echo "  raw boot partition: sectors ${BOOT_FIRST}-${BOOT_LAST}, kernel blocks=${KERNEL_BLOCKS} (0x${KERNEL_BLOCKS_HEX})"

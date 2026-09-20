@@ -24,6 +24,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT}/scripts/host.sh"
+ame_host_tools
+DEFAULT_DISPLAY=sdl
+if [[ "$(uname -s)" == Darwin ]]; then DEFAULT_DISPLAY=cocoa; fi
+case "${AME_BOOT_MODE:-direct}" in
+    direct|disk) ;;
+    *) echo 'error: AME_BOOT_MODE must be direct or disk' >&2; exit 2 ;;
+esac
 BUILD_DIR="${AME_BUILD_DIR:-${ROOT}/build}"
 KERNEL="${BUILD_DIR}/kernel/anko.bin"
 INITRD="${BUILD_DIR}/system.mxb"
@@ -134,7 +142,7 @@ prepare_guest_serial() {
 
 GUEST_SERIAL="$(prepare_guest_serial)"
 
-if [[ "${AME_BOOT_MODE:-disk}" == "direct" ]]; then
+if [[ "${AME_BOOT_MODE:-direct}" == "direct" ]]; then
     if [[ ! -f "${KERNEL}" ]]; then
         echo "error: ${KERNEL} not found — run cmake build first" >&2
         exit 1
@@ -165,7 +173,7 @@ if [[ "${AME_BOOT_MODE:-disk}" == "direct" ]]; then
         AME_FS_DISK_SIZE="${FS_DISK_SIZE}" \
         "${ROOT}/scripts/install-ame-vfs.sh"
     elif [[ ! -f "${FS_DISK}" ]]; then
-        truncate -s "${FS_DISK_SIZE}" "${FS_DISK}"
+        ame_sparse_file "${FS_DISK}" "${FS_DISK_SIZE}"
     fi
 
     QEMU_ARGS=(
@@ -179,7 +187,7 @@ if [[ "${AME_BOOT_MODE:-disk}" == "direct" ]]; then
         -device qemu-xhci,id=xhci
         -device usb-kbd,bus=xhci.0
         -device usb-mouse,bus=xhci.0
-        -display "${QEMU_DISPLAY:-sdl}"
+        -display "${QEMU_DISPLAY:-${DEFAULT_DISPLAY}}"
         -serial mon:stdio
         -serial "${GUEST_SERIAL}"
         -kernel "${KERNEL}"
@@ -225,7 +233,7 @@ else
         -device qemu-xhci,id=xhci
         -device usb-kbd,bus=xhci.0
         -device usb-mouse,bus=xhci.0
-        -display "${QEMU_DISPLAY:-sdl}"
+        -display "${QEMU_DISPLAY:-${DEFAULT_DISPLAY}}"
         -serial mon:stdio
         -serial "${GUEST_SERIAL}"
         -bios "${UBOOT}"

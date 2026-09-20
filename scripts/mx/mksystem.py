@@ -19,16 +19,7 @@ RESOURCE_ALIASES = [
     {"name": "shell", "boot": "terminal"},
 ]
 
-CHANNEL_ALIASES = [
-    {"name": "logs", "kind": "ring-doorbell", "order": 6},
-    {"name": "nameservice", "kind": "ring-pair", "order": 6},
-    {"name": "ping-pong", "kind": "ring-pair", "order": 6},
-    {"name": "framebuffer", "kind": "ring-pair", "order": 10},
-    {"name": "terminal", "kind": "ring-pair", "order": 6},
-    {"name": "block", "kind": "ring-pair", "order": 6},
-    {"name": "fs", "kind": "ring-pair", "order": 6},
-    {"name": "svcctl", "kind": "ring-pair", "order": 6},
-]
+CHANNEL_ALIASES = [{'name': 'init_log_ring', 'kind': 'ring', 'order': 6}, {'name': 'console_mirror_ring', 'kind': 'ring', 'order': 10}, {'name': 'console_mirror_db', 'kind': 'doorbell'}, {'name': 'ring_ping_to_pong', 'kind': 'ring', 'order': 6}, {'name': 'ring_pong_to_ping', 'kind': 'ring', 'order': 6}, {'name': 'db_pong', 'kind': 'doorbell'}, {'name': 'db_ping', 'kind': 'doorbell'}, {'name': 'db_ipc_done', 'kind': 'doorbell'}, {'name': 'ns_request_ring', 'kind': 'ring', 'order': 6}, {'name': 'ns_reply_ring', 'kind': 'ring', 'order': 6}, {'name': 'db_nameservice', 'kind': 'doorbell'}, {'name': 'db_ns_reply', 'kind': 'doorbell'}, {'name': 'db_dango_done', 'kind': 'doorbell'}, {'name': 'db_dango_auth_gate', 'kind': 'doorbell'}, {'name': 'db_dango_layout_done', 'kind': 'doorbell'}, {'name': 'fb_cmd_ring', 'kind': 'ring', 'order': 10}, {'name': 'fb_reply_ring', 'kind': 'ring', 'order': 6}, {'name': 'fb_cmd_db', 'kind': 'doorbell'}, {'name': 'fb_reply_db', 'kind': 'doorbell'}, {'name': 'xhci_hid_ring', 'kind': 'ring', 'order': 6}, {'name': 'xhci_hid_db', 'kind': 'doorbell'}, {'name': 'hid_input_ring', 'kind': 'ring', 'order': 6}, {'name': 'hid_input_db', 'kind': 'doorbell'}, {'name': 'input_tty_ring', 'kind': 'ring', 'order': 6}, {'name': 'input_tty_db', 'kind': 'doorbell'}, {'name': 'blk_req_ring', 'kind': 'ring', 'order': 6}, {'name': 'blk_reply_ring', 'kind': 'ring', 'order': 6}, {'name': 'blk_req_db', 'kind': 'doorbell'}, {'name': 'blk_reply_db', 'kind': 'doorbell'}, {'name': 'fs_cmd_ring', 'kind': 'ring', 'order': 6}, {'name': 'fs_reply_ring', 'kind': 'ring', 'order': 6}, {'name': 'fs_cmd_db', 'kind': 'doorbell'}, {'name': 'fs_reply_db', 'kind': 'doorbell'}, {'name': 'term_input_ring', 'kind': 'ring', 'order': 6}, {'name': 'term_output_ring', 'kind': 'ring', 'order': 6}, {'name': 'term_input_db', 'kind': 'doorbell'}, {'name': 'term_output_db', 'kind': 'doorbell'}, {'name': 'svc_ctl_req_ring', 'kind': 'ring', 'order': 6}, {'name': 'svc_ctl_reply_ring', 'kind': 'ring', 'order': 6}, {'name': 'svc_ctl_req_db', 'kind': 'doorbell'}, {'name': 'svc_ctl_reply_db', 'kind': 'doorbell'}]
 
 CHECKS = [
     {"name": "ipc", "service": "demo.ping"},
@@ -68,6 +59,7 @@ def parse_legacy_manifest(path: Path) -> list[dict[str, object]]:
                 "caps": cap_list,
                 "affinity": affinity_for(name),
                 "provides": provides_for(name),
+                "uses": (["fs", "nameservice"] if name == "app.hello" else ["fs"] if name == "msh" else ["nameservice"] if name == "demo.ping" else []),
             }
         )
     return services
@@ -136,7 +128,7 @@ def build_manifest(build_dir: Path, legacy_manifest: Path) -> dict[str, object]:
         svc["sha256"] = sha256_file(image)
 
     return {
-        "schema": 1,
+        "schema": 2,
         "boot": {
             "init": {
                 "bundle": "/ame/boot/system.mxb",

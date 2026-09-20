@@ -176,6 +176,7 @@ extern "C" [[noreturn]] void _start() {
     (void)drain_all(uart, mapped, tty_mirror);
     uart_log(uart, mochi::LogLevel::Info, "io.console", "ready");
 
+    mochi::boot::ready(boot);
     while (true) {
         if (drain_all(uart, mapped, tty_mirror)) {
             continue;

@@ -27,7 +27,6 @@ static kernel::SpinLock g_slab_lock{};
 static constexpr usize kMaxBitmapBytes = 128 * 1024;
 static u8 g_bitmap[kMaxBitmapBytes];
 
-static PhysAddr g_heap_base = 0;
 static PhysAddr g_heap_curr = 0;
 static PhysAddr g_heap_end  = 0;
 
@@ -105,7 +104,7 @@ void phys_init(PhysAddr ram_base, usize ram_size) {
                          reinterpret_cast<PhysAddr>(&__kernel_end[0]));
 
     // Heap is carved out explicitly later by heap_init().
-    g_heap_base = g_heap_curr = g_heap_end = 0;
+    g_heap_curr = g_heap_end = 0;
 }
 
 PhysAddr alloc_page() {
@@ -200,7 +199,6 @@ void heap_init() {
     PhysAddr first = alloc_pages_contiguous(kHeapPages);
     if (!first) return;
 
-    g_heap_base = first;
     g_heap_curr = first;
     g_heap_end  = first + kHeapPages * PAGE_SIZE;
 }

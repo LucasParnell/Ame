@@ -50,20 +50,32 @@ PhysAddr alloc_stage2_table(Stage2AddressSpace* s2) {
     return pa;
 }
 
-bool ensure_table(Stage2AddressSpace* s2, PhysAddr table_pa, u32 idx, PhysAddr* out_pa) {
-    u64* table = table_ptr(table_pa);
-    const u64 desc = table[idx];
-    if (is_table_desc(desc)) {
-        *out_pa = desc & S2_DESC_ADDR_MASK;
-        return true;
-    }
-    if (desc & S2_DESC_VALID) return false;
-
-    PhysAddr child = alloc_stage2_table(s2);
-    if (!child) return false;
-    table[idx] = (child & S2_DESC_ADDR_MASK) | S2_DESC_VALID | S2_DESC_TABLE;
-    *out_pa = child;
+bool table_empty(PhysAddr pa) {
+    for (u32 i = 0; i < 512; ++i) if (table_ptr(pa)[i] & S2_DESC_VALID) return false;
     return true;
+}
+
+void release_table(Stage2AddressSpace* s2, PhysAddr pa) {
+    for (u32 i = 0; i < s2->next_level_table_count; ++i) {
+        if (s2->next_level_tables[i] != pa) continue;
+        s2->next_level_tables[i] = s2->next_level_tables[--s2->next_level_table_count];
+        s2->next_level_tables[s2->next_level_table_count] = 0;
+        mm::free_page(pa);
+        return;
+    }
+}
+
+// No guest can run during this operation. Guest entry invalidates stage-2 TLBs.
+void prune_tables(Stage2AddressSpace* s2, u64 ipa) {
+    auto& root = table_ptr(s2->root_table_phys)[level_index(ipa, 1)];
+    if (!is_table_desc(root)) return;
+    PhysAddr l2 = root & S2_DESC_ADDR_MASK;
+    auto& link = table_ptr(l2)[level_index(ipa, 2)];
+    if (is_table_desc(link)) {
+        PhysAddr l3 = link & S2_DESC_ADDR_MASK;
+        if (table_empty(l3)) { link = 0; release_table(s2, l3); }
+    }
+    if (table_empty(l2)) { root = 0; release_table(s2, l2); }
 }
 
 u64 stage2_page_attrs(u32 rights) {
@@ -155,25 +167,30 @@ SysError stage2_map_page(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 right
     if ((ipa & (PAGE_SIZE - 1)) != 0 || (pa & (PAGE_SIZE - 1)) != 0) return E_INVALID;
     if ((rights & ~(RIGHT_READ | RIGHT_WRITE | RIGHT_EXEC)) != 0) return E_INVALID;
 
-    PhysAddr l2_pa = 0;
-    PhysAddr l3_pa = 0;
-    if (!ensure_table(s2, s2->root_table_phys, level_index(ipa, 1), &l2_pa)) {
-        return E_NOMEM;
+    if (ipa >= (1ull << s2->ipa_bits) || (pa & ~S2_DESC_ADDR_MASK) || !rights) return E_INVALID;
+    if (s2->mapped_pages >= kMaxStage2Mappings) return E_OVERFLOW;
+    PhysAddr table_pa = s2->root_table_phys;
+    for (u32 level = 1; level < 3; ++level) {
+        auto& link = table_ptr(table_pa)[level_index(ipa, level)];
+        if (!is_table_desc(link)) {
+            if (link & S2_DESC_VALID) { prune_tables(s2, ipa); return E_BUSY; }
+            PhysAddr child = alloc_stage2_table(s2);
+            if (!child) { prune_tables(s2, ipa); return E_NOMEM; }
+            link = child | S2_DESC_VALID | S2_DESC_TABLE;
+        }
+        table_pa = link & S2_DESC_ADDR_MASK;
     }
-    if (!ensure_table(s2, l2_pa, level_index(ipa, 2), &l3_pa)) {
-        return E_NOMEM;
-    }
-    u64* l3 = table_ptr(l3_pa);
-    const u32 l3_idx = level_index(ipa, 3);
-    if (l3[l3_idx] & S2_DESC_VALID) return E_BUSY;
-    l3[l3_idx] = (pa & S2_DESC_ADDR_MASK) | S2_DESC_BLOCK_PAGE | stage2_page_attrs(rights);
-
-    return record_mapping(s2, ipa, pa, rights);
+    auto& leaf = table_ptr(table_pa)[level_index(ipa, 3)];
+    if (leaf & S2_DESC_VALID) return E_BUSY;
+    const SysError rc = record_mapping(s2, ipa, pa, rights);
+    if (rc != E_OK) { prune_tables(s2, ipa); return rc; }
+    leaf = (pa & S2_DESC_ADDR_MASK) | S2_DESC_BLOCK_PAGE | stage2_page_attrs(rights);
+    return E_OK;
 }
 
 SysError stage2_unmap_page(Stage2AddressSpace* s2, u64 ipa) {
     if (!s2 || !s2->built || s2->active) return E_INVALID;
-    if ((ipa & (PAGE_SIZE - 1)) != 0) return E_INVALID;
+    if ((ipa & (PAGE_SIZE - 1)) != 0 || ipa >= (1ull << s2->ipa_bits)) return E_INVALID;
 
     const u64 l1_desc = table_ptr(s2->root_table_phys)[level_index(ipa, 1)];
     if (is_table_desc(l1_desc)) {
@@ -190,6 +207,7 @@ SysError stage2_unmap_page(Stage2AddressSpace* s2, u64 ipa) {
         if (!mapping.valid || mapping.ipa != ipa) continue;
         mapping.valid = false;
         if (s2->mapped_pages > 0) --s2->mapped_pages;
+        prune_tables(s2, ipa);
         return E_OK;
     }
     return E_NOTFOUND;

@@ -111,6 +111,7 @@ extern "C" [[noreturn]] void _start() {
 
     mochi::log_raw_marker("ui.input: ready\n");
 
+    mochi::boot::ready(boot);
     while (true) {
         if (!g_hid.valid()) {
             mx_yield();

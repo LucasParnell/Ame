@@ -91,6 +91,7 @@ extern "C" [[noreturn]] void _start() {
 
     mochi::log_raw_marker("drv.usb.hid: ready\n");
 
+    mochi::boot::ready(boot);
     while (true) {
         if (!g_xhci.valid()) {
             mx_yield();

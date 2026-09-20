@@ -547,6 +547,7 @@ extern "C" [[noreturn]] void _start() {
     tty_cursor_show();
     fb_present();
 
+    mochi::boot::ready(boot);
     while (true) {
         const bool any_input = drain_input(64);
         const bool any_shell = drain_shell_output(64);

@@ -296,6 +296,7 @@ extern "C" [[noreturn]] void _start() {
         mochi::log_raw_marker("io.framebuffer: no command endpoint\n");
     }
 
+    mochi::boot::ready(boot);
     while (true) {
         if (!cmd_ring || cmd_db == MX_NULL_HANDLE) {
             mx_yield();

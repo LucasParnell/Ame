@@ -23,5 +23,6 @@ extern "C" [[noreturn]] void _start() {
     (void)mochi::log_map_from_boot(boot, kVaLogRing, "drv.pci");
 
     mochi::log_raw_marker("drv.pci: placeholder — M10 not yet implemented\n");
+    mochi::boot::ready(boot);
     while (true) { mx_yield(); }
 }

@@ -125,4 +125,10 @@ static inline mx_handle_t require_handle(const MxBootInfo* info, const char* nam
     return h;
 }
 
+// Services publish readiness only after their endpoints and local state exist.
+static inline void ready(const MxBootInfo* info) {
+    const auto db = handle(info, "service.ready");
+    if (db != MX_NULL_HANDLE) (void)sys_notify(db);
+}
+
 } // namespace mochi::boot

@@ -123,6 +123,7 @@ extern "C" [[noreturn]] void _start() {
                                         kVaConsoleRing, RIGHT_READ | RIGHT_WRITE);
     wait_cap(log_doorbell, kCapTypeDoorbell);
     mochi::log_set_sink(log_ring, kRingOrder, log_doorbell, "demo.ping");
+    mochi::boot::ready(boot);
 
     auto* ns_request_ring = wait_map<RingPage>(ns_req_cap, kCapTypeSharedRing,
                                                kVaNsRequestRing, RIGHT_READ | RIGHT_WRITE);

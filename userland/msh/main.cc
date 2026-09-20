@@ -1855,6 +1855,7 @@ extern "C" [[noreturn]] void _start() {
     const bool fs_ready = boot_map_fs(boot);
     (void)boot_map_svc_registry(boot);
     (void)boot_map_svcctl(boot);
+    mochi::boot::ready(boot);
     if (log_ready) {
         mochi::log_raw_marker(term_ready
             ? "msh: terminal attached\n"

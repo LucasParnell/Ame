@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT}/scripts/host.sh"
+ame_host_tools
 BUILD_DIR="${AME_BUILD_DIR:-${ROOT}/build}"
 TOOLCHAIN="${AME_TOOLCHAIN_FILE:-${ROOT}/scripts/build/toolchain-aarch64.cmake}"
 AUTO_BUILD_UBOOT="${AME_AUTO_BUILD_UBOOT:-1}"
@@ -13,6 +15,7 @@ LAUNCH=1
 DEBUG=0
 HEADLESS=0
 BOARD="${ANKO_BOARD:-qemu-virt}"
+BOOT_MODE="${AME_BOOT_MODE:-direct}"
 
 usage() {
     cat <<'EOF'
@@ -20,7 +23,8 @@ Usage: scripts/build-all-and-launch.sh [options]
 
 Options:
   --debug             Launch QEMU paused for gdb on :1234.
-  --headless          Suppress the guest terminal and force SDL dummy video.
+  --headless          Suppress the guest terminal and graphical display.
+  --boot-mode MODE    direct (default) or disk (requires U-Boot).
   --no-launch         Build everything and refresh the disk, but do not run QEMU.
   --no-uboot-build    Do not auto-build local U-Boot if no firmware is found.
   --board BOARD       Target board: qemu-virt (default) or switch-t210.
@@ -47,6 +51,10 @@ while [[ $# -gt 0 ]]; do
         --headless)
             HEADLESS=1
             ;;
+        --boot-mode)
+            shift
+            BOOT_MODE="${1:-}"
+            ;;
         --no-launch)
             LAUNCH=0
             ;;
@@ -70,6 +78,10 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+case "${BOOT_MODE}" in
+    direct|disk) ;;
+    *) echo 'error: boot mode must be direct or disk' >&2; exit 2 ;;
+esac
 
 need() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -173,12 +185,7 @@ else
 fi
 cmake "${CONFIGURE_ARGS[@]}"
 
-BUILD_PARALLEL=()
-if [[ -n "${AME_BUILD_JOBS:-}" ]]; then
-    BUILD_PARALLEL=(--parallel "${AME_BUILD_JOBS}")
-elif command -v nproc >/dev/null 2>&1; then
-    BUILD_PARALLEL=(--parallel "$(nproc)")
-fi
+BUILD_PARALLEL=(--parallel "$(ame_jobs)")
 
 echo "==> Building all default targets"
 DANGO_REQUIRE_LINUX="${DANGO_REQUIRE_LINUX}" \
@@ -189,7 +196,8 @@ if [[ "${DANGO_REQUIRE_LINUX}" == "1" ]]; then
     verify_dango_system_bundle
 fi
 
-echo "==> Building non-legacy Ame disk image"
+if [[ "${BOOT_MODE}" == disk ]]; then
+echo "==> Building Ame disk image"
 AME_BUILD_DIR="${BUILD_DIR}" \
 AME_DISK="${AME_DISK:-${BUILD_DIR}/ame-disk.img}" \
 DANGO_REQUIRE_LINUX="${DANGO_REQUIRE_LINUX}" \
@@ -202,27 +210,28 @@ if [[ -z "${UBOOT}" && "${AUTO_BUILD_UBOOT}" == "1" ]]; then
     "${ROOT}/scripts/build-u-boot-qemu-arm64.sh"
     UBOOT="$(find_uboot || true)"
 fi
+fi
 
 if [[ "${LAUNCH}" == "0" ]]; then
     echo "==> Build complete; launch skipped"
     exit 0
 fi
 
-if [[ -z "${UBOOT}" ]]; then
+if [[ "${BOOT_MODE}" == disk && -z "${UBOOT:-}" ]]; then
     echo "error: U-Boot for qemu_arm64 not found." >&2
     echo "hint: set UBOOT_BIN=/path/to/u-boot.bin or rerun without --no-uboot-build." >&2
     exit 1
 fi
 
-echo "==> Launching non-legacy U-Boot/disk boot"
+echo "==> Launching ${BOOT_MODE} boot"
 RUN_ENV=(
     env
-    AME_BOOT_MODE=disk
+    AME_BOOT_MODE="${BOOT_MODE}"
     AME_BUILD_DISK=0
     AME_BUILD_DIR="${BUILD_DIR}"
     AME_DISK="${AME_DISK:-${BUILD_DIR}/ame-disk.img}"
     DANGO_REQUIRE_LINUX="${DANGO_REQUIRE_LINUX}"
-    UBOOT_BIN="${UBOOT}"
+    UBOOT_BIN="${UBOOT:-}"
 )
 
 if [[ "${HEADLESS}" == "1" ]]; then

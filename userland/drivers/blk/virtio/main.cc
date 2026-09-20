@@ -547,6 +547,7 @@ extern "C" [[noreturn]] void _start() {
     }
     mochi::log_raw_marker("drv.blk.virtio: ready\n");
 
+    mochi::boot::ready(boot);
     while (true) {
         RingSlot slot{};
         while (blk.try_recv(&slot)) {

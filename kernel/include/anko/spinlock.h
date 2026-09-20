@@ -11,7 +11,7 @@ struct SpinLock {
 class LockGuard {
 public:
     explicit LockGuard(SpinLock& lock) : lock_(lock) {
-#if defined(__aarch64__)
+#if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
         asm volatile("mrs %0, DAIF; msr DAIFSet, #2" : "=r"(irq_) :: "memory");
 #endif
         while (__atomic_exchange_n(&lock_.value, 1u, __ATOMIC_ACQUIRE) != 0) {
@@ -25,7 +25,7 @@ public:
 
     ~LockGuard() {
         __atomic_store_n(&lock_.value, 0u, __ATOMIC_RELEASE);
-#if defined(__aarch64__)
+#if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
         asm volatile("msr DAIF, %0" :: "r"(irq_) : "memory");
 #endif
     }
@@ -35,7 +35,7 @@ public:
 
 private:
     SpinLock& lock_;
-#if defined(__aarch64__)
+#if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
     u64 irq_;
 #endif
 };

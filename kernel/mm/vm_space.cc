@@ -80,21 +80,7 @@ bool is_table_desc(u64 desc) {
     return (desc & (PTE_VALID | PTE_TABLE)) == (PTE_VALID | PTE_TABLE);
 }
 
-bool ensure_table(u64* table, u32 idx, PhysAddr* out_pa) {
-    u64 desc = table[idx];
-    if (is_table_desc(desc)) {
-        *out_pa = desc & PTE_ADDR_MASK;
-        return true;
-    }
-    if (desc & PTE_VALID) return false;
-
-    PhysAddr child = alloc_page();
-    if (!child) return false;
-    libk::memset(reinterpret_cast<void*>(child), 0, PAGE_SIZE);
-    table[idx] = (child & PTE_ADDR_MASK) | DESC_TABLE;
-    *out_pa = child;
-    return true;
-}
+void tlbi_all();
 
 u64 user_page_attrs(u32 rights, PhysAddr pa) {
     const bool writable = (rights & RIGHT_WRITE) != 0;
@@ -129,15 +115,37 @@ bool map_page_raw(VmSpace& space, VirtAddr va, PhysAddr pa, u64 attrs) {
     if (user && writable && executable) return false;
 
     PhysAddr table_pa = space.pgd_phys;
+    u64* created_links[3]{};
+    PhysAddr created_pages[3]{};
+    u32 created_count = 0;
+    auto rollback = [&]() {
+        // Remove only tables created by this walk. Existing mappings are intact.
+        for (u32 i = 0; i < created_count; ++i) *created_links[i] = 0;
+        if (created_count) tlbi_all();
+        for (u32 i = 0; i < created_count; ++i) free_page(created_pages[i]);
+        return false;
+    };
     for (u32 level = 0; level < 3; ++level) {
         u64* table = table_ptr(table_pa);
         const u32 idx = level_index(va, level);
-        if (!ensure_table(table, idx, &table_pa)) return false;
+        const u64 desc = table[idx];
+        if (is_table_desc(desc)) {
+            table_pa = desc & PTE_ADDR_MASK;
+            continue;
+        }
+        if (desc & PTE_VALID) return rollback();
+        const PhysAddr child = alloc_page();
+        if (!child) return rollback();
+        libk::memset(reinterpret_cast<void*>(child), 0, PAGE_SIZE);
+        created_links[created_count] = &table[idx];
+        created_pages[created_count++] = child;
+        table[idx] = (child & PTE_ADDR_MASK) | DESC_TABLE;
+        table_pa = child;
     }
 
     u64* l3 = table_ptr(table_pa);
     const u32 idx = level_index(va, 3);
-    if (l3[idx] & PTE_VALID) return false;
+    if (l3[idx] & PTE_VALID) return rollback();
     l3[idx] = (pa & PTE_ADDR_MASK) | DESC_PAGE | attrs;
     return true;
 }
@@ -378,7 +386,10 @@ void vm_init() {
     if (!kernel.pgd_phys) return;
     libk::memset(reinterpret_cast<void*>(kernel.pgd_phys), 0, PAGE_SIZE);
 
-    if (!map_bootstrap_identity(kernel)) return;
+    if (!map_bootstrap_identity(kernel)) {
+        destroy_table(kernel, kernel.pgd_phys, 0);
+        return;
+    }
 
     g_kernel_root = kernel.pgd_phys;
     enable_mmu(g_kernel_root);
@@ -423,6 +434,7 @@ bool vm_map_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32 rights
     rounded &= ~(static_cast<u64>(PAGE_SIZE - 1));
     u64 end = 0;
     if (__builtin_add_overflow(va, rounded, &end)) return false;
+    if (__builtin_add_overflow(pa, rounded, &end)) return false;
     kernel::LockGuard guard(g_vm_lock);
     u64 mapped = 0;
     for (u64 off = 0; off < rounded; off += PAGE_SIZE) {
@@ -445,6 +457,9 @@ bool vm_map_device_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32
     u64 rounded = 0;
     if (__builtin_add_overflow(size, static_cast<u64>(PAGE_SIZE - 1), &rounded)) return false;
     rounded &= ~(static_cast<u64>(PAGE_SIZE - 1));
+    u64 end = 0;
+    if (__builtin_add_overflow(va, rounded, &end) ||
+        __builtin_add_overflow(pa, rounded, &end)) return false;
     const u64 attrs = user_device_attrs(rights);
     kernel::LockGuard guard(g_vm_lock);
     u64 mapped = 0;

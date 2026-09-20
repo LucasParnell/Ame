@@ -8,6 +8,10 @@ project(Midix
     DESCRIPTION "Midix V0: Anko microkernel + Mochi userland, AArch64"
     LANGUAGES CXX ASM)
 
+# Prefer the project environment, including when launched outside an activated shell.
+if(NOT DEFINED Python3_EXECUTABLE AND EXISTS "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+    set(Python3_EXECUTABLE "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
@@ -45,6 +49,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_compile_options(
     -ffreestanding
+    $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>
     -mgeneral-regs-only
     -fno-exceptions
     -fno-rtti

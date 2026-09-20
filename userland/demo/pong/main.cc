@@ -67,6 +67,7 @@ extern "C" [[noreturn]] void _start() {
     mochi::log_set_sink(log_ring, kOrder, log_doorbell, "demo.pong");
 
     RingSlot slot{};
+    mochi::boot::ready(boot);
     while (true) {
         if (!ring_wait_pop(recv_ring, kOrder, &slot, my_doorbell)) {
             // Invalid doorbell/cap should not happen in the wired V1 demo.

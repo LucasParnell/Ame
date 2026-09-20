@@ -55,5 +55,6 @@ extern "C" [[noreturn]] void _start() {
 
     console_log("authority check passed\n");
     (void)sys_notify(kAuthGateDoorbell);
+    mochi::boot::ready(boot);
     while (true) sys_yield();
 }

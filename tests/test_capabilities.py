@@ -9,7 +9,7 @@ class Capabilities(unittest.TestCase):
     def test_retention_revocation_and_exhaustion(self):
         with tempfile.TemporaryDirectory(prefix='ame-capabilities-') as work:
             probe = str(Path(work) / 'probe')
-            subprocess.run(['clang++', '-std=c++23', '-O1', '-g', '-pthread',
+            subprocess.run(['clang++', '-std=c++23', '-DANKO_HOST_TEST', '-O1', '-g', '-pthread',
                 '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I'+str(ROOT/'kernel/include'), '-I'+str(ROOT/'shared/include'),
                 str(ROOT/'tests/capability_probe.cc'),

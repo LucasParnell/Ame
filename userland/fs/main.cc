@@ -12,6 +12,7 @@
 #include "mochi/boot.h"
 #include "mochi/boot_log.h"
 #include "mochi/fs.h"
+#include "mochi/sessions.h"
 #include "midix/abi/protocols/fs.h"
 
 constexpr mx_vaddr_t kVaBootInfo = 0x1000'0000ull;
@@ -94,6 +95,7 @@ struct SnapshotState {
 struct OpenHandle {
     bool used;
     bool disk_backed;
+    mx_u32_t owner;
     mx_u32_t inode_number;
     mx_u64_t snapshot_id;
     bool read_only;
@@ -108,6 +110,20 @@ static InodeState g_inodes[kMaxInodes];
 static PhysRefState g_phys_refs[kMaxPhysBlocks];
 static SnapshotState g_snapshots[kMaxSnapshots];
 static OpenHandle g_handles[kMaxHandles];
+static mx_u32_t g_handle_generations[kMaxHandles];
+static mx_u32_t g_session;
+static mx_u32_t g_tmp_inode;
+static mochi::ServerSessions g_sessions;
+
+static fs_handle_t handle_token(mx_u32_t index) {
+    g_handles[index].owner = g_session;
+    return (++g_handle_generations[index] << 8) | index;
+}
+static void close_session(mx_u32_t session) {
+    for (mx_u32_t i = 2; i < kMaxHandles; ++i)
+        if (g_handles[i].used && g_handles[i].owner == session) g_handles[i] = {};
+}
+
 static mochi::fs::BlkClient g_blk_client{};
 static bool g_blk_available = false;
 static bool g_disk_mounted = false;
@@ -117,14 +133,12 @@ static mx_u64_t g_disk_base_sector = 0;
 static mx_u64_t g_disk_partition_sectors = 0;
 static mx_u64_t g_disk_total_blocks = 0;
 static mx_u64_t g_disk_inode_root = 0;
-static mx_u64_t g_disk_generation = 1;
 static DiskBlockCacheEntry g_disk_cache[kDiskBlockCacheEntries];
 static mx_u64_t g_disk_cache_clock = 1;
 alignas(4096) static mx_u8_t g_gpt_entries[64 * 1024];
 static mx_u32_t g_next_inode = kRootInode + 1;
 static mx_u64_t g_generation = 1;
 static mx_u64_t g_last_snapshot_id = 0;
-static mx_u64_t g_metadata_seq = 1;
 static bool g_metadata_dirty = false;
 
 static const char kHelloName[] = "hello.txt";
@@ -205,7 +219,6 @@ static mx_u32_t checksum_block(const mx_u8_t* data) {
 static void note_metadata_delta(FsMutation type, mx_u32_t target) {
     (void)type;
     (void)target;
-    ++g_metadata_seq;
     g_metadata_dirty = true;
 }
 
@@ -423,50 +436,35 @@ static InodeState* find_live_child(mx_u32_t parent_inode, const char* name, mx_u
 }
 
 static fs_handle_t alloc_handle(mx_u32_t inode_number, mx_u64_t snapshot_id, bool read_only) {
-    for (mx_u32_t i = 1; i < kMaxHandles; ++i) {
-        if (g_handles[i].used) continue;
+    for (mx_u32_t i = 2; i < kMaxHandles; ++i) {
+        if (g_handles[i].used || g_handle_generations[i] == 0xffffff) continue;
         g_handles[i].used = true;
         g_handles[i].inode_number = inode_number;
         g_handles[i].snapshot_id = snapshot_id;
         g_handles[i].read_only = read_only || snapshot_id != 0;
-        return i;
+        return handle_token(i);
     }
     return 0;
 }
 
 static OpenHandle* handle_state(fs_handle_t handle) {
-    if (handle >= kMaxHandles || !g_handles[handle].used) return nullptr;
-    return &g_handles[handle];
+    if (handle == kRootHandle) return &g_handles[kRootHandle];
+    const mx_u32_t index = handle & 255;
+    if (index < 2 || index >= kMaxHandles || !g_handles[index].used ||
+        (handle >> 8) != g_handle_generations[index] || g_handles[index].owner != g_session) return nullptr;
+    return &g_handles[index];
 }
 
 static mx_i32_t parent_from_token(mx_u32_t token, mx_u32_t* out_inode,
                                   mx_u64_t* out_snapshot, bool* out_read_only) {
-    if (token == 0) {
-        if (out_inode) *out_inode = kRootInode;
-        if (out_snapshot) *out_snapshot = 0;
-        if (out_read_only) *out_read_only = false;
-        return MX_OK;
-    }
-
-    if (token < kMaxHandles && g_handles[token].used) {
-        const OpenHandle& h = g_handles[token];
-        const InodeState* inode = any_inode(h.snapshot_id, h.inode_number);
-        if (!inode || inode->type != FS_INODE_DIR) {
-            return static_cast<mx_i32_t>(MX_ERR_BAD_TYPE);
-        }
-        if (out_inode) *out_inode = h.inode_number;
-        if (out_snapshot) *out_snapshot = h.snapshot_id;
-        if (out_read_only) *out_read_only = h.read_only;
-        return MX_OK;
-    }
-
-    const InodeState* inode = live_inode(token);
-    if (!inode || inode->type != FS_INODE_DIR) {
-        return static_cast<mx_i32_t>(MX_ERR_BAD_TYPE);
-    }
-    if (out_inode) *out_inode = token;
-    if (out_snapshot) *out_snapshot = 0;
-    if (out_read_only) *out_read_only = false;
+    const auto* h = handle_state(token ? token : kRootHandle);
+    if (!h) return MX_ERR_NOT_FOUND;
+    if (h->disk_backed) return MX_ERR_PERM;
+    const auto* inode = any_inode(h->snapshot_id, h->inode_number);
+    if (!inode || inode->type != FS_INODE_DIR) return MX_ERR_BAD_TYPE;
+    if (out_inode) *out_inode = h->inode_number;
+    if (out_snapshot) *out_snapshot = h->snapshot_id;
+    if (out_read_only) *out_read_only = h->read_only;
     return MX_OK;
 }
 
@@ -611,7 +609,6 @@ static void format_memory_fs() {
     g_next_inode = kRootInode + 1;
     g_generation = 1;
     g_last_snapshot_id = 0;
-    g_metadata_seq = 1;
     g_metadata_dirty = false;
 
     InodeState& root = g_inodes[0];
@@ -627,7 +624,10 @@ static void format_memory_fs() {
     g_handles[kRootHandle].used = true;
     g_handles[kRootHandle].inode_number = kRootInode;
     g_handles[kRootHandle].snapshot_id = 0;
-    g_handles[kRootHandle].read_only = false;
+    g_handles[kRootHandle].read_only = true;
+    g_handles[kRootHandle].type = FS_INODE_DIR;
+    auto* tmp = alloc_inode(FS_INODE_DIR, FS_CLASS_USER_DATA, kRootInode, "tmp", 3, 0755);
+    g_tmp_inode = tmp ? tmp->inode_number : 0;
 
     InodeState* hello = alloc_inode(FS_INODE_FILE, FS_CLASS_CONTENT_STORE,
                                     kRootInode, kHelloName,
@@ -938,8 +938,8 @@ static mx_i32_t disk_readdir(const OpenHandle& handle,
 }
 
 static fs_handle_t alloc_disk_handle(const InodeLeafEntry& inode) {
-    for (mx_u32_t i = 1; i < kMaxHandles; ++i) {
-        if (g_handles[i].used) continue;
+    for (mx_u32_t i = 2; i < kMaxHandles; ++i) {
+        if (g_handles[i].used || g_handle_generations[i] == 0xffffff) continue;
         OpenHandle& h = g_handles[i];
         zero_bytes(&h, sizeof(h));
         h.used = true;
@@ -951,7 +951,7 @@ static fs_handle_t alloc_disk_handle(const InodeLeafEntry& inode) {
         h.mode = inode.mode;
         h.size = inode.size;
         h.tree_root = inode.extent_tree_root;
-        return i;
+        return handle_token(i);
     }
     return 0;
 }
@@ -1034,7 +1034,6 @@ static bool mount_disk_fs() {
         return false;
     }
     g_disk_inode_root = sb->inode_table_root;
-    g_disk_generation = sb->current_generation ? sb->current_generation : 1;
     g_disk_mounted = true;
     InodeLeafEntry root;
     zero_bytes(&root, sizeof(root));
@@ -1063,36 +1062,38 @@ static void handle_open(const mochi::fs::Server& fs, const RingSlot& slot) {
         // stack — an unbounded name_len would let any client read past the
         // slot into adjacent stack memory. kMaxName matches the on-disk
         // dirent name field and the existing CREATE-path check.
-        if (req.name_len > kMaxName) {
+        if (req.name_len > sizeof(req.name)) {
             reply.status = static_cast<mx_i32_t>(MX_ERR_INVALID);
             (void)fs.send_reply(slot, FS_OPEN_REPLY, reply);
             return;
         }
-        if (g_disk_mounted &&
-            (req.flags & (FS_OPEN_WRITE | FS_OPEN_CREATE | FS_OPEN_TRUNC)) == 0) {
+        const auto* parent_handle = handle_state(req.parent_inode ? req.parent_inode : kRootHandle);
+        const bool root_parent = parent_handle && parent_handle->inode_number == kRootInode;
+        const bool tmp_mount = root_parent && req.name_len == 3 && name_eq("tmp", req.name, 3);
+        if (g_disk_mounted && !tmp_mount && parent_handle && (root_parent || parent_handle->disk_backed)) {
             bool disk_parent = false;
-            InodeLeafEntry parent;
-            zero_bytes(&parent, sizeof(parent));
-            if (req.parent_inode == 0) {
-                disk_parent = disk_inode(kRootInode, &parent);
-            } else if (req.parent_inode < kMaxHandles &&
-                       g_handles[req.parent_inode].used &&
-                       g_handles[req.parent_inode].disk_backed) {
-                const OpenHandle& h = g_handles[req.parent_inode];
+            InodeLeafEntry parent{};
+            if (root_parent) disk_parent = disk_inode(kRootInode, &parent);
+            else {
+                const auto& h = *parent_handle;
                 parent.inode_number = h.inode_number;
                 parent.type = h.type;
                 parent.inode_class = h.inode_class;
                 parent.size = h.size;
                 parent.extent_tree_root = h.tree_root;
                 parent.mode = h.mode;
-                disk_parent = true;
+                disk_parent = h.type == FS_INODE_DIR;
             }
-
+            if (req.flags & (FS_OPEN_WRITE | FS_OPEN_CREATE | FS_OPEN_TRUNC)) {
+                reply.status = MX_ERR_PERM;
+                (void)fs.send_reply(slot, FS_OPEN_REPLY, reply);
+                return;
+            }
             if (disk_parent) {
                 InodeLeafEntry target;
                 zero_bytes(&target, sizeof(target));
                 bool found = false;
-                if (req.name_len == 0 && req.parent_inode == 0) {
+                if (req.name_len == 0 && (req.parent_inode == 0 || req.parent_inode == kRootHandle)) {
                     target = parent;
                     found = true;
                 } else {
@@ -1125,11 +1126,12 @@ static void handle_open(const mochi::fs::Server& fs, const RingSlot& slot) {
         mx_u32_t parent_inode = kRootInode;
         mx_u64_t snapshot_id = 0;
         bool read_only_parent = false;
-        reply.status = parent_from_token(req.parent_inode, &parent_inode,
+        if (tmp_mount) { parent_inode = kRootInode; read_only_parent = false; reply.status = MX_OK; }
+        else reply.status = parent_from_token(req.parent_inode, &parent_inode,
                                          &snapshot_id, &read_only_parent);
         if (reply.status == MX_OK) {
             const InodeState* target = nullptr;
-            if (req.name_len == 0 && req.parent_inode == 0) {
+            if (req.name_len == 0 && (req.parent_inode == 0 || req.parent_inode == kRootHandle)) {
                 target = any_inode(snapshot_id, kRootInode);
             } else {
                 target = find_child(snapshot_id, parent_inode, req.name, req.name_len);
@@ -1142,6 +1144,12 @@ static void handle_open(const mochi::fs::Server& fs, const RingSlot& slot) {
             }
 
             if (target) {
+                if ((req.flags & (FS_OPEN_WRITE | FS_OPEN_TRUNC)) &&
+                    (snapshot_id || read_only_parent || target->inode_class == FS_CLASS_CONTENT_STORE)) {
+                    reply.status = MX_ERR_PERM;
+                    (void)fs.send_reply(slot, FS_OPEN_REPLY, reply);
+                    return;
+                }
                 if ((req.flags & FS_OPEN_TRUNC) && snapshot_id == 0 && !read_only_parent) {
                     InodeState* live = live_inode(target->inode_number);
                     if (live && live->type == FS_INODE_FILE) {
@@ -1158,7 +1166,8 @@ static void handle_open(const mochi::fs::Server& fs, const RingSlot& slot) {
                 } else {
                     const fs_handle_t h =
                         alloc_handle(target->inode_number, snapshot_id,
-                                     snapshot_id != 0 || !(req.flags & FS_OPEN_WRITE));
+                                     snapshot_id != 0 || target->inode_number == kRootInode ||
+                                     (target->type != FS_INODE_DIR && !(req.flags & FS_OPEN_WRITE)));
                     if (!h) {
                         reply.status = static_cast<mx_i32_t>(MX_ERR_NOMEM);
                     } else {
@@ -1315,6 +1324,10 @@ static void handle_mkdir(const mochi::fs::Server& fs, const RingSlot& slot) {
     mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_INVALID);
     if (slot.length >= sizeof(FsMkdirRequest)) {
         const auto& req = *reinterpret_cast<const FsMkdirRequest*>(slot.payload);
+        if (!req.name_len || req.name_len > sizeof(req.name)) {
+            send_status_only(fs, slot, FS_MKDIR_REPLY, MX_ERR_INVALID);
+            return;
+        }
         mx_u32_t parent_inode = kRootInode;
         mx_u64_t snapshot_id = 0;
         bool read_only_parent = false;
@@ -1337,6 +1350,10 @@ static void handle_unlink(const mochi::fs::Server& fs, const RingSlot& slot) {
     mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_INVALID);
     if (slot.length >= sizeof(FsUnlinkRequest)) {
         const auto& req = *reinterpret_cast<const FsUnlinkRequest*>(slot.payload);
+        if (!req.name_len || req.name_len > sizeof(req.name)) {
+            send_status_only(fs, slot, FS_UNLINK_REPLY, MX_ERR_INVALID);
+            return;
+        }
         mx_u32_t parent_inode = kRootInode;
         mx_u64_t snapshot_id = 0;
         bool read_only_parent = false;
@@ -1512,17 +1529,17 @@ static void handle_slot(const mochi::fs::Server& fs, const RingSlot& slot) {
     case FS_OPEN:
         handle_open(fs, slot);
         break;
-    case FS_CLOSE:
-        if (slot.length >= sizeof(fs_handle_t)) {
-            fs_handle_t h = 0;
-            fs_copy_bytes(&h, slot.payload, sizeof(h));
-            // Slot 0 is never handed out by alloc_handle/alloc_disk_handle;
-            // kRootHandle (1) is owned by the FS, not the client, and zeroing
-            // it would brick path lookups for the rest of the session.
-            if (h >= 2 && h < kMaxHandles) zero_bytes(&g_handles[h], sizeof(g_handles[h]));
+    case FS_CLOSE: {
+        mx_i32_t status = MX_ERR_INVALID;
+        if (slot.length == sizeof(fs_handle_t)) {
+            fs_handle_t token = 0;
+            fs_copy_bytes(&token, slot.payload, sizeof(token));
+            auto* h = handle_state(token);
+            if (h && token != kRootHandle) { *h = {}; status = MX_OK; }
         }
-        send_status_only(fs, slot, FS_SYNC_REPLY, MX_OK);
+        send_status_only(fs, slot, FS_SYNC_REPLY, status);
         break;
+    }
     case FS_READ:
         handle_read(fs, slot);
         break;
@@ -1554,7 +1571,7 @@ static void handle_slot(const mochi::fs::Server& fs, const RingSlot& slot) {
         handle_snapshot_drop(fs, slot);
         break;
     case FS_SYNC:
-        send_status_only(fs, slot, FS_SYNC_REPLY, sync_ordered_metadata());
+        send_status_only(fs, slot, FS_SYNC_REPLY, MX_ERR_NOT_IMPLEMENTED);
         break;
     case FS_PREFETCH:
         break;
@@ -1571,13 +1588,7 @@ extern "C" [[noreturn]] void _start() {
     register_service_arenas();
     format_memory_fs();
 
-    mx_u32_t cmd_order = kRingOrder;
-    mx_u32_t reply_order = kRingOrder;
-    RingPage* cmd_ring = map_ring_from_boot(boot, "fs.cmd.ring", kVaFsCmdRing, &cmd_order);
-    RingPage* reply_ring = map_ring_from_boot(boot, "fs.reply.ring", kVaFsReplyRing, &reply_order);
-    const CapHandle cmd_db = mochi::boot::handle(boot, "fs.cmd.doorbell");
-    const CapHandle reply_db = mochi::boot::handle(boot, "fs.reply.doorbell");
-
+    if (!g_sessions.map(boot)) mochi::boot::invalid_boot();
     mx_u32_t blk_req_order = kRingOrder;
     mx_u32_t blk_reply_order = kRingOrder;
     RingPage* blk_req = map_ring_from_boot(boot, "blk.req.ring", kVaBlkReqRing, &blk_req_order);
@@ -1610,34 +1621,22 @@ extern "C" [[noreturn]] void _start() {
         mochi::log_raw_marker("io.fs: no block dma arena; disk mount skipped\n");
     }
 
-    if (cmd_order != reply_order) {
-        // Server uses one `order` for both rings; if they ever disagree,
-        // ring_pop / ring_push will mask slot indices wrong and we will
-        // either skip slots or read stale ones. Refuse to come up.
-        mochi::log_raw_marker("io.fs: ring order mismatch\n");
-        while (true) mx_yield();
-    }
-    const mochi::fs::Server fs{
-        {reply_ring, cmd_ring, cmd_order, reply_db, cmd_db},
-    };
-
-    if (!fs.valid()) {
-        mochi::log_raw_marker("io.fs: no client endpoint\n");
-        while (true) mx_yield();
-    }
-
-    mochi::log_raw_marker("FS service registered OK\n");
-    mochi::log_raw_marker("io.fs: V1 core ready\n");
-
+    for (mx_u32_t i = 0; i < g_sessions.directory->count; ++i) g_sessions.refresh(i, close_session);
+    mochi::log_raw_marker("io.fs: read-only root and volatile /tmp ready\n");
+    mochi::boot::ready(boot);
     while (true) {
-        RingSlot slot{};
-        while (fs.try_recv(&slot)) {
-            handle_slot(fs, slot);
+        bool progress = false;
+        for (mx_u32_t i = 0; i < g_sessions.directory->count; ++i) {
+            if (!g_sessions.refresh(i, close_session)) continue;
+            g_session = i;
+            const mochi::fs::Server fs{g_sessions.endpoints[i]};
+            RingSlot slot{};
+            // Bound each client's work so a full ring cannot starve its peers.
+            for (mx_u32_t n = 0; n < 8 && fs.try_recv(&slot); ++n) {
+                handle_slot(fs, slot);
+                progress = true;
+            }
         }
-        if (fs.wait_recv(&slot)) {
-            handle_slot(fs, slot);
-        } else {
-            mx_yield();
-        }
+        if (!progress) mx_yield();
     }
 }

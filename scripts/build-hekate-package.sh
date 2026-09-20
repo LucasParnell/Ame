@@ -36,6 +36,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${REPO}/scripts/host.sh"
+ame_host_tools
 TOOLCHAIN="${REPO}/scripts/build/toolchain-aarch64.cmake"
 
 BUILD_DIR=""
@@ -104,7 +106,7 @@ fi
 # Build
 # ---------------------------------------------------------------------------
 if [[ "${BUILD}" == "1" ]]; then
-    BUILD_JOBS="${AME_BUILD_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+    BUILD_JOBS="$(ame_jobs)"
     echo "[hekate-pkg] building mochi_system (userland)..."
     cmake --build "${BUILD_DIR}" --target mochi_system --parallel "${BUILD_JOBS}"
 

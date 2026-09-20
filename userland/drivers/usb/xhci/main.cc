@@ -925,6 +925,7 @@ extern "C" [[noreturn]] void _start() {
         mochi::log_raw_marker("drv.usb.xhci: keyboard not found\n");
     }
 
+    mochi::boot::ready(boot);
     while (true) {
         service_events();
     }

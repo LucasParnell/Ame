@@ -13,6 +13,7 @@
 #include "anko/smp.h"
 #include "anko/spinlock.h"
 #include "libk/string.h"
+#include "sched_internal.h"
 
 namespace sched {
 
@@ -260,10 +261,7 @@ void finish_thread(Thread* t) {
     if (!t) return;
     ANKO_ASSERT(t != current() && !t->on_runqueue && !t->remote_next);
     ipc::doorbell_clear_waiter(t);
-    if (t->reply_target) {
-        auto* peer = t->reply_target; t->reply_target = nullptr;
-        if (peer->reply_target == t) { peer->reply_target = nullptr; peer->tf.x[0] = static_cast<u64>(E_DEAD); wake(peer); }
-    }
+    handoff_abort_reply(t);
     t->state = TS_DEAD;
     Process* owner = t->owner;
     bool last = false;

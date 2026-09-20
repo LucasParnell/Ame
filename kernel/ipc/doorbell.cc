@@ -19,6 +19,7 @@
 #include "anko/panic.h"
 #include "libk/metric.h"
 #include "libk/string.h"
+#include "../sched/sched_internal.h"
 
 namespace ipc {
 
@@ -268,8 +269,7 @@ SysError notify_handoff(CapHandle handle, u64 payload_word, u32 caller_pid) {
 
     // Non-transitive priority donation: lend our vruntime as a lower-bound key
     // so the receiver is not unfairly penalized for being woken late.
-    receiver->donated_key = sender->vruntime_ns;
-    receiver->has_donation = true;
+    sched::handoff_grant_donation(receiver, sender);
 
     // Cross-link for reply path.
     sender->state = TS_BLOCKED;
@@ -306,8 +306,7 @@ SysError reply_handoff(u64 reply_val, u32 caller_pid) {
     sender->tf.x[0] = reply_val;
 
     // Release donation.
-    cur->has_donation = false;
-    cur->donated_key = 0;
+    sched::handoff_clear_donation(cur);
     cur->reply_target = nullptr;
     sender->reply_target = nullptr;
 

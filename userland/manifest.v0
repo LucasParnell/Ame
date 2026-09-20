@@ -13,3 +13,4 @@ ui.input ui.input native_sandboxed always -
 drv.blk.virtio drv.blk.virtio native_trusted always mmio
 io.fs io.fs native_trusted always blk
 msh msh native_trusted always shell
+app.hello app.hello native_sandboxed always -

@@ -304,6 +304,42 @@ void issue_boot_caps(Process& init_proc,
         }
     }
 
+    // 14b) Appliance GPU function authority (§6.1). Publish the assignable
+    // virtio-gpu-pci function (and its INTx line) to init so it can hand the
+    // authority to dango.manager; the VM never names raw physical addresses.
+    if (g_hw.has_pcie) {
+        constexpr u16 kVirtioVendor = 0x1af4;
+        constexpr u16 kVirtioGpuDevice = 0x1050;
+        // QEMU virt swizzles PCI INTx onto GIC SPI 3..6, rotating per slot:
+        //   spi = 3 + (device + pin - 1) % 4   (pin A = 1)
+        // Empirically confirmed by the host DTB interrupt-map captured in
+        // tests/fixtures/phasea-iommu-smmu-node.dts.  Physical boards parse
+        // their own map in Phase P.
+        constexpr u32 kQemuVirtPciIntxBaseSpi = 3;
+        pci::PciFunctionInfo gpu_info{};
+        if (pci::find_by_id(g_hw.ecam_base, kVirtioVendor, kVirtioGpuDevice, &gpu_info)) {
+            static pci::HostFunction g_gpu_function;
+            g_gpu_function.info = gpu_info;
+            g_gpu_function.group_id =
+                pci::isolation_group_id(gpu_info.segment, gpu_info.bus, gpu_info.device);
+            g_gpu_function.flags = 0;
+
+            static IrqLine g_gpu_irq;
+            g_gpu_irq.irq_id = kQemuVirtPciIntxBaseSpi + (gpu_info.device % 4u);
+            g_gpu_irq.trigger = 0; // INTx is level-triggered
+            g_gpu_irq.flags = 0;
+            g_gpu_irq.device_hint = 0;
+            g_gpu_irq.doorbell_cap = 0;
+
+            grant("gpu.function", CAP_PCI_FUNCTION, &g_gpu_function, RIGHT_READ | RIGHT_DUP);
+            grant("gpu.irq", CAP_IRQ, &g_gpu_irq, RIGHT_READ | RIGHT_WRITE | RIGHT_DUP);
+            ANKO_LOGF_INFO("kernel/init", "gpu: function bus=%u dev=%u fn=%u vendor=%x device=%x group=%u intx=%u",
+                           gpu_info.bus, gpu_info.device, gpu_info.function,
+                           gpu_info.vendor_id, gpu_info.device_id,
+                           g_gpu_function.group_id, g_gpu_irq.irq_id);
+        }
+    }
+
     // 15..16) Virtio-blk block device (QEMU only — T210 uses AmeFS via SATA/SD).
     if (g_hw.has_virtio_blk) {
         auto* blk_mmio = static_cast<MmioRange*>(

@@ -138,6 +138,10 @@ u32 enumerate_groups(PhysAddr ecam_base, PciIsolationGroup* out, u32 cap);
 // Find the inventory record for a BDF. Returns false when absent.
 bool find_function(PhysAddr ecam_base, u8 bus, u8 device, u8 function, PciFunctionInfo* out);
 
+// Find the first function with the given vendor/device id. Used by boot to
+// publish the appliance's assignable function as capability authority (§6.1).
+bool find_by_id(PhysAddr ecam_base, u16 vendor_id, u16 device_id, PciFunctionInfo* out);
+
 // Read the host PCI command register for a BDF.
 u16 read_command(u8 bus, u8 device, u8 function);
 // Read a single config byte / the 16-bit status+command word for a BDF.

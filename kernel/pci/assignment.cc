@@ -120,6 +120,18 @@ bool find_function(PhysAddr ecam_base, u8 bus, u8 device, u8 function, PciFuncti
     return false;
 }
 
+bool find_by_id(PhysAddr ecam_base, u16 vendor_id, u16 device_id, PciFunctionInfo* out) {
+    static PciFunctionInfo functions[kMaxFunctions];
+    const u32 count = enumerate(ecam_base, functions, kMaxFunctions);
+    for (u32 i = 0; i < count; ++i) {
+        if (functions[i].vendor_id == vendor_id && functions[i].device_id == device_id) {
+            if (out) { *out = functions[i]; }
+            return true;
+        }
+    }
+    return false;
+}
+
 u32 enumerate_groups(PhysAddr ecam_base, PciIsolationGroup* out, u32 cap) {
     if (!out || cap == 0) {
         return 0;

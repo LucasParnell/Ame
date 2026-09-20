@@ -65,8 +65,10 @@ Still required before completion:
    and separate scheduler queue, accounting, handoff, and lifecycle modules.
 3. Consume the new exit records in normal supervision (steady-state path) and verify dependency
    restarts/backoff under injected faults; add a regression fixture for the restart path.
-4. Per-client SPSC discovery/FS sessions, timeout/peer-death handling.
-5. Explicit read-only disk root + volatile /tmp, session-owned generation handles; FS/shell modules; example application and tests.
+4. Per-client SPSC discovery/FS sessions, timeout/peer-death handling. (Done — see session
+   note below; a fault-injection fixture for the stall path is still worth adding.)
+5. Explicit read-only disk root + volatile /tmp, session-owned generation handles **done**; FS
+   modules **done**. Still pending: shell modules, example application and tests.
 6. Full CPU/boot matrix, 100 lifecycle cycles, guest Linux/auth regression and final feature documentation.
 
 Notes:
@@ -75,5 +77,40 @@ Notes:
   revisions of this file listed them as pending. Tracker entries are now aligned with the code.
 - `.git/cleanup-baseline-20260920-154756/` is referenced above but was not present in the
   2026-09-20 source archive; re-create it before further large edits.
+
+### Session 2026-09-20 (sessions + io.fs modules)
+
+- **Per-client SPSC sessions (item 4).** io.fs and nameservice serve one SPSC
+  request/reply ring pair and one doorbell pair per client; the service holds a
+  `ServerSessions` directory and never a single global session. Each slot carries
+  its own generation; the server maps/resets the slot rings only on the
+  generation handshake and acknowledges before the client resumes.
+- **Timeout + peer-death handling.** Added `SpscEndpoint::send_bounded` and a
+  per-instance reply deadline (`mochi::kSessionReplyTimeoutNs`) used by
+  `fs::Server`. A client that dies mid-request (its process cap is revoked, so
+  `sys_cap_identify` fails) or stops draining its reply ring is dropped: the
+  bounded send expires, the session is closed, and the other clients keep
+  running. Only init can revive a dropped slot, by publishing a newer
+  generation. The block-driver round trip (`fs::BlkClient::request`) is bounded
+  the same way, so a dead drv.blk degrades io.fs to the memory backend instead
+  of wedging it.
+- **Session-owned generation handles (item 5).** `handle_state` now accepts a
+  token only when its handle generation *and* the owning session generation
+  match the client currently being served, so a stale handle can never be
+  replayed across a client restart. Session teardown still releases every handle
+  the exiting slot owned.
+- **io.fs module split.** `userland/fs/main.cc` is split behind
+  `fs/fs_internal.h` into `fs_ring` (boot wiring, per-client session loop,
+  dispatch), `fs_core` (in-memory inode/extent/phys-ref core), `fs_handles`
+  (handle table + handlers), `fs_snapshot`, and `fs_disk` (GPT/B+tree/block
+  cache). Behaviour-preserving moves; `-Wall -Wextra -Werror` clean.
+- **Mount semantics documented.** The disk root is read-only (disk-backed
+  handles are always read-only and write/create/truncate flags are rejected
+  before the B+tree) and `/tmp` is volatile (in-memory only, redirected away
+  from the disk root, discarded on restart). See the header comment in
+  `fs/fs_internal.h`.
+- Verified: `scripts/verify.sh` green (boot ready, lifecycle 1/2/4, supervision
+  restart, provenance); `cmake --preset switch && cmake --build --preset switch
+  --target anko` green.
 
 This file is a progress record, not a completion claim.

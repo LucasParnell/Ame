@@ -34,6 +34,30 @@ struct SpscEndpoint {
     bool wait_recv(RingSlot* out) const {
         return rx_ring && rx_doorbell != kNullCap && ring_wait_pop(rx_ring, order, out, rx_doorbell);
     }
+
+    // Bounded push/pop. Unlike ring_send_spinning()/ring_wait_pop() these never
+    // block past an absolute nanosecond deadline, so a server can bound how long
+    // one unresponsive peer holds its service thread. On expiry they return
+    // false and leave the rings untouched; a dropped reply is the caller's
+    // defined return path (see mochi/sessions.h).
+    bool send_bounded(uint32_t type, const void* data, uint32_t len,
+                      mx_u64_t deadline_ns) const {
+        if (!tx_ring || tx_doorbell == kNullCap) return false;
+        for (;;) {
+            if (ring_try_push(tx_ring, order, type, data, len, tx_doorbell)) return true;
+            if (mx_clock_ns() >= deadline_ns) return false;
+            sys_yield();
+        }
+    }
+
+    bool recv_bounded(RingSlot* out, mx_u64_t deadline_ns) const {
+        if (!rx_ring) return false;
+        for (;;) {
+            if (ring_pop(rx_ring, order, out)) return true;
+            if (mx_clock_ns() >= deadline_ns) return false;
+            sys_yield();
+        }
+    }
 };
 
 static inline bool endpoint_desc_valid(const MxEndpointDesc& desc, uint32_t protocol) {

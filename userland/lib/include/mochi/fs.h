@@ -197,6 +197,15 @@ struct Client {
 
 struct Server {
     SpscEndpoint ep;
+    // Absolute nanosecond deadline for delivering a reply to the peer of this
+    // server instance. 0 keeps the legacy unbounded spinning behaviour; the
+    // io.fs/nameservice loops pass now + kSessionReplyTimeoutNs so a stalled
+    // client cannot hold the service thread (see mochi/sessions.h).
+    mx_u64_t reply_deadline_ns = 0;
+    // Cleared once a reply could not be delivered. Every later send for this
+    // instance is a no-op, so a handler that faults part way through cannot
+    // keep hammering a dead ring.
+    mutable bool reply_ok = true;
 
     bool valid() const {
         return ep.valid();
@@ -213,7 +222,11 @@ struct Server {
     bool send_payload(const RingSlot& req, mx_u32_t type,
                       const void* payload, mx_u32_t len) const {
         (void)req;
-        return ep.send_spinning(type, payload, len);
+        if (!reply_ok) return false;
+        reply_ok = (reply_deadline_ns != 0)
+                       ? ep.send_bounded(type, payload, len, reply_deadline_ns)
+                       : ep.send_spinning(type, payload, len);
+        return reply_ok;
     }
 
     bool send_error(const RingSlot& req, mx_i32_t status) const {
@@ -235,7 +248,7 @@ struct BlkClient {
 
     bool request(mx_u32_t type, mx_u64_t sector, mx_u32_t sector_count,
                  mx_handle_t arena_cap, mx_u32_t arena_offset,
-                 BlkReply* out) const {
+                 BlkReply* out, mx_u64_t deadline_ns = 0) const {
         BlkRequest req{};
         req.type = type;
         req.sector = sector;
@@ -244,10 +257,14 @@ struct BlkClient {
         req.arena_offset = arena_offset;
         if (!ep.send_spinning(type, &req, sizeof(req))) return false;
         RingSlot slot{};
-        while (ep.wait_recv(&slot)) {
-            if (slot.type == BLK_REPLY && payload_from_slot(slot, out)) return true;
+        for (;;) {
+            if (ep.try_recv(&slot)) {
+                if (slot.type == BLK_REPLY && payload_from_slot(slot, out)) return true;
+                continue;
+            }
+            if (deadline_ns == 0 || mx_clock_ns() >= deadline_ns) return false;
+            sys_yield();
         }
-        return false;
     }
 };
 

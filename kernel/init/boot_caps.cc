@@ -331,7 +331,8 @@ void issue_boot_caps(Process& init_proc,
             g_gpu_irq.device_hint = 0;
             g_gpu_irq.doorbell_cap = 0;
 
-            grant("gpu.function", CAP_PCI_FUNCTION, &g_gpu_function, RIGHT_READ | RIGHT_DUP);
+            grant("gpu.function", CAP_PCI_FUNCTION, &g_gpu_function,
+                  RIGHT_READ | RIGHT_WRITE | RIGHT_DUP);
             grant("gpu.irq", CAP_IRQ, &g_gpu_irq, RIGHT_READ | RIGHT_WRITE | RIGHT_DUP);
             ANKO_LOGF_INFO("kernel/init", "gpu: function bus=%u dev=%u fn=%u vendor=%x device=%x group=%u intx=%u",
                            gpu_info.bus, gpu_info.device, gpu_info.function,

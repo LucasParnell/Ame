@@ -2,7 +2,7 @@ nameservice nameservice native_trusted never -
 io.console io.console native_trusted always uart
 demo.pong demo.pong native_sandboxed always -
 demo.ping demo.ping native_sandboxed never -
-dango.manager dango.manager native_trusted never vm
+dango.manager dango.manager native_trusted never vm,gpu.function,gpu.irq
 dango.auth_probe dango.auth_probe native_sandboxed never -
 io.framebuffer io.framebuffer native_trusted always mmio
 tty.fb0 tty.fb0 native_sandboxed always -

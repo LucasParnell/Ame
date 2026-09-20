@@ -55,6 +55,7 @@ constexpr uint64_t kVaSvcRegistry    = 0x2A00'0000ull;
 static CapHandle kCapManifest, kCapInitrd, kCapSupervisor, kCapUart;
 static CapHandle kCapVmRoot, kCapLogDoorbell, kCapFbMemory, kCapXhciMmio, kCapXhciIrq, kCapXhciDma;
 static CapHandle kCapVirtioBlkMmio, kCapVirtioBlkDma;
+static CapHandle kCapGpuFunction, kCapGpuIrq; // Phase E: appliance GPU authority
 constexpr uint32_t kKernelLogRingCount = 4;
 static CapHandle kKernelLogRings[kKernelLogRingCount];
 static uint64_t g_manifest_size = 0;
@@ -732,6 +733,15 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
         share_doorbell_to(svc, g_rt.db_dango_auth_gate, "dango.auth_gate.db", RIGHT_WAIT);
         share_doorbell_to(svc, g_rt.db_dango_layout_done, "dango.layout_done.db", RIGHT_NOTIFY);
         grant_to(svc, kCapInitrd, RIGHT_READ | RIGHT_MAP, MX_BOOT_ENTRY_HANDLE, "boot.initrd");
+        // Phase E: pass the assignable GPU function (and its INTx) to Dango so it
+        // can build the appliance assignment (spec §6.1, §20 Phase E).
+        if (kCapGpuFunction != kNullCap) {
+            grant_to(svc, kCapGpuFunction, RIGHT_READ | RIGHT_WRITE, MX_BOOT_ENTRY_HANDLE,
+                     "gpu.function");
+        }
+        if (kCapGpuIrq != kNullCap) {
+            grant_to(svc, kCapGpuIrq, RIGHT_READ | RIGHT_WRITE, MX_BOOT_ENTRY_HANDLE, "gpu.irq");
+        }
         boot_publish(svc);
         require_ok(set_service_affinity(svc.main_thread, 1ull << 1), "init: service start failed\n");
         require_ok(sys_thread_resume(svc.main_thread), "init: service start failed\n");
@@ -1249,6 +1259,8 @@ extern "C" [[noreturn]] void _start() {
     kCapXhciIrq = mochi::boot::handle(boot, "xhci.irq");
     kCapXhciDma = mochi::boot::handle(boot, "xhci.dma");
     kCapVirtioBlkMmio = mochi::boot::handle(boot, "virtio.blk.mmio");
+    kCapGpuFunction = mochi::boot::handle(boot, "gpu.function");
+    kCapGpuIrq = mochi::boot::handle(boot, "gpu.irq");
     kCapVirtioBlkDma = mochi::boot::handle(boot, "virtio.blk.dma");
     g_manifest_size = mochi::boot::find(boot, "manifest")->aux0;
     g_bundle_size = mochi::boot::find(boot, "boot.initrd")->aux0;

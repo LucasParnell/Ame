@@ -24,24 +24,9 @@ namespace sched {
 // ---------------------------------------------------------------------------
 static Eki   g_eki[kMaxCpus]{};
 static u32   g_online_cpu_count = 1;
-static u64   g_yield_count = 0;
 static u64   g_cntfrq = 0;          // cached at init
-static u64   g_wrong_cpu_dequeues = 0;
-
-constexpr u32 kMaxPrincipalsLocal = kMaxPrincipals; // alias for clarity
-static PrincipalSchedState g_principal_sched[kMaxPrincipalsLocal]{};
-static u32 g_next_principal_id = 1; // principal 0 is reserved for the kernel/bootstrap bucket
-static kernel::SpinLock g_principal_lock{};
-
-bool principal_allocated(u32 pid) {
-    return pid < kMaxPrincipalsLocal && g_principal_sched[pid].allocated;
-}
-
-
-static void pending_push(Eki& target, Thread* t);
 
 using libk::metric_inc;
-using libk::metric_load;
 
 // ---------------------------------------------------------------------------
 // Clock
@@ -73,11 +58,11 @@ static inline void wait_for_interrupt()  {
     irq_disable();
 }
 
-static Eki& eki_for_cpu(u32 cpu_id) {
+Eki& eki_for_cpu(u32 cpu_id) {
     if (cpu_id >= kMaxCpus) cpu_id = 0;
     return g_eki[cpu_id];
 }
-static Eki& current_eki() { return eki_for_cpu(current_cpu_id()); }
+Eki& current_eki() { return eki_for_cpu(current_cpu_id()); }
 
 u64 online_mask() {
     const u32 n = g_online_cpu_count > kMaxCpus ? kMaxCpus : g_online_cpu_count;
@@ -117,8 +102,7 @@ static bool enqueue_fair(Eki& e, Thread* t) {
     if (t->vruntime_ns < min_vr) t->vruntime_ns = min_vr;
     if (pe.vruntime[bi] < min_vr) pe.vruntime[bi] = min_vr;
 
-    const u32 global_weight = (pid < kMaxPrincipalsLocal && g_principal_sched[pid].weight)
-        ? g_principal_sched[pid].weight : NICE_0_WEIGHT;
+    const u32 global_weight = principal_weight(pid);
     if (pe.weight == 0) pe.weight = global_weight;
     t->slice_ns = compute_slice_ns(t, pe.runnable[bi] + 1);
 
@@ -163,7 +147,7 @@ static bool enqueue_fair(Eki& e, Thread* t) {
 // dequeue_from_principal — remove thread from its principal's band heap.
 // Called by work stealing and destruction.
 // ---------------------------------------------------------------------------
-static bool dequeue_from_principal(Eki& e, Thread* t) {
+bool dequeue_from_principal(Eki& e, Thread* t) {
     if (!t) return false;
     const u32 pid = t->principal_id;
     if (pid >= kMaxPrincipals) return false;
@@ -257,9 +241,7 @@ static Thread* pick_fair(Eki& e, FairPrincipalQueue& band) {
         PrincipalEntity* pe = fpq_peek_min(band);
         if (!pe) break;
 
-        const bool global_throttled =
-            pe->principal_id < kMaxPrincipalsLocal &&
-            __atomic_load_n(&g_principal_sched[pe->principal_id].throttled, __ATOMIC_RELAXED);
+        const bool global_throttled = principal_throttled(pe->principal_id);
         if (pe->throttled || global_throttled) {
             pe->throttled = true;
             fpq_pop_min(band);
@@ -300,95 +282,6 @@ static Thread* pick_fair(Eki& e, FairPrincipalQueue& band) {
     }
     return nullptr;
 }
-
-// ---------------------------------------------------------------------------
-// Runtime accounting — charge elapsed time to thread / process / principal.
-// Called before every context switch and on tick.
-// ---------------------------------------------------------------------------
-static void account_current(Eki& e) {
-    Thread* t = e.current;
-    if (!t || t == e.idle) return;
-    if (t->state != TS_RUNNING) return;
-
-    const u64 now   = sched_clock_ns();
-    const u64 delta = now - t->last_start_ns;
-    t->last_start_ns = now;
-
-    t->runtime_ns += delta;
-    if (auto p = find_process(t->pid)) p->runtime_ns += delta;
-
-    const u32 pid = t->principal_id;
-    if (pid < kMaxPrincipalsLocal) {
-        PrincipalSchedState& ps = g_principal_sched[pid];
-        __atomic_add_fetch(&ps.runtime_ns,        delta, __ATOMIC_RELAXED);
-        __atomic_add_fetch(&ps.used_in_period_ns, delta, __ATOMIC_RELAXED);
-
-        // Per-CPU principal entity vruntime, tracked per band so a principal
-        // cannot carry latency placement into fair/VM queues.
-        PrincipalEntity& pe = e.principal_entities[pid];
-        pe.runtime_ns   += delta;
-        const u32 pw     = pe.weight ? pe.weight : NICE_0_WEIGHT;
-        const u32 bi = band_index(t->sched.sched_class);
-        pe.vruntime[bi] += delta * NICE_0_WEIGHT / pw;
-        if (pe.in_queue[bi]) fpq_resift(band_for(e, t->sched.sched_class), &pe);
-
-        // Thread vruntime
-        const u32 tw     = t->sched.weight ? t->sched.weight : NICE_0_WEIGHT;
-        t->vruntime_ns  += delta * NICE_0_WEIGHT / tw;
-
-        // Bound explicit sched contexts independently from principal budgets.
-        if (t->sched_context) {
-            SchedContext* ctx = t->sched_context;
-            ctx->used_ns += delta;
-            if (ctx->budget_ns > 0 && ctx->used_ns >= ctx->budget_ns) {
-                request_switch(false, SWITCH_BUDGET);
-            }
-        }
-
-        // Decay IPC wake credit
-        const u64 decay  = static_cast<u64>(t->wake_credit_ns) < delta
-            ? static_cast<u64>(t->wake_credit_ns < 0 ? 0 : t->wake_credit_ns)
-            : delta;
-        t->wake_credit_ns -= static_cast<i64>(decay);
-        if (t->wake_credit_ns < 0) t->wake_credit_ns = 0;
-
-        // IPC drain quantum expiry: strip credit if went CPU-bound
-        if (t->in_drain_quantum) {
-            if (now - t->drain_quantum_start_ns > kIpcDrainQuantumNs) {
-                t->in_drain_quantum = false;
-                t->wake_credit_ns   = 0;
-            }
-        }
-
-        // Budget enforcement
-        if (ps.budget_ns > 0 && ps.used_in_period_ns >= ps.budget_ns) {
-            ps.throttled = true;
-            pe.throttled = true;
-            request_switch(false, SWITCH_BUDGET);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Period refill — called from tick() for each principal with a budget.
-// ---------------------------------------------------------------------------
-static void refill_principal_budgets() {
-    const u64 now = sched_clock_ns();
-    for (u32 i = 0; i < kMaxPrincipalsLocal; ++i) {
-        PrincipalSchedState& ps = g_principal_sched[i];
-        if (ps.budget_ns == 0) continue;
-        if (ps.period_ns == 0 || now - ps.period_start_ns < ps.period_ns) continue;
-        ps.used_in_period_ns = 0;
-        ps.period_start_ns   = now;
-        if (ps.throttled) {
-            ps.throttled = false;
-            for (u32 cpu = 0; cpu < kMaxCpus; ++cpu) {
-                if (i < kMaxPrincipals) g_eki[cpu].principal_entities[i].throttled = false;
-            }
-        }
-    }
-}
-
 
 static void maybe_request_preemption_on_wake(Eki& e, Thread* woken);
 
@@ -444,7 +337,7 @@ static void drain_pending_wakes(Eki& e) {
 // ---------------------------------------------------------------------------
 // Pending-wake push (lock-free CAS, called from remote CPUs)
 // ---------------------------------------------------------------------------
-static void pending_push(Eki& target, Thread* t) {
+void pending_push(Eki& target, Thread* t) {
     Thread* old;
     do {
         old = __atomic_load_n(&target.pending_wakes.head, __ATOMIC_ACQUIRE);
@@ -533,8 +426,7 @@ void apply_wake_metadata(Thread* t, WakeReason reason, u32 sched_hints) {
     // per thread and is charged away as the receiver's principal runs.
     if (reason != WAKE_DOORBELL && reason != WAKE_IRQ) return;
 
-    const u32 pid = t->principal_id;
-    if (pid < kMaxPrincipalsLocal && g_principal_sched[pid].throttled) return;
+    if (principal_throttled(t->principal_id)) return;
 
     const u64 credit = wake_credit_for(t, reason, sched_hints);
     if (credit == 0) return;
@@ -660,117 +552,6 @@ void wake(Thread* t) {
     else                         wake_remote(t, tgt);
 }
 
-// ---------------------------------------------------------------------------
-// Work stealing
-// ---------------------------------------------------------------------------
-static bool is_stealable(const Thread* t) {
-    if (!t || __atomic_load_n(&t->terminate_requested, __ATOMIC_ACQUIRE)) return false;
-    if (!t->on_runqueue || t->state != TS_RUNNABLE_QUEUED) return false;
-    const SchedBand band = t->sched.sched_class;
-    if (band == SCHED_BAND_RT_NATIVE || band == SCHED_BAND_LATENCY ||
-        band == SCHED_BAND_VM_LATENCY) return false;
-    if (t->sched_context && (t->sched_context->flags & SCHED_CTX_NO_STEAL)) return false;
-    if (is_vm_band(band) &&
-        (!t->sched_context || !(t->sched_context->flags & SCHED_CTX_STEALABLE))) return false;
-    // Hard affinity: pinned to one CPU
-    if (t->affinity_mask != 0 && __builtin_popcountll(t->affinity_mask) == 1) return false;
-    if (t->ipc_hot_until_ns > sched_clock_ns()) return false;
-    return band == SCHED_BAND_FAIR || band == SCHED_BAND_BATCH || band == SCHED_BAND_VM_FAIR;
-}
-
-static Thread* select_stealable_from_band(FairPrincipalQueue& q) {
-    const SchedBand sb = q.band;
-    for (u32 i = 0; i < q.size; ++i) {
-        PrincipalEntity* pe = q.data[i];
-        if (!pe) continue;
-        BandQueue& threads = band_threads(*pe, sb);
-        for (u32 j = 0; j < threads.size; ++j) {
-            if (is_stealable(threads.data[j])) return threads.data[j];
-        }
-    }
-    return nullptr;
-}
-
-static Thread* select_stealable(Eki& victim) {
-    // Steal only lower-priority, migration-safe work.  VM fair vCPUs are
-    // migration-exempt by default unless SCHED_CTX_STEALABLE is set.
-    if (Thread* t = select_stealable_from_band(victim.fair_principals)) return t;
-    if (Thread* t = select_stealable_from_band(victim.vm_fair_principals)) return t;
-    if (Thread* t = select_stealable_from_band(victim.batch_principals)) return t;
-    return nullptr;
-}
-
-static void handle_pending_steal_requests(Eki& victim) {
-    StealRequest* list = __atomic_exchange_n(
-        &victim.pending_steal_requests.head, nullptr, __ATOMIC_ACQ_REL);
-    while (list) {
-        StealRequest* nxt = list->next;
-        metric_inc(victim.steal_requests_received);
-
-        Thread* t = select_stealable(victim);
-        if (!t) {
-            metric_inc(victim.steals_denied);
-        } else {
-            if (!dequeue_from_principal(victim, t)) {
-                metric_inc(victim.steals_denied);
-                list = nxt;
-                continue;
-            }
-            t->state = TS_RUNNABLE_PENDING_REMOTE;
-
-            const u32 thief_cpu = list->thief_cpu;
-            t->cpu_id = thief_cpu;
-            pending_push(eki_for_cpu(thief_cpu), t);
-            smp::send_wake_ipi(thief_cpu);
-            metric_inc(victim.steals_granted);
-
-            // Free request back to thief's eki
-            if (thief_cpu < kMaxCpus)
-                __atomic_store_n(&g_eki[thief_cpu].steal_req_in_flight, false, __ATOMIC_RELEASE);
-        }
-
-        if (!t) {
-            // Still need to free the request
-            if (list->thief_cpu < kMaxCpus)
-                __atomic_store_n(&g_eki[list->thief_cpu].steal_req_in_flight, false, __ATOMIC_RELEASE);
-        }
-        list = nxt;
-    }
-}
-
-static void maybe_send_steal_request(Eki& thief) {
-    if (g_online_cpu_count <= 1) return;
-
-    // Don't send if already in flight
-    if (__atomic_load_n(&thief.steal_req_in_flight, __ATOMIC_ACQUIRE)) return;
-
-    // Find most loaded peer
-    u32 victim_cpu = kInvalidCpu;
-    u32 max_load   = 1; // only steal if victim has > 1 stealable thread
-    const u32 n    = g_online_cpu_count < kMaxCpus ? g_online_cpu_count : kMaxCpus;
-    for (u32 c = 0; c < n; ++c) {
-        if (c == thief.cpu_id) continue;
-        u32 load = g_eki[c].fair_principals.size + g_eki[c].vm_fair_principals.size + g_eki[c].batch_principals.size;
-        if (load > max_load) { max_load = load; victim_cpu = c; }
-    }
-    if (victim_cpu == kInvalidCpu) return;
-
-    __atomic_store_n(&thief.steal_req_in_flight, true, __ATOMIC_RELEASE);
-    thief.steal_req_buf.thief_cpu = thief.cpu_id;
-    thief.steal_req_buf.next      = nullptr;
-
-    Eki& victim = g_eki[victim_cpu];
-    StealRequest* old;
-    do {
-        old = __atomic_load_n(&victim.pending_steal_requests.head, __ATOMIC_ACQUIRE);
-        thief.steal_req_buf.next = old;
-    } while (!__atomic_compare_exchange_n(&victim.pending_steal_requests.head,
-                                          &old, &thief.steal_req_buf,
-                                          false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
-    metric_inc(thief.steal_requests_sent);
-    smp::send_wake_ipi(victim_cpu);
-}
-
 void collect_terminations(Eki& e, Thread* protected_thread) {
     if (!termination_pending()) return;
     for (u32 tid = 1; tid <= 128; ++tid) {
@@ -781,18 +562,10 @@ void collect_terminations(Eki& e, Thread* protected_thread) {
             kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
             if (t->cpu_id != e.cpu_id || t->state == TS_RUNNING || t->state == TS_RUNNABLE_PENDING_REMOTE) continue;
             dequeue_thread(t);
-            if (e.handoff_next == t) e.handoff_next = nullptr;
+            handoff_forget(e, t);
             t->state = TS_DEAD;
         }
-        if (t->reply_target) {
-            Thread* peer = t->reply_target;
-            t->reply_target = nullptr;
-            if (peer->reply_target == t) {
-                peer->reply_target = nullptr;
-                peer->tf.x[0] = static_cast<u64>(E_DEAD);
-                wake(peer);
-            }
-        }
+        handoff_abort_reply(t);
         finish_thread(t);
     }
 }
@@ -863,20 +636,10 @@ void init() {
     asm volatile("mrs %0, CNTFRQ_EL0" : "=r"(g_cntfrq));
     for (u32 i = 0; i < kMaxCpus; ++i) init_eki(i);
 
-    // Reserve principal 0 for kernel/bootstrap work.  User processes and VMs get
-    // unique IDs; PrincipalClass is now authorization metadata, not the fairness
-    // bucket.
-    g_principal_sched[0].principal_id = 0;
-    g_principal_sched[0].class_ = PRINCIPAL_KERNEL;
-    g_principal_sched[0].allocated = 1;
-    g_principal_sched[0].weight = NICE_0_WEIGHT;
-    g_principal_sched[0].period_start_ns = sched_clock_ns();
+    principal_init_bootstrap();
 
     // Mirror weights into per-CPU entities.
-    for (u32 cpu = 0; cpu < kMaxCpus; ++cpu) {
-        for (u32 i = 0; i < kMaxPrincipals; ++i)
-            g_eki[cpu].principal_entities[i].weight = g_principal_sched[i].weight;
-    }
+    for (u32 cpu = 0; cpu < kMaxCpus; ++cpu) principal_mirror_weights(cpu);
 
     g_online_cpu_count = 1;
     mark_cpu_online(0);
@@ -934,7 +697,7 @@ void tick() {
 
     if (e.switch_pending) return;
     if ((cur->slice_ns > 0 && ran_in_slice >= cur->slice_ns) ||
-        (cur->handoff_deadline_ns != 0 && now >= cur->handoff_deadline_ns)) {
+        handoff_deadline_expired(cur, now)) {
         request_switch(true, SWITCH_TIMER);
     }
 }
@@ -943,7 +706,7 @@ void tick() {
 // Yield / block
 // ---------------------------------------------------------------------------
 void yield() {
-    metric_inc(g_yield_count);
+    note_yield();
     request_switch(true, SWITCH_YIELD);
 }
 
@@ -953,62 +716,9 @@ void block(Thread* t) {
     if (t == current_eki().current) request_switch(false, SWITCH_BLOCK);
 }
 
-// ---------------------------------------------------------------------------
-// set_handoff_next — installs receiver as next thread for handoff
-// ---------------------------------------------------------------------------
-void set_handoff_next(Thread* receiver) {
-    Eki& e         = current_eki();
-    e.handoff_next = receiver;
-}
-
-bool principal_throttled(u32 pid) {
-    if (pid >= kMaxPrincipalsLocal) return false;
-    return __atomic_load_n(&g_principal_sched[pid].throttled, __ATOMIC_RELAXED);
-}
-
 bool switch_pending() {
     return current_eki().switch_pending;
 }
-
-u32 allocate_principal(PrincipalClass class_, u32 weight, u64 budget_ns, u64 period_ns) {
-    kernel::LockGuard guard(g_principal_lock);
-    u32 id = 0;
-    for (u32 scan = 0; scan < kMaxPrincipalsLocal - 1; ++scan) {
-        const u32 candidate = ((g_next_principal_id - 1 + scan) % (kMaxPrincipalsLocal - 1)) + 1;
-        if (!g_principal_sched[candidate].allocated) {
-            id = candidate;
-            g_next_principal_id = (candidate % (kMaxPrincipalsLocal - 1)) + 1;
-            break;
-        }
-    }
-    if (id == 0) return 0;
-    PrincipalSchedState& ps = g_principal_sched[id];
-    libk::memset(&ps, 0, sizeof(ps));
-    ps.principal_id = id;
-    ps.class_ = class_;
-    ps.allocated = 1;
-    ps.weight = weight ? weight : NICE_0_WEIGHT;
-    ps.budget_ns = budget_ns;
-    ps.period_ns = period_ns;
-    ps.period_start_ns = sched_clock_ns();
-    for (u32 cpu = 0; cpu < kMaxCpus; ++cpu)
-        g_eki[cpu].principal_entities[id].weight = ps.weight;
-    return id;
-}
-
-void release_principal(u32 id) {
-    if (id == 0 || id >= kMaxPrincipalsLocal) return;
-    kernel::LockGuard guard(g_principal_lock);
-    libk::memset(&g_principal_sched[id], 0, sizeof(g_principal_sched[id]));
-    if (id < g_next_principal_id) g_next_principal_id = id;
-    for (u32 cpu = 0; cpu < kMaxCpus; ++cpu) {
-        PrincipalEntity& pe = g_eki[cpu].principal_entities[id];
-        libk::memset(&pe, 0, sizeof(pe));
-        pe.principal_id = id;
-        for (u32 b = 0; b < NUM_BANDS; ++b) pe.heap_idx[b] = 0xff;
-    }
-}
-
 
 // ---------------------------------------------------------------------------
 // Enqueue public API
@@ -1146,8 +856,7 @@ extern "C" void post_syscall(void* frame_ptr) {
     }
 
     // Handoff override: skip fair pick
-    Thread* next = e.handoff_next;
-    e.handoff_next = nullptr;
+    Thread* next = handoff_take_next(e);
 
     if (!next) {
         next = pick_next(e);
@@ -1198,12 +907,7 @@ extern "C" void post_syscall(void* frame_ptr) {
     next->last_cpu  = next->cpu_id;
     next->cpu_id    = e.cpu_id;
     // Set up IPC drain quantum on first run after doorbell wake
-    if (next->last_wake_reason == WAKE_DOORBELL
-        && next->latency_hint == LATENCY_IPC_SERVER
-        && !next->in_drain_quantum) {
-        next->in_drain_quantum       = true;
-        next->drain_quantum_start_ns = next->last_start_ns;
-    }
+    ipc_drain_quantum_begin(next, next->last_start_ns);
 
     activate_thread_space(next);
     *frame = next->tf;
@@ -1243,112 +947,10 @@ void mark_cpu_online(u32 cpu_id) {
     if (cpu_id >= kMaxCpus) return;
     if (cpu_id + 1 > g_online_cpu_count) g_online_cpu_count = cpu_id + 1;
     // Mirror principal weights to secondary CPU Eki
-    for (u32 i = 0; i < kMaxPrincipals; ++i)
-        g_eki[cpu_id].principal_entities[i].weight = g_principal_sched[i].weight;
+    principal_mirror_weights(cpu_id);
 }
 void note_ipi_sent(u32)   { metric_inc(current_eki().ipis_sent); }
 void note_ipi_handled()   { metric_inc(current_eki().ipis_handled); }
 void drain_pending_wakes() { drain_pending_wakes(current_eki()); }
-
-// ---------------------------------------------------------------------------
-// Metrics
-// ---------------------------------------------------------------------------
-u64 context_switch_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].context_switches);
-    return t;
-}
-u64 cpu_context_switch_count(u32 c) {
-    return c < kMaxCpus ? metric_load(g_eki[c].context_switches) : 0;
-}
-u64 yield_count()        { return metric_load(g_yield_count); }
-u64 block_switch_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].block_switches);
-    return t;
-}
-u64 timer_preempt_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].timer_preempts);
-    return t;
-}
-u64 cpu_timer_preempt_count(u32 c) {
-    return c < kMaxCpus ? metric_load(g_eki[c].timer_preempts) : 0;
-}
-u64 exit_switch_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].exit_switches);
-    return t;
-}
-u64 local_wake_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].local_wakes);
-    return t;
-}
-u64 remote_wake_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].remote_wakes);
-    return t;
-}
-u64 ipi_sent_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].ipis_sent);
-    return t;
-}
-u64 ipi_handled_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].ipis_handled);
-    return t;
-}
-u64 pending_wake_drain_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].pending_wake_drains);
-    return t;
-}
-u64 principal_runtime(u32 pid) {
-    if (pid >= kMaxPrincipalsLocal) return 0;
-    return __atomic_load_n(&g_principal_sched[pid].runtime_ns, __ATOMIC_RELAXED);
-}
-
-u64 principal_class_runtime(PrincipalClass class_) {
-    u64 total = 0;
-    for (u32 i = 0; i < kMaxPrincipalsLocal; ++i) {
-        PrincipalSchedState& ps = g_principal_sched[i];
-        if (ps.allocated && ps.class_ == class_) {
-            total += __atomic_load_n(&ps.runtime_ns, __ATOMIC_RELAXED);
-        }
-    }
-    return total;
-}
-u64 fairness_max_lag() {
-    u64 min_v = ~0ull, max_v = 0;
-    bool any = false;
-    for (u32 i = 0; i < kMaxPrincipalsLocal; ++i) {
-        const u64 rt = __atomic_load_n(&g_principal_sched[i].runtime_ns, __ATOMIC_RELAXED);
-        if (!rt) continue;
-        any = true;
-        if (rt < min_v) min_v = rt;
-        if (rt > max_v) max_v = rt;
-    }
-    return any ? (max_v - min_v) : 0;
-}
-u64 wake_doorbell_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].wake_doorbell);
-    return t;
-}
-u64 wake_remote_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].wake_remote);
-    return t;
-}
-u64 wake_resume_count() {
-    u64 t = 0;
-    for (u32 i = 0; i < kMaxCpus; ++i) t += metric_load(g_eki[i].wake_resume);
-    return t;
-}
-u64 wrong_cpu_dequeue_count() {
-    return metric_load(g_wrong_cpu_dequeues);
-}
 
 } // namespace sched

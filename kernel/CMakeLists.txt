@@ -41,6 +41,10 @@ set(ANKO_SOURCES
     sched/sched_class.cc
     sched/fair_queue.cc
     sched/sched_context.cc
+    sched/accounting.cc
+    sched/handoff.cc
+    sched/steal.cc
+    sched/metrics.cc
     sched/runqueue.cc
     cap/cap_table.cc
     cap/object.cc

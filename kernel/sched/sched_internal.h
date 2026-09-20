@@ -8,6 +8,7 @@
 namespace sched {
 
 inline constexpr u64 kIpcDrainQuantumNs = 100000ULL; // 100 us (IPC drain quantum)
+inline constexpr u32 kMaxPrincipalsLocal = kMaxPrincipals; // alias for clarity
 
 // --- Band / class policy (sched_class.cc) ----------------------------------
 u32 band_index(SchedBand band);
@@ -40,10 +41,46 @@ FairPrincipalQueue& band_for(Eki& e, SchedBand band);
 BandQueue& band_threads(PrincipalEntity& pe, SchedBand band);
 u64& min_vruntime_for(Eki& e, SchedBand band);
 
-// --- Shared accessors owned by runqueue.cc ---------------------------------
+// --- Per-CPU stations and core queues (runqueue.cc) ------------------------
+Eki& eki_for_cpu(u32 cpu_id);
+Eki& current_eki();
 u64 online_mask();
 u32 first_allowed_cpu(u64 allowed);
+void pending_push(Eki& target, Thread* t);
+bool dequeue_from_principal(Eki& e, Thread* t);
+
+// --- Principal accounting / budgets / throttle (accounting.cc) -------------
 bool principal_allocated(u32 pid);
+bool principal_throttled(u32 pid);
+u32  principal_weight(u32 pid);
+void principal_init_bootstrap();
+void principal_mirror_weights(u32 cpu_id);
+void account_current(Eki& e);
+void refill_principal_budgets();
+u64  fairness_max_lag();
+u64  principal_runtime(u32 pid);
+u64  principal_class_runtime(PrincipalClass class_);
+u32  allocate_principal(PrincipalClass class_, u32 weight, u64 budget_ns, u64 period_ns);
+void release_principal(u32 principal_id);
+
+// --- SchedContext budgets (sched_context.cc) -------------------------------
 void refill_sched_context_budgets();
+
+// --- Handoff / reply / donation / IPC drain quantum (handoff.cc) -----------
+Thread* handoff_take_next(Eki& e);
+void handoff_forget(Eki& e, Thread* t);
+bool handoff_deadline_expired(const Thread* t, u64 now);
+void ipc_drain_quantum_begin(Thread* t, u64 now);
+void ipc_drain_quantum_expire(Thread* t, u64 now);
+void handoff_abort_reply(Thread* t);
+void handoff_grant_donation(Thread* receiver, const Thread* sender);
+void handoff_clear_donation(Thread* donor);
+
+// --- Work stealing (steal.cc) ----------------------------------------------
+void handle_pending_steal_requests(Eki& victim);
+void maybe_send_steal_request(Eki& thief);
+
+// --- Metrics (metrics.cc) --------------------------------------------------
+void note_yield();
 
 } // namespace sched

@@ -1,0 +1,257 @@
+#pragma once
+// userland/fs/fs_internal.h — shared surface for the io.fs service modules.
+//
+// io.fs is a fixed-capacity, data-oriented filesystem service. The boot wiring
+// and the per-client SPSC session loop live in fs_ring.cc; everything else is
+// split by responsibility:
+//
+//   fs_core     — in-memory inode/extent/phys-ref core, checksums, formatting
+//   fs_handles  — open-handle table, per-session handle ownership, handlers
+//   fs_snapshot — copy-on-write snapshot pin/unpin and snapshot handlers
+//   fs_disk     — the midix-fs-v1 disk backend (GPT, B+tree, block cache)
+//   fs_ring     — boot wiring, per-client session loop, request dispatch
+//
+// Mount semantics, kept explicit here because the whole service depends on them
+// (see also docs/FS_SPEC.md and docs/CLEANUP_STATUS.md item 5):
+//
+//   * The disk root is READ-ONLY. Every disk-backed handle is opened read-only
+//     (fs_disk alloc_disk_handle sets read_only), and FS_OPEN_WRITE/CREATE/TRUNC
+//     are rejected with MX_ERR_PERM before the request can reach the disk
+//     B+tree. Redirecting/overlaying the root read-only means a client can never
+//     mutate the signed disk image through io.fs.
+//
+//   * /tmp is VOLATILE. It lives only in the in-memory inode table, is
+//     redirected away from the disk root on open (fs_handles handle_open), and
+//     is discarded on service restart. Nothing under /tmp is ever written back
+//     to the disk image.
+
+#include "mochi/syscall.h"
+#include "mochi/ring.h"
+#include "mochi/fs.h"
+#include "mochi/boot.h"
+#include "midix/abi/protocols/fs.h"
+
+// ---------------------------------------------------------------------------
+// Geometry and shared limits. All storage is fixed-capacity on purpose: the
+// hot path never allocates, so every table is sized at compile time.
+// ---------------------------------------------------------------------------
+constexpr mx_u32_t kRingOrder = MX_DEFAULT_RING_ORDER;
+constexpr mx_u32_t kRootInode = 1;
+constexpr fs_handle_t kRootHandle = 1; // index 1 of g_handles / g_handle_generations
+constexpr mx_u32_t kMaxInodes = 64;
+constexpr mx_u32_t kMaxHandles = 64;
+constexpr mx_u32_t kMaxExtentsPerInode = 8;
+constexpr mx_u32_t kMaxPhysBlocks = 256;
+constexpr mx_u32_t kMaxSnapshots = 8;
+constexpr mx_u32_t kMaxName = 47;
+constexpr mx_u32_t kBlockSize = FS_BLOCK_SIZE;
+constexpr mx_u32_t kSectorsPerFsBlock = FS_BLOCK_SIZE / 512;
+
+// ---------------------------------------------------------------------------
+// In-memory state records. Members are ordered so the common scans touch the
+// smallest fields first.
+// ---------------------------------------------------------------------------
+struct ExtentState {
+    bool used;
+    mx_u64_t logical_block;
+    mx_u64_t phys_block;
+    mx_u64_t length_blocks;
+    mx_u64_t generation;
+    mx_u32_t data_crc32;
+    mx_u16_t flags;
+};
+
+struct InodeState {
+    bool used;
+    mx_u32_t inode_number;
+    mx_u32_t parent_inode;
+    mx_u16_t type;
+    mx_u16_t inode_class;
+    mx_u32_t mode;
+    mx_u32_t nlink;
+    mx_u64_t size;
+    char name[48];
+    ExtentState extents[kMaxExtentsPerInode];
+};
+
+struct PhysRefState {
+    bool used;
+    mx_u64_t phys_block;
+    mx_u64_t length_blocks;
+    mx_u32_t refcount;
+    mx_u32_t flags;
+};
+
+struct SnapshotState {
+    bool used;
+    mx_u64_t snapshot_id;
+    mx_u64_t parent_snapshot_id;
+    InodeState inodes[kMaxInodes];
+};
+
+struct OpenHandle {
+    bool used;
+    bool disk_backed;
+    // Session ownership. owner is the directory slot index; owner_generation is
+    // the slot generation at open time. Both must match the currently served
+    // client for the handle to be accepted, so a token minted before a client
+    // restart can never be replayed (see fs_handles handle_state).
+    mx_u32_t owner;
+    mx_u64_t owner_generation;
+    mx_u32_t inode_number;
+    mx_u64_t snapshot_id;
+    bool read_only;
+    mx_u16_t type;
+    mx_u16_t inode_class;
+    mx_u32_t mode;
+    mx_u64_t size;
+    mx_u64_t tree_root;
+};
+
+enum class FsMutation : mx_u32_t {
+    ExtentAlloc = 1,
+    ExtentFree = 2,
+    InodeWrite = 3,
+    DirInsert = 4,
+    DirDelete = 5,
+    PhysRefInc = 6,
+    PhysRefDec = 7,
+};
+
+// ---------------------------------------------------------------------------
+// Shared tables (defined once, in fs_core.cc unless noted).
+// ---------------------------------------------------------------------------
+extern InodeState g_inodes[kMaxInodes];
+extern PhysRefState g_phys_refs[kMaxPhysBlocks];
+extern SnapshotState g_snapshots[kMaxSnapshots];
+extern OpenHandle g_handles[kMaxHandles];
+extern mx_u32_t g_handle_generations[kMaxHandles];
+extern mx_u8_t g_data_blocks[kMaxPhysBlocks][kBlockSize];
+extern mx_u32_t g_next_inode;
+extern mx_u64_t g_generation;
+extern mx_u64_t g_last_snapshot_id;
+extern bool g_metadata_dirty;
+
+// Currently served client, set by the session loop before dispatching a request.
+extern mx_u32_t g_session;
+extern mx_u64_t g_session_generation;
+
+// ---------------------------------------------------------------------------
+// Small freestanding helpers, shared by every module.
+// ---------------------------------------------------------------------------
+static inline void zero_bytes(void* ptr, mx_u64_t len) {
+    auto* p = static_cast<mx_u8_t*>(ptr);
+    for (mx_u64_t i = 0; i < len; ++i) p[i] = 0;
+}
+
+static inline void fs_copy_bytes(void* dst, const void* src, mx_u64_t len) {
+    auto* d = static_cast<mx_u8_t*>(dst);
+    const auto* s = static_cast<const mx_u8_t*>(src);
+    for (mx_u64_t i = 0; i < len; ++i) d[i] = s[i];
+}
+
+static inline mx_u32_t str_len(const char* s, mx_u32_t limit) {
+    mx_u32_t n = 0;
+    if (!s) return 0;
+    while (n < limit && s[n]) ++n;
+    return n;
+}
+
+static inline bool name_eq(const char* a, const char* b, mx_u8_t b_len) {
+    for (mx_u32_t i = 0; i < b_len; ++i) {
+        if (a[i] != b[i]) return false;
+    }
+    return a[b_len] == '\0';
+}
+
+static inline void copy_name(char* dst, const char* src, mx_u8_t len) {
+    mx_u32_t n = len;
+    if (n > kMaxName) n = kMaxName;
+    for (mx_u32_t i = 0; i < n; ++i) dst[i] = src[i];
+    dst[n] = '\0';
+}
+
+static inline mx_u32_t min_u32(mx_u32_t a, mx_u32_t b) {
+    return a < b ? a : b;
+}
+
+// Map a named boot ring at a fixed VA. Shared by the session and block paths.
+static inline RingPage* map_ring_from_boot(const MxBootInfo* boot, const char* name,
+                                           mx_vaddr_t va, mx_u32_t* out_order) {
+    const MxBootEntry* entry = mochi::boot::find_type(boot, name, MX_BOOT_ENTRY_RING);
+    if (!entry || entry->handle == MX_NULL_HANDLE) return nullptr;
+    if (mx_map_page(entry->handle, va, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) {
+        return nullptr;
+    }
+    if (out_order) {
+        *out_order = entry->aux0 ? static_cast<mx_u32_t>(entry->aux0) : kRingOrder;
+    }
+    return reinterpret_cast<RingPage*>(va);
+}
+
+// ---------------------------------------------------------------------------
+// fs_core.cc — in-memory core.
+// ---------------------------------------------------------------------------
+mx_u32_t crc32_ieee(const mx_u8_t* data, mx_u64_t len);
+mx_u32_t name_hash32(const char* name, mx_u8_t len);
+mx_u32_t checksum_block(const mx_u8_t* data);
+void note_metadata_delta(FsMutation type, mx_u32_t target);
+
+InodeState* live_inode(mx_u32_t inode_number);
+InodeState* alloc_inode(mx_u16_t type, mx_u16_t inode_class,
+                        mx_u32_t parent_inode, const char* name,
+                        mx_u8_t name_len, mx_u32_t mode);
+const InodeState* find_child(mx_u64_t snapshot_id, mx_u32_t parent_inode,
+                             const char* name, mx_u8_t name_len);
+InodeState* find_live_child(mx_u32_t parent_inode, const char* name, mx_u8_t name_len);
+const ExtentState* find_extent_const(const InodeState& inode, mx_u64_t logical_block);
+mx_i32_t inc_phys_ref(mx_u64_t phys_block);
+void dec_phys_ref(mx_u64_t phys_block);
+void release_inode_extents(InodeState& inode);
+mx_i32_t write_inline(InodeState& inode, mx_u64_t offset, const mx_u8_t* data, mx_u32_t len);
+mx_i32_t verify_refcount_index();
+void format_memory_fs();
+void register_service_arenas();
+
+// ---------------------------------------------------------------------------
+// fs_handles.cc — handle table + request handlers.
+// ---------------------------------------------------------------------------
+fs_handle_t handle_token(mx_u32_t index);
+fs_handle_t alloc_handle(mx_u32_t inode_number, mx_u64_t snapshot_id, bool read_only);
+void close_session(mx_u32_t session);
+void send_status_only(const mochi::fs::Server& fs, const RingSlot& req,
+                      mx_u32_t reply_type, mx_i32_t status);
+
+void handle_open(const mochi::fs::Server& fs, const RingSlot& slot);
+void handle_close(const mochi::fs::Server& fs, const RingSlot& slot);
+void handle_read(const mochi::fs::Server& fs, const RingSlot& slot);
+void handle_write(const mochi::fs::Server& fs, const RingSlot& slot);
+void handle_readdir(const mochi::fs::Server& fs, const RingSlot& slot);
+void handle_mkdir(const mochi::fs::Server& fs, const RingSlot& slot);
+void handle_unlink(const mochi::fs::Server& fs, const RingSlot& slot);
+void handle_rename(const mochi::fs::Server& fs, const RingSlot& slot);
+void handle_promote(const mochi::fs::Server& fs, const RingSlot& slot);
+
+// ---------------------------------------------------------------------------
+// fs_snapshot.cc — snapshot pin/unpin + handlers.
+// ---------------------------------------------------------------------------
+SnapshotState* snapshot_by_id(mx_u64_t snapshot_id);
+const InodeState* any_inode(mx_u64_t snapshot_id, mx_u32_t inode_number);
+
+void handle_snapshot(const mochi::fs::Server& fs, const RingSlot& slot);
+void handle_snapshot_mount(const mochi::fs::Server& fs, const RingSlot& slot);
+void handle_snapshot_drop(const mochi::fs::Server& fs, const RingSlot& slot);
+
+// ---------------------------------------------------------------------------
+// fs_disk.cc — read-only midix-fs-v1 disk backend.
+// ---------------------------------------------------------------------------
+bool disk_mounted();
+bool disk_inode(mx_u32_t inode_number, InodeLeafEntry* out);
+bool disk_dir_lookup(const InodeLeafEntry& dir, mx_u32_t parent_inode,
+                     const char* name, mx_u8_t name_len, InodeLeafEntry* out_inode);
+fs_handle_t alloc_disk_handle(const InodeLeafEntry& inode);
+mx_i32_t disk_read_file(const OpenHandle& handle, mx_u64_t offset,
+                        mx_u32_t length, FsReadReply* reply);
+mx_i32_t disk_readdir(const OpenHandle& handle, const FsReaddirRequest& req,
+                      FsReaddirReply* reply);
+void fs_disk_init(const MxBootInfo* boot);

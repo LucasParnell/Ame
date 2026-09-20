@@ -69,7 +69,14 @@ endif()
 mochi_service(drv.usb.hid     drivers/usb/hid/main.cc    0x10B00000)
 mochi_service(ui.input        drivers/input/main.cc      0x10C00000)
 mochi_service(drv.blk.virtio  drivers/blk/virtio/main.cc 0x10D00000)
-mochi_service(io.fs           fs/main.cc                  0x10E00000)
+# io.fs is split into cohesive modules behind fs/fs_internal.h.
+set(FS_SOURCES
+    fs/fs_ring.cc
+    fs/fs_core.cc
+    fs/fs_handles.cc
+    fs/fs_snapshot.cc
+    fs/fs_disk.cc)
+mochi_service(io.fs        "${FS_SOURCES}"               0x10E00000)
 mochi_service(msh             msh/main.cc                 0x10F00000)
 
 set(MOCHI_BOOT_MANIFEST "${ANKO_BOOT_MANIFEST}")

@@ -124,6 +124,34 @@ mappings, mediated config writes, MSI/MSI-X + INTx level routes → vGIC. See
 - Harness: boot with `AME_QEMU_IOMMU=1 Dango build-linux-artifacts=ON`, then assert `virtio_gpu` binds,
   `/dev/dri/card0` appears, and IOMMU counters stay clean.
 
+### E.3 status — where the boot stops (empirically)
+
+The appliance now boots Ame with the SMMU up, loads Linux into the VM, and builds the assignment:
+
+```
+dango.manager: linux image loaded / linux.trampoline / vcpu ready
+kernel/vm: assign: claimed device=1 group=3 fns=1; contained bm=0 fns=1/1; domain ready index=2
+           ram mapped ranges=3 pages=32768; streams attached n=1; exposed fns=1 msi=1; ACTIVE device=1
+dango.manager: gpu bar map failed
+```
+
+`gpu bar map failed` is `device_map_bar_internal` returning `E_NOTFOUND` at `bar.base == 0`
+(`kernel/vm/vm_device.cc:802`). Root cause: **nothing assigns the function's host BAR addresses.**
+On `-kernel` direct boot there is no firmware, so the inventory shows `bar1 mmio32 base=0x0` / `bar4
+mmio64 base=0x0` (sizes decode correctly). Native xHCI works only because its BAR is assigned
+separately by the native probe path.
+
+**Next step (E.3 remainder):** assign the function's BARs before mapping — allocate from the PCIe
+MMIO window. The window is in the host DTB (`pci-host-ecam-generic.ranges`, MMIO32 `0x10000000`
+size `0x2eff0000` in the Phase A fixture), so:
+1. parse the pci node's `ranges` into `HwInfo` (window base + size) in `kernel/platform/probe.cc`;
+2. in the attach path, allocate aligned space for each implemented MMIO BAR and program the BAR
+   register(s) via config space (handle the two-register `mmio64` BAR4), then refresh the cached
+   bases so `device_map_bar` can map the host range as a guest stage-2 **Device** mapping.
+
+After that: INTx delivery (guest SPI 12) and the Linux-side `virtio_gpu` / `/dev/dri/card0`
+assertions for Phase E.5.
+
 **Acceptance:** Linux binds `virtio_gpu`, creates a DRM primary device, no unexpected IOMMU faults, no
 global-bypass mapping.
 

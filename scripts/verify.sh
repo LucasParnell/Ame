@@ -60,6 +60,14 @@ do_host_tests() {
     ctest --test-dir "$BUILD_DIR" --output-on-failure >/dev/null
 }
 
+# Provenance: the build must record revision, config, signing id, bundle hash.
+do_provenance() {
+    cmake --build "$BUILD_DIR" --target provenance >/dev/null
+    local json="$BUILD_DIR/generated/provenance.json"
+    [[ -f "$json" ]] || fail "generated/provenance.json missing"
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("   -> {} {} {} key={} mxb={}".format(d["git"]["describe"], d["build"]["type"], d["build"]["board"], d["signing"]["key_id"], d["artifact"]["sha256"][:12]))' "$json"
+}
+
 # boot <marker> <cpus> [bundle] — run one bounded QEMU boot and report a
 # one-line summary; the exit status is boot.py's, so the gate can rely on it.
 run_boot() {
@@ -83,14 +91,22 @@ do_lifecycle() {
     done
 }
 
+# Supervision: a service is killed and init must restart it (and its dependents).
+do_supervision() {
+    cmake --build "$BUILD_DIR" --target kernel_regressions >/dev/null
+    run_boot 'supervision regression passed' 2 "$BUILD_DIR/restart.mxb"
+}
+
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
 # bespoke control flow below.
 CHECKS=(
     "configure:do_configure"
     "build:do_build"
     "host-regressions:do_host_tests"
+    "provenance:do_provenance"
     "boot-direct:do_boot"
     "lifecycle-matrix:do_lifecycle"
+    "supervision-restart:do_supervision"
 )
 
 record_toolchain

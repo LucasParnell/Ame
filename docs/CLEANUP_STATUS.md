@@ -67,7 +67,11 @@ Still required before completion:
    restarts/backoff under injected faults; add a regression fixture for the restart path.
 4. Per-client SPSC discovery/FS sessions, timeout/peer-death handling.
 5. Explicit read-only disk root + volatile /tmp, session-owned generation handles; FS/shell modules; example application and tests.
-6. Full CPU/boot matrix, 100 lifecycle cycles, guest Linux/auth regression and final feature documentation.
+6. Full CPU/boot matrix, 100 lifecycle cycles, guest Linux/auth regression and final feature
+   documentation. The per-subsystem status matrix — status, evidence, limitations and the
+   test-matrix gaps (including what is explicitly unverified) — is now in
+   [docs/FEATURE_STATUS.md](FEATURE_STATUS.md). Guest Linux/auth regression and disk-mode
+   boot remain out of the default gate; see that document's gaps section.
 
 Notes:
 

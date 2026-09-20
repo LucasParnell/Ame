@@ -87,6 +87,17 @@ Release builds require an Ed25519 private key in PKCS8 format and explicitly
 configured trusted public keys (PEM or raw 32-byte files). Keep private keys
 outside the repository. The release configuration rejects the development key.
 
+Generate a keypair with:
+
+```sh
+scripts/make-release-key.sh ~/.ame-keys
+cmake --preset qemu-release \
+  -DAME_SIGNING_KEY=$HOME/.ame-keys/release-signing-key.pem \
+  -DAME_TRUSTED_KEY_FILES=$HOME/.ame-keys/release-trusted-key.pem
+```
+
+A release configure without a key fails closed by design.
+
 ```sh
 cmake --preset qemu-release \
   -DAME_SIGNING_KEY=/path/outside/repository/signing-key.pem \

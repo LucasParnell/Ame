@@ -49,6 +49,9 @@ Implemented and initially exercised:
   exists. Boot now completes to `init: all services ready`.
 - Added `scripts/verify.sh`; recorded the validated toolchain (Homebrew Clang 23.1.1, CMake 4.4.0,
   QEMU 11.1.1).
+- Release signing sorted: `scripts/make-release-key.sh` generates an Ed25519 PKCS8 keypair outside
+  the repo; `qemu-release` configure + build + direct boot are validated with a generated key, and
+  a release configure without `AME_SIGNING_KEY` still fails closed.
 - Added `scripts/provenance.py` and wired it into the top-level `CMakeLists.txt` so every build
   lands `generated/provenance.json`/`.h`. Confirmed the qemu-dev (Debug) tree reports
   `ninja: no work to do` on a second build with no source changes, and that qemu-release (Release)

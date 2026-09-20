@@ -437,42 +437,42 @@ const IommuBackendOps& null_backend() {
     return g_null_backend;
 }
 
-SysError IommuDomain::map_batch(const IommuMap* maps, u32 count) {
-    if (state_ != DomainState::Active) {
+SysError domain_map_batch(IommuDomain& domain, const IommuMap* maps, u32 count) {
+    if (domain.state_ != DomainState::Active) {
         return E_PERM; // quarantine (and free) domains never map
     }
     if (!maps || count == 0) {
         return E_INVALID;
     }
-    LockGuard guard(lock_);
-    if (count > kMaxDomainMappings - mapping_count_) {
+    LockGuard guard(domain.lock_);
+    if (count > kMaxDomainMappings - domain.mapping_count_) {
         return E_OVERFLOW;
     }
 
-    const u32 record_start = mapping_count_;
-    const u32 table_start = table_count_;
+    const u32 record_start = domain.mapping_count_;
+    const u32 table_start = domain.table_count_;
 
     for (u32 i = 0; i < count; ++i) {
         const IommuMap& map = maps[i];
         SysError rc = check_mapping(map);
         if (rc != E_OK) {
-            rollback(this, record_start, table_start);
+            rollback(&domain, record_start, table_start);
             return rc;
         }
         u64 owner = 0;
         VmDmaClass cls = VmDmaClass::None;
-        rc = validate_ownership(this, map, &owner, &cls);
+        rc = validate_ownership(&domain, map, &owner, &cls);
         if (rc != E_OK) {
-            rollback(this, record_start, table_start);
+            rollback(&domain, record_start, table_start);
             return rc;
         }
         const bool block = is_block_map(map);
-        rc = block ? emit_blocks(this, map) : emit_pages(this, map);
+        rc = block ? emit_blocks(&domain, map) : emit_pages(&domain, map);
         if (rc != E_OK) {
-            rollback(this, record_start, table_start);
+            rollback(&domain, record_start, table_start);
             return rc;
         }
-        IommuMapping& record = mappings_[mapping_count_++];
+        IommuMapping& record = domain.mappings_[domain.mapping_count_++];
         libk::memset(&record, 0, sizeof(record));
         record.iova = map.iova;
         record.pa = map.pa;
@@ -486,12 +486,13 @@ SysError IommuDomain::map_batch(const IommuMap* maps, u32 count) {
     }
 
     // Publish freshly written page tables, then wait for the command stream.
-    for (u32 t = table_start; t < table_count_; ++t) {
-        publish_table(this, tables_[t]);
+    for (u32 t = table_start; t < domain.table_count_; ++t) {
+        publish_table(&domain, domain.tables_[t]);
     }
-    publish_table(this, root_table_);
-    if (backend_.sync_command_stream && backend_.sync_command_stream(backend_.ctx) != E_OK) {
-        rollback(this, record_start, table_start);
+    publish_table(&domain, domain.root_table_);
+    if (domain.backend_.sync_command_stream &&
+        domain.backend_.sync_command_stream(domain.backend_.ctx) != E_OK) {
+        rollback(&domain, record_start, table_start);
         return E_FAULT;
     }
 
@@ -501,19 +502,19 @@ SysError IommuDomain::map_batch(const IommuMap* maps, u32 count) {
         if (is_block_map(maps[i])) {
             counter_add(IOMMU_BLOCK_MAP_BYTES, maps[i].length);
         }
-        pinned_pages_ += static_cast<u32>(maps[i].length / kPageBytes);
+        domain.pinned_pages_ += static_cast<u32>(maps[i].length / kPageBytes);
     }
     return E_OK;
 }
 
-SysError IommuDomain::unmap_batch(const IommuMap* maps, u32 count) {
-    if (state_ == DomainState::Free) {
+SysError domain_unmap_batch(IommuDomain& domain, const IommuMap* maps, u32 count) {
+    if (domain.state_ == DomainState::Free) {
         return E_INVALID;
     }
     if (!maps || count == 0) {
         return E_INVALID;
     }
-    LockGuard guard(lock_);
+    LockGuard guard(domain.lock_);
     for (u32 i = 0; i < count; ++i) {
         const SysError rc = check_extent(maps[i]);
         if (rc != E_OK) {
@@ -522,46 +523,46 @@ SysError IommuDomain::unmap_batch(const IommuMap* maps, u32 count) {
     }
     for (u32 i = 0; i < count; ++i) {
         const IommuMap& map = maps[i];
-        const u32 idx = find_record(this, map.iova, map.length);
+        const u32 idx = find_record(&domain, map.iova, map.length);
         if (idx == kNoIndex) {
             return E_NOTFOUND;
         }
-        IommuMapping record = mappings_[idx];
-        clear_record(this, record);
-        if (!invalidate_and_sync_range(this, record.iova, record.length)) {
+        IommuMapping record = domain.mappings_[idx];
+        clear_record(&domain, record);
+        if (!invalidate_and_sync_range(&domain, record.iova, record.length)) {
             // Cannot prove the device stopped; keep the pages pinned and stop
             // accepting work on this domain.
-            state_ = DomainState::Quarantined;
+            domain.state_ = DomainState::Quarantined;
             counter_inc(IOMMU_QUARANTINES);
             return E_FAULT;
         }
-        if (owner_.release) {
-            owner_.release(owner_.ctx, record.pa, record.length);
+        if (domain.owner_.release) {
+            domain.owner_.release(domain.owner_.ctx, record.pa, record.length);
         }
-        prune_range(this, record.iova, record.length);
-        if (pinned_pages_ >= record.pages) {
-            pinned_pages_ -= record.pages;
+        prune_range(&domain, record.iova, record.length);
+        if (domain.pinned_pages_ >= record.pages) {
+            domain.pinned_pages_ -= record.pages;
         } else {
-            pinned_pages_ = 0;
+            domain.pinned_pages_ = 0;
         }
         counter_inc(IOMMU_UNMAP_OPS);
-        mappings_[idx] = mappings_[--mapping_count_];
+        domain.mappings_[idx] = domain.mappings_[--domain.mapping_count_];
     }
     return E_OK;
 }
 
-SysError IommuDomain::sync() {
-    LockGuard guard(lock_);
-    if (backend_.sync_command_stream) {
-        return backend_.sync_command_stream(backend_.ctx);
+SysError domain_sync(IommuDomain& domain) {
+    LockGuard guard(domain.lock_);
+    if (domain.backend_.sync_command_stream) {
+        return domain.backend_.sync_command_stream(domain.backend_.ctx);
     }
     return E_OK;
 }
 
-SysError IommuDomain::attach(IommuDeviceId device) {
+SysError domain_attach(IommuDomain& domain, IommuDeviceId device) {
     // Attaching to the quarantine (or a faulted) domain is allowed: it is the
     // default-deny target a requester is bound to when it has no valid domain.
-    if (state_ == DomainState::Free) {
+    if (domain.state_ == DomainState::Free) {
         return E_PERM; // slot not in use
     }
     ensure_initialised();
@@ -572,7 +573,7 @@ SysError IommuDomain::attach(IommuDeviceId device) {
             binding.sid != device.requester_or_stream_id) {
             continue;
         }
-        if (binding.domain_index == index_) {
+        if (binding.domain_index == domain.index_) {
             return E_OK; // redundant attach
         }
         if (binding.domain_index != kQuarantineIndex) {
@@ -582,18 +583,18 @@ SysError IommuDomain::attach(IommuDeviceId device) {
             // rebinding away from a faulting context, not a bypass (§8.12).
             IommuDomain* current = domain_by_index(binding.domain_index);
             const bool current_denies =
-                current == nullptr || current->state() == DomainState::Quarantined;
+                current == nullptr || domain_state(*current) == DomainState::Quarantined;
             if (!current_denies) {
                 return E_BUSY; // owned by another live domain
             }
         }
         // Program the backend context before committing the binding, so a
         // failed install leaves the requester on its previous (deny) context.
-        if (!program_stream(this, device)) {
+        if (!program_stream(&domain, device)) {
             return E_FAULT;
         }
-        binding.domain_index = index_;
-        __atomic_or_fetch(&attached_mask_, 1ull << i, __ATOMIC_RELAXED);
+        binding.domain_index = domain.index_;
+        __atomic_or_fetch(&domain.attached_mask_, 1ull << i, __ATOMIC_RELAXED);
         return E_OK;
     }
     for (u32 i = 0; i < kMaxIommuStreams; ++i) {
@@ -601,20 +602,20 @@ SysError IommuDomain::attach(IommuDeviceId device) {
         if (binding.used) {
             continue;
         }
-        if (!program_stream(this, device)) {
+        if (!program_stream(&domain, device)) {
             return E_FAULT;
         }
         binding.used = true;
         binding.segment = device.segment;
         binding.sid = device.requester_or_stream_id;
-        binding.domain_index = index_;
-        __atomic_or_fetch(&attached_mask_, 1ull << i, __ATOMIC_RELAXED);
+        binding.domain_index = domain.index_;
+        __atomic_or_fetch(&domain.attached_mask_, 1ull << i, __ATOMIC_RELAXED);
         return E_OK;
     }
     return E_OVERFLOW;
 }
 
-SysError IommuDomain::detach(IommuDeviceId device) {
+SysError domain_detach(IommuDomain& domain, IommuDeviceId device) {
     ensure_initialised();
     LockGuard guard(g_stream_lock);
     for (u32 i = 0; i < kMaxIommuStreams; ++i) {
@@ -623,23 +624,49 @@ SysError IommuDomain::detach(IommuDeviceId device) {
             binding.sid != device.requester_or_stream_id) {
             continue;
         }
-        if (binding.domain_index != index_) {
+        if (binding.domain_index != domain.index_) {
             return E_NOTFOUND;
         }
         binding.domain_index = kQuarantineIndex;
-        __atomic_and_fetch(&attached_mask_, ~(1ull << i), __ATOMIC_RELAXED);
+        __atomic_and_fetch(&domain.attached_mask_, ~(1ull << i), __ATOMIC_RELAXED);
         counter_inc(IOMMU_QUARANTINES);
         // Redirect the requester to a faulting context. If the backend cannot
         // prove it stopped translating, quarantine this domain so its pages
         // stay pinned rather than being recycled (§8.12).
-        if (backend_.detach_stream && backend_.detach_stream(backend_.ctx, device) != E_OK) {
-            state_ = DomainState::Quarantined;
+        if (domain.backend_.detach_stream &&
+            domain.backend_.detach_stream(domain.backend_.ctx, device) != E_OK) {
+            domain.state_ = DomainState::Quarantined;
             counter_inc(IOMMU_QUARANTINES);
             return E_FAULT;
         }
         return E_OK;
     }
     return E_NOTFOUND;
+}
+
+// --- accessors -------------------------------------------------------------
+u32 domain_index(const IommuDomain& domain) {
+    return domain.index_;
+}
+
+DomainState domain_state(const IommuDomain& domain) {
+    return domain.state_;
+}
+
+bool domain_is_active(const IommuDomain& domain) {
+    return domain.state_ == DomainState::Active;
+}
+
+u32 domain_live_mappings(const IommuDomain& domain) {
+    return domain.mapping_count_;
+}
+
+u32 domain_pinned_pages(const IommuDomain& domain) {
+    return domain.pinned_pages_;
+}
+
+u64 domain_attached_mask(const IommuDomain& domain) {
+    return __atomic_load_n(&domain.attached_mask_, __ATOMIC_RELAXED);
 }
 
 SysError domain_create(u64 authorized_object, const IommuOwnerOps& owner,

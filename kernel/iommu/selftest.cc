@@ -285,7 +285,7 @@ void smmuv3_selftest_if_testdev() {
     readonly_map.perms = static_cast<u32>(DmaPerm::Read);
 
     IommuMap maps[2] = {mapped, readonly_map};
-    if (domain->map_batch(maps, 2) != E_OK || domain->attach(device) != E_OK) {
+    if (domain_map_batch(*domain, maps, 2) != E_OK || domain_attach(*domain, device) != E_OK) {
         ANKO_LOG_ERROR("iommu/selftest", "TEST FAILED: map/attach");
         return;
     }
@@ -319,7 +319,7 @@ void smmuv3_selftest_if_testdev() {
         unmap.iova = kIovaMapped;
         unmap.pa = target;
         unmap.length = PAGE_SIZE;
-        check(domain->unmap_batch(&unmap, 1) == E_OK, "(f) unmap");
+        check(domain_unmap_batch(*domain, &unmap, 1) == E_OK, "(f) unmap");
         check(debug_counter(IOMMU_TLBI_RANGE) > tlbi0, "(f) range invalidation issued");
         *reinterpret_cast<volatile u32*>(target) = kPoisonWord;
         cache_clean(target, 4);
@@ -362,7 +362,7 @@ void smmuv3_selftest_if_testdev() {
     {
         *reinterpret_cast<volatile u32*>(target) = kPoisonWord;
         cache_clean(target, 4);
-        check(domain->detach(device) == E_OK, "(d) detach");
+        check(domain_detach(*domain, device) == E_OK, "(d) detach");
         const u64 faults0 = debug_counter(IOMMU_FAULTS);
         const u32 result = td_dma(kIovaMapped, target, 4);
         (void)smmuv3_drain_events();
@@ -376,7 +376,7 @@ void smmuv3_selftest_if_testdev() {
     // quarantine (STE faulting, bus-master cleared).
     {
         const u64 quarantines0 = debug_counter(IOMMU_QUARANTINES);
-        check(domain->attach(device) == E_OK, "(e) re-attach");
+        check(domain_attach(*domain, device) == E_OK, "(e) re-attach");
         for (u32 i = 0; i < kFaultInjections; ++i) {
             (void)td_dma(canary, canary, 4);
             (void)smmuv3_drain_events();

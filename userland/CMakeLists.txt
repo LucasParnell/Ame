@@ -75,7 +75,8 @@ set(FS_SOURCES
     fs/fs_core.cc
     fs/fs_handles.cc
     fs/fs_snapshot.cc
-    fs/fs_disk.cc)
+    fs/fs_disk.cc
+    fs/fs_durable.cc)
 mochi_service(io.fs        "${FS_SOURCES}"               0x10E00000)
 # msh is split into cohesive modules behind userland/msh/msh.h.
 set(MSH_SOURCES
@@ -217,6 +218,21 @@ if(ANKO_BUILD_DEV)
                 ${CMAKE_CURRENT_BINARY_DIR}/test.busy.mxi
                 ${CMAKE_SOURCE_DIR}/scripts/test/package-restart.py
         VERBATIM)
+
+    # Durability persistence fixture: a normal system bundle plus a probe service
+    # that writes /data, syncs, and reads the file back after a reboot. Built
+    # as its own bundle so the default system.mxb never runs it.
+    mochi_service(app.durable ${CMAKE_SOURCE_DIR}/tests/durable/durable.cc 0x11500000)
+    add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/durable.mxb
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test/package-durable.py ${CMAKE_BINARY_DIR}
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/app.durable.mxi
+                ${CMAKE_BINARY_DIR}/manifest.json
+                ${MOCHI_MXI_FILES}
+                ${CMAKE_SOURCE_DIR}/scripts/test/package-durable.py
+        VERBATIM)
+    add_custom_target(durable_bundle DEPENDS ${CMAKE_BINARY_DIR}/durable.mxb)
+
     add_custom_target(kernel_regressions DEPENDS ${CMAKE_BINARY_DIR}/lifecycle.mxb
-                                              ${CMAKE_BINARY_DIR}/restart.mxb)
+                                              ${CMAKE_BINARY_DIR}/restart.mxb
+                                              ${CMAKE_BINARY_DIR}/durable.mxb)
 endif()

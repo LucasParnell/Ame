@@ -17,6 +17,7 @@ mx_u32_t g_next_inode = kRootInode + 1;
 mx_u64_t g_generation = 1;
 mx_u64_t g_last_snapshot_id = 0;
 bool g_metadata_dirty = false;
+mx_u32_t g_data_inode = 0;
 
 // Currently served client, published by the session loop in fs_ring.cc.
 mx_u32_t g_session = 0;
@@ -38,8 +39,8 @@ static const char kHelloData[] =
 // ---------------------------------------------------------------------------
 // Checksums.
 // ---------------------------------------------------------------------------
-mx_u32_t crc32_ieee(const mx_u8_t* data, mx_u64_t len) {
-    mx_u32_t crc = 0xFFFF'FFFFu;
+mx_u32_t crc32_ieee_update(mx_u32_t state, const mx_u8_t* data, mx_u64_t len) {
+    mx_u32_t crc = state;
     for (mx_u64_t i = 0; i < len; ++i) {
         crc ^= data[i];
         for (mx_u32_t bit = 0; bit < 8; ++bit) {
@@ -47,7 +48,11 @@ mx_u32_t crc32_ieee(const mx_u8_t* data, mx_u64_t len) {
             crc = (crc >> 1) ^ (0xEDB8'8320u & mask);
         }
     }
-    return ~crc;
+    return crc;
+}
+
+mx_u32_t crc32_ieee(const mx_u8_t* data, mx_u64_t len) {
+    return ~crc32_ieee_update(0xFFFF'FFFFu, data, len);
 }
 
 mx_u32_t name_hash32(const char* name, mx_u8_t len) {
@@ -325,15 +330,15 @@ mx_i32_t verify_refcount_index() {
 }
 
 // ---------------------------------------------------------------------------
-// Inline writes.
+// Data writes. write_bytes_unbounded is the whole path; write_inline is the
+// client-facing entry that bounds one request to FS_INLINE_WRITE_MAX.
 // ---------------------------------------------------------------------------
-mx_i32_t write_inline(InodeState& inode, mx_u64_t offset,
-                      const mx_u8_t* data, mx_u32_t len) {
+mx_i32_t write_bytes_unbounded(InodeState& inode, mx_u64_t offset,
+                               const mx_u8_t* data, mx_u32_t len) {
     if (inode.type != FS_INODE_FILE) return static_cast<mx_i32_t>(MX_ERR_BAD_TYPE);
     if (inode.inode_class == FS_CLASS_CONTENT_STORE && inode.size != 0) {
         return static_cast<mx_i32_t>(MX_ERR_PERM);
     }
-    if (len > FS_INLINE_WRITE_MAX) return static_cast<mx_i32_t>(MX_ERR_INVALID);
 
     mx_u32_t written = 0;
     while (written < len) {
@@ -355,6 +360,12 @@ mx_i32_t write_inline(InodeState& inode, mx_u64_t offset,
     ++g_generation;
     note_metadata_delta(FsMutation::InodeWrite, inode.inode_number);
     return MX_OK;
+}
+
+mx_i32_t write_inline(InodeState& inode, mx_u64_t offset,
+                      const mx_u8_t* data, mx_u32_t len) {
+    if (len > FS_INLINE_WRITE_MAX) return static_cast<mx_i32_t>(MX_ERR_INVALID);
+    return write_bytes_unbounded(inode, offset, data, len);
 }
 
 static void init_file_content(InodeState& inode, const char* data, mx_u32_t len) {
@@ -388,6 +399,7 @@ void format_memory_fs() {
     g_last_snapshot_id = 0;
     g_metadata_dirty = false;
 
+    g_data_inode = 0;
     InodeState& root = g_inodes[0];
     root.used = true;
     root.inode_number = kRootInode;
@@ -408,6 +420,11 @@ void format_memory_fs() {
     // disk root stays read-only and never sees these inodes.
     auto* tmp = alloc_inode(FS_INODE_DIR, FS_CLASS_USER_DATA, kRootInode, "tmp", 3, 0755);
     g_tmp_inode = tmp ? tmp->inode_number : 0;
+
+    // /data is the durable user volume. It always exists; whether it survives a
+    // reboot depends on a writable disk region (see fs_durable.cc).
+    auto* data = alloc_inode(FS_INODE_DIR, FS_CLASS_USER_DATA, kRootInode, "data", 4, 0755);
+    g_data_inode = data ? data->inode_number : 0;
 
     InodeState* hello = alloc_inode(FS_INODE_FILE, FS_CLASS_CONTENT_STORE,
                                     kRootInode, kHelloName,

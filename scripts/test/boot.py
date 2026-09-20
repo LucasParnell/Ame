@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Bounded QEMU acceptance runner; never writes the supplied disk image."""
+"""Bounded QEMU acceptance runner; never writes the supplied disk image.
+
+The disk is attached with a discarded overlay (snapshot=on) by default, so a
+boot cannot mutate the image it was given. Pass --no-snapshot only when the
+caller already owns a disposable copy of the image (e.g. the durability
+regression in scripts/test/durable-persistence.py).
+"""
 import argparse
 import json
 import pathlib
@@ -8,7 +14,8 @@ import tempfile
 import time
 
 
-def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, output=None, bundle=None):
+def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, output=None,
+        bundle=None, snapshot=True):
     build = pathlib.Path(build).resolve()
     output = pathlib.Path(output) if output else pathlib.Path(tempfile.mkdtemp(prefix='ame-boot-'))
     output.mkdir(parents=True, exist_ok=True)
@@ -19,7 +26,9 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
             '-device', 'usb-mouse,bus=xhci.0', '-display', 'none', '-monitor', 'none',
             '-serial', f'file:{host}', '-serial', f'file:{guest}']
     if disk:
-        args += ['-drive', f'if=none,file={pathlib.Path(disk).resolve()},format=raw,id=disk,snapshot=on',
+        snapshot_arg = 'snapshot=on' if snapshot else 'snapshot=off'
+        args += ['-drive',
+                 f'if=none,file={pathlib.Path(disk).resolve()},format=raw,id=disk,{snapshot_arg}',
                  '-device', 'virtio-blk-device,drive=disk']
     if mode == 'direct':
         args += ['-kernel', str(build / 'kernel/anko.bin'), '-initrd', str(pathlib.Path(bundle).resolve() if bundle else build / 'system.mxb')]
@@ -49,7 +58,8 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
                 try: proc.wait(timeout=5)
                 except subprocess.TimeoutExpired: proc.kill(); proc.wait()
     result = dict(success=success, reason=reason, mode=mode, cpus=cpus,
-                  elapsed=time.monotonic() - started, logs=str(output), command=args)
+                  elapsed=time.monotonic() - started, logs=str(output), command=args,
+                  snapshot=snapshot)
     (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result))
     return success
@@ -66,8 +76,12 @@ def main():
     parser.add_argument('--firmware')
     parser.add_argument('--output')
     parser.add_argument('--marker', action='append', dest='markers')
+    parser.add_argument('--no-snapshot', action='store_true',
+                        help='give the guest a writable disk (default uses a discarded overlay)')
     args = parser.parse_args()
-    return 0 if run(**vars(args)) else 1
+    params = vars(args)
+    params['snapshot'] = not params.pop('no_snapshot')
+    return 0 if run(**params) else 1
 
 
 if __name__ == '__main__':

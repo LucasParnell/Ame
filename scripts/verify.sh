@@ -97,6 +97,14 @@ do_supervision() {
     run_boot 'supervision regression passed' 2 "$BUILD_DIR/restart.mxb"
 }
 
+# Durability: write /data/persist.txt and FS_SYNC in one boot, reboot against the
+# same (disposable, copied) disk image, and read the file back byte-for-byte.
+do_durable() {
+    cmake --build "$BUILD_DIR" --target durable_bundle >/dev/null
+    python3 scripts/test/durable-persistence.py --build "$BUILD_DIR" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> write={} read={} ({:.2f}s)".format(d["write_phase"], d["read_phase"], d["elapsed"])); sys.exit(0 if d["success"] else 1)'
+}
+
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
 # bespoke control flow below.
 CHECKS=(
@@ -107,6 +115,7 @@ CHECKS=(
     "boot-direct:do_boot"
     "lifecycle-matrix:do_lifecycle"
     "supervision-restart:do_supervision"
+    "durable-persistence:do_durable"
 )
 
 record_toolchain

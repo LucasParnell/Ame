@@ -169,10 +169,11 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 
 | Feature | Status | Evidence | Limitations |
 |---------|--------|----------|-------------|
-| FS core (inode/extent/refcount, ring ABI, CoW+ordering invariants) | Implemented | `userland/fs/main.cc` (`mounted midix-fs-v1 disk`, `FS snapshot flush OK`) | Fixed-capacity V1; durable B+tree writer not landed |
-| Block backend via `drv.blk.virtio` | Implemented (when a virtio-blk device is present) | `userland/fs/main.cc` `io.fs: block endpoint ready` | Default QEMU boot has no virtio-blk disk → falls back |
-| Memory backend fallback and read-only root + volatile `/tmp` | Implemented | Boot: `io.fs: no valid midix-fs disk; memory backend only`, `io.fs: read-only root and volatile /tmp ready` | Writable state is volatile; `sync` is not proof of persistence |
-| Disk-mode mount (`midix-fs-v1`) | Unverified in this tree | `io.fs: mounted midix-fs-v1 disk` marker exists in `userland/fs/main.cc` | Not reached by the default gate (no disk attached) |
+| FS core (inode/extent/refcount, ring ABI, CoW+ordering invariants) | Implemented | `userland/fs/fs_core.cc`, `userland/fs/fs_handles.cc`; boot: `io.fs: ... durable /data empty` | Fixed-capacity V1; the journaled on-disk B+tree writer is not landed |
+| Block backend via `drv.blk.virtio` | Implemented (when a virtio-blk device is present) | `userland/fs/fs_disk.cc` `io.fs: block endpoint ready`; read in `drv.blk.virtio: BLK read OK`, write+flush exercised by the durability check | Default QEMU boot has no virtio-blk disk → falls back |
+| Durable `/data` volume: write-back through `BLK_WRITE` + `BLK_FLUSH` on `FS_SYNC` | Implemented | `userland/fs/fs_durable.cc`; boot: `io.fs: read-only root, volatile /tmp, durable /data replayed`; `durable-persistence` check | Only `/data` is durable; the read-only root's B+tree is never written |
+| Memory backend fallback and read-only root + volatile `/tmp` | Implemented | Boot (no disk): `io.fs: read-only root, volatile /tmp, non-durable /data`; `FS_SYNC` returns `MX_ERR_NOT_IMPLEMENTED` | `/tmp` is always volatile; `/data` is non-durable only when no safe disk region is mounted |
+| Disk-backed mount (`midix-fs-v1`) | Implemented (direct boot with a virtio-blk disk) | Durability check mounts a writable `midix-fs-v1` image (`read-only root, volatile /tmp, durable /data replayed`) | The U-Boot/AmeFS disk boot remains out of the gate |
 
 ### 2.6 msh (shell)
 
@@ -189,7 +190,7 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | `drv.usb.xhci` | Implemented (polling) | `userland/drivers/usb/xhci/main.cc`; boot: `drv.usb.xhci: controller ready`, `drv.usb.xhci: keyboard ready` | Polls the event ring; IRQ routing/ack not wired |
 | `drv.usb.hid` | Implemented (polling) | `userland/drivers/usb/hid/main.cc`; boot: `drv.usb.hid: ready` | Boot-keyboard reports only |
 | `ui.input` | Implemented | `userland/drivers/input/main.cc`; boot: `ui.input: ready` | US boot-keyboard layout normalization only |
-| `drv.blk.virtio` | Implemented (device-dependent) | `userland/drivers/blk/virtio/main.cc`; boot: `drv.blk.virtio: mmio bank has no virtio-blk`, `no-device mode`, `drv.blk.virtio: ready` | Default gate attaches no virtio-blk disk, so only the no-device path runs |
+| `drv.blk.virtio` | Implemented (device-dependent) | `userland/drivers/blk/virtio/main.cc`; no-disk boot: `mmio bank has no virtio-blk`, `no-device mode`; disk boots: `virtio-blk device detected`, `BLK read OK` | `BLK_WRITE`/`BLK_FLUSH` are exercised by the durability check (the no-device path still runs in the default boot) |
 
 ---
 
@@ -235,6 +236,7 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | Direct boot (2 CPUs) | `boot.py --mode direct --cpus 2 --marker 'all services ready'` | green |
 | Kernel lifecycle matrix | `lifecycle.mxb` at CPUs 1, 2, 4 (`lifecycle regression passed`) | green |
 | Supervision restart | `restart.mxb` (`supervision regression passed`) | green |
+| Durability persistence | `durable-persistence.py` — write `/data`, `FS_SYNC`, reboot, read back (`durability regression passed`) | green |
 
 ### 4.2 Manually-confirmed extras (this pass)
 
@@ -248,12 +250,13 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | Gap | Why | How to exercise |
 |-----|-----|-----------------|
 | Disk-mode boot | Requires a locally built U-Boot firmware + `ame_disk` image; not part of the gate | `scripts/build-u-boot-qemu-arm64.sh`; `ame_disk`; `boot.py --mode disk --disk … --firmware …` |
+| Journaled on-disk B+tree writer | The read-only root is never mutated; durability is delivered by the separate `/data` region | Land the journaled writer, then extend the durability check to root writes |
 | Guest Linux / Dango guest boot | Linux artifacts disabled by default (`DANGO_BUILD_LINUX_ARTIFACTS=OFF`); manager logs `vcpu stub run skipped: no linux guest payload` | Build artifacts (+ `-DDANGO_BUILD_LINUX_ARTIFACTS=ON`) and wire a guest run; no captured green run here |
 | Dango auth regression as a guest | `dango.auth_probe` runs as a native probe (`authority check passed`), not inside a guest | Enable guest path above |
 | Switch hardware acceptance | No physical device | Flash and boot the staging package on a T210 console |
 | Supervision as a long soak | The restart path is asserted by a bounded fixture | Extend the fixture / soak run |
 | Hardware IRQ delivery | `SYS_IRQ_*` return `E_NOTIMPL`; drivers poll | Implement GIC delivery + teardown |
-| Durable FS persistence | Writable FS state is volatile; memory backend on the default boot | Disk-backed mount work |
+
 | Scheduler conformance suite | No dedicated test | Add scheduler-specific tests |
 
 ---
@@ -265,7 +268,7 @@ Anything below has code but **no captured evidence in this tree**; treat as unpr
 - Switch on-device boot and any T210 peripheral beyond compile/link/stage.
 - Disk-mode boot end-to-end and the `midix-fs-v1` on-disk mount path.
 - Guest Linux boot through Dango (all guest-run counters exist but the default boot reports `no linux guest payload`).
-- `drv.blk.virtio` against a real backing device (only the no-device path runs in the gate).
+- `drv.blk.virtio` against a real backing device: the no-device path runs in the default boot; `BLK_READ`/`BLK_WRITE`/`BLK_FLUSH` run against a virtio-blk disk only in the durability check.
 - QEMU boot at CPUs other than 1/2/4 (e.g. 3), and any CPU count above 4 (`kMaxCpus` bounds the scheduler).
 
 ## 6. Verification

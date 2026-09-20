@@ -37,6 +37,10 @@ static mx_u64_t g_disk_base_sector = 0;
 static mx_u64_t g_disk_partition_sectors = 0;
 static mx_u64_t g_disk_total_blocks = 0;
 static mx_u64_t g_disk_inode_root = 0;
+// Reserved region geometry from the superblock, cached at mount.
+static mx_u64_t g_disk_journal_start = 0;
+static mx_u64_t g_disk_journal_blocks = 0;
+static mx_u64_t g_disk_first_data = 0;
 static DiskBlockCacheEntry g_disk_cache[kDiskBlockCacheEntries];
 static mx_u64_t g_disk_cache_clock = 1;
 alignas(4096) static mx_u8_t g_gpt_entries[64 * 1024];
@@ -94,6 +98,14 @@ static void disk_cache_store(mx_u64_t block, const mx_u8_t* data) {
     fs_copy_bytes(entry.data, data, kBlockSize);
 }
 
+static void disk_cache_invalidate(mx_u64_t block) {
+    for (mx_u32_t i = 0; i < kDiskBlockCacheEntries; ++i) {
+        if (g_disk_cache[i].valid && g_disk_cache[i].block == block) {
+            g_disk_cache[i].valid = false;
+        }
+    }
+}
+
 static void disk_cache_reset() {
     for (mx_u32_t i = 0; i < kDiskBlockCacheEntries; ++i) {
         g_disk_cache[i].valid = false;
@@ -128,7 +140,36 @@ static bool disk_read_sectors(mx_u64_t sector, mx_u32_t sector_count, mx_u8_t* o
     return true;
 }
 
-static bool disk_read_block(mx_u64_t block, mx_u8_t* out) {
+// Write one fs block through the block service. Mirrors disk_read_block's
+// bounds checks so a durable write can never leave the mounted partition, and
+// keeps the read cache coherent with the new contents.
+bool disk_write_block(mx_u64_t block, const mx_u8_t* data) {
+    if (!g_blk_available || !g_blk_dma || !data) return false;
+    if (g_disk_total_blocks != 0 && block >= g_disk_total_blocks) return false;
+    const mx_u64_t sector = g_disk_base_sector + block * kSectorsPerFsBlock;
+    if (g_disk_partition_sectors != 0 &&
+        (sector < g_disk_base_sector ||
+         sector + kSectorsPerFsBlock > g_disk_base_sector + g_disk_partition_sectors)) {
+        return false;
+    }
+    fs_copy_bytes(g_blk_dma + BLK_DMA_CLIENT_OFFSET, data, kBlockSize);
+    BlkReply reply{};
+    if (!g_blk_client.request(BLK_WRITE,
+                              sector,
+                              kSectorsPerFsBlock,
+                              MX_NULL_HANDLE,
+                              BLK_DMA_CLIENT_OFFSET,
+                              &reply,
+                              mx_clock_ns() + kBlkReplyTimeoutNs)) {
+        return false;
+    }
+    if (reply.status != MX_OK || reply.sectors_transferred != kSectorsPerFsBlock) return false;
+    disk_cache_invalidate(block);
+    disk_cache_store(block, data);
+    return true;
+}
+
+bool disk_read_block(mx_u64_t block, mx_u8_t* out) {
     if (!g_blk_available || !g_blk_dma || !out) return false;
     if (g_disk_total_blocks != 0 && block >= g_disk_total_blocks) return false;
     if (disk_cache_lookup(block, out)) return true;
@@ -435,6 +476,9 @@ static bool mount_disk_fs() {
         return false;
     }
     g_disk_inode_root = sb->inode_table_root;
+    g_disk_journal_start = sb->journal_start_block;
+    g_disk_journal_blocks = sb->journal_block_count;
+    g_disk_first_data = sb->first_data_block;
     g_disk_mounted = true;
     InodeLeafEntry root;
     zero_bytes(&root, sizeof(root));
@@ -447,29 +491,36 @@ static bool mount_disk_fs() {
 }
 
 // ---------------------------------------------------------------------------
-// Ordered-metadata sync hook. Kept small until the durable B+tree writer lands.
+// Device flush + durable-region access, used by the fs_durable write path.
 // ---------------------------------------------------------------------------
-static mx_i32_t flush_block_device_if_available() {
-    if (!g_blk_available) return MX_OK;
+mx_i32_t disk_flush() {
+    if (!g_blk_available) return static_cast<mx_i32_t>(MX_ERR_SERVICE_UNAVAILABLE);
     BlkReply reply{};
     if (!g_blk_client.request(BLK_FLUSH, 0, 0, MX_NULL_HANDLE, 0, &reply,
                               mx_clock_ns() + kBlkReplyTimeoutNs)) {
         return static_cast<mx_i32_t>(MX_ERR_BUSY);
     }
+    // A device that cannot flush is still a device that accepted the writes;
+    // the write-back path treats NOT_IMPLEMENTED as "no cache to drain".
     if (reply.status == static_cast<mx_i32_t>(MX_ERR_NOT_IMPLEMENTED)) return MX_OK;
     return reply.status;
 }
 
-[[maybe_unused]] static mx_i32_t sync_ordered_metadata() {
-    const mx_i32_t rc = verify_refcount_index();
-    if (rc != MX_OK) return rc;
-    if (!g_metadata_dirty) return MX_OK;
-    // ext4 data=ordered shape: data pages are made durable before metadata is
-    // declared clean; V1 keeps the metadata log tiny and relies on ordering.
-    const mx_i32_t flush = flush_block_device_if_available();
-    if (flush != MX_OK) return flush;
-    g_metadata_dirty = false;
-    return MX_OK;
+// The durable user region is the disk's reserved journal area [journal_start,
+// journal_start + journal_blocks). It is only exposed when it is provably
+// disjoint from every block the read-only root allocates (all root blocks live
+// at or after first_data_block), so replaying it can never corrupt the signed
+// image.
+bool disk_durable_region(mx_u64_t* start_block, mx_u64_t* block_count) {
+    if (!g_disk_mounted) return false;
+    if (g_disk_journal_blocks < kMinDurableRegionBlocks) return false;
+    if (g_disk_journal_start < 2) return false;
+    if (g_disk_journal_start + g_disk_journal_blocks > g_disk_total_blocks) return false;
+    if (g_disk_first_data == 0) return false;
+    if (g_disk_journal_start + g_disk_journal_blocks > g_disk_first_data) return false;
+    if (start_block) *start_block = g_disk_journal_start;
+    if (block_count) *block_count = g_disk_journal_blocks;
+    return true;
 }
 
 // ---------------------------------------------------------------------------

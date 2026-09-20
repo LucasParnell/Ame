@@ -72,7 +72,10 @@ Still required before completion:
    note below; a fault-injection fixture for the stall path is still worth adding.)
 5. Explicit read-only disk root + volatile /tmp, session-owned generation handles **done**;
    FS modules **done**; shell (msh) modules **done**; example application (app.hello) **done**.
-   Still pending: automated tests for the example application.
+   Durable user volume (`/data` + `FS_SYNC` write-back + `BLK_FLUSH`, with a two-boot
+   persistence regression) **done**; still pending: automated tests for the example
+   application, and the journaled on-disk B+tree writer (the reserved region is used as
+   a separate durable store, not as the root's B+tree journal).
 6. Full CPU/boot matrix, 100 lifecycle cycles, guest Linux/auth regression and final feature
    documentation. The per-subsystem status matrix — status, evidence, limitations and the
    test-matrix gaps (including what is explicitly unverified) — is now in
@@ -120,5 +123,31 @@ Notes:
 - Verified: `scripts/verify.sh` green (boot ready, lifecycle 1/2/4, supervision
   restart, provenance); `cmake --preset switch && cmake --build --preset switch
   --target anko` green.
+
+### Session 2026-09-20 (durable storage)
+
+- **`sync` is now real, and the contract is honest.** `userland/fs/fs_durable.cc`
+  serialises the `/data` subtree into the disk's reserved journal region with
+  `BLK_WRITE` and commits it with one `BLK_FLUSH`. A file written and synced to
+  `/data` survives a reboot. The read-only root is still never mutated, and `/tmp`
+  is still volatile.
+- **Crash-safe commit.** The region header is written `Dirty` → records → header
+  `Committed` → flush; a torn sync leaves a `Dirty` header that the loader rejects.
+  Records carry a record CRC and a folded data CRC, all validated before replay.
+- **Non-durable mode is explicit.** With no usable reserved region, `/data` is an
+  in-memory volume and `FS_SYNC` returns `MX_ERR_NOT_IMPLEMENTED`; the boot log
+  says `non-durable /data` rather than implying persistence.
+- **Block write path + reply hygiene.** `fs_disk` gained cache-coherent
+  `disk_write_block`/`disk_flush`; `FS_CLOSE_REPLY`/`FS_SNAPSHOT_DROP_REPLY` are
+  dedicated reply types so a close acknowledgement can never be read as a sync
+  result. `init`'s manifest capacity rose from 16 to 20 services.
+- **Persistence regression.** `scripts/test/durable-persistence.py` boots
+  `durable.mxb` (the normal system + an `app.durable` probe) twice against one
+  disposable copy of a writable midix-fs-v1 image, writes `/data/persist.txt`,
+  syncs, reboots, and asserts the exact bytes. It is a `scripts/verify.sh` check
+  (`durable-persistence`).
+- Still open: the **journaled on-disk B+tree writer**. The durable region is a
+  separate store, not the root's journal; mutating the read-only root through the
+  B+tree remains unimplemented (and deliberately so).
 
 This file is a progress record, not a completion claim.

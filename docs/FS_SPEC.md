@@ -376,6 +376,8 @@ enum FsMsgType : u32 {
     FS_SYNC_REPLY   = 24,
     FS_PREFETCH     = 25,          // advisory; no reply
     FS_ERROR        = 26,          // generic error reply
+    FS_CLOSE_REPLY  = 27,          // status-only ack for FS_CLOSE
+    FS_SNAPSHOT_DROP_REPLY = 28,   // status-only ack for FS_SNAPSHOT_DROP
 };
 ```
 
@@ -649,14 +651,47 @@ V1 uses an ordered metadata contract, not a full replay journal:
 2. Update the ExtentLeafEntry checksum/generation.
 3. Update inode size/dirent/refcount metadata.
 4. On FS_SYNC: verify extent checksums and phys-refcount invariants.
-5. If a block backend is present, issue BLK_FLUSH where supported.
-6. Mark the in-memory checkpoint clean.
+5. Serialise the durable /data volume into the reserved disk region (BLK_WRITE).
+6. issue BLK_FLUSH where supported.
+7. Mark the in-memory checkpoint clean.
 ```
 
 This mirrors ext4's practical V1 lesson: metadata safety matters, but full data
 journaling is too expensive for the default path. The bcachefs lesson is that
 ordered keyed metadata plus invariant checking gives a clean foundation for a
 later logical journal.
+
+### 7.1.1 Implemented durability (V1, `userland/fs/fs_durable.cc`)
+
+What is actually durable in this tree, stated precisely:
+
+- **Read-only root.** The signed midix-fs-v1 root is never mutated. Disk-backed
+  handles are read-only and write/create/truncate are rejected before the B+tree.
+- **`/tmp` is volatile.** It lives only in the in-memory inode table and is
+  discarded on service restart. `sync` does not make `/tmp` durable.
+- **`/data` is durable when the mount exposes a safe reserved region.** The whole
+  `/data` subtree is serialised into the disk's reserved journal region
+  (`superblock.journal_start_block`, `journal_block_count`) using `BLK_WRITE`, and
+  committed with one `BLK_FLUSH`. On the next mount the region is replayed, so a
+  file written and synced survives a reboot.
+- **Commit protocol.** The region header is written first with `state=Dirty`, then
+  the records, then the header again with `state=Committed`, then flushed. A crash
+  between the two header writes leaves a `Dirty` header that the loader rejects
+  rather than replaying a torn tree. Every record carries a record CRC and a folded
+  data CRC, validated in full before anything is imported.
+- **Non-durable mode is explicit.** With no usable region (memory backend, or a
+  disk whose reserved region is missing or not provably disjoint from the root)
+  `durable_available()` is false, `/data` is an ordinary in-memory volume, and
+  `FS_SYNC` returns `MX_ERR_NOT_IMPLEMENTED`. A successful sync therefore means
+  "durable bytes", and a sync that cannot be honoured says so.
+- **`FS_SYNC` reply hygiene.** `FS_CLOSE_REPLY` and `FS_SNAPSHOT_DROP_REPLY` are
+  dedicated reply types appended to `FsMsgType`; a close/drop acknowledgement can
+  no longer be mistaken for a sync result.
+
+The reserved region is deliberately *not* the on-disk B+tree: the journaled
+B+tree writer (below) is still the post-V1 milestone. The region is only exposed
+when `journal_start_block + journal_block_count <= first_data_block`, so it can
+never overlap a block the read-only root allocates.
 
 ### 7.2 Future Journal Record (exactly 4096 bytes per record)
 
@@ -697,9 +732,11 @@ struct JournalCommit {
 static_assert(sizeof(JournalCommit) == 4096);
 ```
 
-### 7.4 Post-V1 Durable Commit Sequence
+### 7.4 Post-V1 Durable Commit Sequence (B+tree journal — not yet implemented)
 
-The durable journal/replay layer must follow this sequence for power-fail safety:
+This is the still-unimplemented journaled-B+tree path. The V1 `/data` store in
+§7.1.1 is a separate, simpler mechanism that does not write B+tree nodes. When
+the journaled writer lands it must follow this sequence for power-fail safety:
 
 ```
 1. Write JournalRecord(s) to circular journal.

@@ -105,6 +105,11 @@ enum FsMsgType : mx_u32_t {
     FS_SYNC_REPLY         = 24,
     FS_PREFETCH           = 25,
     FS_ERROR              = 26,
+    // Status-only replies that used to reuse FS_SYNC_REPLY. Appended so a
+    // client waiting for an FS_SYNC_REPLY can never mistake a close/drop
+    // acknowledgement for a sync result.
+    FS_CLOSE_REPLY        = 27,
+    FS_SNAPSHOT_DROP_REPLY = 28,
 };
 
 using FsFrame = MxRingSlot;

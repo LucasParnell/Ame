@@ -65,7 +65,7 @@ static int64_t set_service_affinity(CapHandle thread, uint64_t preferred) {
     return sys_thread_set_affinity(thread, (preferred & online) ? (preferred & online) : 1);
 }
 
-constexpr uint32_t kMaxManifestServices = 16;
+constexpr uint32_t kMaxManifestServices = 20;
 constexpr uint32_t kManifestScanLimit = 64 * 1024;
 
 static uint8_t g_policy_sha256[MX_SHA256_SIZE]{};

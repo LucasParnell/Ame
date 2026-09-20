@@ -25,9 +25,10 @@
 // whose reserved region is missing/unsafe) durable_available() is false, /data
 // is an ordinary in-memory volume, and FS_SYNC reports MX_ERR_NOT_IMPLEMENTED.
 //
-// Stack discipline: every on-disk block is staged in a file-scope static
-// buffer. io.fs has a small user stack, so no 4096-byte record/header may ever
-// live in a stack frame.
+// Stack discipline: every on-disk block, and every table sized like one (the
+// record enumeration and the replay slot table), lives in a file-scope static.
+// io.fs has a small user stack, so no 4096-byte record/header may ever live in
+// a stack frame.
 
 #include "fs_internal.h"
 #include "mochi/log.h"
@@ -38,6 +39,12 @@ constexpr mx_u32_t kDurableVersion = 1u;
 constexpr mx_u32_t kDurableStateDirty = 0u;
 constexpr mx_u32_t kDurableStateCommitted = 1u;
 constexpr mx_u32_t kDurableMaxRecords = kMaxInodes;
+// Region-relative block geometry: the header occupies block 0 and each record is
+// one metadata block followed by its file's data run.
+constexpr mx_u64_t kDurableHeaderBlock = 0;
+constexpr mx_u64_t kDurableHeaderBlocks = 1;
+constexpr mx_u64_t kDurableFirstRecordBlock = kDurableHeaderBlock + kDurableHeaderBlocks;
+constexpr mx_u64_t kDurableRecordMetaBlocks = 1;
 
 struct DurableHeader {
     mx_u32_t magic;
@@ -57,8 +64,8 @@ struct DurableRecord {
     mx_u16_t type;
     mx_u16_t inode_class;
     mx_u32_t mode;
-    mx_u32_t parent_slot;  // record index of the parent; 0 is the /data root
-    mx_u32_t reserved0;    // explicit padding keeps every offset deterministic
+    mx_u32_t parent_slot; // record index of the parent; 0 is the /data root
+    mx_u32_t reserved0;   // explicit padding keeps every offset deterministic
     mx_u64_t size;
     mx_u64_t data_blocks;
     mx_u32_t data_crc32;   // crc32 folded over every data block
@@ -78,11 +85,17 @@ alignas(4096) static mx_u8_t g_record_block[kBlockSize];
 alignas(4096) static mx_u8_t g_header_block[kBlockSize];
 
 bool durable_available() {
-    if (g_region_ready) return true;
-    if (!disk_mounted()) return false;
+    if (g_region_ready) {
+        return true;
+    }
+    if (!disk_mounted()) {
+        return false;
+    }
     mx_u64_t start = 0;
     mx_u64_t count = 0;
-    if (!disk_durable_region(&start, &count)) return false;
+    if (!disk_durable_region(&start, &count)) {
+        return false;
+    }
     g_region_start = start;
     g_region_blocks = count;
     g_region_ready = true;
@@ -90,12 +103,16 @@ bool durable_available() {
 }
 
 static bool region_read_block(mx_u64_t rel, mx_u8_t* out) {
-    if (!g_region_ready || rel >= g_region_blocks || !out) return false;
+    if (!g_region_ready || rel >= g_region_blocks || !out) {
+        return false;
+    }
     return disk_read_block(g_region_start + rel, out);
 }
 
 static bool region_write_block(mx_u64_t rel, const mx_u8_t* data) {
-    if (!g_region_ready || rel >= g_region_blocks || !data) return false;
+    if (!g_region_ready || rel >= g_region_blocks || !data) {
+        return false;
+    }
     return disk_write_block(g_region_start + rel, data);
 }
 
@@ -112,9 +129,17 @@ struct DurableEntry {
     mx_u32_t parent_slot;
 };
 
+// Enumerated /data records (sync) and the replay slot table (load). File-scope
+// statics like the staging buffers above: io.fs has a small user stack, and
+// each is about a kilobyte.
+static DurableEntry g_entries[kDurableMaxRecords];
+static InodeState* g_record_slots[kDurableMaxRecords];
+
 static mx_u32_t enumerate_data(DurableEntry out[kDurableMaxRecords]) {
     InodeState* root = live_inode(g_data_inode);
-    if (!root || root->type != FS_INODE_DIR) return 0;
+    if (!root || root->type != FS_INODE_DIR) {
+        return 0;
+    }
     mx_u32_t count = 0;
     out[count].inode = root;
     out[count].parent_slot = 0;
@@ -126,8 +151,12 @@ static mx_u32_t enumerate_data(DurableEntry out[kDurableMaxRecords]) {
             if (!in.used || in.inode_number == kRootInode || in.inode_number == parent) {
                 continue;
             }
-            if (in.parent_inode != parent) continue;
-            if (count >= kDurableMaxRecords) return count;
+            if (in.parent_inode != parent) {
+                continue;
+            }
+            if (count >= kDurableMaxRecords) {
+                return count;
+            }
             out[count].inode = &in;
             out[count].parent_slot = i;
             ++count;
@@ -137,8 +166,7 @@ static mx_u32_t enumerate_data(DurableEntry out[kDurableMaxRecords]) {
 }
 
 // Copy one logical data block of a file into `out` (zeros for a hole).
-static void read_logical_block(const InodeState& inode, mx_u64_t logical_block,
-                               mx_u8_t* out) {
+static void read_logical_block(const InodeState& inode, mx_u64_t logical_block, mx_u8_t* out) {
     const ExtentState* extent = find_extent_const(inode, logical_block);
     if (extent && extent->phys_block < kMaxPhysBlocks) {
         fs_copy_bytes(out, g_data_blocks[extent->phys_block], kBlockSize);
@@ -163,7 +191,9 @@ static DurableRecord& fill_record(const DurableEntry& entry) {
     rec.data_blocks = (inode.type == FS_INODE_FILE) ? blocks_for_size(inode.size) : 0;
     const mx_u32_t name_len = str_len(inode.name, kMaxName);
     rec.name_len = name_len;
-    for (mx_u32_t i = 0; i < name_len; ++i) rec.name[i] = inode.name[i];
+    for (mx_u32_t i = 0; i < name_len; ++i) {
+        rec.name[i] = inode.name[i];
+    }
     return rec;
 }
 
@@ -181,9 +211,8 @@ static bool write_header(mx_u32_t state, mx_u32_t content_blocks) {
     header.generation = g_generation;
     header.content_blocks = content_blocks;
     header.header_crc32 = 0;
-    header.header_crc32 = crc32_ieee(reinterpret_cast<const mx_u8_t*>(&header),
-                                     sizeof(header));
-    return region_write_block(0, g_header_block);
+    header.header_crc32 = crc32_ieee(reinterpret_cast<const mx_u8_t*>(&header), sizeof(header));
+    return region_write_block(kDurableHeaderBlock, g_header_block);
 }
 
 // ---------------------------------------------------------------------------
@@ -191,24 +220,25 @@ static bool write_header(mx_u32_t state, mx_u32_t content_blocks) {
 // ---------------------------------------------------------------------------
 mx_i32_t durable_sync() {
     const mx_i32_t rc = verify_refcount_index();
-    if (rc != MX_OK) return rc;
+    if (rc != MX_OK) {
+        return rc;
+    }
     if (!durable_available()) {
         mochi::log_raw_marker("io.fs: sync: no durable backing; /data is volatile\n");
         return static_cast<mx_i32_t>(MX_ERR_NOT_IMPLEMENTED);
     }
 
-    DurableEntry entries[kDurableMaxRecords];
-    const mx_u32_t count = enumerate_data(entries);
+    const mx_u32_t count = enumerate_data(g_entries);
 
-    // entries[0] is the /data root itself and is implicit on disk (parent_slot
-    // 0); only its descendants get records.
-    mx_u64_t total = count > 0 ? count - 1 : 0; // one metadata block per record
+    // g_entries[0] is the /data root itself and is implicit on disk
+    // (parent_slot 0); only its descendants get records.
+    mx_u64_t total = (count > 0 ? static_cast<mx_u64_t>(count - 1) : 0) * kDurableRecordMetaBlocks;
     for (mx_u32_t i = 1; i < count; ++i) {
-        if (entries[i].inode->type == FS_INODE_FILE) {
-            total += blocks_for_size(entries[i].inode->size);
+        if (g_entries[i].inode->type == FS_INODE_FILE) {
+            total += blocks_for_size(g_entries[i].inode->size);
         }
     }
-    if (total + 1 > g_region_blocks) {
+    if (total + kDurableHeaderBlocks > g_region_blocks) {
         mochi::log_raw_marker("io.fs: sync: durable region full\n");
         return static_cast<mx_i32_t>(MX_ERR_NOMEM);
     }
@@ -219,16 +249,16 @@ mx_i32_t durable_sync() {
         return static_cast<mx_i32_t>(MX_ERR_FAULT);
     }
 
-    mx_u64_t rel = 1;
+    mx_u64_t rel = kDurableFirstRecordBlock;
     for (mx_u32_t i = 1; i < count; ++i) {
-        const InodeState& inode = *entries[i].inode;
-        DurableRecord& rec = fill_record(entries[i]);
+        const InodeState& inode = *g_entries[i].inode;
+        DurableRecord& rec = fill_record(g_entries[i]);
         if (inode.type == FS_INODE_FILE) {
-            mx_u32_t crc = 0xFFFF'FFFFu;
+            mx_u32_t crc = kCrc32IeeeInit;
             for (mx_u64_t d = 0; d < rec.data_blocks; ++d) {
                 read_logical_block(inode, d, g_data_stage);
                 crc = crc32_ieee_update(crc, g_data_stage, kBlockSize);
-                if (!region_write_block(rel + 1 + d, g_data_stage)) {
+                if (!region_write_block(rel + kDurableRecordMetaBlocks + d, g_data_stage)) {
                     return static_cast<mx_i32_t>(MX_ERR_FAULT);
                 }
             }
@@ -237,13 +267,13 @@ mx_i32_t durable_sync() {
             if (!region_write_block(rel, g_record_block)) {
                 return static_cast<mx_i32_t>(MX_ERR_FAULT);
             }
-            rel += 1 + rec.data_blocks;
+            rel += kDurableRecordMetaBlocks + rec.data_blocks;
         } else {
             finalize_record(rec);
             if (!region_write_block(rel, g_record_block)) {
                 return static_cast<mx_i32_t>(MX_ERR_FAULT);
             }
-            ++rel;
+            rel += kDurableRecordMetaBlocks;
         }
     }
 
@@ -251,7 +281,9 @@ mx_i32_t durable_sync() {
         return static_cast<mx_i32_t>(MX_ERR_FAULT);
     }
     const mx_i32_t flush = disk_flush();
-    if (flush != MX_OK) return flush;
+    if (flush != MX_OK) {
+        return flush;
+    }
     g_metadata_dirty = false;
     return MX_OK;
 }
@@ -263,23 +295,39 @@ mx_i32_t durable_sync() {
 // restores it, so no copy of the block is needed.
 static bool validate_record(mx_u64_t rel, mx_u64_t end) {
     auto& rec = *reinterpret_cast<DurableRecord*>(g_record_block);
-    if (rec.magic != kDurableRecordMagic) return false;
-    if (rec.name_len == 0 || rec.name_len > kMaxName) return false;
-    if (rec.type != FS_INODE_FILE && rec.type != FS_INODE_DIR) return false;
+    if (rec.magic != kDurableRecordMagic) {
+        return false;
+    }
+    if (rec.name_len == 0 || rec.name_len > kMaxName) {
+        return false;
+    }
+    if (rec.type != FS_INODE_FILE && rec.type != FS_INODE_DIR) {
+        return false;
+    }
     const mx_u32_t stored_crc = rec.record_crc32;
     rec.record_crc32 = 0;
     const mx_u32_t actual_crc = crc32_ieee(g_record_block, sizeof(DurableRecord));
     rec.record_crc32 = stored_crc;
-    if (actual_crc != stored_crc) return false;
-    if (rel + 1 + rec.data_blocks > end) return false;
+    if (actual_crc != stored_crc) {
+        return false;
+    }
+    if (rel + kDurableRecordMetaBlocks + rec.data_blocks > end) {
+        return false;
+    }
     if (rec.type == FS_INODE_FILE) {
-        if (rec.data_blocks != blocks_for_size(rec.size)) return false;
-        mx_u32_t crc = 0xFFFF'FFFFu;
+        if (rec.data_blocks != blocks_for_size(rec.size)) {
+            return false;
+        }
+        mx_u32_t crc = kCrc32IeeeInit;
         for (mx_u64_t d = 0; d < rec.data_blocks; ++d) {
-            if (!region_read_block(rel + 1 + d, g_data_stage)) return false;
+            if (!region_read_block(rel + kDurableRecordMetaBlocks + d, g_data_stage)) {
+                return false;
+            }
             crc = crc32_ieee_update(crc, g_data_stage, kBlockSize);
         }
-        if (~crc != rec.data_crc32) return false;
+        if (~crc != rec.data_crc32) {
+            return false;
+        }
     } else if (rec.data_blocks != 0 || rec.size != 0) {
         return false;
     }
@@ -287,11 +335,14 @@ static bool validate_record(mx_u64_t rel, mx_u64_t end) {
 }
 
 bool durable_load() {
-    if (!durable_available()) return false;
-    if (!region_read_block(0, g_header_block)) return false;
+    if (!durable_available()) {
+        return false;
+    }
+    if (!region_read_block(kDurableHeaderBlock, g_header_block)) {
+        return false;
+    }
     auto& header = *reinterpret_cast<DurableHeader*>(g_header_block);
-    if (header.magic != kDurableHeaderMagic ||
-        header.version != kDurableVersion ||
+    if (header.magic != kDurableHeaderMagic || header.version != kDurableVersion ||
         header.state != kDurableStateCommitted) {
         return false;
     }
@@ -299,57 +350,74 @@ bool durable_load() {
     header.header_crc32 = 0;
     const mx_u32_t actual_crc = crc32_ieee(g_header_block, sizeof(DurableHeader));
     header.header_crc32 = stored_crc;
-    if (actual_crc != stored_crc) return false;
-    if (header.content_blocks == 0 ||
-        static_cast<mx_u64_t>(header.content_blocks) + 1 > g_region_blocks) {
+    if (actual_crc != stored_crc) {
         return false;
     }
-    const mx_u64_t end = 1 + header.content_blocks;
+    if (header.content_blocks == 0 ||
+        static_cast<mx_u64_t>(header.content_blocks) + kDurableHeaderBlocks > g_region_blocks) {
+        return false;
+    }
+    const mx_u64_t end = kDurableHeaderBlocks + header.content_blocks;
 
     // Pass 1: validate before importing anything, so corruption never leaves a
     // partially rebuilt /data tree in memory.
-    mx_u64_t rel = 1;
+    mx_u64_t rel = kDurableFirstRecordBlock;
     while (rel < end) {
-        if (!region_read_block(rel, g_record_block)) return false;
-        if (!validate_record(rel, end)) return false;
+        if (!region_read_block(rel, g_record_block)) {
+            return false;
+        }
+        if (!validate_record(rel, end)) {
+            return false;
+        }
         auto& rec = *reinterpret_cast<const DurableRecord*>(g_record_block);
         rel += 1 + rec.data_blocks;
     }
-    if (rel != end) return false;
+    if (rel != end) {
+        return false;
+    }
 
     // Pass 2: replay. parent_slot always references an earlier record, so the
     // slot table is populated in order.
-    InodeState* slots[kDurableMaxRecords]{};
+    zero_bytes(g_record_slots, sizeof(g_record_slots));
     InodeState* root = live_inode(g_data_inode);
-    if (!root) return false;
+    if (!root) {
+        return false;
+    }
     mx_u32_t slot = 0;
-    rel = 1;
+    rel = kDurableFirstRecordBlock;
     while (rel < end) {
-        if (!region_read_block(rel, g_record_block)) return false;
+        if (!region_read_block(rel, g_record_block)) {
+            return false;
+        }
         auto& rec = *reinterpret_cast<const DurableRecord*>(g_record_block);
-        if (slot >= kDurableMaxRecords || rec.parent_slot > slot) return false;
-        InodeState* parent = (rec.parent_slot == 0) ? root : slots[rec.parent_slot - 1];
-        if (!parent) return false;
-        InodeState* inode = alloc_inode(rec.type,
-                                        static_cast<mx_u16_t>(rec.inode_class),
-                                        parent->inode_number,
-                                        rec.name,
-                                        static_cast<mx_u8_t>(rec.name_len),
-                                        rec.mode);
-        if (!inode) return false;
+        if (slot >= kDurableMaxRecords || rec.parent_slot > slot) {
+            return false;
+        }
+        InodeState* parent = (rec.parent_slot == 0) ? root : g_record_slots[rec.parent_slot - 1];
+        if (!parent) {
+            return false;
+        }
+        InodeState* inode =
+            alloc_inode(rec.type, static_cast<mx_u16_t>(rec.inode_class), parent->inode_number,
+                        rec.name, static_cast<mx_u8_t>(rec.name_len), rec.mode);
+        if (!inode) {
+            return false;
+        }
         if (rec.type == FS_INODE_FILE && rec.data_blocks != 0) {
             for (mx_u64_t d = 0; d < rec.data_blocks; ++d) {
-                if (!region_read_block(rel + 1 + d, g_data_stage)) return false;
-                const mx_i32_t rc = write_bytes_unbounded(*inode,
-                                                          d * kBlockSize,
-                                                          g_data_stage,
-                                                          kBlockSize);
-                if (rc != MX_OK) return false;
+                if (!region_read_block(rel + kDurableRecordMetaBlocks + d, g_data_stage)) {
+                    return false;
+                }
+                const mx_i32_t rc =
+                    write_bytes_unbounded(*inode, d * kBlockSize, g_data_stage, kBlockSize);
+                if (rc != MX_OK) {
+                    return false;
+                }
             }
             inode->size = rec.size;
         }
-        slots[slot++] = inode;
-        rel += 1 + rec.data_blocks;
+        g_record_slots[slot++] = inode;
+        rel += kDurableRecordMetaBlocks + rec.data_blocks;
     }
     g_metadata_dirty = false;
     return true;

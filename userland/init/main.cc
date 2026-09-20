@@ -34,6 +34,7 @@ using integrity::bytes_equal;
 #include "midix/abi/image.h"
 #include "midix/abi/protocols/nameservice.h"
 #include "midix/abi/protocols/fs.h"
+#include "supervision.h"
 
 constexpr uint32_t PRINCIPAL_NATIVE_TRUSTED = 1;
 constexpr uint32_t PRINCIPAL_NATIVE_SANDBOXED = 2;
@@ -91,6 +92,7 @@ struct ServiceSpec {
     bool ready;
     bool desired;
     bool restart_pending;
+    bool stopping;
     CapHandle log_ring;
     CapHandle boot_arena;
     MxBootInfo* boot_info;
@@ -982,19 +984,25 @@ static bool drain_exits() {
         const auto event = sys_supervisor_poll(kCapSupervisor);
         if (event.value <= 0) break;
         progress = true;
-        for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-            auto& svc = g_rt.services[i];
-            if (svc.identity != static_cast<uint64_t>(event.value)) continue;
-            svc.proc = svc.main_thread = kNullCap;
-            svc.identity = 0;
-            svc.ready = false;
-            if (svc.desired && (streq(svc.restart, "always") || svc.restart_pending)) {
-                svc.restart_pending = true;
-                if (svc.failures < 7) ++svc.failures;
-                svc.retry_at = mx_clock_ns() + (10000000ull << svc.failures);
-            }
-            registry_sync(svc);
-        }
+        // Exit records are generation-tagged: match the record to the exact
+        // incarnation that died, never to a same-named later one.
+        uint64_t identities[kMaxManifestServices];
+        for (uint32_t i = 0; i < g_rt.service_count; ++i) identities[i] = g_rt.services[i].identity;
+        const uint32_t index = supervision::match_identity(
+            identities, g_rt.service_count, static_cast<uint64_t>(event.value));
+        if (index == g_rt.service_count) continue;  // stale/foreign record
+        auto& svc = g_rt.services[index];
+        svc.proc = svc.main_thread = kNullCap;
+        svc.identity = 0;
+        svc.ready = false;
+        const auto decision = supervision::restart_decision(
+            svc.stopping, svc.desired, streq(svc.restart, "always"),
+            svc.restart_pending, svc.failures);
+        svc.stopping = false;
+        if (decision.failed && svc.failures < supervision::kFailureCap) ++svc.failures;
+        svc.restart_pending = decision.restart;
+        if (decision.delay_ns) svc.retry_at = mx_clock_ns() + decision.delay_ns;
+        registry_sync(svc);
     }
     return progress;
 }
@@ -1013,13 +1021,9 @@ static bool await_stopped(uint32_t mask) {
 }
 
 static uint32_t dependent_mask(uint32_t mask) {
-    for (uint32_t pass = 0; pass < g_rt.service_count; ++pass) {
-        for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-            auto& svc = g_rt.services[i];
-            if (svc.dependencies & mask) mask |= 1u << i;
-        }
-    }
-    return mask;
+    uint32_t dependencies[kMaxManifestServices];
+    for (uint32_t i = 0; i < g_rt.service_count; ++i) dependencies[i] = g_rt.services[i].dependencies;
+    return supervision::dependent_closure(dependencies, g_rt.service_count, mask);
 }
 
 static bool stop_mask(uint32_t mask) {
@@ -1028,7 +1032,14 @@ static bool stop_mask(uint32_t mask) {
         if (!(mask & (1u << i))) continue;
         svc.ready = false;
         svc.restart_pending = svc.desired;
-        if (svc.proc && sys_kill(svc.proc) < 0 && sys_cap_identify(svc.proc) >= 0) return false;
+        if (!svc.proc) continue;
+        // Mark the kill as deliberate so drain_exits() does not charge it to the
+        // crash-loop backoff: an intended stop must not look like a failure.
+        svc.stopping = true;
+        if (sys_kill(svc.proc) < 0 && sys_cap_identify(svc.proc) >= 0) {
+            svc.stopping = false;
+            return false;
+        }
     }
     return await_stopped(mask);
 }
@@ -1039,6 +1050,7 @@ static bool await_ready(ServiceSpec& svc) {
         if (sys_doorbell_read(svc.ready_db) != svc.ready_counter) {
             svc.ready = true;
             svc.restart_pending = false;
+            svc.failures = 0;  // healthy again: the next crash backoff starts over
             registry_sync(svc);
             return true;
         }
@@ -1053,6 +1065,14 @@ static bool await_ready(ServiceSpec& svc) {
 static bool start_service_now(ServiceSpec& svc) {
     if (svc.ready || !dependencies_ready(svc)) return false;
     svc.desired = true;
+    // A control request can race a death: the incarnation is gone but its exit
+    // record has not been drained yet. Drop the stale generation before granting
+    // any capability into it, otherwise the next grant targets a dead process.
+    if (svc.proc && sys_cap_identify(svc.proc) < 0) {
+        svc.proc = svc.main_thread = kNullCap;
+        svc.identity = 0;
+        svc.ready = false;
+    }
     if (!svc.proc && !spawn_service(svc, MX_SPAWN_SUSPENDED)) return false;
     // Order is load-bearing: BootInfo must claim the child's cap slot 0 before any
     // other capability is granted into it (mochi::boot::kBootInfoCap == slot 0).
@@ -1061,6 +1081,11 @@ static bool start_service_now(ServiceSpec& svc) {
     boot_init_for_service(svc, service_ordinal(&svc));
     refresh_exports();
     if (wire_and_resume_service(svc) && await_ready(svc)) return true;
+    // The service came up but never reported ready (or wiring failed). Charge it
+    // like a crash so a persistent start failure backs off instead of spinning;
+    // the cleanup kill below is marked planned and leaves retry_at intact.
+    if (svc.failures < supervision::kFailureCap) ++svc.failures;
+    svc.retry_at = mx_clock_ns() + supervision::backoff_ns(svc.failures);
     svc.restart_pending = true;
     (void)stop_mask(1u << service_ordinal(&svc));
     return false;
@@ -1105,7 +1130,7 @@ static bool supervise_services() {
     const uint32_t dependents = dependent_mask(affected) & ~affected;
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
         auto& svc = g_rt.services[i];
-        if ((dependents & (1u << i)) && svc.ready) {
+        if ((dependents & (1u << i)) && svc.proc) {
             (void)stop_mask(dependents);
             break;
         }

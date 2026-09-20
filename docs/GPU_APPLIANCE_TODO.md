@@ -3,6 +3,21 @@
 Task list for `AME-GPU-APPLIANCE-1` (v2), grounded in the tree at `master` (post-Phase D +
 the Phase E build pipeline). Status legend: **Done** · **Partial** · **Not started**.
 
+## Scope (current decision)
+
+**Target now: the Linux `virtio-gpu` driver appliance** — Phases **E–J**. A real Linux VM owns an assigned
+QEMU `virtio-gpu-pci` function behind an Ame SMMUv3 domain, is driven over Dango rings/shared memory, and
+is presented through a native Midix GPU service. **The plumbing stays backend-agnostic**: the Midix GPU
+ABI, the Dango channel, object lifetime, supervision and the async completion model must not change when a
+different Linux GPU driver is dropped in later.
+
+**Deliberately deferred (plumbing-ready, NOT to be started):** `amdgpu` and the physical/RADV work —
+Phases **P** (physical backend), **Q** (amdgpu appliance), **R** (RADV), and the physical halves of N/O.
+No AMD-specific code, firmware, platform interrupt-remapping, or physical reset logic until the virtio
+appliance milestone (Phase J) is proven end to end. Phase E §E.3/§E.4 already carry the plumbing (MSI
+interrupt routing, device-memory stage-2, filtered config) that amdgpu would reuse — that is the point of
+building it now.
+
 Master reference points: `kernel/iommu/{core,smmuv3,faults}.cc`, `kernel/vm/vm_device.cc`,
 `kernel/pci/{enumerate,assignment,msi}.cc`, `shared/include/midix/abi/protocols/{gpu,dango_channel}.h`,
 `scripts/linux/build-gpu-linux*.sh`, `linux-artifacts/config/{dango_hello_arm64,dango_gpu_arm64}.fragment`,
@@ -25,9 +40,9 @@ Master reference points: `kernel/iommu/{core,smmuv3,faults}.cc`, `kernel/vm/vm_d
 | M zero-copy/import | Not started |
 | N remote Vulkan session transport | Not started (ABI only) |
 | O Vulkan WSI bootstrap | Not started |
-| P physical GPU backend | Not started |
-| Q amdgpu appliance | Not started |
-| R RADV backend | Not started |
+| P physical GPU backend | Deferred (by decision — virtio appliance only) |
+| Q amdgpu appliance | Deferred (by decision — virtio appliance only) |
+| R RADV backend | Deferred (by decision — virtio appliance only) |
 | S zero-copy Vulkan/compositor | Not started |
 
 ---
@@ -156,16 +171,24 @@ Surface/swapchain integration with a bounded copy into a Dango shared buffer; sc
 native compositor/`dango-gpud`. A native Vulkan triangle presents through Linux `virtio_gpu`; killing
 the appliance yields clean device/session loss.
 
-## Phase P — physical GPU backend — Not started
+## Phase P — physical GPU backend — **Deferred (by decision)**
+
+Not in scope until the virtio appliance milestone (Phase J) is proven. The generic `IommuDomain` /
+assignment contract stays ready for it.
 AMD-Vi/VT-d backends, physical PCI reset quirks, real isolation-group topology, hardware interrupt
 remapping; validate the same `IommuDomain` contract on a physical test device.
 
-## Phase Q — amdgpu appliance — Not started
+## Phase Q — amdgpu appliance — **Deferred (by decision)**
+
+Not in scope yet. The `amdgpu` flow exists in the minimal-config checker for when it is picked up, and the
+virtio appliance exercises the same PCI ownership / interrupt-routing / mandatory IOMMU contract it will need.
 `CONFIG_DRM_AMDGPU` + firmware (`linux-artifacts/config/dango_gpu_amd64`-equivalent fragment, flow
 `amdgpu` in the checker), assign the AMD GPU/IOMMU group, boot the same `dango-gpud`+`dango-vkd`.
 IOMMU fault tests must prove the GPU cannot address pages outside the appliance domain.
 
-## Phase R — RADV backend — Not started
+## Phase R — RADV backend — **Deferred (by decision)**
+
+Not in scope yet; lavapipe remains the QEMU Vulkan reference when Phase N lands.
 Mesa RADV in the physical appliance selected by `dango-vkd` with no native Vulkan ABI change.
 
 ## Phase S — zero-copy Vulkan/compositor — Not started

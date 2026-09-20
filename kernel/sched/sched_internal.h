@@ -40,4 +40,10 @@ FairPrincipalQueue& band_for(Eki& e, SchedBand band);
 BandQueue& band_threads(PrincipalEntity& pe, SchedBand band);
 u64& min_vruntime_for(Eki& e, SchedBand band);
 
+// --- Shared accessors owned by runqueue.cc ---------------------------------
+u64 online_mask();
+u32 first_allowed_cpu(u64 allowed);
+bool principal_allocated(u32 pid);
+void refill_sched_context_budgets();
+
 } // namespace sched

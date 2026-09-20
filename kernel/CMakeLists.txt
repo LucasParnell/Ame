@@ -40,6 +40,7 @@ set(ANKO_SOURCES
     sched/thread.cc
     sched/sched_class.cc
     sched/fair_queue.cc
+    sched/sched_context.cc
     sched/runqueue.cc
     cap/cap_table.cc
     cap/object.cc

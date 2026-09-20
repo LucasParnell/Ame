@@ -194,6 +194,45 @@ SysError map_one_bar_page(VmDeviceAssignment* a, u64 ipa, PhysAddr pa, u32 right
     return stage2_map_page_ex(&a->owner_vm->stage2, ipa, pa, rights, Stage2MemType::Device);
 }
 
+// Authorise the owner VM's mapped RAM as the appliance DMA aperture (§8.2,
+// §8.5). The authoritative source is the VM memory ownership structure; here we
+// coalesce its backing pages into maximal physically-contiguous runs, each with
+// IOVA == the run's guest physical address. Capacity is fixed (kMaxAssignRam),
+// so an unusually fragmented VM logs and truncates rather than overflowing.
+void collect_vm_ram(VmDeviceAssignment* a) {
+    Vm* v = a->owner_vm;
+    if (!v) {
+        return;
+    }
+    for (u32 i = 0; i < v->memory_count; ++i) {
+        VmMemory* mem = v->memory_objects[i];
+        if (!mem || mem->dead || !mem->mapped_stage2 || !mem->pages) {
+            continue;
+        }
+        u64 p = 0;
+        while (p < mem->page_count) {
+            const PhysAddr start = mem->pages[p];
+            if (start == 0) {
+                ++p;
+                continue;
+            }
+            u64 len = PAGE_SIZE;
+            u64 q = p + 1;
+            while (q < mem->page_count && mem->pages[q] == start + len) {
+                len += PAGE_SIZE;
+                ++q;
+            }
+            const u64 iova = mem->guest_pa_base + p * PAGE_SIZE;
+            if (device_authorize_ram(a, start, len, iova) != E_OK) {
+                ANKO_LOG_WARN("kernel/vm",
+                              "assign: RAM range capacity reached; aperture truncated");
+                return;
+            }
+            p = q;
+        }
+    }
+}
+
 } // namespace
 
 // Drop the assignment's creator reference exactly once. Several teardown paths
@@ -731,6 +770,9 @@ SysError device_secure_attach(Process& caller, CapHandle vm_cap, const pci::Host
     if (!a) {
         return rc;
     }
+    // Policy input for the attach machine: authorise the VM's mapped RAM as the
+    // appliance DMA aperture before the domain is populated (§8.2, §8.5).
+    collect_vm_ram(a);
     rc = device_attach(a, spec);
     if (rc != E_OK) {
         object::release(a->lifetime);

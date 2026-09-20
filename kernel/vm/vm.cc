@@ -397,7 +397,18 @@ static void retire_vm(Vm* v) {
     for (u32 i = 0; i < v->channel_count; ++i) {
         auto* channel = v->channels[i]; if (!channel) continue;
         channel->dead = true;
-        sched::sweep_process_caps(channel); object::release(channel->lifetime);
+        sched::sweep_process_caps(channel);
+        // Ring and doorbell endpoints are capabilities whose target is the
+        // endpoint object, not the channel. They are handed out by
+        // channel_endpoint() (and may be re-shared). Revoke every process's
+        // endpoints so the channel's creator reference is the last one left
+        // and dispose_channel() can release and free them exactly once.
+        {
+            void* const endpoints[] = {channel->host_to_guest, channel->guest_to_host,
+                                       channel->host_doorbell, channel->guest_doorbell};
+            for (void* endpoint : endpoints) sched::sweep_process_caps(endpoint);
+        }
+        object::release(channel->lifetime);
         v->channels[i] = nullptr;
     }
     for (auto& slot : g_vms) if (slot == v) slot = nullptr;

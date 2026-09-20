@@ -61,6 +61,9 @@ set(ANKO_SOURCES
     vm/vcpu.cc
     vm/vm_channel.cc
 
+    # ---- Phase B: backend-independent IOMMU core --------------------------
+    iommu/core.cc
+
     # ---- Framebuffer + PCI driver support (M2 / M3.5) --------------------
     drivers/fwcfg.cc
     drivers/pci_probe.cc

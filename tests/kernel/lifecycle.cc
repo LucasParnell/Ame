@@ -1,10 +1,32 @@
 #include "mochi/boot.h"
+#include "midix/abi/image.h"
 #include "midix/format/bundle.h"
+#include "midix/format/integrity.h"
 #include "libk/string.h"
 
 static CapHandle supervisor;
 static uint32_t cpu_count;
+static MxBootInfo* boot_info;
 static midix::format::Bundle bundle;
+
+// Presence of this value in a spawned BootInfo turns a second copy of this
+// image into the VM-owner worker instead of another supervising test.
+static constexpr uint64_t kModeVmWorker = 1;
+
+// Scratch arena the parent uses to materialise a synthetic failing image.
+static constexpr uint64_t kFixtureArenaVa = 0x32000000ull;
+static constexpr uint64_t kFixtureArenaSize = 0x2000ull; // two pages: the image is 8 KiB
+static constexpr uint64_t kFixtureCodeVa = 0x14000000ull; // child executable segment
+// Deliberately adjacent to the code segment so the partial map shares its
+// first level-3 table with an already-mapped page; unwinding must prune only
+// the tables that became empty.
+static constexpr uint64_t kFixtureDataVa = 0x14001000ull; // child oversized RW segment
+static constexpr uint64_t kFixtureDataPages = 2048;       // > sandbox page quota (1024)
+
+// VM debug-counter ids (kernel/include/anko/vm.h: VmDebugCounter) mirrored for
+// the userland image, which does not include kernel headers.
+static constexpr uint64_t kCounterVmCreated = 33;
+static constexpr uint64_t kCounterVmDestroyed = 34;
 
 static void print(const char* text) {
     sys_debug_puts(text, libk::strlen(text));
@@ -27,19 +49,21 @@ struct Child {
     CapHandle process, thread;
     uint64_t identity;
 };
-static Child spawn(const char* name) {
-    const uint8_t* data = nullptr;
-    uint64_t size = 0;
+static const uint8_t* object_bytes(const char* name, uint64_t* size) {
     for (uint32_t i = 0; i < bundle.header.object_count; ++i) {
         MxBundleObject object{};
         const char* object_name = nullptr;
         check(midix::format::object(bundle, i, object, object_name), "test object lookup");
         if (mochi::boot::streq(object_name, name)) {
-            data = bundle.data + object.offset;
-            size = object.size;
-            break;
+            *size = object.size;
+            return bundle.data + object.offset;
         }
     }
+    return nullptr;
+}
+static Child spawn(const char* name) {
+    uint64_t size = 0;
+    const uint8_t* data = object_bytes(name, &size);
     check(data && size, "test image absent");
     static const char process_name[32] = "test.child";
     auto result = sys_spawn(data, size, MX_POLICY_PRINCIPAL_NATIVE_SANDBOXED, supervisor,
@@ -76,8 +100,247 @@ static void settle(long objects, long pages) {
     fail("resources accumulated");
 }
 
+// Build a syntactically valid MXI1 image that nevertheless cannot be loaded by
+// a sandboxed principal: its second segment needs far more pages than the
+// 1024-page quota. The loader must fail part-way through that segment's map and
+// unwind every backing page and page table it already built.
+static uint64_t build_oversized_image(uint8_t* buffer) {
+    constexpr uint64_t kHeaderSize = sizeof(MxImageHeader);
+    constexpr uint64_t kSegmentSize = sizeof(MxImageSegment);
+    constexpr uint64_t kCodeOffset = 4096;
+    constexpr uint64_t kCodeSize = 4096;
+    constexpr uint64_t kImageSize = kCodeOffset + kCodeSize;
+
+    libk::memset(buffer, 0, kImageSize);
+
+    // One executable page. It never runs: loading fails on the oversized
+    // zero-fill segment that follows. `b .` keeps it valid AArch64 regardless.
+    auto* code = reinterpret_cast<uint32_t*>(buffer + kCodeOffset);
+    code[0] = 0x14000000u;
+
+    MxImageHeader header{};
+    header.magic = MX_IMAGE_MAGIC;
+    header.version = MX_IMAGE_VERSION;
+    header.header_size = kHeaderSize;
+    header.kind = MX_IMAGE_KIND_EXEC;
+    header.arch = MX_IMAGE_ARCH_AARCH64;
+    header.abi_version = MX_IMAGE_ABI_VERSION;
+    header.flags = MX_IMAGE_FLAG_STATIC;
+    header.entry_va = kFixtureCodeVa;
+    header.stack_size = 4096;
+    header.image_size = kImageSize;
+    header.segment_table_offset = kHeaderSize;
+    header.segment_count = 2;
+    header.checksum_algorithm = MX_CHECKSUM_CRC32C;
+
+    MxImageSegment segments[2]{};
+    segments[0].file_offset = kCodeOffset;
+    segments[0].file_size = kCodeSize;
+    segments[0].memory_size = kCodeSize;
+    segments[0].virtual_address = kFixtureCodeVa;
+    segments[0].alignment = 4096;
+    segments[0].rights = MX_RIGHT_READ | MX_RIGHT_EXEC;
+    segments[1].file_offset = kCodeOffset + kCodeSize;
+    segments[1].file_size = 0;
+    segments[1].memory_size = kFixtureDataPages * 4096;
+    segments[1].virtual_address = kFixtureDataVa;
+    segments[1].alignment = 4096;
+    segments[1].rights = MX_RIGHT_READ | MX_RIGHT_WRITE;
+    segments[1].flags = MX_IMAGE_SEG_ZERO_FILL;
+    static_assert(kSegmentSize == 64);
+
+    libk::memcpy(buffer, &header, kHeaderSize);
+    libk::memcpy(buffer + kHeaderSize, segments, sizeof(segments));
+
+    const uint32_t crc = integrity::crc32c_zero_field(
+        buffer, kImageSize, __builtin_offsetof(MxImageHeader, image_crc32c), sizeof(uint32_t));
+    libk::memcpy(buffer + __builtin_offsetof(MxImageHeader, image_crc32c), &crc, sizeof(crc));
+    return kImageSize;
+}
+
+// (1) A spawn whose image cannot be fully mapped must fail cleanly: the caller
+// observes an error, no capability is created, and every page charged while
+// building the partial map returns to the allocator.
+static void page_table_failure_mid_map(long objects, long pages) {
+    auto arena = static_cast<CapHandle>(sys_arena_create(kFixtureArenaSize, 0));
+    check(arena > 0, "fixture arena");
+    check(!sys_map_page(arena, kFixtureArenaVa, RIGHT_READ | RIGHT_WRITE), "fixture arena map");
+    auto* image = reinterpret_cast<uint8_t*>(kFixtureArenaVa);
+    const uint64_t image_size = build_oversized_image(image);
+
+    static const char process_name[32] = "test.oversized";
+    auto result = sys_spawn(image, image_size, MX_POLICY_PRINCIPAL_NATIVE_SANDBOXED, supervisor,
+                            MX_SPAWN_SUSPENDED, process_name);
+    check(result.value < 0 && result.detail == 0, "oversized spawn must fail");
+
+    sys_unmap_page(kFixtureArenaVa);
+    sys_unmap_page(kFixtureArenaVa + 4096);
+    sys_cap_revoke(arena);
+    settle(objects, pages);
+    print("page-table allocation failure mid-map: unwound\n");
+}
+
+// Populate a VM with the object kinds that carry their own lifetime: guest
+// memory (backing pages + stage-2), a vCPU, and a paravirt channel whose ring
+// and doorbell endpoints are handed out as separate capabilities. Returns 0 on
+// success, otherwise a negative stage tag.
+static long populate_vm(CapHandle vm, CapHandle* out_endpoint) {
+    auto memory = sys_vm_memory_create(vm, 64 * 1024, 0);
+    if (memory <= 0) return -2;
+    if (sys_vm_memory_map(vm, static_cast<CapHandle>(memory), 0x40000000ull, 64 * 1024,
+                          RIGHT_READ | RIGHT_WRITE) != 0) {
+        return -3;
+    }
+    auto vcpu = sys_vcpu_create(vm, 0);
+    if (vcpu <= 0) return -4;
+    if (sys_vcpu_set_entry(static_cast<CapHandle>(vcpu), 0x40000000ull, 0, 0) != 0) return -5;
+    auto channel = sys_vm_channel_create(vm, 6, 0);
+    if (channel <= 0) return -6;
+    auto ring = sys_vm_channel_endpoint(static_cast<CapHandle>(channel), 0,
+                                        RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
+    if (ring <= 0) return -7;
+    if (sys_vm_channel_endpoint(static_cast<CapHandle>(channel), 2,
+                                RIGHT_NOTIFY | RIGHT_WAIT) <= 0) {
+        return -8;
+    }
+    if (out_endpoint) *out_endpoint = static_cast<CapHandle>(ring);
+    return 0;
+}
+
+// (2) A supervised child owns a fully populated VM — including a channel
+// endpoint capability granted out to the live parent. When the owner dies the
+// VM, its vCPUs, guest memory, channel, endpoints and every observed capability
+// must be released exactly once.
+static void vm_owner_death(long objects, long pages) {
+    const long created_before = sys_debug_counter(kCounterVmCreated);
+    const long destroyed_before = sys_debug_counter(kCounterVmDestroyed);
+
+    auto child = spawn("init");
+
+    auto boot_arena = static_cast<CapHandle>(sys_arena_create(4096, 0));
+    auto result_arena = static_cast<CapHandle>(sys_arena_create(4096, 0));
+    check(boot_arena > 0 && result_arena > 0, "vm child arenas");
+    check(!sys_map_page(boot_arena, 0x30000000, RIGHT_READ | RIGHT_WRITE), "vm child boot map");
+    check(!sys_map_page(result_arena, 0x30010000, RIGHT_READ | RIGHT_WRITE), "vm child result map");
+    auto* child_boot = reinterpret_cast<MxBootInfo*>(0x30000000);
+    libk::memset(child_boot, 0, sizeof(*child_boot));
+    check(sys_cap_grant(child.process, boot_arena, RIGHT_READ | RIGHT_MAP) == (1ull << 32),
+          "vm child bootstrap handle");
+    child_boot->magic = MX_BOOT_MAGIC;
+    child_boot->version = MX_BOOT_VERSION;
+    child_boot->entry_count = 4;
+
+    auto& root_entry = child_boot->entries[0];
+    root_entry.type = MX_BOOT_ENTRY_HANDLE;
+    libk::memcpy(root_entry.name, "vm.root", 8);
+    root_entry.handle = sys_cap_grant(child.process,
+                                      mochi::boot::require_handle(boot_info, "vm.root"),
+                                      RIGHT_VM_CREATE);
+    auto& parent_entry = child_boot->entries[1];
+    parent_entry.type = MX_BOOT_ENTRY_HANDLE;
+    libk::memcpy(parent_entry.name, "parent", 7);
+    parent_entry.handle = sys_cap_grant(child.process,
+                                        mochi::boot::require_handle(boot_info, "self"),
+                                        RIGHT_READ | RIGHT_SPAWN);
+    auto& result_entry = child_boot->entries[2];
+    result_entry.type = MX_BOOT_ENTRY_ARENA;
+    libk::memcpy(result_entry.name, "result", 7);
+    result_entry.handle =
+        sys_cap_grant(child.process, result_arena, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
+    auto& mode_entry = child_boot->entries[3];
+    mode_entry.type = MX_BOOT_ENTRY_VALUE;
+    libk::memcpy(mode_entry.name, "mode", 5);
+    mode_entry.aux0 = kModeVmWorker;
+
+    check(root_entry.handle && parent_entry.handle && result_entry.handle &&
+              !sys_thread_resume(child.thread),
+          "vm child start");
+    await_exit(child.identity, 0);
+    const auto granted = *reinterpret_cast<volatile uint64_t*>(0x30010000);
+    check(granted, "owner published endpoint");
+
+    // The exit event is published before the last thread's storage teardown, so
+    // the VM is retired on the owner's CPU. settle() waits for every object and
+    // page the owner held to have been released, which happens only after
+    // destroy_owned_process() has run.
+    sys_unmap_page(0x30010000);
+    sys_unmap_page(0x30000000);
+    sys_cap_revoke(result_arena);
+    sys_cap_revoke(boot_arena);
+    settle(objects, pages);
+    check(sys_debug_counter(kCounterVmCreated) == created_before + 1, "vm created exactly once");
+    check(sys_debug_counter(kCounterVmDestroyed) == destroyed_before + 1,
+          "vm reclaimed exactly once");
+    check(sys_cap_identify(static_cast<CapHandle>(granted)) < 0,
+          "channel endpoint revoked on owner death");
+    print("vm owner death: reclaimed exactly once\n");
+}
+
+// (2b) An explicit SYS_VM_DESTROY by a live owner must reclaim the same object
+// graph, including capabilities the owner itself still holds, and leave no
+// stale handle or backing page behind.
+static void vm_explicit_destroy(long objects, long pages) {
+    const long created_before = sys_debug_counter(kCounterVmCreated);
+    const long destroyed_before = sys_debug_counter(kCounterVmDestroyed);
+    const CapHandle root = mochi::boot::require_handle(boot_info, "vm.root");
+
+    auto vm = sys_vm_create(root, 0);
+    check(vm > 0, "owner vm create");
+    const auto vmh = static_cast<CapHandle>(vm);
+    CapHandle endpoint = 0;
+    check(populate_vm(vmh, &endpoint) == 0, "owner vm populate");
+    check(!sys_vm_destroy(vmh), "owner vm destroy");
+    settle(objects, pages);
+    check(sys_debug_counter(kCounterVmCreated) == created_before + 1, "explicit vm counted");
+    check(sys_debug_counter(kCounterVmDestroyed) == destroyed_before + 1,
+          "explicit vm reclaimed");
+    check(sys_cap_identify(vmh) < 0 && sys_cap_identify(endpoint) < 0,
+          "destroyed vm and endpoint capabilities are stale");
+    print("explicit vm destroy: reclaimed once\n");
+}
+
+// Child behaviour: build a VM with memory, a vCPU and a channel, publish one
+// channel endpoint capability into the live parent, then exit so the owning
+// process dies with live VM objects.
+[[noreturn]] static void vm_owner_worker(MxBootInfo* boot) {
+    const CapHandle root = mochi::boot::require_handle(boot, "vm.root");
+    const CapHandle parent = mochi::boot::require_handle(boot, "parent");
+    const CapHandle result = mochi::boot::require_handle(boot, "result");
+    long status = 0;
+    auto vm = sys_vm_create(root, 0);
+    if (vm <= 0) {
+        status = -1;
+    } else {
+        CapHandle endpoint = 0;
+        status = populate_vm(static_cast<CapHandle>(vm), &endpoint);
+        if (status == 0) {
+            if (sys_map_page(result, 0x30010000, RIGHT_READ | RIGHT_WRITE) != 0) {
+                status = -9;
+            } else {
+                auto shared = sys_cap_grant(parent, endpoint,
+                                            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
+                if (shared <= 0) {
+                    status = -10;
+                } else {
+                    *reinterpret_cast<volatile uint64_t*>(0x30010000) =
+                        static_cast<uint64_t>(shared);
+                }
+            }
+        }
+    }
+    sys_exit(status);
+    while (true) {
+        sys_yield();
+    }
+}
+
 extern "C" [[noreturn]] void _start() {
     auto* boot = mochi::boot::map();
+    boot_info = boot;
+    const auto* mode = mochi::boot::find(boot, "mode");
+    if (mode && mode->type == MX_BOOT_ENTRY_VALUE && mode->aux0 == kModeVmWorker) {
+        vm_owner_worker(boot);
+    }
     supervisor = mochi::boot::require_handle(boot, "supervisor");
     cpu_count = mochi::boot::find(boot, "cpu.count")->aux0;
     auto archive = mochi::boot::require_handle(boot, "boot.initrd");
@@ -192,6 +455,10 @@ extern "C" [[noreturn]] void _start() {
     sys_cap_revoke(boot_arena);
     settle(objects, pages);
     print("shared arena: survives creator and capability revocation\n");
+
+    page_table_failure_mid_map(objects, pages);
+    vm_owner_death(objects, pages);
+    vm_explicit_destroy(objects, pages);
     print("lifecycle regression passed\n");
     while (true) {
         sys_yield();

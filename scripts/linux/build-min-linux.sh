@@ -62,6 +62,32 @@ echo "[5/5] write manifest"
 image_size=$(stat -c%s "${OUT}/Image")
 initramfs_size=$(stat -c%s "${OUT}/initramfs.cpio")
 dtb_size=$(stat -c%s "${OUT}/dango-linux.dtb")
+image_text_offset=$(python3 - "${OUT}/Image" <<'PY_IMAGE_HEADER'
+import pathlib
+import struct
+import sys
+image = pathlib.Path(sys.argv[1]).read_bytes()[:64]
+if len(image) < 64 or image[56:60] != b'ARMd':
+    print('0')
+else:
+    print(str(struct.unpack_from('<Q', image, 8)[0]))
+PY_IMAGE_HEADER
+)
+
+if [[ -n "${DANGO_LINUX_KERNEL_LOAD:-}" ]]; then
+    KERNEL_LOAD="${DANGO_LINUX_KERNEL_LOAD}"
+elif [[ "${image_text_offset}" == "0" ]]; then
+    # Modern arm64 Images often report text_offset=0 and require a 2 MiB-aligned
+    # placement. Leave the first 2 MiB of guest RAM free for the tiny Dango
+    # diagnostic trampoline and load Linux at the next 2 MiB boundary.
+    KERNEL_LOAD="0x40200000"
+else
+    # Older arm64 Images use a non-zero text_offset, commonly 0x80000. In that
+    # case the conventional placement is RAM_BASE + text_offset.
+    KERNEL_LOAD=$(printf '0x%x' $((0x40000000 + image_text_offset)))
+fi
+echo "dango: linux Image text_offset=$(printf '0x%x' "${image_text_offset}") kernel_load=${KERNEL_LOAD}"
+
 cat > "${OUT}/manifest.toml" <<EOF_MANIFEST
 name = "dango-linux-hello"
 arch = "aarch64"
@@ -77,7 +103,7 @@ dtb_size = ${dtb_size}
 memory_base = "0x40000000"
 memory_size = "0x08000000"
 
-kernel_load = "0x40200000"
+kernel_load = "${KERNEL_LOAD}"
 initramfs_load = "0x46000000"
 dtb_load = "0x47000000"
 
@@ -87,4 +113,5 @@ vcpus = 1
 EOF_MANIFEST
 
 "${AME}/scripts/linux/check-artifacts.sh" "${OUT}"
+echo "dango: linux manifest entry=$(awk -F= '/^entry[[:space:]]*=/{gsub(/[ "\t]/, "", $2); print $2}' "${OUT}/manifest.toml") kernel_load=${KERNEL_LOAD}"
 echo "dango: linux artifacts ready"

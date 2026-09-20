@@ -1,32 +1,34 @@
 #pragma once
 
 #include <cstdint>
+#include "midix/abi/status.h"
+#include "midix/abi/cap.h"
 
 namespace dango {
 
-constexpr int64_t E_PERM = -2;
-constexpr int64_t E_NOTIMPL = -10;
+constexpr int64_t E_PERM = MX_ERR_PERM;
+constexpr int64_t E_NOTIMPL = MX_ERR_NOT_IMPLEMENTED;
 
-constexpr uint32_t CAP_SHARED_RING = 4;
-constexpr uint32_t CAP_PAGE = 3;
-constexpr uint32_t CAP_DOORBELL = 5;
-constexpr uint32_t CAP_VM_ROOT = 11;
-constexpr uint32_t CAP_VM = 12;
-constexpr uint32_t CAP_VCPU = 13;
-constexpr uint32_t CAP_VM_MEMORY = 14;
-constexpr uint32_t CAP_VM_CHANNEL = 15;
-constexpr uint32_t CAP_SCHED_CONTEXT = 16;
+constexpr uint32_t CAP_SHARED_RING = MX_CAP_SHARED_RING;
+constexpr uint32_t CAP_PAGE = MX_CAP_PAGE;
+constexpr uint32_t CAP_DOORBELL = MX_CAP_DOORBELL;
+constexpr uint32_t CAP_VM_ROOT = MX_CAP_VM_ROOT;
+constexpr uint32_t CAP_VM = MX_CAP_VM;
+constexpr uint32_t CAP_VCPU = MX_CAP_VCPU;
+constexpr uint32_t CAP_VM_MEMORY = MX_CAP_VM_MEMORY;
+constexpr uint32_t CAP_VM_CHANNEL = MX_CAP_VM_CHANNEL;
+constexpr uint32_t CAP_SCHED_CONTEXT = MX_CAP_SCHED_CONTEXT;
 
-constexpr uint32_t RIGHT_READ = 1u << 0;
-constexpr uint32_t RIGHT_WRITE = 1u << 1;
-constexpr uint32_t RIGHT_MAP = 1u << 2;
-constexpr uint32_t RIGHT_EXEC = 1u << 3;
-constexpr uint32_t RIGHT_NOTIFY = 1u << 4;
-constexpr uint32_t RIGHT_WAIT = 1u << 5;
-constexpr uint32_t RIGHT_DUP = 1u << 6;
-constexpr uint32_t RIGHT_VM_CONTROL = 1u << 11;
-constexpr uint32_t RIGHT_VM_INSPECT = 1u << 13;
-constexpr uint32_t RIGHT_VM_CREATE = 1u << 23;
+constexpr uint32_t RIGHT_READ = MX_RIGHT_READ;
+constexpr uint32_t RIGHT_WRITE = MX_RIGHT_WRITE;
+constexpr uint32_t RIGHT_MAP = MX_RIGHT_MAP;
+constexpr uint32_t RIGHT_EXEC = MX_RIGHT_EXEC;
+constexpr uint32_t RIGHT_NOTIFY = MX_RIGHT_NOTIFY;
+constexpr uint32_t RIGHT_WAIT = MX_RIGHT_WAIT;
+constexpr uint32_t RIGHT_DUP = MX_RIGHT_DUP;
+constexpr uint32_t RIGHT_VM_CONTROL = MX_RIGHT_VM_CONTROL;
+constexpr uint32_t RIGHT_VM_INSPECT = MX_RIGHT_VM_INSPECT;
+constexpr uint32_t RIGHT_VM_CREATE = MX_RIGHT_VM_CREATE;
 
 constexpr uint32_t VM_CREATED = 1;
 constexpr uint32_t VM_MEMORY_READY = 2;

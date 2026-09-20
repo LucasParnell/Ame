@@ -1,8 +1,8 @@
 # build outputs
-build/
-build-*/
-out/
-cmake-build-*/
+/build/
+/build-*/
+/out/
+/cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
 compile_commands.json
@@ -29,3 +29,9 @@ dango-guest.log
 .vscode/
 .idea/
 .DS_Store
+
+# Python/tool caches and local agent backups
+__pycache__/
+*.pyc
+.venv/
+.claude-token-pack-backup-*/

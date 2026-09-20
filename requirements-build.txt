@@ -1,0 +1,2 @@
+# Host-side Ed25519 bundle signing. Install in a virtual environment.
+cryptography==50.0.1

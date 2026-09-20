@@ -401,14 +401,15 @@ void write(Level level, const char* component, const char* msg) {
 }
 
 void vwritef(Level level, const char* component, const char* fmt, va_list ap) {
-    if (!g_doorbell) {
-        emit_early_direct(level, component, fmt ? fmt : "(null)");
-        return;
-    }
-
     char msg[kMaxMessage + 1];
     bool truncated = false;
     (void)vformat(msg, sizeof(msg), fmt, ap, &truncated);
+
+    if (!g_doorbell) {
+        emit_early_direct(level, component, msg);
+        return;
+    }
+
     if (truncated) {
         __atomic_add_fetch(&g_truncated[cpu_index()], 1ull, __ATOMIC_RELAXED);
     }
@@ -428,14 +429,15 @@ void raw(const char* msg) {
 }
 
 void vrawf(const char* fmt, va_list ap) {
-    if (!g_doorbell) {
-        emit_early_direct(Level::Info, "kernel", fmt ? fmt : "(null)");
-        return;
-    }
-
     char line[kMaxMessage + 1];
     bool truncated = false;
     const usize len = vformat(line, sizeof(line), fmt, ap, &truncated);
+
+    if (!g_doorbell) {
+        emit_early_direct(Level::Info, "kernel", line);
+        return;
+    }
+
     (void)len;
     if (truncated) {
         __atomic_add_fetch(&g_truncated[cpu_index()], 1ull, __ATOMIC_RELAXED);

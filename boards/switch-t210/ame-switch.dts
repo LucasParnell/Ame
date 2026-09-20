@@ -1,0 +1,77 @@
+/dts-v1/;
+
+/* U-Boot / BL33 / control DTB live here; do not allocate into this range. */
+/memreserve/ 0x00000000A8000000 0x0000000004000000;
+/* BL31 TZDRAM carveout: last 64 MiB of 4 GiB DRAM (0x80000000 + 4 GiB - 64 MiB). */
+/memreserve/ 0x000000017C000000 0x0000000004000000;
+
+/ {
+    compatible = "ame,nintendo-switch", "nintendo,switch", "nvidia,tegra210";
+    model = "Nintendo Switch (Ame)";
+    #address-cells = <2>;
+    #size-cells = <2>;
+    interrupt-parent = <&gic>;
+
+    chosen {
+        stdout-path = "/serial@70006000";
+    };
+
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x0 0x80000000 0x1 0x00000000>; /* 4 GiB; Erista only */
+    };
+
+    psci {
+        compatible = "arm,psci-1.0";
+        method = "smc";
+        cpu_on = <0xc4000003>;
+    };
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        cpu@0 {
+            device_type = "cpu";
+            compatible = "arm,cortex-a57";
+            reg = <0>;
+            enable-method = "psci";
+        };
+
+        cpu@1 {
+            device_type = "cpu";
+            compatible = "arm,cortex-a57";
+            reg = <1>;
+            enable-method = "psci";
+        };
+
+        cpu@2 {
+            device_type = "cpu";
+            compatible = "arm,cortex-a57";
+            reg = <2>;
+            enable-method = "psci";
+        };
+
+        cpu@3 {
+            device_type = "cpu";
+            compatible = "arm,cortex-a57";
+            reg = <3>;
+            enable-method = "psci";
+        };
+    };
+
+    gic: interrupt-controller@50041000 {
+        compatible = "arm,gic-400", "arm,gic-v2";
+        #interrupt-cells = <3>;
+        interrupt-controller;
+        reg = <0x0 0x50041000 0x0 0x1000>,
+              <0x0 0x50042000 0x0 0x2000>;
+    };
+
+    serial@70006000 {
+        compatible = "nvidia,tegra210-uart", "nvidia,tegra20-uart";
+        reg = <0x0 0x70006000 0x0 0x40>;
+        reg-shift = <2>;
+        status = "okay";
+    };
+};

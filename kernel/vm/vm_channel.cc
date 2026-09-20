@@ -4,6 +4,12 @@
 namespace vm {
 
 namespace {
+void release_creator(void* target) {
+    if (!target) return;
+    auto* record = object::acquire(target);
+    object::release(record); object::release(record);
+}
+
 
 u32 g_next_channel_id = 1;
 
@@ -20,7 +26,7 @@ bool doorbell_rights_valid(u32 rights) {
 CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags,
                          SysError* out_error) {
     SysError rc = E_OK;
-    Vm* v = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
+    auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
     if (!v) {
         if (out_error) *out_error = rc;
         return kNullCap;
@@ -36,14 +42,16 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
     Doorbell* host_db = ipc::doorbell_create_object(caller.pid);
     Doorbell* guest_db = ipc::doorbell_create_object(caller.pid);
     if (!h2g || !g2h || !host_db || !guest_db) {
+        release_creator(h2g); release_creator(g2h); release_creator(host_db); release_creator(guest_db);
         if (out_error) *out_error = E_NOMEM;
         note_error();
         return kNullCap;
     }
 
     VmChannel* channel = static_cast<VmChannel*>(
-        mm::heap_alloc(sizeof(VmChannel), alignof(VmChannel)));
+        mm::slab_alloc(sizeof(VmChannel), alignof(VmChannel)));
     if (!channel) {
+        release_creator(h2g); release_creator(g2h); release_creator(host_db); release_creator(guest_db);
         if (out_error) *out_error = E_NOMEM;
         note_error();
         return kNullCap;
@@ -58,6 +66,9 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
     channel->order = order;
     channel->flags = flags;
 
+    channel->owner_lifetime = v->lifetime; object::retain(channel->owner_lifetime);
+    channel->lifetime = object::create(channel, dispose_channel);
+    if (!channel->lifetime) { dispose_channel(channel); if (out_error) *out_error = E_NOMEM; return kNullCap; }
     const CapHandle cap_h = cap::alloc(*caller.cap_table, CAP_VM_CHANNEL, channel,
                                        RIGHT_VM_CHANNEL_SEND |
                                            RIGHT_VM_CHANNEL_RECV |
@@ -65,7 +76,7 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
                                            RIGHT_VM_CHANNEL_INSPECT |
                                            RIGHT_DUP);
     if (cap_h == kNullCap) {
-        channel->dead = true;
+        object::release(channel->lifetime);
         if (out_error) *out_error = E_OVERFLOW;
         note_error();
         return kNullCap;
@@ -91,7 +102,7 @@ CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_
     }
 
     SysError rc = E_OK;
-    VmChannel* channel = channel_from_cap(caller, channel_cap, needed, &rc);
+    auto channel = channel_from_cap(caller, channel_cap, needed, &rc);
     if (!channel) {
         if (out_error) *out_error = rc;
         return kNullCap;
@@ -138,7 +149,7 @@ CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_
 SysError inspect_channel(Process& caller, CapHandle channel_cap, VmChannelInfo* out) {
     if (!out) return E_INVALID;
     SysError rc = E_OK;
-    VmChannel* channel = channel_from_cap(caller, channel_cap,
+    auto channel = channel_from_cap(caller, channel_cap,
                                           RIGHT_VM_CHANNEL_INSPECT, &rc);
     if (!channel) return rc;
 
@@ -156,6 +167,15 @@ SysError inspect_channel(Process& caller, CapHandle channel_cap, VmChannelInfo* 
         (channel->guest_doorbell ? 8ull : 0ull);
     *out = info;
     return E_OK;
+}
+
+void dispose_channel(void* target) {
+    auto* channel = static_cast<VmChannel*>(target);
+    auto* owner = channel->owner_lifetime;
+    release_creator(channel->host_to_guest); release_creator(channel->guest_to_host);
+    release_creator(channel->host_doorbell); release_creator(channel->guest_doorbell);
+    mm::slab_free(channel, sizeof(VmChannel), alignof(VmChannel));
+    object::release(owner);
 }
 
 } // namespace vm

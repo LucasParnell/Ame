@@ -1,0 +1,367 @@
+--- /tmp/archive_orig/userland/init/main.cc	2026-05-14 02:21:44.000000000 +0000
++++ userland/init/main.cc	2026-05-14 01:38:58.787614048 +0000
+@@ -39,13 +39,12 @@
+ constexpr uint64_t kVaInitLogRing = 0x2800'0000ull;
+ constexpr uint64_t kVaPingToPongRing = 0x2801'0000ull;
+ constexpr uint64_t kVaConsoleConfig  = 0x2802'0000ull;
+-constexpr uint64_t kVaFsSmokeCmdRing = 0x2803'0000ull;
+-constexpr uint64_t kVaFsSmokeReplyRing = 0x2804'0000ull;
+-constexpr uint64_t kVaBlkSmokeReqRing = 0x2805'0000ull;
+-constexpr uint64_t kVaBlkSmokeReplyRing = 0x2806'0000ull;
++// kVaFs{Cmd,Reply}Ring were originally for an FS smoke test that has been
++// removed; load_service_images_from_fs still needs them to talk to io.fs.
++constexpr uint64_t kVaFsCmdRing = 0x2803'0000ull;
++constexpr uint64_t kVaFsReplyRing = 0x2804'0000ull;
+ constexpr uint64_t kVaSvcCtlReqRing = 0x2807'0000ull;
+ constexpr uint64_t kVaSvcCtlReplyRing = 0x2808'0000ull;
+-constexpr uint64_t kVaBlkSmokeDma = 0x2810'0000ull;
+ constexpr uint64_t kVaBootInfoBase   = 0x2900'0000ull;
+ constexpr uint64_t kVaSvcRegistry    = 0x2A00'0000ull;
+ constexpr uint64_t kVaFsImageBase    = 0x3000'0000ull;
+@@ -897,132 +896,10 @@
+     require_ok(sys_thread_resume(svc.main_thread), "init: driver resume failed\n");
+ }
+ 
+-static void run_blk_smoke(CapHandle blk_req_ring, CapHandle blk_reply_ring,
+-                          CapHandle blk_req_db, CapHandle blk_reply_db) {
+-    if (sys_cap_identify(kCapVirtioBlkDma) != kCapTypeArena) {
+-        console_log("BLK smoke skipped: no DMA arena\n");
+-        return;
+-    }
+-    if (sys_map_page(blk_req_ring, kVaBlkSmokeReqRing, RIGHT_READ | RIGHT_WRITE) != 0) {
+-        fail_halt("blk: smoke ring map failed\n");
+-    }
+-    if (sys_map_page(blk_reply_ring, kVaBlkSmokeReplyRing, RIGHT_READ | RIGHT_WRITE) != 0) {
+-        fail_halt("blk: smoke ring map failed\n");
+-    }
+-    if (sys_map_page(kCapVirtioBlkDma, kVaBlkSmokeDma, RIGHT_READ | RIGHT_WRITE) != 0) {
+-        fail_halt("blk: smoke dma map failed\n");
+-    }
+-
+-    volatile uint8_t* dma = reinterpret_cast<volatile uint8_t*>(
+-        kVaBlkSmokeDma + BLK_DMA_CLIENT_OFFSET);
+-    for (uint32_t i = 0; i < 512; ++i) dma[i] = 0;
+-
+-    const mochi::fs::BlkClient blk{
+-        {reinterpret_cast<RingPage*>(kVaBlkSmokeReqRing),
+-         reinterpret_cast<RingPage*>(kVaBlkSmokeReplyRing),
+-         kRingOrder,
+-         blk_req_db,
+-         blk_reply_db},
+-    };
+-
+-    BlkReply reply{};
+-    constexpr uint64_t kBlkSmokeSector = (2ull * FS_BLOCK_SIZE) / 512ull;
+-    if (!blk.request(BLK_READ, kBlkSmokeSector, 1, kNullCap, BLK_DMA_CLIENT_OFFSET, &reply) ||
+-        reply.status != MX_OK ||
+-        reply.sectors_transferred != 1) {
+-        fail_halt("blk: read smoke failed\n");
+-    }
+-    if (!blk.request(BLK_WRITE, kBlkSmokeSector, 1, kNullCap, BLK_DMA_CLIENT_OFFSET, &reply) ||
+-        reply.status != MX_OK ||
+-        reply.sectors_transferred != 1) {
+-        fail_halt("blk: write smoke failed\n");
+-    }
+-
+-    console_log("BLK read/write smoke OK\n");
+-}
+-
+-static void run_fs_smoke(CapHandle fs_cmd_ring, CapHandle fs_reply_ring,
+-                         CapHandle fs_cmd_db, CapHandle fs_reply_db) {
+-    if (sys_map_page(fs_cmd_ring, kVaFsSmokeCmdRing, RIGHT_READ | RIGHT_WRITE) != 0) {
+-        fail_halt("fs: smoke map failed\n");
+-    }
+-    if (sys_map_page(fs_reply_ring, kVaFsSmokeReplyRing, RIGHT_READ | RIGHT_WRITE) != 0) {
+-        fail_halt("fs: smoke map failed\n");
+-    }
+-
+-    const mochi::fs::Client fs{
+-        {reinterpret_cast<RingPage*>(kVaFsSmokeCmdRing),
+-         reinterpret_cast<RingPage*>(kVaFsSmokeReplyRing),
+-         kRingOrder,
+-         fs_cmd_db,
+-         fs_reply_db},
+-    };
+-
+-    FsOpenReply open{};
+-    if (!fs.wait_open(1, "hello.txt", FS_OPEN_READ, &open) ||
+-        open.status != MX_OK ||
+-        open.handle == 0) {
+-        fail_halt("fs: open smoke failed\n");
+-    }
+-
+-    FsReadReply read{};
+-    if (!fs.try_read(open.handle, 0, 5, &read) ||
+-        read.status != MX_OK ||
+-        read.length_read != 5 ||
+-        read.inline_data[0] != 'M' ||
+-        read.inline_data[1] != 'i' ||
+-        read.inline_data[2] != 'd' ||
+-        read.inline_data[3] != 'i' ||
+-        read.inline_data[4] != 'x') {
+-        fail_halt("fs: read smoke failed\n");
+-    }
+-
+-    FsPromoteReply promoted{};
+-    if (!fs.try_promote(open.handle, &promoted) ||
+-        promoted.status != MX_OK ||
+-        promoted.new_handle == 0) {
+-        fail_halt("fs: promote smoke failed\n");
+-    }
+-
+-    FsWriteReply write{};
+-    const char ame[] = "Ame";
+-    if (!fs.try_write(promoted.new_handle, 0, ame, 3, &write) ||
+-        write.status != MX_OK ||
+-        write.bytes_written != 3) {
+-        fail_halt("fs: cow write smoke failed\n");
+-    }
+-
+-    FsReadReply original_after_cow{};
+-    if (!fs.try_read(open.handle, 0, 5, &original_after_cow) ||
+-        original_after_cow.status != MX_OK ||
+-        original_after_cow.inline_data[0] != 'M' ||
+-        original_after_cow.inline_data[1] != 'i') {
+-        fail_halt("fs: cow isolation smoke failed\n");
+-    }
+-
+-    const char cow[] = "Cow";
+-    if (!fs.try_write(promoted.new_handle, 0, cow, 3, &write) ||
+-        write.status != MX_OK ||
+-        write.bytes_written != 3) {
+-        fail_halt("fs: second cow write smoke failed\n");
+-    }
+-
+-    FsReadReply live_after_second_write{};
+-    if (!fs.try_read(promoted.new_handle, 0, 3, &live_after_second_write) ||
+-        live_after_second_write.status != MX_OK ||
+-        live_after_second_write.inline_data[0] != 'C' ||
+-        live_after_second_write.inline_data[1] != 'o' ||
+-        live_after_second_write.inline_data[2] != 'w') {
+-        fail_halt("fs: live cow smoke failed\n");
+-    }
+-
+-    mx_i32_t sync_status = static_cast<mx_i32_t>(MX_ERR_INVALID);
+-    if (!fs.try_sync(&sync_status) || sync_status != MX_OK) {
+-        fail_halt("fs: sync smoke failed\n");
+-    }
+-
+-    console_log("FS V1 smoke OK\n");
+-}
++// Block- and FS-layer smoke tests used to run here. They blocked the boot path
++// for ~dozens of round trips per test against services that are already
++// covered by the FS image load below (which is the only real consumer of fs).
++// Drop them outright.
+ 
+ static bool image_filename(const ServiceSpec& svc, char out[36]) {
+     uint32_t n = 0;
+@@ -1145,10 +1022,22 @@
+ // is called on the shell and nothing else. Loading the other 14 service images
+ // from AmeFS was pure round-trip overhead (~3.8s at boot) because each
+ // FS_READ_REPLY ships at most ~40 bytes of inline payload.
+-static uint32_t load_service_images_from_fs(CapHandle fs_cmd_db, CapHandle fs_reply_db) {
++//
++// Maps the FS cmd/reply rings on first call; the smoke tests used to own this
++// mapping but they have been removed from the boot path.
++static uint32_t load_service_images_from_fs(CapHandle fs_cmd_ring,
++                                            CapHandle fs_reply_ring,
++                                            CapHandle fs_cmd_db,
++                                            CapHandle fs_reply_db) {
++    if (sys_map_page(fs_cmd_ring, kVaFsCmdRing, RIGHT_READ | RIGHT_WRITE) != 0) {
++        return 0;
++    }
++    if (sys_map_page(fs_reply_ring, kVaFsReplyRing, RIGHT_READ | RIGHT_WRITE) != 0) {
++        return 0;
++    }
+     const mochi::fs::Client fs{
+-        {reinterpret_cast<RingPage*>(kVaFsSmokeCmdRing),
+-         reinterpret_cast<RingPage*>(kVaFsSmokeReplyRing),
++        {reinterpret_cast<RingPage*>(kVaFsCmdRing),
++         reinterpret_cast<RingPage*>(kVaFsReplyRing),
+          kRingOrder,
+          fs_cmd_db,
+          fs_reply_db},
+@@ -1918,7 +1807,12 @@
+         sys_kill(pong_proc);
+ 
+         bool saw_death = false;
+-        for (int i = 0; i < 65536; ++i) {
++        // sys_supervisor_poll is non-blocking and the kernel marks the death
++        // synchronously off sys_kill, so the wake usually comes back within a
++        // handful of yields. 4096 is still ~3 orders of magnitude of headroom
++        // for a slow host without making this loop dominate boot when something
++        // is actually wrong (we surface that via the saw_death check below).
++        for (int i = 0; i < 4096; ++i) {
+             SysPair event = sys_supervisor_poll(kCapSupervisor);
+             if (event.value > 0) {
+                 saw_death = true;
+@@ -1969,38 +1863,44 @@
+     console_log("fairness check complete\n");
+     console_log("base services ready\n");
+     console_log("scheduler tests ready\n");
+-    console_log_counter("metric.syscalls", static_cast<uint64_t>(sys_debug_counter(0)));
+-    console_log_counter("metric.ipc.syscalls", static_cast<uint64_t>(sys_debug_counter(1)));
+-    console_log_counter("metric.context.switches", static_cast<uint64_t>(sys_debug_counter(2)));
+-    console_log_counter("metric.debug.puts", static_cast<uint64_t>(sys_debug_counter(3)));
+-    console_log_counter("metric.el0.faults", static_cast<uint64_t>(sys_debug_counter(4)));
+-    console_log_counter("metric.doorbell.sleeps", static_cast<uint64_t>(sys_debug_counter(5)));
+-    console_log_counter("metric.doorbell.wakes", static_cast<uint64_t>(sys_debug_counter(6)));
+-    console_log_counter("metric.timer.ticks", static_cast<uint64_t>(sys_debug_counter(7)));
+-    console_log_counter("metric.doorbell.wait.calls", static_cast<uint64_t>(sys_debug_counter(8)));
+-    console_log_counter("metric.doorbell.wait.immediate", static_cast<uint64_t>(sys_debug_counter(9)));
+-    console_log_counter("metric.notify.calls", static_cast<uint64_t>(sys_debug_counter(10)));
+-    console_log_counter("metric.notify.no.waiter", static_cast<uint64_t>(sys_debug_counter(11)));
+-    console_log_counter("metric.notify.woke.thread", static_cast<uint64_t>(sys_debug_counter(12)));
+-    console_log_counter("metric.yields", static_cast<uint64_t>(sys_debug_counter(13)));
+-    console_log_counter("metric.block.switches", static_cast<uint64_t>(sys_debug_counter(14)));
+-    console_log_counter("metric.timer.preempts", static_cast<uint64_t>(sys_debug_counter(15)));
+-    console_log_counter("metric.exit.switches", static_cast<uint64_t>(sys_debug_counter(16)));
+-    console_log_counter("metric.cpus.online", static_cast<uint64_t>(sys_debug_counter(17)));
+-    console_log_counter("metric.cpu0.context.switches", static_cast<uint64_t>(sys_debug_counter(18)));
+-    console_log_counter("metric.cpu1.context.switches", static_cast<uint64_t>(sys_debug_counter(19)));
+-    console_log_counter("metric.cpu0.timer.preempts", static_cast<uint64_t>(sys_debug_counter(20)));
+-    console_log_counter("metric.cpu1.timer.preempts", static_cast<uint64_t>(sys_debug_counter(21)));
+-    console_log_counter("metric.local.wakes", static_cast<uint64_t>(sys_debug_counter(22)));
+-    console_log_counter("metric.remote.wakes", static_cast<uint64_t>(sys_debug_counter(23)));
+-    console_log_counter("metric.ipi.sent", static_cast<uint64_t>(sys_debug_counter(24)));
+-    console_log_counter("metric.ipi.handled", static_cast<uint64_t>(sys_debug_counter(25)));
+-    console_log_counter("metric.pending.wake.drains", static_cast<uint64_t>(sys_debug_counter(26)));
+-    console_log_counter("metric.doorbell.local.wakes", static_cast<uint64_t>(sys_debug_counter(27)));
+-    console_log_counter("metric.doorbell.remote.wakes", static_cast<uint64_t>(sys_debug_counter(28)));
+-    console_log_counter("metric.ressha.fairness.max.lag", static_cast<uint64_t>(sys_debug_counter(29)));
+-    console_log_counter("metric.principal.a.runtime", static_cast<uint64_t>(sys_debug_counter(30)));
+-    console_log_counter("metric.principal.b.runtime", static_cast<uint64_t>(sys_debug_counter(31)));
++    // sys_debug_counter is a real syscall (ring-0 round trip) per slot. When
++    // kEmitBootMetrics is off, console_log_counter is a no-op, but the argument
++    // expressions still run. Gate the whole block so we don't pay for ~32
++    // syscalls' worth of latency on every boot just to throw the numbers away.
++    if constexpr (kEmitBootMetrics) {
++        console_log_counter("metric.syscalls", static_cast<uint64_t>(sys_debug_counter(0)));
++        console_log_counter("metric.ipc.syscalls", static_cast<uint64_t>(sys_debug_counter(1)));
++        console_log_counter("metric.context.switches", static_cast<uint64_t>(sys_debug_counter(2)));
++        console_log_counter("metric.debug.puts", static_cast<uint64_t>(sys_debug_counter(3)));
++        console_log_counter("metric.el0.faults", static_cast<uint64_t>(sys_debug_counter(4)));
++        console_log_counter("metric.doorbell.sleeps", static_cast<uint64_t>(sys_debug_counter(5)));
++        console_log_counter("metric.doorbell.wakes", static_cast<uint64_t>(sys_debug_counter(6)));
++        console_log_counter("metric.timer.ticks", static_cast<uint64_t>(sys_debug_counter(7)));
++        console_log_counter("metric.doorbell.wait.calls", static_cast<uint64_t>(sys_debug_counter(8)));
++        console_log_counter("metric.doorbell.wait.immediate", static_cast<uint64_t>(sys_debug_counter(9)));
++        console_log_counter("metric.notify.calls", static_cast<uint64_t>(sys_debug_counter(10)));
++        console_log_counter("metric.notify.no.waiter", static_cast<uint64_t>(sys_debug_counter(11)));
++        console_log_counter("metric.notify.woke.thread", static_cast<uint64_t>(sys_debug_counter(12)));
++        console_log_counter("metric.yields", static_cast<uint64_t>(sys_debug_counter(13)));
++        console_log_counter("metric.block.switches", static_cast<uint64_t>(sys_debug_counter(14)));
++        console_log_counter("metric.timer.preempts", static_cast<uint64_t>(sys_debug_counter(15)));
++        console_log_counter("metric.exit.switches", static_cast<uint64_t>(sys_debug_counter(16)));
++        console_log_counter("metric.cpus.online", static_cast<uint64_t>(sys_debug_counter(17)));
++        console_log_counter("metric.cpu0.context.switches", static_cast<uint64_t>(sys_debug_counter(18)));
++        console_log_counter("metric.cpu1.context.switches", static_cast<uint64_t>(sys_debug_counter(19)));
++        console_log_counter("metric.cpu0.timer.preempts", static_cast<uint64_t>(sys_debug_counter(20)));
++        console_log_counter("metric.cpu1.timer.preempts", static_cast<uint64_t>(sys_debug_counter(21)));
++        console_log_counter("metric.local.wakes", static_cast<uint64_t>(sys_debug_counter(22)));
++        console_log_counter("metric.remote.wakes", static_cast<uint64_t>(sys_debug_counter(23)));
++        console_log_counter("metric.ipi.sent", static_cast<uint64_t>(sys_debug_counter(24)));
++        console_log_counter("metric.ipi.handled", static_cast<uint64_t>(sys_debug_counter(25)));
++        console_log_counter("metric.pending.wake.drains", static_cast<uint64_t>(sys_debug_counter(26)));
++        console_log_counter("metric.doorbell.local.wakes", static_cast<uint64_t>(sys_debug_counter(27)));
++        console_log_counter("metric.doorbell.remote.wakes", static_cast<uint64_t>(sys_debug_counter(28)));
++        console_log_counter("metric.ressha.fairness.max.lag", static_cast<uint64_t>(sys_debug_counter(29)));
++        console_log_counter("metric.principal.a.runtime", static_cast<uint64_t>(sys_debug_counter(30)));
++        console_log_counter("metric.principal.b.runtime", static_cast<uint64_t>(sys_debug_counter(31)));
++    }
+ 
+     if (dango && auth_probe &&
+         dango_proc != kNullCap &&
+@@ -2054,23 +1954,25 @@
+             fail_halt("dango: wiring failed\n");
+         }
+ 
+-        console_log_counter("metric.vm.create.calls", static_cast<uint64_t>(sys_debug_counter(32)));
+-        console_log_counter("metric.vm.created", static_cast<uint64_t>(sys_debug_counter(33)));
+-        console_log_counter("metric.vm.destroyed", static_cast<uint64_t>(sys_debug_counter(34)));
+-        console_log_counter("metric.vm.memory.created", static_cast<uint64_t>(sys_debug_counter(35)));
+-        console_log_counter("metric.vm.memory.mapped", static_cast<uint64_t>(sys_debug_counter(36)));
+-        console_log_counter("metric.vm.memory.unmapped", static_cast<uint64_t>(sys_debug_counter(37)));
+-        console_log_counter("metric.vm.stage2.tables.created", static_cast<uint64_t>(sys_debug_counter(38)));
+-        console_log_counter("metric.vm.stage2.pages.mapped", static_cast<uint64_t>(sys_debug_counter(39)));
+-        console_log_counter("metric.vm.vcpus.created", static_cast<uint64_t>(sys_debug_counter(40)));
+-        console_log_counter("metric.vm.vcpu.configured", static_cast<uint64_t>(sys_debug_counter(41)));
+-        console_log_counter("metric.vm.vcpu.run.attempts", static_cast<uint64_t>(sys_debug_counter(42)));
+-        console_log_counter("metric.vm.vcpu.run.notimpl", static_cast<uint64_t>(sys_debug_counter(43)));
+-        console_log_counter("metric.vm.channels.created", static_cast<uint64_t>(sys_debug_counter(44)));
+-        console_log_counter("metric.vm.errors", static_cast<uint64_t>(sys_debug_counter(45)));
+-        console_log_counter("metric.el.current", static_cast<uint64_t>(sys_debug_counter(46)));
+-        console_log_counter("metric.el2.available", static_cast<uint64_t>(sys_debug_counter(47)));
+-        console_log_counter("metric.vhe.available", static_cast<uint64_t>(sys_debug_counter(48)));
++        if constexpr (kEmitBootMetrics) {
++            console_log_counter("metric.vm.create.calls", static_cast<uint64_t>(sys_debug_counter(32)));
++            console_log_counter("metric.vm.created", static_cast<uint64_t>(sys_debug_counter(33)));
++            console_log_counter("metric.vm.destroyed", static_cast<uint64_t>(sys_debug_counter(34)));
++            console_log_counter("metric.vm.memory.created", static_cast<uint64_t>(sys_debug_counter(35)));
++            console_log_counter("metric.vm.memory.mapped", static_cast<uint64_t>(sys_debug_counter(36)));
++            console_log_counter("metric.vm.memory.unmapped", static_cast<uint64_t>(sys_debug_counter(37)));
++            console_log_counter("metric.vm.stage2.tables.created", static_cast<uint64_t>(sys_debug_counter(38)));
++            console_log_counter("metric.vm.stage2.pages.mapped", static_cast<uint64_t>(sys_debug_counter(39)));
++            console_log_counter("metric.vm.vcpus.created", static_cast<uint64_t>(sys_debug_counter(40)));
++            console_log_counter("metric.vm.vcpu.configured", static_cast<uint64_t>(sys_debug_counter(41)));
++            console_log_counter("metric.vm.vcpu.run.attempts", static_cast<uint64_t>(sys_debug_counter(42)));
++            console_log_counter("metric.vm.vcpu.run.notimpl", static_cast<uint64_t>(sys_debug_counter(43)));
++            console_log_counter("metric.vm.channels.created", static_cast<uint64_t>(sys_debug_counter(44)));
++            console_log_counter("metric.vm.errors", static_cast<uint64_t>(sys_debug_counter(45)));
++            console_log_counter("metric.el.current", static_cast<uint64_t>(sys_debug_counter(46)));
++            console_log_counter("metric.el2.available", static_cast<uint64_t>(sys_debug_counter(47)));
++            console_log_counter("metric.vhe.available", static_cast<uint64_t>(sys_debug_counter(48)));
++        }
+         console_log("dango ready\n");
+     }
+     // Driver services. Wire by service name so the manifest order is not part
+@@ -2286,7 +2188,6 @@
+             share_doorbell_to(*blk, blk_reply_db, "blk.reply.doorbell",
+                               RIGHT_NOTIFY);
+             publish_resume_service(*blk);
+-            run_blk_smoke(blk_req_ring, blk_reply_ring, blk_req_db, blk_reply_db);
+         }
+ 
+         if (service_started(fs)) {
+@@ -2313,8 +2214,8 @@
+             share_doorbell_to(*fs, blk_reply_db, "blk.reply.doorbell",
+                               RIGHT_WAIT);
+             publish_resume_service(*fs);
+-            run_fs_smoke(fs_cmd_ring, fs_reply_ring, fs_cmd_db, fs_reply_db);
+-            const uint32_t loaded = load_service_images_from_fs(fs_cmd_db, fs_reply_db);
++            const uint32_t loaded = load_service_images_from_fs(
++                fs_cmd_ring, fs_reply_ring, fs_cmd_db, fs_reply_db);
+             if (loaded > 0) {
+                 console_log("userland images loaded from AmeFS\n");
+                 console_log_counter("metric.userland.fs.images", loaded);
+@@ -2354,13 +2255,29 @@
+                                       RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
+             share_doorbell_to(*shell, svc_reply_db, "svc.reply.doorbell",
+                               RIGHT_WAIT);
+-            publish_resume_service(*shell);
++            // Publish BootInfo but DO NOT resume yet. The resume is deferred to
++            // after "system ready" so msh's banner and first prompt cannot race
++            // with the tail of the boot log on the framebuffer mirror.
++            boot_publish(*shell);
++            registry_sync(*shell);
+         }
+         console_log("drivers ready\n");
+     }
+ 
+     console_log("system ready\n");
+ 
++    // Resume msh last so the framebuffer terminal has finished drawing the boot
++    // log (in particular "system ready", which also unlocks the input gate in
++    // tty.fb0) before the shell starts producing output.
++    {
++        ServiceSpec* shell = find_service(g_rt.services, g_rt.service_count, "msh");
++        if (shell && shell->proc != kNullCap && shell->main_thread != kNullCap) {
++            require_ok(sys_thread_resume(shell->main_thread),
++                       "init: shell resume failed\n");
++            registry_sync(*shell);
++        }
++    }
++
+     while (true) {
+         bool progress = false;
+         if (handle_svc_control_requests()) progress = true;

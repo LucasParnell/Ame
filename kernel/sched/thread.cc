@@ -7,46 +7,152 @@
 
 #include "anko/sched.h"
 #include "anko/ipc.h"
+#include "anko/vm.h"
 #include "anko/mm.h"
+#include "anko/panic.h"
+#include "anko/smp.h"
+#include "anko/spinlock.h"
 #include "libk/string.h"
 
 namespace sched {
 
 static u32 g_next_tid = 1;
+static u32 g_terminating_threads;
+bool termination_pending() { return __atomic_load_n(&g_terminating_threads, __ATOMIC_ACQUIRE) != 0; }
 static u32 g_next_pid = 1;
 static constexpr u32 kMaxThreads = 128;
 static constexpr u32 kMaxProcs = 64;
+static constexpr u32 kSandboxPageQuota = 1024;
 static Thread* g_threads[kMaxThreads + 1];
 static Process* g_processes[kMaxProcs + 1];
+static bool g_tid_reserved[kMaxThreads + 1];
+static bool g_pid_reserved[kMaxProcs + 1];
+static u32 g_pid_generation[kMaxProcs + 1];
+static kernel::SpinLock g_lifecycle_lock{};
+struct ExitRecord { u64 identity; u64 supervisor; long status; bool ready; };
+// A PID remains unavailable while its exit record is unacknowledged. Therefore
+// every possible child has a reserved slot and simultaneous deaths cannot drop.
+static ExitRecord g_exits[kMaxProcs + 1];
+u64 process_identity(const Process& p) { return (static_cast<u64>(p.generation) << 32) | p.pid; }
+
+void record_exit(Process* p, long status) {
+    if (!p || !p->supervisor_identity) return;
+    kernel::LockGuard guard(g_lifecycle_lock);
+    auto& event = g_exits[p->pid];
+    if (!event.identity) event = {process_identity(*p), p->supervisor_identity, status, false};
+}
+
+bool poll_exit(Process& supervisor, u64* identity, long* status) {
+    kernel::LockGuard guard(g_lifecycle_lock);
+    for (auto& event : g_exits) {
+        if (!event.ready || event.supervisor != process_identity(supervisor)) continue;
+        *identity = event.identity; *status = event.status; event = {};
+        return true;
+    }
+    return false;
+}
+
+static u32 alloc_pid_locked() {
+    for (u32 scan = 0; scan < kMaxProcs; ++scan) {
+        const u32 pid = ((g_next_pid - 1 + scan) % kMaxProcs) + 1;
+        if (!g_processes[pid] && !g_pid_reserved[pid] && !g_exits[pid].identity) {
+            g_pid_reserved[pid] = true;
+            g_next_pid = (pid % kMaxProcs) + 1;
+            return pid;
+        }
+    }
+    return 0;
+}
+
+static u32 alloc_tid_locked() {
+    for (u32 scan = 0; scan < kMaxThreads; ++scan) {
+        const u32 tid = ((g_next_tid - 1 + scan) % kMaxThreads) + 1;
+        if (!g_threads[tid] && !g_tid_reserved[tid]) {
+            g_tid_reserved[tid] = true;
+            g_next_tid = (tid % kMaxThreads) + 1;
+            return tid;
+        }
+    }
+    return 0;
+}
+
+static void release_reserved_pid(u32 pid) {
+    kernel::LockGuard guard(g_lifecycle_lock);
+    if (pid <= kMaxProcs && !g_processes[pid]) g_pid_reserved[pid] = false;
+}
 
 static void register_process(Process* p) {
     if (!p) return;
-    if (p->pid <= kMaxProcs) g_processes[p->pid] = p;
+    if (p->pid <= kMaxProcs) {
+        g_processes[p->pid] = p;
+        g_pid_reserved[p->pid] = false;
+    }
 }
 
 static void unregister_process(Process* p) {
     if (!p) return;
-    if (p->pid <= kMaxProcs) g_processes[p->pid] = nullptr;
+    if (p->pid <= kMaxProcs) {
+        g_processes[p->pid] = nullptr;
+        g_pid_reserved[p->pid] = true;
+    }
 }
 
 static void register_thread(Thread* t) {
     if (!t) return;
-    if (t->tid <= kMaxThreads) g_threads[t->tid] = t;
+    if (t->tid <= kMaxThreads) {
+        g_threads[t->tid] = t;
+        g_tid_reserved[t->tid] = false;
+    }
 }
 
 static void unregister_thread(Thread* t) {
     if (!t) return;
-    if (t->tid <= kMaxThreads) g_threads[t->tid] = nullptr;
+    if (t->tid <= kMaxThreads) {
+        g_threads[t->tid] = nullptr;
+        g_tid_reserved[t->tid] = false;
+    }
+}
+
+static void destroy_process_storage(void* target) {
+    auto* p = static_cast<Process*>(target);
+    vm::destroy_owned_process(process_identity(*p));
+    VmSpace space{p->ttbr0, p->pid};
+    mm::vm_space_destroy(space);
+    if (p->arena_table) {
+        mm::arena_clear(*p->arena_table);
+        mm::slab_free(p->arena_table, sizeof(ArenaTable), alignof(ArenaTable));
+    }
+    if (p->cap_table) {
+        cap::clear(*p->cap_table);
+        mm::slab_free(p->cap_table, sizeof(CapTable), alignof(CapTable));
+    }
+    release_principal(p->principal_id);
+    release_reserved_pid(p->pid);
+    mm::slab_free(p, sizeof(Process), alignof(Process));
+}
+
+static void destroy_thread_storage(void* target) {
+    auto* t = static_cast<Thread*>(target);
+    auto* owner = t->owner_lifetime;
+    object::release(t->sched_context_lifetime);
+    mm::slab_free(t, sizeof(Thread), alignof(Thread));
+    object::release(owner);
 }
 
 Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
                       u64 arg0, u32 flags) {
-    if (g_next_tid > kMaxThreads) return nullptr;
-    Thread* t = static_cast<Thread*>(mm::heap_alloc(sizeof(Thread), alignof(Thread)));
+    Thread* t = static_cast<Thread*>(mm::slab_alloc(sizeof(Thread), alignof(Thread)));
     if (!t) return nullptr;
     libk::memset(t, 0, sizeof(*t));
 
-    t->tid = g_next_tid++;
+    {
+        kernel::LockGuard guard(g_lifecycle_lock);
+        t->tid = alloc_tid_locked();
+        if (t->tid == 0) {
+            mm::slab_free(t, sizeof(Thread), alignof(Thread));
+            return nullptr;
+        }
+    }
     t->pid = pid;
     t->state = (flags & THREAD_SUSPENDED) ? TS_SUSPENDED : TS_RUNNABLE_QUEUED;
     t->cpu_id = 0;
@@ -107,61 +213,131 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
     default:           t->latency_hint = LATENCY_NORMAL;      break;
     }
 
-    Process* p = find_process(pid);
-    if (p) {
-        t->principal_id = p->principal_id;
-        t->sched_context_id = 0;
-        t->sched_context = nullptr;
+    auto p = find_process(pid);
+    if (!p) {
+        kernel::LockGuard guard(g_lifecycle_lock);
+        g_tid_reserved[t->tid] = false;
+        mm::slab_free(t, sizeof(Thread), alignof(Thread));
+        return nullptr;
+    }
+    t->principal_id = p->principal_id;
+    t->owner = p;
+    t->owner_lifetime = p->lifetime;
+    object::retain(t->owner_lifetime);
+    t->lifetime = object::create(t, destroy_thread_storage);
+    if (!t->lifetime) {
+        object::release(t->owner_lifetime);
+        kernel::LockGuard guard(g_lifecycle_lock);
+        g_tid_reserved[t->tid] = false;
+        mm::slab_free(t, sizeof(Thread), alignof(Thread));
+        return nullptr;
+    }
+    {
+        kernel::LockGuard guard(g_lifecycle_lock);
+        if (p->dying) {
+            g_tid_reserved[t->tid] = false;
+            object::release(t->lifetime);
+            return nullptr;
+        }
         t->process_next = p->threads;
         p->threads = t;
-    } else {
-        t->principal_id = 0;
+        register_thread(t);
     }
-
-    register_thread(t);
     return t;
 }
 
 void thread_destroy(Thread* t) {
     if (!t) return;
-    // Unlink from owning process's thread list to prevent double-destroy.
-    if (Process* p = find_process(t->pid)) {
-        Thread** prev = &p->threads;
-        while (*prev && *prev != t) prev = &(*prev)->process_next;
-        if (*prev) *prev = t->process_next;
-    }
-    ipc::doorbell_clear_waiter(t);
-    dequeue_thread(t);  // remove from fair queue before marking dead
-    t->state = TS_DEAD;
-    unregister_thread(t);
+    u32 expected = 0;
+    if (__atomic_compare_exchange_n(&t->terminate_requested, &expected, 1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        __atomic_add_fetch(&g_terminating_threads, 1u, __ATOMIC_RELEASE);
+    smp::send_wake_ipi(t->cpu_id);
 }
 
+// Scheduler acknowledgement: no CPU queue, pending wake, trap frame or active
+// address space may reference this thread when it reaches this function.
+void finish_thread(Thread* t) {
+    if (!t) return;
+    ANKO_ASSERT(t != current() && !t->on_runqueue && !t->remote_next);
+    ipc::doorbell_clear_waiter(t);
+    if (t->reply_target) {
+        auto* peer = t->reply_target; t->reply_target = nullptr;
+        if (peer->reply_target == t) { peer->reply_target = nullptr; peer->tf.x[0] = static_cast<u64>(E_DEAD); wake(peer); }
+    }
+    t->state = TS_DEAD;
+    Process* owner = t->owner;
+    bool last = false;
+    {
+        kernel::LockGuard guard(g_lifecycle_lock);
+        Thread** link = &owner->threads;
+        while (*link && *link != t) link = &(*link)->process_next;
+        ANKO_ASSERT(*link == t);
+        *link = t->process_next;
+        unregister_thread(t);
+        last = !owner->threads;
+    }
+    sweep_process_caps(t);
+    if (last) process_destroy(owner);
+    __atomic_sub_fetch(&g_terminating_threads, 1u, __ATOMIC_RELEASE);
+    object::release(t->lifetime);
+}
+
+
 Process* process_create(PrincipalClass principal, u32 supervisor_pid) {
-    if (g_next_pid > kMaxProcs) return nullptr;
-    Process* p = static_cast<Process*>(mm::heap_alloc(sizeof(Process), alignof(Process)));
+    Process* p = static_cast<Process*>(mm::slab_alloc(sizeof(Process), alignof(Process)));
     if (!p) return nullptr;
     libk::memset(p, 0, sizeof(*p));
 
-    p->pid = g_next_pid++;
+    {
+        kernel::LockGuard guard(g_lifecycle_lock);
+        p->pid = alloc_pid_locked();
+        if (p->pid) {
+            if (++g_pid_generation[p->pid] == 0 || g_pid_generation[p->pid] >= 0x80000000) g_pid_generation[p->pid] = 1;
+            p->generation = g_pid_generation[p->pid];
+        }
+        if (p->pid == 0) {
+            mm::slab_free(p, sizeof(Process), alignof(Process));
+            return nullptr;
+        }
+    }
     p->principal_class = principal;
     p->supervisor_pid = supervisor_pid;
+    if (auto supervisor = find_process(supervisor_pid)) p->supervisor_identity = process_identity(*supervisor);
     if (principal == PRINCIPAL_KERNEL) {
         p->principal_id = 0;
     } else {
         p->principal_id = allocate_principal(principal,
                                              principal == PRINCIPAL_NATIVE_TRUSTED ? 2048 : NICE_0_WEIGHT,
                                              0, 0);
-        if (p->principal_id == 0) return nullptr;
+        if (p->principal_id == 0) {
+            release_reserved_pid(p->pid);
+            mm::slab_free(p, sizeof(Process), alignof(Process));
+            return nullptr;
+        }
     }
     p->next_stack_slot = 0;
     p->runtime_ns = 0;
+    p->page_count = 0;
+    p->page_quota = (principal == PRINCIPAL_NATIVE_SANDBOXED) ? kSandboxPageQuota : 0;
     p->runnable_threads = 0;
 
     VmSpace vm = mm::vm_space_create(p->pid);
+    if (!vm.pgd_phys) {
+        release_principal(p->principal_id);
+        release_reserved_pid(p->pid);
+        mm::slab_free(p, sizeof(Process), alignof(Process));
+        return nullptr;
+    }
     p->ttbr0 = vm.pgd_phys;
 
-    p->cap_table = static_cast<CapTable*>(mm::heap_alloc(sizeof(CapTable), alignof(CapTable)));
-    if (!p->cap_table) return nullptr;
+    p->cap_table = static_cast<CapTable*>(mm::slab_alloc(sizeof(CapTable), alignof(CapTable)));
+    if (!p->cap_table) {
+        mm::vm_space_destroy(vm);
+        release_principal(p->principal_id);
+        release_reserved_pid(p->pid);
+        mm::slab_free(p, sizeof(Process), alignof(Process));
+        return nullptr;
+    }
     libk::memset(p->cap_table, 0, sizeof(CapTable));
     p->cap_table->next_free = 0;
 
@@ -172,32 +348,61 @@ Process* process_create(PrincipalClass principal, u32 supervisor_pid) {
     }
 
     p->arena_table = static_cast<ArenaTable*>(
-        mm::heap_alloc(sizeof(ArenaTable), alignof(ArenaTable)));
-    if (!p->arena_table) return nullptr;
+        mm::slab_alloc(sizeof(ArenaTable), alignof(ArenaTable)));
+    if (!p->arena_table) {
+        mm::slab_free(p->cap_table, sizeof(CapTable), alignof(CapTable));
+        mm::vm_space_destroy(vm);
+        release_principal(p->principal_id);
+        release_reserved_pid(p->pid);
+        mm::slab_free(p, sizeof(Process), alignof(Process));
+        return nullptr;
+    }
     libk::memset(p->arena_table, 0, sizeof(ArenaTable));
 
-    register_process(p);
+    p->lifetime = object::create(p, destroy_process_storage);
+    if (!p->lifetime) {
+        release_reserved_pid(p->pid);
+        destroy_process_storage(p);
+        return nullptr;
+    }
+    {
+        kernel::LockGuard guard(g_lifecycle_lock);
+        register_process(p);
+    }
     return p;
 }
 
 void process_destroy(Process* p) {
     if (!p) return;
-
-    Thread* t = p->threads;
-    while (t) {
-        Thread* next = t->process_next;
-        thread_destroy(t);
-        t = next;
+    bool completed = false;
+    {
+        kernel::LockGuard guard(g_lifecycle_lock);
+        if (p->dying == 2) return;
+        __atomic_store_n(&p->dying, 1u, __ATOMIC_RELEASE);
+        for (Thread* t = p->threads; t; t = t->process_next) thread_destroy(t);
+        if (!p->threads) {
+            __atomic_store_n(&p->dying, 2u, __ATOMIC_RELEASE);
+            unregister_process(p);
+            // A dead supervisor cannot acknowledge children. Release their PID
+            // reservations instead of stranding them indefinitely.
+            for (auto& child : g_exits) if (child.supervisor == process_identity(*p)) child = {};
+            completed = true;
+        }
     }
-    p->threads = nullptr;
-
-    VmSpace vm{};
-    vm.pgd_phys = p->ttbr0;
-    vm.pid = p->pid;
-    mm::vm_space_destroy(vm);
-    p->ttbr0 = 0;
-
-    unregister_process(p);
+    if (completed) {
+        sweep_process_caps(p);
+        cap::clear(*p->cap_table);
+        {
+            kernel::LockGuard guard(g_lifecycle_lock);
+            auto& event = g_exits[p->pid];
+            if (event.identity) event.ready = true;
+        }
+        for (u32 tid = 1; tid <= kMaxThreads; ++tid) {
+            auto waiter = find_thread(tid);
+            if (waiter && process_identity(*waiter->owner) == p->supervisor_identity) wake(waiter);
+        }
+        object::release(p->lifetime);
+    }
 }
 
 void process_set_name(Process* p, const char* name) {
@@ -208,14 +413,51 @@ void process_set_name(Process* p, const char* name) {
     p->name[len] = '\0';
 }
 
-Thread* find_thread(u32 tid) {
-    if (tid == 0 || tid > kMaxThreads) return nullptr;
-    return g_threads[tid];
+bool process_charge_page(u32 pid) {
+    auto p = find_process(pid);
+    if (!p) return true;
+    u32 count = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
+    while (true) {
+        if (p->page_quota != 0 && count >= p->page_quota) return false;
+        const u32 next = count + 1;
+        if (__atomic_compare_exchange_n(&p->page_count, &count, next, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return true;
+        }
+    }
 }
 
-Process* find_process(u32 pid) {
-    if (pid == 0 || pid > kMaxProcs) return nullptr;
-    return g_processes[pid];
+void process_uncharge_page(u32 pid) {
+    auto p = find_process(pid);
+    if (!p) return;
+    u32 count = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
+    while (count != 0) {
+        const u32 next = count - 1;
+        if (__atomic_compare_exchange_n(&p->page_count, &count, next, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            return;
+        }
+    }
+}
+
+object::Ref<Thread> find_thread(u32 tid) {
+    kernel::LockGuard guard(g_lifecycle_lock);
+    if (!tid || tid > kMaxThreads) return nullptr;
+    return object::Ref<Thread>(g_threads[tid]);
+}
+
+object::Ref<Process> find_process(u32 pid) {
+    kernel::LockGuard guard(g_lifecycle_lock);
+    if (!pid || pid > kMaxProcs) return nullptr;
+    return object::Ref<Process>(g_processes[pid]);
+}
+
+void sweep_process_caps(void* target) {
+    if (!target) return;
+    for (u32 i = 1; i <= kMaxProcs; ++i) {
+        auto p = find_process(i);
+        if (p && p->cap_table) cap::revoke_target(*p->cap_table, target);
+    }
 }
 
 } // namespace sched

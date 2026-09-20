@@ -1,0 +1,388 @@
+// kernel/platform/probe.cc — DTB hardware discovery.
+//
+// platform::probe() walks the DTB with fdt::walk() and fills g_hw with
+// discovered hardware addresses and device presence flags.
+// Falls back to board_fallback.cc constants when DTB is absent or corrupt.
+
+#include "anko/hw_info.h"
+#include "anko/fdt.h"
+#include "libk/string.h"
+
+extern "C" u64 g_boot_el;
+
+namespace platform {
+
+namespace {
+
+static bool starts_with(const char* s, const char* prefix) {
+    while (*prefix) {
+        if (*s++ != *prefix++) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Check whether a FDT compatible property contains target as one of its
+// NUL-delimited strings.
+static bool compat_has(const u8* data, u32 len, const char* target) {
+    const char* s = reinterpret_cast<const char*>(data);
+    u32 off = 0;
+    while (off < len) {
+        u32 end = off;
+        while (end < len && s[end]) {
+            ++end;
+        }
+        if (end == len) {
+            return false;
+        }
+        if (libk::strcmp(s + off, target) == 0) {
+            return true;
+        }
+        while (off < len && s[off]) {
+            ++off;
+        }
+        ++off; // skip NUL
+    }
+    return false;
+}
+
+// Read a big-endian physical address from the first 4 or 8 bytes of data.
+// #address-cells=2 (standard for AArch64 boards): two BE32 words → 64-bit addr.
+static PhysAddr read_phys_be(const u8* p, u32 avail) {
+    if (avail >= 8) {
+        return (PhysAddr(libk::be32(p)) << 32) | PhysAddr(libk::be32(p + 4));
+    }
+    if (avail >= 4) {
+        return PhysAddr(libk::be32(p));
+    }
+    return 0;
+}
+
+constexpr u32 kMaxDepth = 8;
+constexpr u32 kRegMax = 64; // enough for two address/size pairs (GIC)
+
+// Node kind tags.
+constexpr u8 kNone = 0;
+constexpr u8 kMemory = 1;
+constexpr u8 kPL011 = 2;
+constexpr u8 kTegra = 3;
+constexpr u8 kGIC = 4;
+constexpr u8 kFwCfg = 5;
+constexpr u8 kVirtio = 6;
+constexpr u8 kPCIe = 7;
+constexpr u8 kSimpleFb = 8;
+
+struct NodeSlot {
+    u8 kind;
+    bool status_ok; // false if status property was "disabled"
+    alignas(4) u8 reg[kRegMax];
+    u32 reg_len;
+    u32 fb_width;  // kSimpleFb: width in pixels
+    u32 fb_height; // kSimpleFb: height in lines
+    char path[256];
+};
+
+struct ProbeCtx {
+    HwInfo* hw;
+    NodeSlot slots[kMaxDepth];
+    char console_path[256];
+    bool console_found;
+};
+
+static bool probe_begin(void* v, const char* name, u32 depth) {
+    auto& ctx = *static_cast<ProbeCtx*>(v);
+    if (depth >= kMaxDepth) {
+        return true;
+    }
+    auto& s = ctx.slots[depth];
+    // Detect /memory node by name prefix (e.g. "memory@40000000").
+    s.kind = starts_with(name, "memory") ? kMemory : kNone;
+    s.status_ok = true;
+    s.reg_len = 0;
+    s.fb_width = 0;
+    s.fb_height = 0;
+    u32 pos = 0;
+    if (depth) {
+        const char* parent = ctx.slots[depth - 1].path;
+        while (parent[pos] && pos + 1 < sizeof(s.path)) {
+            s.path[pos] = parent[pos];
+            ++pos;
+        }
+        if (pos + 1 < sizeof(s.path)) {
+            s.path[pos++] = '/';
+        }
+    }
+    for (u32 i = 0; name[i] && pos + 1 < sizeof(s.path); ++i) {
+        s.path[pos++] = name[i];
+    }
+    s.path[pos] = 0;
+    return true;
+}
+
+static void probe_end(void* v, u32 depth) {
+    auto& ctx = *static_cast<ProbeCtx*>(v);
+    if (depth >= kMaxDepth) {
+        return;
+    }
+    const auto& s = ctx.slots[depth];
+    if (!s.status_ok) {
+        return;
+    }
+    HwInfo& hw = *ctx.hw;
+
+    switch (s.kind) {
+    case kMemory:
+        // reg: [addr_hi addr_lo size_hi size_lo] (2×2 BE32 words)
+        if (s.reg_len >= 16) {
+            hw.ram_base = read_phys_be(s.reg, s.reg_len);
+            hw.ram_size = read_phys_be(s.reg + 8, s.reg_len >= 16 ? 8 : 0);
+        }
+        break;
+    case kPL011:
+        if (s.reg_len >= 8 && (!ctx.console_found) &&
+            (!ctx.console_path[0] || libk::strcmp(s.path, ctx.console_path) == 0)) {
+            ctx.console_found = true;
+            hw.console_kind = ConsoleKind::PL011;
+            hw.console_base = read_phys_be(s.reg, s.reg_len);
+        }
+        break;
+    case kTegra:
+        if (s.reg_len >= 8 && (!ctx.console_found) &&
+            (!ctx.console_path[0] || libk::strcmp(s.path, ctx.console_path) == 0)) {
+            ctx.console_found = true;
+            hw.console_kind = ConsoleKind::Tegra16550;
+            hw.console_base = read_phys_be(s.reg, s.reg_len);
+        }
+        break;
+    case kGIC:
+        // reg: [dist_addr_hi dist_addr_lo dist_size_hi dist_size_lo
+        //       cpu_addr_hi  cpu_addr_lo  cpu_size_hi  cpu_size_lo]
+        hw.intc_kind = IntcKind::GICv2;
+        if (s.reg_len >= 8) {
+            hw.gic_dist_base = read_phys_be(s.reg, s.reg_len);
+        }
+        if (s.reg_len >= 32) {
+            hw.gic_cpu_base = read_phys_be(s.reg + 16, 8);
+        }
+        break;
+    case kFwCfg:
+        if (s.reg_len >= 8) {
+            hw.has_fwcfg = true;
+            hw.fwcfg_base = read_phys_be(s.reg, s.reg_len);
+        }
+        break;
+    case kVirtio:
+        // Record only the first virtio-mmio instance.
+        if (!hw.has_virtio_blk && s.reg_len >= 8) {
+            hw.has_virtio_blk = true;
+            hw.virtio_base = read_phys_be(s.reg, s.reg_len);
+        }
+        break;
+    case kPCIe:
+        if (s.reg_len >= 8) {
+            hw.has_pcie = true;
+            hw.ecam_base = read_phys_be(s.reg, s.reg_len);
+        }
+        break;
+    case kSimpleFb:
+        // DTB simple-framebuffer: reg=[base size], width, height properties.
+        // U-Boot adds this under /chosen/framebuffer@<addr> when video is on.
+        if (s.reg_len >= 8 && s.fb_width > 0 && s.fb_height > 0 && !hw.has_t210_dc) {
+            const PhysAddr fb_base = read_phys_be(s.reg, s.reg_len);
+            if (fb_base != 0) {
+                hw.has_t210_dc = true;
+                hw.t210_dc_fb_phys = fb_base;
+                hw.t210_dc_fb_width = s.fb_width;
+                hw.t210_dc_fb_height = s.fb_height;
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static void probe_prop(void* v, const char* name, const u8* data, u32 len, u32 depth) {
+    auto& ctx = *static_cast<ProbeCtx*>(v);
+    if (depth >= kMaxDepth) {
+        return;
+    }
+    auto& s = ctx.slots[depth];
+
+    if (libk::strcmp(name, "compatible") == 0) {
+        u8 new_kind = kNone;
+        if (compat_has(data, len, "arm,pl011")) {
+            new_kind = kPL011;
+        } else if (compat_has(data, len, "nvidia,tegra210-uart") ||
+                   compat_has(data, len, "nvidia,tegra20-uart")) {
+            new_kind = kTegra;
+        } else if (compat_has(data, len, "arm,gic-400") ||
+                   compat_has(data, len, "arm,cortex-a15-gic") ||
+                   compat_has(data, len, "arm,gic-v2")) {
+            new_kind = kGIC;
+        } else if (compat_has(data, len, "qemu,fw-cfg-mmio")) {
+            new_kind = kFwCfg;
+        } else if (compat_has(data, len, "virtio,mmio")) {
+            new_kind = kVirtio;
+        } else if (compat_has(data, len, "pci-host-ecam-generic")) {
+            new_kind = kPCIe;
+        } else if (compat_has(data, len, "simple-framebuffer")) {
+            new_kind = kSimpleFb;
+        }
+        // Don't overwrite kMemory (set from name in begin_node).
+        if (s.kind != kMemory) {
+            s.kind = new_kind;
+        }
+    } else if (libk::strcmp(name, "reg") == 0) {
+        u32 copy = len < kRegMax ? len : kRegMax;
+        libk::memcpy(s.reg, data, copy);
+        s.reg_len = copy;
+    } else if (libk::strcmp(name, "width") == 0 && len >= 4) {
+        s.fb_width = libk::be32(data);
+    } else if (libk::strcmp(name, "height") == 0 && len >= 4) {
+        s.fb_height = libk::be32(data);
+    } else if (libk::strcmp(name, "status") == 0 && len > 0) {
+        const char* sv = reinterpret_cast<const char*>(data);
+        s.status_ok = ((len == 5 && libk::memcmp(sv, "okay", 5) == 0) ||
+                       (len == 3 && libk::memcmp(sv, "ok", 3) == 0));
+    }
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// TegraDC0 display register probe.
+//
+// Called when console_kind == Tegra16550, with the MMU off so physical
+// addresses are directly accessible.
+//
+// Register map (Tegra X1 TRM §24):  word offset × 4 = byte offset
+//   DC_CMD_DISPLAY_WINDOW_HEADER  word 0x042 = byte 0x108
+//     bit 4 = WINDOW_A_SELECT; write to bank window-A registers.
+//   DC_WIN_SIZE                   word 0x707 = byte 0x1C1C
+//     [12:0]  = H_SIZE (width in pixels)
+//     [28:16] = V_SIZE (height in lines)
+//   DC_WINBUF_START_ADDR          word 0x800 = byte 0x2000
+//     Physical address of the active framebuffer (32-bit).
+//
+// Fallback: Hekate Erista always places its FB at 0xC0000000, 1280×720.
+// If the DC registers read zero (clock gated by TF-A or U-Boot reset),
+// we fall through to the hard-coded address so the screen still shows output.
+// ---------------------------------------------------------------------------
+static void probe_t210_dc(HwInfo& hw) {
+    // Skip if a simplefb DTB node already gave us the address.
+    if (hw.has_t210_dc) {
+        return;
+    }
+
+    constexpr PhysAddr kDC0Base = 0x5420'0000ull;
+    constexpr PhysAddr kHekateFbBase = 0xC000'0000ull; // Hekate Erista constant
+    constexpr u32 kHekateWidth = 1280;
+    constexpr u32 kHekateHeight = 720;
+
+    constexpr u32 kWinHeaderOff = 0x108u; // DC_CMD_DISPLAY_WINDOW_HEADER
+    constexpr u32 kWinASelect = 1u << 4;
+    constexpr u32 kWinSizeOff = 0x1C1Cu; // DC_WIN_SIZE
+    constexpr u32 kWinBufOff = 0x2000u;  // DC_WINBUF_START_ADDR
+
+    volatile u32* dc = reinterpret_cast<volatile u32*>(kDC0Base);
+
+    // Select Window A so banked registers reflect the active window.
+    dc[kWinHeaderOff / 4] = kWinASelect;
+    asm volatile("dsb sy" ::: "memory");
+
+    const u32 win_size = dc[kWinSizeOff / 4];
+    const u32 dc_width = win_size & 0x1FFFu;
+    const u32 dc_height = (win_size >> 16) & 0x1FFFu;
+    const u32 fb_lo = dc[kWinBufOff / 4];
+
+    // Use DC-read values if plausible; fall back to Hekate constants otherwise.
+    const PhysAddr fb_phys = (fb_lo != 0) ? PhysAddr{fb_lo} : kHekateFbBase;
+    const u32 width = (dc_width > 0 && dc_width <= 4096) ? dc_width : kHekateWidth;
+    const u32 height = (dc_height > 0 && dc_height <= 4096) ? dc_height : kHekateHeight;
+
+    hw.has_t210_dc = true;
+    hw.t210_dc_fb_phys = fb_phys;
+    hw.t210_dc_fb_width = width;
+    hw.t210_dc_fb_height = height;
+
+    // Paint the ENTIRE screen bright green: "platform::probe() reached".
+    // Entry.S already painted red (first sign of life), so green here means
+    // we got through EL drop, BSS clear, init_array, and into C++.
+    volatile u32* fb = reinterpret_cast<volatile u32*>(fb_phys);
+    const u64 pixels = static_cast<u64>(width) * static_cast<u64>(height);
+    for (u64 i = 0; i < pixels; ++i) {
+        fb[i] = 0x0000FF00u; // green XRGB
+    }
+    asm volatile("dsb sy" ::: "memory");
+}
+
+void probe(PhysAddr dtb_phys) {
+    // Always copy boot_el from entry.S — it's runtime state.
+    g_hw.boot_el = static_cast<u32>(g_boot_el);
+
+    const auto* dtb = reinterpret_cast<const u8*>(dtb_phys);
+    const bool valid_dtb = dtb_phys && !(dtb_phys & 3) && libk::be32(dtb) == fdt::kMagic;
+    if (valid_dtb) {
+        struct Selection {
+            const char* node;
+            const char* prop;
+            bool inside;
+            char value[256];
+        } selection{"chosen", "stdout-path", false, {}};
+        auto begin = [](void* v, const char* n, u32 depth) {
+            auto& c = *static_cast<Selection*>(v);
+            if (depth == 1) {
+                c.inside = libk::strcmp(n, c.node) == 0;
+            }
+            return true;
+        };
+        auto end = [](void* v, u32 depth) {
+            if (depth == 1) {
+                static_cast<Selection*>(v)->inside = false;
+            }
+        };
+        auto prop = [](void* v, const char* n, const u8* data, u32 len, u32 depth) {
+            auto& c = *static_cast<Selection*>(v);
+            if (!c.inside || depth != 1 || libk::strcmp(n, c.prop) != 0 || !len ||
+                len > sizeof(c.value) || data[len - 1]) {
+                return;
+            }
+            u32 i = 0;
+            for (; i + 1 < len && data[i] && data[i] != ':'; ++i) {
+                c.value[i] = data[i];
+            }
+            c.value[i] = 0;
+        };
+        if (!fdt::walk(dtb, {&selection, begin, end, prop})) {
+            return;
+        }
+        if (selection.value[0] && selection.value[0] != '/') {
+            char alias[256];
+            libk::memcpy(alias, selection.value, sizeof(alias));
+            selection.node = "aliases";
+            selection.prop = alias;
+            selection.value[0] = 0;
+            if (!fdt::walk(dtb, {&selection, begin, end, prop})) {
+                return;
+            }
+        }
+        HwInfo discovered = g_hw;
+        ProbeCtx ctx{};
+        ctx.hw = &discovered;
+        libk::memcpy(ctx.console_path, selection.value, sizeof(ctx.console_path));
+        if (fdt::walk(dtb, {&ctx, probe_begin, probe_end, probe_prop})) {
+            g_hw = discovered;
+        }
+    }
+
+    // T210-specific: read TegraDC0 display registers while MMU is still off.
+    // Run even without a valid DTB because the Switch fallback already selects
+    // Tegra16550, and the LCD is our only practical no-UART progress signal.
+    if (g_hw.console_kind == ConsoleKind::Tegra16550) {
+        probe_t210_dc(g_hw);
+    }
+}
+
+} // namespace platform

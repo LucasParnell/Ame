@@ -11,24 +11,15 @@
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/console_config.h"
+#include "mochi/boot.h"
+#include "mochi/terminal.h"
 
 constexpr uint32_t kLogRingOrder    = 6;
-constexpr int64_t  kCapTypeArena    = 6;
-constexpr int64_t  kCapTypeSharedRing = 4;
-constexpr int64_t  kCapTypeDoorbell = 5;
-constexpr int64_t  kCapTypeUart     = 9;
 
-constexpr CapHandle cap_slot(uint32_t idx) {
-    return (static_cast<CapHandle>(1) << 32) | idx;
-}
-
-constexpr CapHandle kCapConfig = cap_slot(0);
-
-constexpr uint32_t RIGHT_READ  = 1u << 0;
-constexpr uint32_t RIGHT_WRITE = 1u << 1;
 constexpr uint64_t kVaConsoleConfig = 0x3000'0000ull;
 constexpr uint64_t kVaUart          = 0x2000'0000ull;
 constexpr uint64_t kVaLogRingBase   = 0x2001'0000ull;
+constexpr uint64_t kVaTtyMirrorRing = 0x2040'0000ull;
 
 // ---- UART helpers ----------------------------------------------------------
 
@@ -66,20 +57,30 @@ static RingPage* log_ring_at(uint32_t index) {
 
 // ---- Ring drain / sleep ----------------------------------------------------
 
-static bool drain_one(volatile uint32_t* uart, RingPage* ring) {
+static void mirror_bytes(const mochi::terminal::OutputSink& mirror,
+                         const char* data, uint32_t len) {
+    if (!data || len == 0) return;
+    (void)mirror.try_write_bytes(data, len);
+}
+
+static bool drain_one(volatile uint32_t* uart, RingPage* ring,
+                      const mochi::terminal::OutputSink& mirror) {
     bool any = false;
     RingSlot slot{};
     while (ring_pop(ring, kLogRingOrder, &slot)) {
-        uart_puts(uart, reinterpret_cast<const char*>(slot.payload), slot.length);
+        const char* bytes = reinterpret_cast<const char*>(slot.payload);
+        uart_puts(uart, bytes, slot.length);
+        mirror_bytes(mirror, bytes, slot.length);
         any = true;
     }
     return any;
 }
 
-static bool drain_all(volatile uint32_t* uart, uint32_t ring_count) {
+static bool drain_all(volatile uint32_t* uart, uint32_t ring_count,
+                      const mochi::terminal::OutputSink& mirror) {
     bool any = false;
     for (uint32_t i = 0; i < ring_count; ++i) {
-        any = drain_one(uart, log_ring_at(i)) || any;
+        any = drain_one(uart, log_ring_at(i), mirror) || any;
     }
     return any;
 }
@@ -120,12 +121,17 @@ static void uart_log(volatile uint32_t* uart, mochi::LogLevel level,
 // ---- Entry -----------------------------------------------------------------
 
 extern "C" [[noreturn]] void _start() {
-    // Map config page (granted by init as slot 0).
-    auto* cfg = wait_map<ConsoleBootConfig>(kCapConfig, kCapTypeArena,
+    // Slot 0 is the generic BootInfo page. The console-specific config is a
+    // named arena entry inside it, so adding terminal channels later does not
+    // require fixed cap-slot changes in this service.
+    const MxBootInfo* boot = mochi::boot::map();
+    const CapHandle config_cap = mochi::boot::require_handle(boot, "console.config");
+
+    auto* cfg = wait_map<ConsoleBootConfig>(config_cap, kCapTypeArena,
                                             kVaConsoleConfig,
                                             RIGHT_READ | RIGHT_WRITE);
 
-    // Wait for init to finish filling the config.
+    // Wait for init to finish filling the service-specific config.
     while (__atomic_load_n(&cfg->magic, __ATOMIC_ACQUIRE) != ConsoleBootConfig::kMagic) {
         sys_yield();
     }
@@ -153,18 +159,32 @@ extern "C" [[noreturn]] void _start() {
                                  RIGHT_READ | RIGHT_WRITE);
     }
 
-    (void)drain_all(uart, mapped);
+    mochi::terminal::OutputSink tty_mirror{};
+    tty_mirror.order = kLogRingOrder;
+    const MxBootEntry* mirror_entry =
+        mochi::boot::find_type(boot, "tty.mirror.ring", MX_BOOT_ENTRY_RING);
+    if (mirror_entry && mirror_entry->handle != kNullCap &&
+        sys_map_page(mirror_entry->handle, kVaTtyMirrorRing,
+                     RIGHT_READ | RIGHT_WRITE) == 0) {
+        tty_mirror.ring = reinterpret_cast<RingPage*>(kVaTtyMirrorRing);
+        tty_mirror.order = mirror_entry->aux0
+            ? static_cast<uint32_t>(mirror_entry->aux0)
+            : kLogRingOrder;
+        tty_mirror.doorbell = mochi::boot::handle(boot, "tty.mirror.doorbell");
+    }
+
+    (void)drain_all(uart, mapped, tty_mirror);
     uart_log(uart, mochi::LogLevel::Info, "io.console", "ready");
 
     while (true) {
-        if (drain_all(uart, mapped)) {
+        if (drain_all(uart, mapped, tty_mirror)) {
             continue;
         }
 
         const uint64_t counter = sys_doorbell_read(log_doorbell);
         publish_sleep(counter, mapped);
 
-        if (drain_all(uart, mapped)) {
+        if (drain_all(uart, mapped, tty_mirror)) {
             clear_sleep(mapped);
             continue;
         }

@@ -283,8 +283,9 @@ el2_lower_sync:
     orr     x0, x0, #(1 << 3)
     orr     x0, x0, #(1 << 4)
     orr     x0, x0, #(1 << 5)
-    // Trap guest WFI/WFE so the host VMM can account idle exits and advance
-    // virtual timer/IRQ state from the vCPU run loop.
+    // Trap guest WFI/WFE back to the host.  The virtual-timer poll path is
+    // slower than sleeping on the hardware timer, but it is deterministic
+    // during bring-up and avoids losing the guest after early console init.
     orr     x0, x0, #(1 << 13)   // TWI: trap guest WFI
     orr     x0, x0, #(1 << 14)   // TWE: trap guest WFE
     orr     x0, x0, #(1 << 19)

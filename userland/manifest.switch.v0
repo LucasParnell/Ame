@@ -1,0 +1,4 @@
+nameservice nameservice native_trusted never -
+io.console io.console native_trusted always uart
+io.framebuffer io.framebuffer native_trusted always mmio
+tty.fb0 tty.fb0 native_sandboxed always -

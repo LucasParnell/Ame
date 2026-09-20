@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/run-qemu.sh — boot the anko kernel under QEMU virt.
+# scripts/run-qemu.sh — boot Ame under QEMU virt.
 #
 # Usage:
 #   scripts/run-qemu.sh           # run
@@ -15,14 +15,62 @@
 #   - cmake build complete:
 #       cmake -B build -DCMAKE_TOOLCHAIN_FILE=scripts/build/toolchain-aarch64.cmake
 #       cmake --build build
+#       cmake --build build --target ame_disk
 #   - qemu-system-aarch64 in PATH
+#   - U-Boot for qemu_arm64 in UBOOT_BIN, or installed in a common distro path
+#   - Raw U-Boot commands are generated in build/boot.raw.cmd; this disk does
+#     not contain a FAT/extlinux boot partition.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KERNEL="${ROOT}/build/kernel/anko"
-INITRD="${ROOT}/build/initrd.tar"
-GUEST_LOG="${DANGO_GUEST_LOG:-${ROOT}/build/dango-guest.log}"
+BUILD_DIR="${AME_BUILD_DIR:-${ROOT}/build}"
+KERNEL="${BUILD_DIR}/kernel/anko.bin"
+INITRD="${BUILD_DIR}/system.mxb"
+SYSTEM_BUNDLE="${BUILD_DIR}/system.mxb"
+GUEST_LOG="${DANGO_GUEST_LOG:-${BUILD_DIR}/dango-guest.log}"
+FS_DISK="${AME_FS_DISK:-${BUILD_DIR}/fs.img}"
+AME_DISK="${AME_DISK:-${BUILD_DIR}/ame-disk.img}"
+FS_DISK_SIZE="${AME_FS_DISK_SIZE:-128M}"
+
+find_uboot() {
+    if [[ -n "${UBOOT_BIN:-}" ]]; then
+        printf '%s\n' "${UBOOT_BIN}"
+        return 0
+    fi
+    local candidate
+    for candidate in \
+        "${BUILD_DIR}/u-boot-qemu-arm64.bin" \
+        "${ROOT}/build/u-boot-qemu-arm64.bin" \
+        /usr/share/u-boot/qemu_arm64/u-boot.bin \
+        /usr/share/u-boot/qemu-arm64/u-boot.bin \
+        /usr/lib/u-boot/qemu_arm64/u-boot.bin \
+        /usr/lib/u-boot/qemu-arm64/u-boot.bin
+    do
+        if [[ -f "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+require_mxb_object() {
+    local bundle="$1" object="$2"
+    if ! python3 "${ROOT}/scripts/mx/mxpack.py" list "${bundle}" | grep -qx "${object}"; then
+        echo "error: ${bundle} does not contain ${object}" >&2
+        echo "hint: configure with -DDANGO_BUILD_LINUX_ARTIFACTS=ON or set DANGO_LINUX_ARTIFACT_DIR=/path/to/dango-linux" >&2
+        exit 1
+    fi
+}
+
+require_dango_linux_payload() {
+    local bundle="$1"
+    require_mxb_object "${bundle}" linux/manifest.toml
+    require_mxb_object "${bundle}" linux/Image
+    require_mxb_object "${bundle}" linux/initramfs.cpio
+    require_mxb_object "${bundle}" linux/dango-linux.dtb
+}
 
 open_guest_terminal() {
     local log="$1"
@@ -84,41 +132,105 @@ prepare_guest_serial() {
     printf 'file:%s\n' "${GUEST_LOG}"
 }
 
-if [[ ! -f "${KERNEL}" ]]; then
-    echo "error: ${KERNEL} not found — run cmake build first" >&2
-    exit 1
-fi
-
-if [[ ! -f "${INITRD}" ]]; then
-    echo "error: ${INITRD} not found — run cmake build first" >&2
-    exit 1
-fi
-
-if [[ "${DANGO_REQUIRE_LINUX:-0}" == "1" ]]; then
-    if ! tar -tf "${INITRD}" | grep -qx 'linux/Image'; then
-        echo "error: initrd.tar does not contain linux/Image" >&2
-        echo "Configure with -DDANGO_BUILD_LINUX_ARTIFACTS=ON or -DDANGO_LINUX_ARTIFACT_DIR=/path/to/build/dango-linux" >&2
-        exit 1
-    fi
-    if ! tar -tf "${INITRD}" | grep -qx 'linux/initramfs.cpio'; then
-        echo "error: initrd.tar does not contain linux/initramfs.cpio" >&2
-        exit 1
-    fi
-fi
-
 GUEST_SERIAL="$(prepare_guest_serial)"
 
-QEMU_ARGS=(
-    -machine virt,virtualization=on,gic-version=2
-    -cpu cortex-a57
-    -smp 2
-    -m "${QEMU_MEM:-512M}"
-    -nographic
-    -serial mon:stdio
-    -serial "${GUEST_SERIAL}"
-    -kernel "${KERNEL}"
-    -initrd "${INITRD}"
-)
+if [[ "${AME_BOOT_MODE:-disk}" == "direct" ]]; then
+    if [[ ! -f "${KERNEL}" ]]; then
+        echo "error: ${KERNEL} not found — run cmake build first" >&2
+        exit 1
+    fi
+
+    if [[ ! -f "${INITRD}" ]]; then
+        echo "error: ${INITRD} not found — run cmake build first" >&2
+        exit 1
+    fi
+
+    if [[ "${DANGO_REQUIRE_LINUX:-0}" == "1" ]]; then
+        if [[ "${INITRD}" == *.mxb ]]; then
+            require_dango_linux_payload "${INITRD}"
+        else
+            for object in linux/manifest.toml linux/Image linux/initramfs.cpio linux/dango-linux.dtb; do
+                if ! tar -tf "${INITRD}" | grep -qx "${object}"; then
+                    echo "error: ${INITRD} does not contain ${object}" >&2
+                    exit 1
+                fi
+            done
+        fi
+    fi
+
+    mkdir -p "$(dirname "${FS_DISK}")"
+    if [[ "${AME_INSTALL_VFS:-0}" == "1" ]]; then
+        AME_BUILD_DIR="${BUILD_DIR}" \
+        AME_FS_DISK="${FS_DISK}" \
+        AME_FS_DISK_SIZE="${FS_DISK_SIZE}" \
+        "${ROOT}/scripts/install-ame-vfs.sh"
+    elif [[ ! -f "${FS_DISK}" ]]; then
+        truncate -s "${FS_DISK_SIZE}" "${FS_DISK}"
+    fi
+
+    QEMU_ARGS=(
+        -machine virt,virtualization=on,gic-version=2
+        -cpu cortex-a57
+        -smp "${QEMU_SMP:-2}"
+        -m "${QEMU_MEM:-512M}"
+        -device ramfb
+        -drive if=none,file="${FS_DISK}",format=raw,id=fsdisk
+        -device virtio-blk-device,drive=fsdisk
+        -device qemu-xhci,id=xhci
+        -device usb-kbd,bus=xhci.0
+        -device usb-mouse,bus=xhci.0
+        -display "${QEMU_DISPLAY:-sdl}"
+        -serial mon:stdio
+        -serial "${GUEST_SERIAL}"
+        -kernel "${KERNEL}"
+        -initrd "${INITRD}"
+    )
+else
+    if [[ "${AME_BUILD_DISK:-0}" == "1" || ! -f "${AME_DISK}" ]]; then
+        AME_BUILD_DIR="${BUILD_DIR}" \
+        AME_DISK="${AME_DISK}" \
+        "${ROOT}/scripts/build-ame-disk.sh"
+    fi
+    if [[ ! -f "${AME_DISK}" ]]; then
+        echo "error: ${AME_DISK} not found — run cmake --build ${BUILD_DIR} --target ame_disk" >&2
+        exit 1
+    fi
+    UBOOT="$(find_uboot || true)"
+    if [[ -z "${UBOOT}" ]]; then
+        echo "error: U-Boot for qemu_arm64 not found; set UBOOT_BIN=/path/to/u-boot.bin" >&2
+        echo "hint: set AME_BOOT_MODE=direct to use the old -kernel/-initrd development path" >&2
+        exit 1
+    fi
+    if [[ "${DANGO_REQUIRE_LINUX:-0}" == "1" ]]; then
+        require_file_bundle="${SYSTEM_BUNDLE}"
+        if [[ ! -f "${require_file_bundle}" ]]; then
+            echo "error: ${require_file_bundle} not found — run cmake --build ${BUILD_DIR} --target mochi_system" >&2
+            exit 1
+        fi
+        require_dango_linux_payload "${require_file_bundle}"
+    fi
+
+    if [[ -f "${BUILD_DIR}/boot.raw.cmd" ]]; then
+        echo "raw U-Boot boot commands: ${BUILD_DIR}/boot.raw.cmd" >&2
+    fi
+
+    QEMU_ARGS=(
+        -machine virt,virtualization=on,gic-version=2
+        -cpu cortex-a57
+        -smp "${QEMU_SMP:-2}"
+        -m "${QEMU_MEM:-512M}"
+        -device ramfb
+        -drive if=none,file="${AME_DISK}",format=raw,id=amedisk
+        -device virtio-blk-device,drive=amedisk
+        -device qemu-xhci,id=xhci
+        -device usb-kbd,bus=xhci.0
+        -device usb-mouse,bus=xhci.0
+        -display "${QEMU_DISPLAY:-sdl}"
+        -serial mon:stdio
+        -serial "${GUEST_SERIAL}"
+        -bios "${UBOOT}"
+    )
+fi
 
 if [[ "${1:-}" == "debug" ]]; then
     QEMU_ARGS+=(-S -gdb tcp::1234)

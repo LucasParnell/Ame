@@ -145,6 +145,8 @@ struct Stage2AddressSpace {
 };
 
 struct VmMemory {
+    object::Record* lifetime;
+    object::Record* owner_lifetime;
     u32 mem_id;
     u32 owner_vm_id;
     PhysAddr host_phys_base;
@@ -291,6 +293,7 @@ static_assert(__builtin_offsetof(El2RunState, host_ttbr1) == 520);
 static_assert(__builtin_offsetof(El2RunState, guest_sp_el0) == 592);
 static_assert(__builtin_offsetof(El2RunState, guest_afsr1_el1) == 696);
 struct VcpuSched {
+    object::Record* context_lifetime;
     u32 sched_context_id;
     u32 runner_tid;
 
@@ -318,6 +321,8 @@ struct VcpuSched {
 static_assert(__is_trivially_constructible(VcpuSched));
 
 struct Vcpu {
+    object::Record* lifetime;
+    object::Record* owner_lifetime;
     u32 vcpu_id;
     u32 owner_vm_id;
     VcpuState state;
@@ -340,6 +345,8 @@ struct Vcpu {
 };
 
 struct VmChannel {
+    object::Record* lifetime;
+    object::Record* owner_lifetime;
     u32 channel_id;
     u32 owner_vm_id;
     Ring* host_to_guest;
@@ -355,6 +362,8 @@ struct VmChannel {
 };
 
 struct Vm {
+    object::Record* lifetime;
+    u64 owner_identity;
     u32 vm_id;
     u32 owner_pid;
     VmState state;
@@ -434,15 +443,30 @@ u64 debug_counter(u64 id);
 void note_error();
 void metric_inc(VmDebugCounter id);
 
-CapEntry* require_cap(Process& caller, CapHandle handle, CapType type,
+// Serialize VM mutation and guest entry. Host timer exits bound guest runs.
+class CallGuard {
+    bool active_;
+    u64 irq_;
+public:
+    explicit CallGuard(bool active);
+    ~CallGuard();
+    CallGuard(const CallGuard&) = delete;
+};
+void destroy_owned_process(u64 identity);
+void dispose_memory(void* target);
+void dispose_vcpu(void* target);
+void dispose_channel(void* target);
+
+cap::Ref require_cap(Process& caller, CapHandle handle, CapType type,
                       u32 need_rights, SysError* out_error);
-Vm* vm_from_cap(Process& caller, CapHandle vm_cap, u32 need_rights, SysError* out_error);
-Vcpu* vcpu_from_cap(Process& caller, CapHandle vcpu_cap, u32 need_rights, SysError* out_error);
-VmMemory* memory_from_cap(Process& caller, CapHandle memory_cap,
+cap::Borrow<Vm> vm_from_cap(Process& caller, CapHandle vm_cap, u32 need_rights, SysError* out_error);
+cap::Borrow<Vcpu> vcpu_from_cap(Process& caller, CapHandle vcpu_cap, u32 need_rights, SysError* out_error);
+cap::Borrow<VmMemory> memory_from_cap(Process& caller, CapHandle memory_cap,
                           u32 need_rights, SysError* out_error);
-VmChannel* channel_from_cap(Process& caller, CapHandle channel_cap,
+cap::Borrow<VmChannel> channel_from_cap(Process& caller, CapHandle channel_cap,
                             u32 need_rights, SysError* out_error);
 Vm* find_vm_by_id(u32 vm_id);
+Vm* owner_for_vcpu(Vcpu* vcpu);
 void refresh_vm_state(Vm* vm);
 void poll_blocked_vcpu_timers();
 void poll_vcpu_timer(Vcpu& vcpu);

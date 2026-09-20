@@ -12,6 +12,7 @@
 //   - Arenas: registered writable regions for snapshot-capable services.
 
 #include "anko/types.h"
+#include "anko/object.h"
 
 constexpr usize PAGE_SIZE  = 4096;
 constexpr usize PAGE_SHIFT = 12;
@@ -59,38 +60,63 @@ struct MemoryObject {
 // ---------------------------------------------------------------------------
 struct Arena {
     VirtAddr base_va;    // base virtual address in the owning process
+    PhysAddr phys_base;  // physical backing when kernel-created; 0 for VA-only registrations
     u64      size;
     u32      owner_pid;
     u32      rights;     // CapRights bitmask
     u32      flags;
-    u8       pad[36];    // pad to 64 bytes for cache friendliness
+    u32      owner_generation;
+    u8       pad[24];    // pad to 64 bytes for cache friendliness
 };
 static_assert(sizeof(Arena) == 64);
 
+constexpr u32 kArenaFlagOwnsPages = 1u << 30;
+constexpr u32 kArenaFlagExposePhys = 1u << 31; // kernel-issued DMA arenas only
+
 // Per-process arena table — fixed quota for V0.
-constexpr u32 kArenaTableSize = 16;
+// BootInfo pages, shared IPC rings, service log rings, and later terminal
+// channels are all represented as registered arenas in V0. init owns many of
+// these while wiring the boot graph, so 16 is too small once every service gets
+// a BootInfo page before log/IPC ring creation. Keep this bounded, but large
+// enough for the bootstrap authority holder.
+constexpr u32 kArenaTableSize = 64;
 
 struct ArenaTable {
     Arena entries[kArenaTableSize];
+    object::Record* backing[kArenaTableSize];
+    u64 unmapped[kArenaTableSize];
     u32   count;
+    u32   lock;
 };
 
 namespace mm {
 
 void phys_init(PhysAddr ram_base, usize ram_size);
+void reserve_phys_range(PhysAddr base, u64 size);
 PhysAddr alloc_page();
+PhysAddr alloc_page_for(u32 owner_pid);
+PhysAddr alloc_pages_contiguous_for(u32 owner_pid, usize count);
+PhysAddr alloc_pages_contiguous(usize count); // returns 0 on failure
 void free_page(PhysAddr pa);
+void free_page_for(u32 owner_pid, PhysAddr pa);
+void free_page_for_identity(u64 identity, PhysAddr pa);
+u64 allocated_page_count();
 
 void heap_init();
 void* heap_alloc(usize size, usize align);
+void* slab_alloc(usize size, usize align);
+void slab_free(void* ptr, usize size, usize align);
 
+bool register_noncached_range(PhysAddr base, u64 size); // boot only
 void vm_init();
 void vm_enable_kernel();
 VmSpace vm_space_create(u32 pid);
 bool vm_map(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights);
+bool vm_map_owned(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights);
 bool vm_map_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32 rights);
 bool vm_map_device_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32 rights);
 void vm_unmap(VmSpace& space, VirtAddr va);
+void vm_unmap_owned_range(VmSpace& space, VirtAddr va, u64 size);
 void vm_space_destroy(VmSpace& space);
 void vm_activate(PhysAddr pgd_phys);
 // Make data written by the kernel visible to instruction fetch before a page
@@ -101,7 +127,15 @@ bool user_range_mapped(const VmSpace& space, VirtAddr va, u64 size, u32 rights);
 bool user_va_to_pa(const VmSpace& space, VirtAddr va, u32 rights, PhysAddr* out_pa);
 u64 vm_debug_pte(const VmSpace& space, VirtAddr va);
 
-bool arena_register(ArenaTable& table, VirtAddr base, u64 size, u32 owner_pid,
+bool arena_register(ArenaTable& table, VirtAddr base, PhysAddr phys_base, u64 size, u32 owner_pid,
                     u32 rights, u32 flags, u32* out_index);
+bool arena_claim_va(ArenaTable& table, Arena& arena, VirtAddr base, u64 size,
+                    bool* out_new_claim = nullptr);
+void arena_release_va(ArenaTable& table, Arena& arena, VirtAddr base);
+void arena_unregister(ArenaTable& table, u32 index);
+void destroy_arena(void* target);
+void arena_retain_mapping(ArenaTable& table, VirtAddr base, object::Record* record);
+void arena_unmap_page(ArenaTable& table, VirtAddr va);
+void arena_clear(ArenaTable& table);
 
 } // namespace mm

@@ -1,10 +1,8 @@
 .git/
-build/
+/build/
 build-*/
 out/
 cmake-build-*/
-linux-artifacts/
-docs/
 *.zip
 *.zip.b64
 *.b64

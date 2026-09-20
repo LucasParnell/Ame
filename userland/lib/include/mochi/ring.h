@@ -23,32 +23,22 @@
 #include <cstdint>
 #include <cstddef>
 #include "mochi/syscall.h"
+#include "midix/abi/ring.h"
 
 // ---------------------------------------------------------------------------
 // Ring layout — must match kernel RingHeader / RingSlot exactly.
 // ---------------------------------------------------------------------------
-struct alignas(64) RingHead  { uint64_t v; uint8_t pad[56]; };
-struct alignas(64) RingTail  { uint64_t v; uint8_t pad[56]; };
-struct alignas(64) RingFlags {
-    uint32_t receiver_about_to_sleep;
-    uint32_t reserved0;
-    uint64_t doorbell_counter_snapshot;
-    uint8_t  pad[48];
-};
-struct alignas(64) RingSlot {
-    uint32_t type;
-    uint32_t length;
-    uint64_t seq;
-    uint8_t  payload[48];
-};
+using RingHead = MxRingHeadLine;
+using RingTail = MxRingTailLine;
+using RingFlags = MxRingFlagsLine;
+using RingSlot = MxRingSlot;
+using RingPage = MxRingPage;
 
-struct RingPage {
-    RingHead  head;      // 0x000
-    RingTail  tail;      // 0x040
-    RingFlags flags;     // 0x080
-    uint8_t   _res[64];  // 0x0C0
-    // slots begin at 0x100 — pointer arithmetic from ring_slots()
-};
+static_assert(sizeof(RingHead) == sizeof(MxRingHeadLine), "userspace RingHead diverged from ABI");
+static_assert(sizeof(RingTail) == sizeof(MxRingTailLine), "userspace RingTail diverged from ABI");
+static_assert(sizeof(RingFlags) == sizeof(MxRingFlagsLine), "userspace RingFlags diverged from ABI");
+static_assert(sizeof(RingSlot) == sizeof(MxRingSlot), "userspace RingSlot diverged from ABI");
+static_assert(sizeof(RingPage) == sizeof(MxRingPage), "userspace RingPage diverged from ABI");
 
 static inline RingSlot* ring_slots(RingPage* r) {
     return reinterpret_cast<RingSlot*>(reinterpret_cast<uint8_t*>(r) + 0x100);
@@ -62,9 +52,9 @@ static inline RingSlot* ring_slots(RingPage* r) {
 // reason to notify is that the consumer explicitly published
 // receiver_about_to_sleep in the shared flags cache line.
 // ---------------------------------------------------------------------------
-static inline bool ring_push(RingPage* r, uint32_t order,
-                             uint32_t type, const void* data, uint32_t len,
-                             CapHandle doorbell_cap) {
+static inline bool ring_try_push(RingPage* r, uint32_t order,
+                                 uint32_t type, const void* data, uint32_t len,
+                                 CapHandle doorbell_cap) {
     const uint64_t mask = (1ull << order) - 1ull;
 
     const uint64_t tail = __atomic_load_n(&r->tail.v, __ATOMIC_ACQUIRE);
@@ -97,13 +87,22 @@ static inline bool ring_push(RingPage* r, uint32_t order,
     // has not yet entered wait_doorbell(), this exchange still works because
     // sys_notify increments the doorbell counter.  The later wait sees the
     // counter changed and returns immediately instead of sleeping.
-    (void)__atomic_exchange_n(&r->flags.receiver_about_to_sleep, 0u, __ATOMIC_ACQ_REL);
-
-    // Always notify after publishing.  Doorbells coalesce naturally, and this
-    // avoids a lost-wake race in the sleep-flag fast path.
-    (void)sys_notify(doorbell_cap);
+    const uint32_t was_sleeping =
+        __atomic_exchange_n(&r->flags.receiver_about_to_sleep, 0u, __ATOMIC_ACQ_REL);
+    if (was_sleeping != 0) {
+        (void)mx_doorbell_notify(doorbell_cap);
+    }
 
     return true;
+}
+
+// Backward-compatible spelling. This is a non-blocking try-push; it never waits
+// for space and only enters the kernel when the consumer has published a sleep
+// request in the shared flags line.
+static inline bool ring_push(RingPage* r, uint32_t order,
+                             uint32_t type, const void* data, uint32_t len,
+                             CapHandle doorbell_cap) {
+    return ring_try_push(r, order, type, data, len, doorbell_cap);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +133,20 @@ static inline bool ring_pop(RingPage* r, uint32_t order, RingSlot* out) {
 static inline bool ring_pop(RingPage* r, uint32_t order,
                             RingSlot* out, CapHandle /*caller_doorbell*/) {
     return ring_pop(r, order, out);
+}
+
+// Producer convenience helper for services that are allowed to back-pressure
+// themselves. It never blocks in the kernel; it yields in userspace until the
+// consumer drains space. Do not use from latency-critical paths unless bounded
+// by a caller-owned retry budget.
+static inline bool ring_send_spinning(RingPage* r, uint32_t order,
+                                      uint32_t type, const void* data, uint32_t len,
+                                      CapHandle doorbell_cap, uint32_t max_yields) {
+    for (uint32_t i = 0; i <= max_yields; ++i) {
+        if (ring_try_push(r, order, type, data, len, doorbell_cap)) return true;
+        sys_yield();
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------

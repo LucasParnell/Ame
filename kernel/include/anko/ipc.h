@@ -95,7 +95,7 @@ struct Ring {
     u32      order;      // capacity = 2^order slots
     u32      producer_pid;
     u32      consumer_pid;
-    u32      _pad;
+    u32      owner_generation;
 };
 
 // ---------------------------------------------------------------------------
@@ -129,7 +129,7 @@ void init();
 
 CapHandle ring_create(u32 pid, u32 order, u32 flags);
 CapHandle ring_share(u32 owner_pid, CapHandle ring_cap, u32 target_pid, u32 rights);
-Ring* ring_from_cap(u32 pid, CapHandle cap);
+cap::Borrow<Ring> ring_from_cap(u32 pid, CapHandle cap);
 Ring* ring_create_object(u32 pid, u32 order, u32 flags);
 CapHandle ring_cap_alloc(u32 target_pid, Ring* ring, u32 rights);
 

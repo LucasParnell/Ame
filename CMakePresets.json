@@ -1,0 +1,81 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "qemu-dev",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/qemu-dev",
+      "toolchainFile": "${sourceDir}/scripts/build/toolchain-aarch64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ANKO_BOARD": "qemu-virt",
+        "ANKO_BUILD_DEV": true,
+        "DANGO_BUILD_LINUX_ARTIFACTS": false,
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true
+      }
+    },
+    {
+      "name": "qemu-release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/qemu-release",
+      "toolchainFile": "${sourceDir}/scripts/build/toolchain-aarch64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ANKO_BOARD": "qemu-virt",
+        "ANKO_BUILD_DEV": false,
+        "DANGO_BUILD_LINUX_ARTIFACTS": false,
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true
+      }
+    },
+    {
+      "name": "switch",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/switch",
+      "toolchainFile": "${sourceDir}/scripts/build/toolchain-aarch64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ANKO_BOARD": "switch-t210",
+        "ANKO_BUILD_DEV": true,
+        "DANGO_BUILD_LINUX_ARTIFACTS": false,
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "qemu-dev",
+      "configurePreset": "qemu-dev"
+    },
+    {
+      "name": "qemu-release",
+      "configurePreset": "qemu-release"
+    },
+    {
+      "name": "switch",
+      "configurePreset": "switch"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "qemu-dev",
+      "configurePreset": "qemu-dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "qemu-release",
+      "configurePreset": "qemu-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "switch",
+      "configurePreset": "switch",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

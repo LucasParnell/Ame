@@ -16,10 +16,22 @@ namespace platform {
 // PL011 UART — only used for early boot log and panic.
 // After DTB parse, the address confirmed from /uart@.../reg.
 constexpr PhysAddr kUartBase    = 0x0900'0000;
+constexpr PhysAddr kFwCfgBase   = 0x0902'0000; // QEMU fw_cfg MMIO (DEVICE_BIG_ENDIAN)
 constexpr PhysAddr kGuestUartBase = 0x0904'0000;
 constexpr u32      kUartDR      = 0x000; // data register
 constexpr u32      kUartFR      = 0x018; // flag register
 constexpr u32      kUartFR_TXFF = 1u << 5; // TX FIFO full
+
+// First virtio-mmio transport on QEMU virt. scripts/run-qemu.sh attaches a
+// virtio-blk-device here for the native filesystem service.
+constexpr PhysAddr kVirtioBlkMmioBase = 0x0A00'0000;
+constexpr u64      kVirtioMmioSize = 0x4000;
+
+// PCIe ECAM window. The temporary xHCI probe only scans buses 0..15, so the
+// bootstrap map can stay to the first 16 MiB until the userland PCI service
+// owns full ECAM discovery.
+constexpr PhysAddr kPciEcamBase = 0x40'1000'0000ull;
+constexpr u64      kPciEcamProbeSize = 16ull * 32ull * 8ull * 4096ull;
 
 // GICv2 — QEMU virt uses GICv2 by default.
 constexpr PhysAddr kGicDistBase = 0x0800'0000; // distributor
@@ -37,6 +49,7 @@ constexpr VirtAddr kKernelDevBase  = 0xFFFF'FFFF'0000'0000ULL;
 
 // Page table config for MAIR_EL1: two attribute indices.
 constexpr u8 kMairNormal    = 0; // normal, inner/outer write-back cacheable
+constexpr u8 kMairNormalNc  = 2; // normal, outer/inner noncacheable
 constexpr u8 kMairDevice    = 1; // device-nGnRnE
 
 } // namespace platform

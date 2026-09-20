@@ -9,10 +9,9 @@ namespace kernel::init {
 bool discover_initrd(PhysAddr dtb_phys, PhysAddr* out_base, usize* out_size);
 bool init_archive(PhysAddr initrd_base, usize initrd_size);
 bool archive_get(const char* name, const void** out_data, usize* out_size);
-bool archive_materialize(PhysAddr* out_base, usize* out_size);
+bool load_system_bundle_from_disk(PhysAddr* out_base, usize* out_size);
 
-VirtAddr load_elf(VmSpace& space, const void* elf_data, usize elf_size);
-bool load_service_elf(const char* service_name, VmSpace& space, VirtAddr* out_entry);
+VirtAddr load_image(VmSpace& space, const void* image_data, usize image_size);
 Process* spawn_image(const void* elf_data, usize elf_size, PrincipalClass principal,
                      u32 supervisor_pid, u32 flags = 0, Thread** out_main_thread = nullptr);
 Process* spawn_service(const char* service_name, PrincipalClass principal, u32 supervisor_pid,

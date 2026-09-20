@@ -176,7 +176,7 @@ irq_entry:
     eret
 
 irq_entry_kernel:
-    sub     sp, sp, #256
+    sub     sp, sp, #288
 
     stp     x0,  x1,  [sp, #0]
     stp     x2,  x3,  [sp, #16]
@@ -195,7 +195,21 @@ irq_entry_kernel:
     stp     x28, x29, [sp, #224]
     str     x30,      [sp, #240]
 
+    mrs     x9,  ELR_EL1
+    mrs     x10, SPSR_EL1
+    mrs     x11, SP_EL0
+    str     x9,  [sp, #248]
+    str     x10, [sp, #256]
+    str     x11, [sp, #264]
+
     bl      irq_dispatch
+
+    ldr     x9,  [sp, #248]
+    ldr     x10, [sp, #256]
+    ldr     x11, [sp, #264]
+    msr     ELR_EL1,  x9
+    msr     SPSR_EL1, x10
+    msr     SP_EL0,   x11
 
     ldp     x0,  x1,  [sp, #0]
     ldp     x2,  x3,  [sp, #16]
@@ -214,5 +228,5 @@ irq_entry_kernel:
     ldp     x28, x29, [sp, #224]
     ldr     x30,      [sp, #240]
 
-    add     sp, sp, #256
+    add     sp, sp, #288
     eret

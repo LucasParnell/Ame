@@ -18,3 +18,6 @@ extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* fram
 
 #define ANKO_PANIC(msg)           panic(msg)
 #define ANKO_PANICF(fmt, ...)     panicf(fmt, ##__VA_ARGS__)
+#define ANKO_ASSERT(cond)         do { if (!(cond)) [[unlikely]] panic("assert: " #cond); } while (0)
+#define ANKO_ASSERTF(cond, fmt, ...) \
+    do { if (!(cond)) [[unlikely]] panicf("assert: " fmt, ##__VA_ARGS__); } while (0)

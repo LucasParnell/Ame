@@ -3,28 +3,33 @@
 #include "mochi/syscall.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
+#include "mochi/boot.h"
 #include "dango/vm.h"
 #include "dango/channel.h"
 #include "dango/layout.h"
+#include "midix/abi/image.h"
 
 constexpr uint32_t kRingOrder = 6;
 constexpr uint64_t kLinuxRunBudgetNs = 6ull * 1000ull * 1000ull;
 constexpr uint64_t kLinuxRunPeriodNs = 16666667ull;
-constexpr uint32_t kLinuxRunMaxExits = 512;
+// Linux early boot does a lot of tiny MMIO exits, especially console output.
+// Amortise the user/kernel syscall boundary over more guest exits.
+constexpr uint32_t kLinuxRunMaxExits = 4096;
+constexpr uint32_t kMonitorPollYieldQuantum = 64;
+// Keep the bootstrap runner on the manager CPU.  Init starts dango.manager on
+// CPU1 so the vCPU can own that core without stalling the CPU0 boot path.
+constexpr uint64_t kLinuxRunnerCoreMask = 1ull << 1;
+constexpr uint32_t kLinuxRunnerHomeCpu = 1;
+
+// The manager itself is a native service and therefore runs in the latency
+// band. If the VM runner is left in VM_LATENCY during bootstrap, the manager's
+// own stats/yield loop remains the only latency runnable and strict band order
+// keeps picking it ahead of the lower VM_LATENCY queue forever. Put the bootstrap
+// runner in the latency band; SCHED_CTX_VM_RUNNER still marks it as VM time.
+constexpr uint32_t kLinuxRunnerSchedBand = dango::SCHED_BAND_LATENCY;
 constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
 constexpr uint64_t kVaBootInitrd = 0x2400'0000ull;
 constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;
-constexpr CapHandle cap_slot(uint32_t idx) {
-    return (static_cast<CapHandle>(1) << 32) | idx;
-}
-
-constexpr CapHandle kConsoleRing = cap_slot(0);
-constexpr CapHandle kConsoleDoorbell = cap_slot(1);
-constexpr CapHandle kVmRoot = cap_slot(2);
-constexpr CapHandle kDoneDoorbell = cap_slot(3);
-constexpr CapHandle kAuthGateDoorbell = cap_slot(4);
-constexpr CapHandle kLayoutDoneDoorbell = cap_slot(5);
-constexpr CapHandle kBootInitrd = cap_slot(6);
 
 struct TarHeader {
     char name[100];
@@ -96,6 +101,22 @@ static void dango_log(const char* msg) {
 
 static void dango_debug(const char* msg) {
     (void)msg;
+}
+
+static void dango_counter(const char* key, uint64_t value) {
+    mochi::log_counter(key, value);
+}
+
+static uint64_t status_magnitude(int64_t rc) {
+    return rc < 0 ? static_cast<uint64_t>(-rc) : static_cast<uint64_t>(rc);
+}
+
+static bool should_log_counter_delta(uint64_t value, uint64_t last) {
+    if (last == ~0ull) return true;
+    if (value == last) return false;
+    if (value <= 4) return true;
+    if ((value & (value - 1)) == 0) return true;
+    return value >= last + 1024ull;
 }
 
 [[noreturn]] static void fail(const char* msg) {
@@ -216,6 +237,58 @@ static const uint8_t* tar_find(const uint8_t* base, const char* name, uint64_t* 
         off = data_off + rounded;
     }
     return nullptr;
+}
+
+static bool range_within_bytes(uint64_t off, uint64_t len, uint64_t total) {
+    const uint64_t end = off + len;
+    return end >= off && end <= total;
+}
+
+static bool bundle_name_eq(const uint8_t* strings, uint64_t strings_size,
+                           uint32_t name_offset, const char* wanted) {
+    if (!strings || !wanted || name_offset >= strings_size) return false;
+    uint64_t pos = name_offset;
+    uint32_t i = 0;
+    while (pos < strings_size && strings[pos] && wanted[i]) {
+        if (static_cast<char>(strings[pos]) != wanted[i]) return false;
+        ++pos;
+        ++i;
+    }
+    return pos < strings_size && strings[pos] == '\0' && wanted[i] == '\0';
+}
+
+static const uint8_t* bundle_find(const uint8_t* base, const char* name, uint64_t* out_size) {
+    if (!base || !name || !out_size) return nullptr;
+    const auto* h = reinterpret_cast<const MxBundleHeader*>(base);
+    if (h->magic != MX_BUNDLE_MAGIC ||
+        h->version != MX_BUNDLE_VERSION ||
+        h->object_count > 64 ||
+        h->bundle_size == 0 ||
+        h->bundle_size > kInitrdScanLimit) {
+        return nullptr;
+    }
+    const uint64_t object_table_size = static_cast<uint64_t>(h->object_count) * sizeof(MxBundleObject);
+    if (!range_within_bytes(h->object_table_offset, object_table_size, h->bundle_size) ||
+        !range_within_bytes(h->string_table_offset, h->string_table_size, h->bundle_size)) {
+        return nullptr;
+    }
+    const auto* objects = reinterpret_cast<const MxBundleObject*>(base + h->object_table_offset);
+    const uint8_t* strings = base + h->string_table_offset;
+    for (uint32_t i = 0; i < h->object_count; ++i) {
+        const MxBundleObject& obj = objects[i];
+        if (!bundle_name_eq(strings, h->string_table_size, obj.name_offset, name)) continue;
+        if (!range_within_bytes(obj.offset, obj.size, h->bundle_size)) return nullptr;
+        *out_size = obj.size;
+        return base + obj.offset;
+    }
+    return nullptr;
+}
+
+static const uint8_t* archive_find(const uint8_t* base, const char* name, uint64_t* out_size) {
+    if (!base) return nullptr;
+    const auto* h = reinterpret_cast<const MxBundleHeader*>(base);
+    if (h->magic == MX_BUNDLE_MAGIC) return bundle_find(base, name, out_size);
+    return tar_find(base, name, out_size);
 }
 
 
@@ -350,16 +423,39 @@ static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
 }
 
 static bool discover_linux_artifacts(const uint8_t* archive, LinuxArtifacts* out) {
-    if (!archive || !out) return false;
-    LinuxArtifacts artifacts{};
-    artifacts.manifest = tar_find(archive, "linux/manifest.toml", &artifacts.manifest_size);
-    artifacts.image = tar_find(archive, "linux/Image", &artifacts.image_size);
-    artifacts.initramfs = tar_find(archive, "linux/initramfs.cpio", &artifacts.initramfs_size);
-    artifacts.dtb = tar_find(archive, "linux/dango-linux.dtb", &artifacts.dtb_size);
-    if (!artifacts.manifest || !artifacts.image || !artifacts.initramfs || !artifacts.dtb) {
+    if (!archive || !out) {
+        dango_log("linux artifact discovery failed: boot archive unavailable\n");
         return false;
     }
-    if (!parse_linux_manifest(&artifacts)) return false;
+    LinuxArtifacts artifacts{};
+    artifacts.manifest = archive_find(archive, "linux/manifest.toml", &artifacts.manifest_size);
+    artifacts.image = archive_find(archive, "linux/Image", &artifacts.image_size);
+    artifacts.initramfs = archive_find(archive, "linux/initramfs.cpio", &artifacts.initramfs_size);
+    artifacts.dtb = archive_find(archive, "linux/dango-linux.dtb", &artifacts.dtb_size);
+
+    bool missing = false;
+    if (!artifacts.manifest) {
+        dango_log("linux artifact missing: linux/manifest.toml\n");
+        missing = true;
+    }
+    if (!artifacts.image) {
+        dango_log("linux artifact missing: linux/Image\n");
+        missing = true;
+    }
+    if (!artifacts.initramfs) {
+        dango_log("linux artifact missing: linux/initramfs.cpio\n");
+        missing = true;
+    }
+    if (!artifacts.dtb) {
+        dango_log("linux artifact missing: linux/dango-linux.dtb\n");
+        missing = true;
+    }
+    if (missing) return false;
+
+    if (!parse_linux_manifest(&artifacts)) {
+        dango_log("linux artifact discovery failed: manifest invalid or size mismatch\n");
+        return false;
+    }
     out->manifest = artifacts.manifest;
     out->manifest_size = artifacts.manifest_size;
     out->image = artifacts.image;
@@ -386,28 +482,136 @@ static uint64_t guest_offset(const dango::VmLayout& layout, uint64_t guest_pa) {
     return guest_pa - layout.ram_base;
 }
 
+static uint32_t a64_movz64(unsigned rd, uint16_t imm, unsigned shift) {
+    return 0xD2800000u | ((shift / 16u) << 21) | (static_cast<uint32_t>(imm) << 5) | rd;
+}
+
+static uint32_t a64_movk64(unsigned rd, uint16_t imm, unsigned shift) {
+    return 0xF2800000u | ((shift / 16u) << 21) | (static_cast<uint32_t>(imm) << 5) | rd;
+}
+
+static uint32_t a64_movz32(unsigned rd, uint16_t imm) {
+    return 0x52800000u | (static_cast<uint32_t>(imm) << 5) | rd;
+}
+
+static uint32_t a64_mov_xzr(unsigned rd) {
+    return 0xAA1F03E0u | rd;
+}
+
+static uint32_t a64_str_w_imm0(unsigned rt, unsigned rn) {
+    return 0xB9000000u | (rn << 5) | rt;
+}
+
+static uint32_t a64_br(unsigned rn) {
+    return 0xD61F0000u | (rn << 5);
+}
+
+static void emit_load_u64(uint32_t* code, uint32_t* idx, unsigned rd, uint64_t value) {
+    code[(*idx)++] = a64_movz64(rd, static_cast<uint16_t>(value & 0xFFFFu), 0);
+    code[(*idx)++] = a64_movk64(rd, static_cast<uint16_t>((value >> 16) & 0xFFFFu), 16);
+    code[(*idx)++] = a64_movk64(rd, static_cast<uint16_t>((value >> 32) & 0xFFFFu), 32);
+    code[(*idx)++] = a64_movk64(rd, static_cast<uint16_t>((value >> 48) & 0xFFFFu), 48);
+}
+
+static bool install_linux_trampoline(CapHandle memory,
+                                     const dango::VmLayout& layout,
+                                     uint64_t trampoline_pa,
+                                     uint64_t linux_entry,
+                                     uint64_t dtb_pa) {
+    uint32_t code[96]{};
+    uint32_t idx = 0;
+
+    // Write a deterministic marker to the guest serial before entering Linux.
+    // The host VMM traps guest PL011 MMIO at 0x09000000 and forwards it to the
+    // second QEMU serial backend, so this bypasses Linux console setup entirely.
+    emit_load_u64(code, &idx, 4, 0x09000000ull);
+    const char msg[] = "dango: trampoline reached\n";
+    for (uint32_t i = 0; i + 1 < sizeof(msg); ++i) {
+        code[idx++] = a64_movz32(5, static_cast<uint8_t>(msg[i]));
+        code[idx++] = a64_str_w_imm0(5, 4);
+    }
+
+    // Linux arm64 boot ABI: x0 = FDT physical address, x1-x3 = 0.
+    emit_load_u64(code, &idx, 0, dtb_pa);
+    code[idx++] = a64_mov_xzr(1);
+    code[idx++] = a64_mov_xzr(2);
+    code[idx++] = a64_mov_xzr(3);
+    emit_load_u64(code, &idx, 4, linux_entry);
+    code[idx++] = a64_br(4);
+
+    if (!contains(layout.ram_base, layout.ram_size, trampoline_pa, idx * sizeof(uint32_t))) {
+        return false;
+    }
+    return sys_vm_memory_write(memory,
+                               guest_offset(layout, trampoline_pa),
+                               code,
+                               idx * sizeof(uint32_t)) == 0;
+}
+
 static void runner_entry(uint64_t vcpu_arg) {
     const CapHandle vcpu = static_cast<CapHandle>(vcpu_arg);
+    dango_log("vm runner thread entered\n");
+    bool logged_first_return = false;
     while (true) {
         dango::VcpuRunBudget budget{};
         budget.budget_ns = kLinuxRunBudgetNs;
-        budget.deadline_ns = kLinuxRunPeriodNs;
+        budget.deadline_ns = 0;
         budget.max_exits = kLinuxRunMaxExits;
 
+        if (!logged_first_return) {
+            dango_log("vm runner entering first vcpu_run\n");
+        }
         dango::VcpuRunResult result{};
         const int64_t rc = sys_vcpu_run(vcpu, &budget, &result);
-        if (rc == dango::E_NOTIMPL || result.exit_reason == dango::VCPU_EXIT_UNSUPPORTED_TRAP ||
-            result.exit_reason == dango::VCPU_EXIT_SHUTDOWN) {
+        if (!logged_first_return) {
+            dango_log("vm runner first vcpu_run returned\n");
+            dango_counter("vcpu.first_rc", status_magnitude(rc));
+            dango_counter("vcpu.first_exit_reason", result.exit_reason);
+            dango_counter("vcpu.first_last_esr", result.last_esr);
+            logged_first_return = true;
+        }
+        if (rc == dango::E_NOTIMPL) {
+            dango_log("vm runner stopped: vcpu_run not implemented\n");
+            dango_counter("vcpu.exit_reason", result.exit_reason);
+            dango_counter("vcpu.last_esr", result.last_esr);
             break;
         }
         if (rc < 0) {
-            sys_yield();
+            dango_log("vm runner stopped: vcpu_run syscall error\n");
+            dango_counter("vcpu.rc", status_magnitude(rc));
+            dango_counter("vcpu.exit_reason", result.exit_reason);
+            dango_counter("vcpu.last_esr", result.last_esr);
+            dango::VcpuInfo info{};
+            if (sys_vcpu_inspect(vcpu, &info, sizeof(info)) == 0) {
+                dango_counter("vcpu.state", info.state);
+                dango_counter("vcpu.run_count", info.run_count);
+                dango_counter("vcpu.last_exit_reason", info.last_exit_reason);
+            }
+            break;
+        }
+        if (result.exit_reason == dango::VCPU_EXIT_UNSUPPORTED_TRAP) {
+            dango_log("vm runner stopped: unsupported guest trap\n");
+            dango_counter("vcpu.last_esr", result.last_esr);
+            break;
+        }
+        if (result.exit_reason == dango::VCPU_EXIT_SHUTDOWN) {
+            dango_log("vm runner stopped: guest shutdown\n");
+            break;
         }
     }
     sys_thread_exit(0);
 }
 
 extern "C" [[noreturn]] void _start() {
+    const MxBootInfo* boot = mochi::boot::map();
+    const CapHandle kConsoleRing = mochi::boot::require_handle(boot, "log.ring");
+    const CapHandle kConsoleDoorbell = mochi::boot::require_handle(boot, "log.doorbell");
+    const CapHandle kVmRoot = mochi::boot::require_handle(boot, "vm.root");
+    const CapHandle kDoneDoorbell = mochi::boot::require_handle(boot, "dango.done.db");
+    const CapHandle kAuthGateDoorbell = mochi::boot::require_handle(boot, "dango.auth_gate.db");
+    const CapHandle kLayoutDoneDoorbell = mochi::boot::require_handle(boot, "dango.layout_done.db");
+    const CapHandle kBootInitrd = mochi::boot::require_handle(boot, "boot.initrd");
+
     auto* log_ring = wait_map<RingPage>(kConsoleRing, dango::CAP_SHARED_RING,
                                         kVaConsoleRing,
                                         dango::RIGHT_READ | dango::RIGHT_WRITE);
@@ -426,12 +630,19 @@ extern "C" [[noreturn]] void _start() {
     dango_log("manager starting\n");
     LinuxArtifacts linux{};
     const bool have_linux = discover_linux_artifacts(boot_archive, &linux);
-    if (have_linux) dango_log("linux artifacts ready\n");
+    if (have_linux) {
+        dango_log("linux artifacts ready\n");
+        dango_counter("linux.entry", linux.entry);
+        dango_counter("linux.kernel_load", linux.layout.kernel_load);
+    }
 
     const int64_t el = sys_debug_counter(dango::VM_DEBUG_EL_CURRENT);
     const int64_t el2 = sys_debug_counter(dango::VM_DEBUG_EL2_AVAILABLE);
     const int64_t vhe = sys_debug_counter(dango::VM_DEBUG_VHE_AVAILABLE);
     if (el < 0 || el > 3 || el2 < 0 || vhe < 0) fail("el2 detection failed\n");
+    dango_counter("vm.current_el", static_cast<uint64_t>(el));
+    dango_counter("vm.el2_available", static_cast<uint64_t>(el2));
+    if (el2 == 0) fail("el2 unavailable: dango VM cannot run guest\n");
     dango_debug("el2 available\n");
 
     const dango::VmLayout layout = have_linux ? linux.layout : dango::v3_layout();
@@ -451,6 +662,7 @@ extern "C" [[noreturn]] void _start() {
         vm_info.state != dango::VM_CREATED) {
         fail("vm object invalid\n");
     }
+    dango_counter("vm.id", vm_info.vm_id);
     dango_debug("vm object ready\n");
 
     dango_debug("creating guest memory\n");
@@ -533,7 +745,15 @@ extern "C" [[noreturn]] void _start() {
     if (vcpu == kNullCap) fail("vcpu object invalid\n");
     dango_debug("vcpu created\n");
 
-    const uint64_t entry_pc = have_linux ? linux.entry : 0x4008'0000ull;
+    uint64_t entry_pc = have_linux ? linux.entry : 0x4008'0000ull;
+    if (have_linux) {
+        const uint64_t trampoline_pa = layout.ram_base + 0x1000ull;
+        if (!install_linux_trampoline(memory, layout, trampoline_pa, linux.entry, layout.dtb_base)) {
+            fail("linux trampoline install failed\n");
+        }
+        entry_pc = trampoline_pa;
+        dango_counter("linux.trampoline", trampoline_pa);
+    }
     dango_debug("setting vcpu entry\n");
     if (sys_vcpu_set_entry(vcpu, entry_pc, layout.dtb_base, 0) != 0) {
         fail("vcpu object invalid\n");
@@ -548,33 +768,42 @@ extern "C" [[noreturn]] void _start() {
         vcpu_info.entry_pc != entry_pc) {
         fail("vcpu object invalid\n");
     }
+    dango_counter("vcpu.id", vcpu_info.vcpu_id);
+    dango_counter("vcpu.owner_vm_id", vcpu_info.owner_vm_id);
     dango_debug("vcpu ready\n");
 
     dango::SchedContext vcpu_sched{};
-    vcpu_sched.band = dango::SCHED_BAND_VM_LATENCY;
+    vcpu_sched.band = kLinuxRunnerSchedBand;
     vcpu_sched.weight = 1024;
     vcpu_sched.budget_ns = kLinuxRunBudgetNs;
     vcpu_sched.period_ns = kLinuxRunPeriodNs;
-    vcpu_sched.deadline_ns = kLinuxRunPeriodNs;
-    vcpu_sched.core_mask = 1ull << 1;
-    vcpu_sched.home_cpu = 1;
+    vcpu_sched.deadline_ns = 0;
+    const auto* cpu_count = mochi::boot::find(boot, "cpu.count");
+    const bool single_cpu = cpu_count && cpu_count->aux0 == 1;
+    vcpu_sched.core_mask = single_cpu ? 1 : kLinuxRunnerCoreMask;
+    vcpu_sched.home_cpu = single_cpu ? 0 : kLinuxRunnerHomeCpu;
     vcpu_sched.flags = dango::SCHED_CTX_VM_RUNNER | dango::SCHED_CTX_NO_STEAL;
     const CapHandle vcpu_sched_ctx = as_cap(sys_sched_context_create(&vcpu_sched, sizeof(vcpu_sched)));
-    if (vcpu_sched_ctx == kNullCap || sys_vcpu_bind_sched_context(vcpu, vcpu_sched_ctx) != 0 ||
-        sys_vcpu_set_core_mask(vcpu, vcpu_sched.core_mask, vcpu_sched.home_cpu) != 0) {
-        fail("vcpu scheduler setup failed\n");
+    if (vcpu_sched_ctx == kNullCap) {
+        dango_counter("vcpu.sched_create_failed", 1);
+        fail("vcpu scheduler context create failed\n");
+    }
+    const int64_t vcpu_sched_bind_rc = sys_vcpu_bind_sched_context(vcpu, vcpu_sched_ctx);
+    if (vcpu_sched_bind_rc != 0) {
+        dango_counter("vcpu.sched_bind_rc",
+                      static_cast<uint64_t>(vcpu_sched_bind_rc < 0 ? -vcpu_sched_bind_rc : vcpu_sched_bind_rc));
+        fail("vcpu scheduler bind failed\n");
+    }
+    const int64_t vcpu_core_mask_rc =
+        sys_vcpu_set_core_mask(vcpu, vcpu_sched.core_mask, vcpu_sched.home_cpu);
+    if (vcpu_core_mask_rc != 0) {
+        dango_counter("vcpu.core_mask_rc",
+                      static_cast<uint64_t>(vcpu_core_mask_rc < 0 ? -vcpu_core_mask_rc : vcpu_core_mask_rc));
+        fail("vcpu scheduler core mask failed\n");
     }
 
     if (!have_linux) {
-        dango::VcpuRunBudget probe_budget{};
-        probe_budget.budget_ns = kLinuxRunBudgetNs;
-        probe_budget.deadline_ns = kLinuxRunPeriodNs;
-        probe_budget.max_exits = 100;
-        dango::VcpuRunResult probe_result{};
-        if (sys_vcpu_run(vcpu, &probe_budget, &probe_result) != dango::E_NOTIMPL) {
-            fail("vcpu stub run failed\n");
-        }
-        console_log("vcpu stub run complete\n");
+        dango_log("vcpu stub run skipped: no linux guest payload\n");
     }
 
     const CapHandle channel = as_cap(sys_vm_channel_create(vm, kRingOrder, 0));
@@ -618,13 +847,29 @@ extern "C" [[noreturn]] void _start() {
             sys_thread_create(kNullCap,
                               reinterpret_cast<uint64_t>(runner_entry),
                               static_cast<uint64_t>(vcpu),
-                              THREAD_SUSPENDED));
+                              MX_THREAD_SUSPENDED));
         if (runner_th != kNullCap) {
-            sys_thread_set_affinity(runner_th, 1ull << 1);
-            if (sys_sched_context_bind_thread(runner_th, vcpu_sched_ctx) != 0) {
-                fail("vcpu scheduler setup failed\n");
+            dango_counter("vm.runner.band", static_cast<uint64_t>(vcpu_sched.band));
+            dango_counter("vm.runner.core_mask", vcpu_sched.core_mask);
+            dango_counter("vm.runner.home_cpu", vcpu_sched.home_cpu);
+            const int64_t runner_affinity_rc = sys_thread_set_affinity(runner_th, vcpu_sched.core_mask);
+            if (runner_affinity_rc != 0) {
+                dango_counter("vm.runner.affinity_rc",
+                              static_cast<uint64_t>(runner_affinity_rc < 0 ? -runner_affinity_rc : runner_affinity_rc));
+                fail("vcpu runner affinity failed\n");
             }
-            sys_thread_resume(runner_th);
+            const int64_t runner_bind_rc = sys_sched_context_bind_thread(runner_th, vcpu_sched_ctx);
+            if (runner_bind_rc != 0) {
+                dango_counter("vm.runner.sched_bind_rc",
+                              static_cast<uint64_t>(runner_bind_rc < 0 ? -runner_bind_rc : runner_bind_rc));
+                fail("vcpu runner scheduler bind failed\n");
+            }
+            const int64_t runner_resume_rc = sys_thread_resume(runner_th);
+            if (runner_resume_rc != 0) {
+                dango_counter("vm.runner.resume_rc",
+                              static_cast<uint64_t>(runner_resume_rc < 0 ? -runner_resume_rc : runner_resume_rc));
+                fail("vcpu runner resume failed\n");
+            }
             dango_log("vm runner started async\n");
         } else {
             dango_debug("vm runner create failed\n");
@@ -636,8 +881,10 @@ extern "C" [[noreturn]] void _start() {
 
     bool logged_agent = false;
     bool logged_hello = false;
+    uint32_t monitor_poll_divider = 0;
     while (true) {
-        if (have_linux && !logged_hello) {
+        const bool poll_now = ((monitor_poll_divider++ & (kMonitorPollYieldQuantum - 1u)) == 0);
+        if (have_linux && !logged_hello && poll_now) {
             const int64_t saw_hello = sys_debug_counter(dango::VM_DEBUG_GUEST_LINUX_HELLO);
             const int64_t saw_agent = sys_debug_counter(dango::VM_DEBUG_GUEST_AGENT_START);
             if (saw_hello > 0) {
@@ -646,6 +893,63 @@ extern "C" [[noreturn]] void _start() {
             } else if (!logged_agent && saw_agent > 0) {
                 dango_log("linux guest agent started\n");
                 logged_agent = true;
+            }
+        }
+        static uint64_t last_attempts = ~0ull;
+        static uint64_t last_notimpl = ~0ull;
+        static uint64_t last_irq = ~0ull;
+        static uint64_t last_wfx = ~0ull;
+        static uint64_t last_unsup = ~0ull;
+        if (have_linux && poll_now) {
+            const int64_t attempts = sys_debug_counter(dango::VM_DEBUG_VCPU_RUN_ATTEMPTS);
+            const int64_t notimpl = sys_debug_counter(dango::VM_DEBUG_VCPU_RUN_NOTIMPL);
+            const int64_t irq = sys_debug_counter(dango::VM_DEBUG_VCPU_IRQ_EXITS);
+            const int64_t wfx = sys_debug_counter(dango::VM_DEBUG_VCPU_WFX_EXITS);
+            const int64_t unsup = sys_debug_counter(dango::VM_DEBUG_VCPU_UNSUPPORTED_EXITS);
+            if (attempts >= 0) {
+                const uint64_t value = static_cast<uint64_t>(attempts);
+                if (should_log_counter_delta(value, last_attempts)) {
+                    last_attempts = value;
+                    dango_counter("vcpu.run_attempts", value);
+                }
+            }
+            if (notimpl >= 0) {
+                const uint64_t value = static_cast<uint64_t>(notimpl);
+                if (should_log_counter_delta(value, last_notimpl)) {
+                    last_notimpl = value;
+                    dango_counter("vcpu.run_notimpl", value);
+                }
+            }
+            if (irq >= 0) {
+                const uint64_t value = static_cast<uint64_t>(irq);
+                if (should_log_counter_delta(value, last_irq)) {
+                    last_irq = value;
+                    dango_counter("vcpu.irq_exits", value);
+                }
+            }
+            if (wfx >= 0) {
+                const uint64_t value = static_cast<uint64_t>(wfx);
+                if (should_log_counter_delta(value, last_wfx)) {
+                    last_wfx = value;
+                    dango_counter("vcpu.wfx_exits", value);
+                }
+            }
+            if (unsup >= 0) {
+                const uint64_t value = static_cast<uint64_t>(unsup);
+                if (should_log_counter_delta(value, last_unsup)) {
+                    last_unsup = value;
+                    dango_counter("vcpu.unsupported_exits", value);
+                }
+            }
+        }
+        if (logged_hello) {
+            // Diagnostics are useful while bringing the guest up, but after the
+            // agent responds this service thread should stop burning latency-band
+            // quanta.  The runner thread keeps the VM alive.
+            const CapHandle idle_db = as_cap(sys_doorbell_create());
+            if (idle_db != kNullCap) {
+                const uint64_t seen = sys_doorbell_read(idle_db);
+                (void)sys_wait_doorbell(idle_db, seen);
             }
         }
         sys_yield();

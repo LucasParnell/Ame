@@ -3,19 +3,12 @@
 #include "mochi/syscall.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
+#include "mochi/boot.h"
 #include "dango/vm.h"
 
 constexpr uint32_t kRingOrder = 6;
 constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
 
-constexpr CapHandle cap_slot(uint32_t idx) {
-    return (static_cast<CapHandle>(1) << 32) | idx;
-}
-
-constexpr CapHandle kConsoleRing = cap_slot(0);
-constexpr CapHandle kConsoleDoorbell = cap_slot(1);
-constexpr CapHandle kRestrictedVmRoot = cap_slot(2);
-constexpr CapHandle kAuthGateDoorbell = cap_slot(3);
 
 template <typename T>
 static T* wait_map(CapHandle cap, int64_t expected_type, uint64_t va, uint32_t rights) {
@@ -43,6 +36,12 @@ static void console_log(const char* msg) {
 }
 
 extern "C" [[noreturn]] void _start() {
+    const MxBootInfo* boot = mochi::boot::map();
+    const CapHandle kConsoleRing = mochi::boot::require_handle(boot, "log.ring");
+    const CapHandle kConsoleDoorbell = mochi::boot::require_handle(boot, "log.doorbell");
+    const CapHandle kRestrictedVmRoot = mochi::boot::require_handle(boot, "vm.root.restricted");
+    const CapHandle kAuthGateDoorbell = mochi::boot::require_handle(boot, "dango.auth_gate.db");
+
     auto* log_ring = wait_map<RingPage>(kConsoleRing, dango::CAP_SHARED_RING,
                                         kVaConsoleRing,
                                         dango::RIGHT_READ | dango::RIGHT_WRITE);

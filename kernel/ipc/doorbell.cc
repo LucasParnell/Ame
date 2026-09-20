@@ -16,10 +16,18 @@
 #include "anko/sched.h"
 #include "anko/cap.h"
 #include "anko/mm.h"
+#include "anko/panic.h"
 #include "libk/metric.h"
 #include "libk/string.h"
 
 namespace ipc {
+
+static void destroy_doorbell(void* target) {
+    auto* db = static_cast<Doorbell*>(target);
+    ANKO_ASSERT(!db->waiter);
+    mm::slab_free(db, sizeof(Doorbell), alignof(Doorbell));
+}
+
 
 static u64 g_sleep_count = 0;
 static u64 g_wake_count = 0;
@@ -55,32 +63,33 @@ static void unlock(Doorbell* db) {
     __atomic_store_n(&db->lock, 0u, __ATOMIC_RELEASE);
 }
 
-static CapEntry* resolve_doorbell_entry(u32 pid, CapHandle handle, u32 need_rights) {
-    Process* p = sched::find_process(pid);
+static cap::Ref resolve_doorbell_entry(u32 pid, CapHandle handle, u32 need_rights) {
+    auto p = sched::find_process(pid);
     if (!p || !p->cap_table) return nullptr;
 
-    CapEntry* e = cap::lookup(*p->cap_table, handle, CAP_DOORBELL);
+    cap::Ref e = cap::lookup(*p->cap_table, handle, CAP_DOORBELL);
     if (!e) return nullptr;
     if ((e->rights_mask & need_rights) != need_rights) return nullptr;
     return e;
 }
 
 Doorbell* doorbell_create_object(u32 pid) {
-    Process* owner = sched::find_process(pid);
+    auto owner = sched::find_process(pid);
     if (!owner || !owner->cap_table) return nullptr;
 
-    Doorbell* db = static_cast<Doorbell*>(mm::heap_alloc(sizeof(Doorbell), alignof(Doorbell)));
+    Doorbell* db = static_cast<Doorbell*>(mm::slab_alloc(sizeof(Doorbell), alignof(Doorbell)));
     if (!db) return nullptr;
     libk::memset(db, 0, sizeof(*db));
     db->owner_pid = pid;
     db->rights = RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP;
 
+    if (!object::create(db, destroy_doorbell)) { destroy_doorbell(db); return nullptr; }
     return db;
 }
 
 CapHandle doorbell_cap_alloc(u32 target_pid, Doorbell* db, u32 rights) {
     if (!db) return kNullCap;
-    Process* target = sched::find_process(target_pid);
+    auto target = sched::find_process(target_pid);
     if (!target || !target->cap_table) return kNullCap;
 
     const u32 allowed = RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP;
@@ -91,17 +100,23 @@ CapHandle doorbell_cap_alloc(u32 target_pid, Doorbell* db, u32 rights) {
 
 CapHandle doorbell_create(u32 pid) {
     Doorbell* db = doorbell_create_object(pid);
-    return doorbell_cap_alloc(pid, db, RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP);
+    if (!db) return kNullCap;
+    // acquire balances itself; the second release transfers the creator root.
+    auto* root = object::acquire(db);
+    CapHandle handle = doorbell_cap_alloc(pid, db, RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP);
+    object::release(root);
+    object::release(root);
+    return handle;
 }
 
 CapHandle doorbell_share(u32 owner_pid, CapHandle db_cap, u32 target_pid, u32 rights) {
-    CapEntry* src = resolve_doorbell_entry(owner_pid, db_cap, RIGHT_DUP);
+    cap::Ref src = resolve_doorbell_entry(owner_pid, db_cap, RIGHT_DUP);
     if (!src) return kNullCap;
 
     Doorbell* db = static_cast<Doorbell*>(src->target);
     if (!db) return kNullCap;
 
-    Process* target = sched::find_process(target_pid);
+    auto target = sched::find_process(target_pid);
     if (!target || !target->cap_table) return kNullCap;
 
     const u32 allowed = RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP;
@@ -117,11 +132,13 @@ SysError notify_object(Doorbell* db) {
     if (!db) return E_NOTFOUND;
 
     Thread* waiter = nullptr;
+    object::Ref<Thread> waiter_reference;
     const u64 irq = local_irq_save_disable();
     lock(db);
 
     __atomic_add_fetch(&db->counter, 1ull, __ATOMIC_RELEASE);
     waiter = db->waiter;
+    waiter_reference.reset(waiter);
     db->waiter = nullptr;
 
     if (waiter) {
@@ -152,7 +169,7 @@ SysError notify_object(Doorbell* db) {
 }
 
 SysError notify(CapHandle handle, u32 caller_pid) {
-    CapEntry* e = resolve_doorbell_entry(caller_pid, handle, RIGHT_NOTIFY);
+    cap::Ref e = resolve_doorbell_entry(caller_pid, handle, RIGHT_NOTIFY);
     Doorbell* db = e ? static_cast<Doorbell*>(e->target) : nullptr;
     return notify_object(db);
 }
@@ -170,7 +187,7 @@ SysError notify(CapHandle handle, u32 caller_pid) {
 SysError notify_handoff(CapHandle handle, u64 payload_word, u32 caller_pid) {
     metric_inc(g_notify_calls);
 
-    CapEntry* ce = resolve_doorbell_entry(caller_pid, handle, RIGHT_NOTIFY);
+    cap::Ref ce = resolve_doorbell_entry(caller_pid, handle, RIGHT_NOTIFY);
     if (!ce) return E_NOTFOUND;
     Doorbell* db = static_cast<Doorbell*>(ce->target);
     if (!db) return E_NOTFOUND;
@@ -179,6 +196,7 @@ SysError notify_handoff(CapHandle handle, u64 payload_word, u32 caller_pid) {
     if (!sender) return E_DEAD;
 
     Thread* receiver = nullptr;
+    object::Ref<Thread> receiver_reference;
     bool do_handoff = false;
 
     const u64 irq = local_irq_save_disable();
@@ -186,6 +204,7 @@ SysError notify_handoff(CapHandle handle, u64 payload_word, u32 caller_pid) {
 
     __atomic_add_fetch(&db->counter, 1ull, __ATOMIC_RELEASE);
     receiver = db->waiter;
+    receiver_reference.reset(receiver);
     db->waiter = nullptr;
 
     if (receiver) {
@@ -203,6 +222,7 @@ SysError notify_handoff(CapHandle handle, u64 payload_word, u32 caller_pid) {
         const bool affinity_ok = (receiver->affinity_mask == 0) ||
                                  ((receiver->affinity_mask >> cpu) & 1u);
         if ((db->sched_hints & IPC_HINT_HANDOFF_OK) &&
+            !__atomic_load_n(&receiver->terminate_requested, __ATOMIC_ACQUIRE) &&
             receiver->state == TS_SLEEPING &&
             receiver->cpu_id == cpu &&
             affinity_ok &&
@@ -276,6 +296,7 @@ SysError reply_handoff(u64 reply_val, u32 caller_pid) {
     (void)caller_pid;
     Thread* cur = sched::current();
     if (!cur) return E_DEAD;
+    ANKO_ASSERT(cur->state == TS_RUNNING);
 
     Thread* sender = cur->reply_target;
     if (!sender) return E_INVALID;
@@ -301,12 +322,13 @@ SysError reply_handoff(u64 reply_val, u32 caller_pid) {
 SysError wait_doorbell(CapHandle handle, u64 expected, u32 caller_pid) {
     metric_inc(g_wait_calls);
 
-    CapEntry* e = resolve_doorbell_entry(caller_pid, handle, RIGHT_WAIT);
+    cap::Ref e = resolve_doorbell_entry(caller_pid, handle, RIGHT_WAIT);
     Doorbell* db = e ? static_cast<Doorbell*>(e->target) : nullptr;
     if (!db) return E_NOTFOUND;
 
     Thread* cur = sched::current();
     if (!cur) return E_DEAD;
+    ANKO_ASSERT(cur->state == TS_RUNNING);
 
     const u64 irq = local_irq_save_disable();
     lock(db);
@@ -325,6 +347,8 @@ SysError wait_doorbell(CapHandle handle, u64 expected, u32 caller_pid) {
         return E_BUSY;
     }
 
+    object::release(cur->waiting_lifetime);
+    cur->waiting_lifetime = object::acquire(db);
     db->waiter = cur;
     __atomic_store_n(&cur->waiting_doorbell, db, __ATOMIC_RELEASE);
     cur->state = TS_SLEEPING;
@@ -337,7 +361,7 @@ SysError wait_doorbell(CapHandle handle, u64 expected, u32 caller_pid) {
 }
 
 u64 doorbell_counter(CapHandle handle, u32 caller_pid) {
-    CapEntry* e = resolve_doorbell_entry(caller_pid, handle, RIGHT_WAIT);
+    cap::Ref e = resolve_doorbell_entry(caller_pid, handle, RIGHT_WAIT);
     Doorbell* db = e ? static_cast<Doorbell*>(e->target) : nullptr;
     if (!db) return 0;
     return __atomic_load_n(&db->counter, __ATOMIC_ACQUIRE);
@@ -347,7 +371,10 @@ void doorbell_clear_waiter(Thread* thread) {
     if (!thread) return;
 
     Doorbell* db = __atomic_load_n(&thread->waiting_doorbell, __ATOMIC_ACQUIRE);
-    if (!db) return;
+    if (!db) {
+        object::release(thread->waiting_lifetime); thread->waiting_lifetime = nullptr;
+        return;
+    }
 
     const u64 irq = local_irq_save_disable();
     lock(db);
@@ -360,6 +387,7 @@ void doorbell_clear_waiter(Thread* thread) {
     }
     unlock(db);
     local_irq_restore(irq);
+    object::release(thread->waiting_lifetime); thread->waiting_lifetime = nullptr;
 }
 
 u64 doorbell_sleep_count()       { return metric_load(g_sleep_count); }

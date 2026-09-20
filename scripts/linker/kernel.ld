@@ -2,8 +2,12 @@
  * scripts/linker/kernel.ld
  *
  * Phase 0: MMU is off, kernel runs from the physical address QEMU/U-Boot
- * loaded it at. QEMU `-kernel` on the virt machine loads at 0x40080000
- * (DRAM base 0x40000000 + 0x80000 image offset).
+ * loaded it at.
+ *
+ * ANKO_LOAD_BASE is defined at link time via -Wl,--defsym,ANKO_LOAD_BASE=...
+ * from CMake (board-specific; see boards/<board>/board.cmake).
+ *   qemu-virt:   0x40080000  (DRAM 0x40000000 + 0x80000 image offset)
+ *   switch-t210: 0x90000000  (clear of U-Boot + TrustZone)
  *
  * Phase 1 will switch to a high-half virtual link address (TTBR1 window
  * at 0xFFFF000000000000) once the MMU is up and an identity-map trampoline
@@ -14,10 +18,8 @@ OUTPUT_FORMAT("elf64-littleaarch64")
 OUTPUT_ARCH(aarch64)
 ENTRY(_start)
 
-KERNEL_LOAD = 0x40080000;
-
 SECTIONS {
-    . = KERNEL_LOAD;
+    . = ANKO_LOAD_BASE;
 
     .text : ALIGN(4096) {
         __text_start = .;
@@ -32,6 +34,12 @@ SECTIONS {
 
     .data : ALIGN(8) {
         *(.data*)
+    }
+
+    .init_array : ALIGN(8) {
+        __init_array_start = .;
+        KEEP(*(.init_array*))
+        __init_array_end = .;
     }
 
     .bss : ALIGN(16) {

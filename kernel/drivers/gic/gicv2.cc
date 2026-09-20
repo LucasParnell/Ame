@@ -13,6 +13,7 @@
 //   - handle_irq(): read GICC_IAR → dispatch → GICC_EOIR.
 
 #include "anko/platform.h"
+#include "anko/hw_info.h"
 #include "anko/types.h"
 #include "anko/smp.h"
 
@@ -71,7 +72,7 @@ void handle_irq() {
     if (!g_cpu) return;
     const u32 iar = g_cpu[GICC_IAR / 4];
     const u32 irq_id = iar & 0x3FFu;
-    if (irq_id == platform::kTimerIrqPhysNS) {
+    if (irq_id == g_hw.timer_irq) {
         drivers::timer::handle_tick();
     } else if (irq_id == 1) {
         smp::handle_ipi();

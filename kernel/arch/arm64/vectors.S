@@ -31,7 +31,9 @@ vectors:
     VEC vec_trap   // serror
 
     // Lower EL using AArch64
-    VEC syscall_entry // sync (SVC from EL0)
+    .balign 128
+    .inst 0xd503229f // CSDB: speculation-control hint, safe on the QEMU cortex-a57 baseline.
+    b syscall_entry  // sync (SVC from EL0)
     VEC irq_entry     // irq
     VEC vec_trap      // fiq
     VEC vec_trap      // serror

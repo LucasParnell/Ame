@@ -86,7 +86,6 @@ enum SchedBand : u8 {
 };
 
 using SchedClass = SchedBand;
-constexpr SchedBand SCHED_RT          = SCHED_BAND_RT_NATIVE;
 constexpr SchedBand SCHED_INTERACTIVE = SCHED_BAND_LATENCY;
 constexpr SchedBand SCHED_SERVICE     = SCHED_BAND_LATENCY;
 constexpr SchedBand SCHED_NORMAL      = SCHED_BAND_FAIR;
@@ -326,6 +325,13 @@ enum SwitchReason : u8 {
 struct Thread {
     // --- Offset 0: assembly-referenced context block ---
     CpuContext  ctx;              // offset 0, size 104
+    object::Record* lifetime;
+    object::Record* owner_lifetime;
+    object::Record* waiting_lifetime;
+    object::Record* sched_context_lifetime;
+    struct Process* owner;
+    u32 terminate_requested;
+    u32 lifecycle_lock;
 
     // --- Identity ---
     u32         tid;
@@ -396,10 +402,13 @@ static_assert(__is_trivially_constructible(Thread));
 // ---------------------------------------------------------------------------
 struct Process {
     u32         pid;
+    u32         generation;
+    object::Record* lifetime;
     PrincipalClass principal_class;
     u8          _pad[3];
     char        name[32];      // human-readable identity (e.g. "init", "io.console")
     u32         supervisor_pid;
+    u64         supervisor_identity;
     u64         ttbr0;
     CapTable*   cap_table;
     ArenaTable* arena_table;
@@ -407,15 +416,13 @@ struct Process {
     u32         next_stack_slot;
     u32         principal_id;
     u64         runtime_ns;
+    u32         page_count;
+    u32         page_quota;
     u32         runnable_threads;
+    u32         lock;
+    u32         dying;
 
-    // Per-supervisor child-death event slot.  Written by a dying child on
-    // one CPU and polled by the supervisor process on another.
-    u32         supervisor_event_lock;
-    u32         supervisor_event_pending;
-    u32         supervisor_event_pid;
-    u32         _pad1;
-    long        supervisor_event_status;
+
 };
 
 // ---------------------------------------------------------------------------
@@ -515,10 +522,11 @@ void set_handoff_next(Thread* receiver);
 bool principal_throttled(u32 principal_id);
 bool switch_pending();
 u32 allocate_principal(PrincipalClass class_, u32 weight, u64 budget_ns, u64 period_ns);
+void release_principal(u32 principal_id);
 CapHandle sched_context_create(Process& caller, const SchedContext& request, SysError* out_error);
 SysError sched_context_bind_thread(Process& caller, CapHandle thread_cap, CapHandle sched_context_cap);
-SchedContext* sched_context_from_cap(Process& caller, CapHandle sched_context_cap, SysError* out_error);
-SchedContext* sched_context_by_id(u32 sched_context_id);
+cap::Borrow<SchedContext> sched_context_from_cap(Process& caller, CapHandle sched_context_cap, SysError* out_error);
+object::Ref<SchedContext> sched_context_by_id(u32 sched_context_id);
 SysError bind_current_to_sched_context_id(u32 sched_context_id);
 
 // ---------------------------------------------------------------------------
@@ -533,13 +541,22 @@ void     thread_destroy(Thread* t);
 Process* process_create(PrincipalClass principal, u32 supervisor_pid);
 void     process_destroy(Process* p);
 void     process_set_name(Process* p, const char* name);
+bool     process_charge_page(u32 pid);
+void     process_uncharge_page(u32 pid);
+void     sweep_process_caps(void* target);
 
 void     enqueue(Thread* t);
 void     dequeue_thread(Thread* t);
 bool     set_affinity(Thread* t, u64 cpu_mask);
 SysError resume_thread(Thread* t);
-Thread*  find_thread(u32 tid);
-Process* find_process(u32 pid);
+object::Ref<Thread> find_thread(u32 tid);
+object::Ref<Process> find_process(u32 pid);
+bool termination_pending();
+u64 process_identity(const Process& process);
+void record_exit(Process* process, long status);
+bool poll_exit(Process& supervisor, u64* identity, long* status);
+void finish_thread(Thread* thread); // called only after its CPU stops using it
+void collect_terminations(Eki& eki, Thread* protected_thread = nullptr);
 
 // ---------------------------------------------------------------------------
 // CPU management
@@ -554,7 +571,7 @@ void drain_pending_wakes();
 
 void request_switch(bool requeue_current, SwitchReason reason);
 extern "C" void post_syscall(void* frame_ptr);
-void mark_current_dead();
+void mark_current_dead(bool whole_process = false);
 
 // ---------------------------------------------------------------------------
 // Metrics
@@ -577,5 +594,6 @@ u64 fairness_max_lag();
 u64 wake_doorbell_count();
 u64 wake_remote_count();
 u64 wake_resume_count();
+u64 wrong_cpu_dequeue_count();
 
 } // namespace sched

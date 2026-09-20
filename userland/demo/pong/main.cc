@@ -10,6 +10,7 @@
 #include "mochi/syscall.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
+#include "mochi/boot.h"
 
 constexpr uint32_t MSG_PING  = 1;
 constexpr uint32_t MSG_PONG  = 2;
@@ -24,21 +25,7 @@ constexpr uint32_t MSG_HOT_START = 0x484F5453; // 'HOTS'
 constexpr uint32_t MSG_HOT_READY = 0x484F5452; // 'HOTR'
 
 constexpr uint32_t kOrder = 6;
-constexpr int64_t kCapTypeSharedRing = 4;
-constexpr int64_t kCapTypeDoorbell = 5;
 
-constexpr CapHandle cap_slot(uint32_t idx) {
-    return (static_cast<CapHandle>(1) << 32) | idx;
-}
-
-constexpr CapHandle kRecvRing     = cap_slot(0);
-constexpr CapHandle kSendRing     = cap_slot(1);
-constexpr CapHandle kMyDoorbell   = cap_slot(2);
-constexpr CapHandle kPeerDoorbell = cap_slot(3);
-constexpr CapHandle kLogRing      = cap_slot(4);
-constexpr CapHandle kLogDoorbell  = cap_slot(5);
-constexpr uint32_t RIGHT_READ  = 1u << 0;
-constexpr uint32_t RIGHT_WRITE = 1u << 1;
 constexpr uint64_t kVaRecvRing = 0x2000'0000ull;
 constexpr uint64_t kVaSendRing = 0x2001'0000ull;
 constexpr uint64_t kVaLogRing = 0x2002'0000ull;
@@ -60,20 +47,28 @@ static void wait_cap(CapHandle cap, int64_t expected_type) {
 }
 
 extern "C" [[noreturn]] void _start() {
-    auto* recv_ring = wait_map<RingPage>(kRecvRing, kCapTypeSharedRing,
+    const MxBootInfo* boot = mochi::boot::map();
+    const CapHandle recv_cap = mochi::boot::require_handle(boot, "ipc.rx");
+    const CapHandle send_cap = mochi::boot::require_handle(boot, "ipc.tx");
+    const CapHandle my_doorbell = mochi::boot::require_handle(boot, "ipc.self.db");
+    const CapHandle peer_doorbell = mochi::boot::require_handle(boot, "ipc.peer.db");
+    const CapHandle log_cap = mochi::boot::require_handle(boot, "log.ring");
+    const CapHandle log_doorbell = mochi::boot::require_handle(boot, "log.doorbell");
+
+    auto* recv_ring = wait_map<RingPage>(recv_cap, kCapTypeSharedRing,
                                          kVaRecvRing, RIGHT_READ | RIGHT_WRITE);
-    auto* send_ring = wait_map<RingPage>(kSendRing, kCapTypeSharedRing,
+    auto* send_ring = wait_map<RingPage>(send_cap, kCapTypeSharedRing,
                                          kVaSendRing, RIGHT_READ | RIGHT_WRITE);
-    wait_cap(kMyDoorbell, kCapTypeDoorbell);
-    wait_cap(kPeerDoorbell, kCapTypeDoorbell);
-    auto* log_ring = wait_map<RingPage>(kLogRing, kCapTypeSharedRing,
+    wait_cap(my_doorbell, kCapTypeDoorbell);
+    wait_cap(peer_doorbell, kCapTypeDoorbell);
+    auto* log_ring = wait_map<RingPage>(log_cap, kCapTypeSharedRing,
                                         kVaLogRing, RIGHT_READ | RIGHT_WRITE);
-    wait_cap(kLogDoorbell, kCapTypeDoorbell);
-    mochi::log_set_sink(log_ring, kOrder, kLogDoorbell, "demo.pong");
+    wait_cap(log_doorbell, kCapTypeDoorbell);
+    mochi::log_set_sink(log_ring, kOrder, log_doorbell, "demo.pong");
 
     RingSlot slot{};
     while (true) {
-        if (!ring_wait_pop(recv_ring, kOrder, &slot, kMyDoorbell)) {
+        if (!ring_wait_pop(recv_ring, kOrder, &slot, my_doorbell)) {
             // Invalid doorbell/cap should not happen in the wired V1 demo.
             sys_yield();
             continue;
@@ -87,7 +82,7 @@ extern "C" [[noreturn]] void _start() {
         if (slot.type == MSG_CPU_QUERY) {
             uint32_t cpu = static_cast<uint32_t>(sys_thread_get_cpu());
             while (!ring_push(send_ring, kOrder, MSG_CPU_REPLY,
-                              &cpu, sizeof(cpu), kPeerDoorbell)) {
+                              &cpu, sizeof(cpu), peer_doorbell)) {
                 sys_yield();
             }
             continue;
@@ -103,7 +98,7 @@ extern "C" [[noreturn]] void _start() {
             }
             uint32_t ready = 1;
             while (!ring_push(send_ring, kOrder, MSG_HOT_READY,
-                              &ready, sizeof(ready), kPeerDoorbell)) {
+                              &ready, sizeof(ready), peer_doorbell)) {
                 sys_yield();
             }
 
@@ -114,7 +109,7 @@ extern "C" [[noreturn]] void _start() {
                 ++received;
                 uint64_t seq = slot.seq;
                 while (!ring_push(send_ring, kOrder, MSG_PONG,
-                                  &seq, sizeof(seq), kPeerDoorbell)) {
+                                  &seq, sizeof(seq), peer_doorbell)) {
                     // The peer runs on another CPU and drains concurrently.
                 }
             }
@@ -124,7 +119,7 @@ extern "C" [[noreturn]] void _start() {
         if (slot.type == MSG_SLEEP_TEST_START) {
             uint32_t ready = 1;
             while (!ring_push(send_ring, kOrder, MSG_SLEEP_TEST_READY,
-                              &ready, sizeof(ready), kPeerDoorbell)) {
+                              &ready, sizeof(ready), peer_doorbell)) {
                 sys_yield();
             }
             continue;
@@ -133,14 +128,14 @@ extern "C" [[noreturn]] void _start() {
         if (slot.type == MSG_SLEEP_TEST_PING) {
             uint32_t pong = 1;
             while (!ring_push(send_ring, kOrder, MSG_SLEEP_TEST_PONG,
-                              &pong, sizeof(pong), kPeerDoorbell)) {
+                              &pong, sizeof(pong), peer_doorbell)) {
                 sys_yield();
             }
             continue;
         }
 
         uint64_t seq = slot.seq;
-        while (!ring_push(send_ring, kOrder, MSG_PONG, &seq, sizeof(seq), kPeerDoorbell)) {
+        while (!ring_push(send_ring, kOrder, MSG_PONG, &seq, sizeof(seq), peer_doorbell)) {
             sys_yield();
         }
     }

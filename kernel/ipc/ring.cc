@@ -10,6 +10,14 @@
 
 namespace ipc {
 
+static void destroy_ring(void* target) {
+    auto* ring = static_cast<Ring*>(target);
+    const u64 bytes = sizeof(RingHeader) + (1ull << ring->order) * sizeof(RingSlot);
+    for (u64 off = 0; off < bytes; off += PAGE_SIZE) mm::free_page_for_identity((static_cast<u64>(ring->owner_generation) << 32) | ring->producer_pid, ring->phys_base + off);
+    mm::slab_free(ring, sizeof(Ring), alignof(Ring));
+}
+
+
 void init() {
     // V0 keeps ring objects heap-allocated; no global registry required.
 }
@@ -17,94 +25,51 @@ void init() {
 static constexpr u32 kRingOrderMin = 4;   // 16 slots
 static constexpr u32 kRingOrderMax = 10;  // 1024 slots
 
-static bool alloc_contiguous_pages(usize pages, PhysAddr* out_base) {
-    if (!out_base || pages == 0) return false;
-    if (pages > 64) return false;
-
-    PhysAddr allocs[64]{};
-    usize got = 0;
-
-    PhysAddr first = mm::alloc_page();
-    if (!first) return false;
-    allocs[got++] = first;
-
-    PhysAddr expected = first + PAGE_SIZE;
-    for (usize i = 1; i < pages; ++i) {
-        PhysAddr pa = mm::alloc_page();
-        if (!pa || pa != expected) {
-            if (pa) mm::free_page(pa);
-            for (usize j = 0; j < got; ++j) mm::free_page(allocs[j]);
-            return false;
-        }
-        allocs[got++] = pa;
-        expected += PAGE_SIZE;
-    }
-
-    *out_base = first;
-    return true;
-}
-
-static CapEntry* resolve_ring_entry(u32 pid, CapHandle ring_cap, u32 need_rights) {
-    Process* p = sched::find_process(pid);
+static cap::Ref resolve_ring_entry(u32 pid, CapHandle ring_cap, u32 need_rights) {
+    auto p = sched::find_process(pid);
     if (!p || !p->cap_table) return nullptr;
 
-    CapEntry* e = cap::lookup(*p->cap_table, ring_cap, CAP_SHARED_RING);
+    cap::Ref e = cap::lookup(*p->cap_table, ring_cap, CAP_SHARED_RING);
     if (!e) return nullptr;
     if ((e->rights_mask & need_rights) != need_rights) return nullptr;
     return e;
 }
 
 Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
+    (void)flags;
     if (order < kRingOrderMin || order > kRingOrderMax) return nullptr;
 
-    Process* owner = sched::find_process(pid);
+    auto owner = sched::find_process(pid);
     if (!owner || !owner->cap_table) return nullptr;
 
     const usize slots = (1u << order);
     const usize bytes = sizeof(RingHeader) + slots * sizeof(RingSlot);
     const usize pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    PhysAddr base = 0;
-    if (!alloc_contiguous_pages(pages, &base)) return nullptr;
+    const PhysAddr base = mm::alloc_pages_contiguous_for(pid, pages);
+    if (!base) return nullptr;
     libk::memset(reinterpret_cast<void*>(base), 0, pages * PAGE_SIZE);
 
-    u32 arena_idx = 0;
-    if (!owner->arena_table ||
-        !mm::arena_register(*owner->arena_table,
-                            static_cast<VirtAddr>(base),
-                            pages * PAGE_SIZE,
-                            pid,
-                            RIGHT_READ | RIGHT_WRITE,
-                            flags,
-                            &arena_idx)) {
-        for (usize i = 0; i < pages; ++i) {
-            mm::free_page(base + i * PAGE_SIZE);
-        }
-        return nullptr;
-    }
-
-    Ring* ring = static_cast<Ring*>(mm::heap_alloc(sizeof(Ring), alignof(Ring)));
+    Ring* ring = static_cast<Ring*>(mm::slab_alloc(sizeof(Ring), alignof(Ring)));
     if (!ring) {
         for (usize i = 0; i < pages; ++i) {
-            mm::free_page(base + i * PAGE_SIZE);
+            mm::free_page_for(pid, base + i * PAGE_SIZE);
         }
-        Arena& arena = owner->arena_table->entries[arena_idx];
-        libk::memset(&arena, 0, sizeof(arena));
-        if (owner->arena_table->count == arena_idx + 1) owner->arena_table->count = arena_idx;
         return nullptr;
     }
     ring->phys_base = base;
     ring->order = order;
     ring->producer_pid = pid;
     ring->consumer_pid = pid;
-    ring->_pad = 0;
+    ring->owner_generation = owner->generation;
 
+    if (!object::create(ring, destroy_ring)) { destroy_ring(ring); return nullptr; }
     return ring;
 }
 
 CapHandle ring_cap_alloc(u32 target_pid, Ring* ring, u32 rights) {
     if (!ring) return kNullCap;
-    Process* target = sched::find_process(target_pid);
+    auto target = sched::find_process(target_pid);
     if (!target || !target->cap_table) return kNullCap;
 
     const u32 allowed = RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP;
@@ -115,32 +80,39 @@ CapHandle ring_cap_alloc(u32 target_pid, Ring* ring, u32 rights) {
 
 CapHandle ring_create(u32 pid, u32 order, u32 flags) {
     Ring* ring = ring_create_object(pid, order, flags);
-    return ring_cap_alloc(pid, ring, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
+    if (!ring) return kNullCap;
+    // acquire balances itself; the second release transfers the creator root.
+    auto* root = object::acquire(ring);
+    CapHandle handle = ring_cap_alloc(pid, ring, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
+    object::release(root);
+    object::release(root);
+    return handle;
 }
 
 CapHandle ring_share(u32 owner_pid, CapHandle ring_cap,
                      u32 target_pid, u32 rights) {
-    CapEntry* src = resolve_ring_entry(owner_pid, ring_cap, RIGHT_DUP);
+    cap::Ref src = resolve_ring_entry(owner_pid, ring_cap, RIGHT_DUP);
     if (!src) return kNullCap;
     Ring* ring = static_cast<Ring*>(src->target);
     if (!ring) return kNullCap;
 
-    Process* target = sched::find_process(target_pid);
+    auto target = sched::find_process(target_pid);
     if (!target || !target->cap_table) return kNullCap;
-
-    if (ring->consumer_pid == owner_pid) ring->consumer_pid = target_pid;
 
     const u32 allowed = RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP;
     const u32 requested = rights & allowed;
     if (requested == 0) return kNullCap;
     if ((requested & src->rights_mask) != requested) return kNullCap;
     const u32 granted = requested;
-    return ring_cap_alloc(target_pid, ring, granted);
+    const CapHandle h = ring_cap_alloc(target_pid, ring, granted);
+    if (h == kNullCap) return kNullCap;
+    if (ring->consumer_pid == owner_pid) ring->consumer_pid = target_pid;
+    return h;
 }
 
-Ring* ring_from_cap(u32 pid, CapHandle cap) {
-    CapEntry* e = resolve_ring_entry(pid, cap, RIGHT_READ);
-    return e ? static_cast<Ring*>(e->target) : nullptr;
+cap::Borrow<Ring> ring_from_cap(u32 pid, CapHandle cap) {
+    cap::Ref e = resolve_ring_entry(pid, cap, RIGHT_READ);
+    return e ? cap::Borrow<Ring>(e) : cap::Borrow<Ring>(nullptr);
 }
 
 } // namespace ipc

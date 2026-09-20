@@ -1,6 +1,7 @@
 #include "anko/vm.h"
 #include "anko/platform.h"
 #include "anko/log.h"
+#include "anko/console.h"
 #include "libk/printf.h"
 #include "libk/string.h"
 #include "anko/arm64_esr.h"
@@ -15,7 +16,6 @@ namespace {
 
 u32 g_next_vcpu_id = 1;
 
-constexpr u64 kLinuxBootProbeEntry = 0x4008'0000ull;
 constexpr u64 kHcrExitUnsupported = 0;
 using namespace arm64;
 constexpr u64 kQemuUartBase = 0x0900'0000ull;
@@ -86,6 +86,13 @@ u64 read_cntpct() {
 
 bool timer_enabled_unmasked(u64 ctl) {
     return (ctl & 0x1ull) && ((ctl & 0x2ull) == 0);
+}
+
+// ESR_EL2.ISS bit 0 distinguishes trapped WFE from WFI for EC=0x01.
+// WFI is now normally allowed to sleep in the guest so the real timer wakes
+// EL2 precisely; WFE remains trapped and is treated as a yield/nop.
+bool wfx_is_wfe(u64 esr) {
+    return (esr_iss(esr) & 1ull) != 0;
 }
 
 u64 data_abort_ipa(const El2RunState& state) {
@@ -196,8 +203,10 @@ void note_guest_console_char(char c) {
 }
 
 void guest_console_putchar(char c) {
-    auto* base = reinterpret_cast<volatile u32*>(platform::kGuestUartBase);
-    base[platform::kUartDR / 4] = static_cast<u32>(static_cast<unsigned char>(c));
+    // Forward to the kernel console (g_console_ops).
+    // kGuestUartBase (0x09040000 = QEMU secure UART) is only present with
+    // -machine virt,secure=on; without it, direct MMIO causes an external abort.
+    drivers::uart::putchar_thunk(c);
 }
 
 void pl011_write(u64 offset, u64 value) {
@@ -700,7 +709,7 @@ void wake_bound_runner(Vcpu& vcpu, WakeReason reason, u32 hints) {
         vcpu.state = VCPU_READY;
     }
 
-    Thread* runner = sched::find_thread(vcpu.sched.runner_tid);
+    auto runner = sched::find_thread(vcpu.sched.runner_tid);
     if (!runner || runner->state == TS_DEAD || runner->state == TS_RUNNING ||
         runner->state == TS_RUNNABLE_QUEUED || runner->state == TS_RUNNABLE_PENDING_REMOTE) {
         return;
@@ -802,7 +811,7 @@ void init_el2_state(Vcpu& vcpu, const Vm& owner) {
 
 CapHandle create_vcpu(Process& caller, CapHandle vm_cap, u64 flags, SysError* out_error) {
     SysError rc = E_OK;
-    Vm* v = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
+    auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
     if (!v) {
         if (out_error) *out_error = rc;
         return kNullCap;
@@ -813,7 +822,7 @@ CapHandle create_vcpu(Process& caller, CapHandle vm_cap, u64 flags, SysError* ou
         return kNullCap;
     }
 
-    Vcpu* vcpu = static_cast<Vcpu*>(mm::heap_alloc(sizeof(Vcpu), alignof(Vcpu)));
+    Vcpu* vcpu = static_cast<Vcpu*>(mm::slab_alloc(sizeof(Vcpu), alignof(Vcpu)));
     if (!vcpu) {
         if (out_error) *out_error = E_NOMEM;
         note_error();
@@ -831,12 +840,15 @@ CapHandle create_vcpu(Process& caller, CapHandle vm_cap, u64 flags, SysError* ou
     vcpu->sched.core_mask = 0;
     vcpu->sched.blocked_reason = VCPU_BLOCK_NONE;
 
+    vcpu->owner_lifetime = v->lifetime; object::retain(vcpu->owner_lifetime);
+    vcpu->lifetime = object::create(vcpu, dispose_vcpu);
+    if (!vcpu->lifetime) { dispose_vcpu(vcpu); if (out_error) *out_error = E_NOMEM; return kNullCap; }
     const CapHandle cap_h = cap::alloc(*caller.cap_table, CAP_VCPU, vcpu,
                                        RIGHT_VCPU_CONTROL |
                                            RIGHT_VCPU_INSPECT |
                                            RIGHT_DUP);
     if (cap_h == kNullCap) {
-        vcpu->state = VCPU_DEAD;
+        object::release(vcpu->lifetime);
         if (out_error) *out_error = E_OVERFLOW;
         note_error();
         return kNullCap;
@@ -852,7 +864,7 @@ CapHandle create_vcpu(Process& caller, CapHandle vm_cap, u64 flags, SysError* ou
 SysError set_vcpu_entry(Process& caller, CapHandle vcpu_cap, u64 entry_pc,
                         u64 arg0, u64 arg1) {
     SysError rc = E_OK;
-    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    auto vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
     if (!vcpu) return rc;
     if (entry_pc == 0) {
         note_error();
@@ -875,7 +887,7 @@ SysError set_vcpu_entry(Process& caller, CapHandle vcpu_cap, u64 entry_pc,
     vcpu->sched.virtual_irq_pending = false;
     metric_inc(VM_DEBUG_VCPU_CONFIGURED);
 
-    Vm* owner = find_vm_by_id(vcpu->owner_vm_id);
+    Vm* owner = owner_for_vcpu(vcpu);
     refresh_vm_state(owner);
     return E_OK;
 }
@@ -883,8 +895,10 @@ SysError set_vcpu_entry(Process& caller, CapHandle vcpu_cap, u64 entry_pc,
 SysError inspect_vcpu(Process& caller, CapHandle vcpu_cap, VcpuInfo* out) {
     if (!out) return E_INVALID;
     SysError rc = E_OK;
-    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_INSPECT, &rc);
+    auto vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_INSPECT, &rc);
     if (!vcpu) return rc;
+
+    (void)owner_for_vcpu(vcpu);
 
     VcpuInfo info{};
     info.vcpu_id = vcpu->vcpu_id;
@@ -927,17 +941,31 @@ void prepare_guest_irq_state(Vcpu& vcpu) {
 
 SysError vcpu_bind_sched_context(Process& caller, CapHandle vcpu_cap, CapHandle sched_context_cap) {
     SysError rc = E_OK;
-    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    auto vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
     if (!vcpu) return rc;
 
-    SchedContext* ctx = sched::sched_context_from_cap(caller, sched_context_cap, &rc);
+    auto ctx = sched::sched_context_from_cap(caller, sched_context_cap, &rc);
     if (!ctx) return rc;
     if (ctx->band == SCHED_BAND_RT_NATIVE) return E_PERM; // VM RT is soft RT only.
-    if (ctx->band != SCHED_BAND_VM_LATENCY && ctx->band != SCHED_BAND_VM_FAIR &&
-        ctx->band != SCHED_BAND_BATCH) {
+
+    const bool vm_band =
+        ctx->band == SCHED_BAND_VM_LATENCY ||
+        ctx->band == SCHED_BAND_VM_FAIR ||
+        ctx->band == SCHED_BAND_BATCH;
+    const bool latency_bootstrap_runner =
+        ctx->band == SCHED_BAND_LATENCY &&
+        ((ctx->flags & SCHED_CTX_VM_RUNNER) != 0);
+
+    // Dango's userland runner thread may be temporarily bootstrapped in the
+    // native latency band so it can get its first dispatch while the manager is
+    // still in its latency-band service loop.  It is still explicitly marked as
+    // a VM runner, and hard RT remains forbidden.
+    if (!vm_band && !latency_bootstrap_runner) {
         return E_INVALID;
     }
 
+    auto* next_context = object::acquire(ctx.get());
+    object::release(vcpu->sched.context_lifetime); vcpu->sched.context_lifetime = next_context;
     vcpu->sched.sched_context_id = ctx->id;
     vcpu->sched.home_cpu = ctx->home_cpu;
     vcpu->sched.core_mask = ctx->core_mask;
@@ -952,7 +980,7 @@ SysError vcpu_bind_sched_context(Process& caller, CapHandle vcpu_cap, CapHandle 
 
 SysError vcpu_set_affinity(Process& caller, CapHandle vcpu_cap, u64 core_mask, u32 home_cpu) {
     SysError rc = E_OK;
-    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    auto vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
     if (!vcpu) return rc;
     if (core_mask == 0) return E_INVALID;
     vcpu->sched.core_mask = core_mask;
@@ -966,7 +994,7 @@ SysError vcpu_set_affinity(Process& caller, CapHandle vcpu_cap, u64 core_mask, u
 
 SysError vcpu_kick(Process& caller, CapHandle vcpu_cap, u32 reason) {
     SysError rc = E_OK;
-    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    auto vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
     if (!vcpu) return rc;
     vcpu->sched.wake_reason = reason;
     wake_bound_runner(*vcpu, WAKE_IRQ, IPC_HINT_LATENCY);
@@ -975,7 +1003,7 @@ SysError vcpu_kick(Process& caller, CapHandle vcpu_cap, u32 reason) {
 
 SysError vcpu_inject_irq(Process& caller, CapHandle vcpu_cap, u32 irq) {
     SysError rc = E_OK;
-    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    auto vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
     if (!vcpu) return rc;
     if (!irq_in_range(irq)) return E_INVALID;
     vgic_bit_set(vcpu->vgic.pending, irq);
@@ -986,7 +1014,7 @@ SysError vcpu_inject_irq(Process& caller, CapHandle vcpu_cap, u32 irq) {
 
 SysError vcpu_block_until_irq_or_timer(Process& caller, CapHandle vcpu_cap) {
     SysError rc = E_OK;
-    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    auto vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
     if (!vcpu) return rc;
     if (vcpu_has_pending_virtual_irq(*vcpu)) return E_BUSY;
     record_guest_timer_source(*vcpu);
@@ -1009,16 +1037,38 @@ void poll_vcpu_timer(Vcpu& vcpu) {
     }
 }
 
+namespace {
+
+constexpr u64 kVcpuRunInvalidState        = 0x44414e474f010000ull; // DANGO reason 1
+constexpr u64 kVcpuRunInvalidNoOwner      = 0x44414e474f020000ull;
+constexpr u64 kVcpuRunInvalidStage2Built  = 0x44414e474f030000ull;
+constexpr u64 kVcpuRunInvalidStage2Empty  = 0x44414e474f040000ull;
+constexpr u64 kVcpuRunInvalidStage2Active = 0x44414e474f050000ull;
+
+SysError fail_vcpu_run_invalid(Vcpu& vcpu, VcpuRunResult* out, u64 detail) {
+    note_error();
+    vcpu.last_exit_reason = detail;
+    if (out) {
+        out->exit_reason = static_cast<u32>(VCPU_EXIT_UNSUPPORTED_TRAP);
+        out->exit_batch_count = 0;
+        out->last_esr = detail;
+        out->used_ns = 0;
+    }
+    return E_INVALID;
+}
+
+} // namespace
+
 SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budget, VcpuRunResult* out) {
     if (out) libk::memset(out, 0, sizeof(*out));
 
     SysError rc = E_OK;
-    Vcpu* vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    auto vcpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
     if (!vcpu) return rc;
 
     if (vcpu->state != VCPU_READY && vcpu->state != VCPU_CONFIGURED) {
-        note_error();
-        return E_INVALID;
+        libk::printf("dango vcpu run invalid: state=%u\n", static_cast<unsigned>(vcpu->state));
+        return fail_vcpu_run_invalid(*vcpu, out, kVcpuRunInvalidState | static_cast<u64>(vcpu->state));
     }
 
     Thread* runner = sched::current();
@@ -1031,24 +1081,49 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budg
 
     metric_inc(VM_DEBUG_VCPU_RUN_ATTEMPTS);
 
-    if (vcpu->entry_pc == kLinuxBootProbeEntry || g_boot_el < 2) {
+    if (g_boot_el < 2) {
+        libk::printf("dango vcpu run unavailable: host booted at EL%llu\n",
+                     static_cast<unsigned long long>(g_boot_el));
         metric_inc(VM_DEBUG_VCPU_RUN_NOTIMPL);
         vcpu->last_exit_reason = static_cast<u64>(E_NOTIMPL);
-        if (out) out->exit_reason = static_cast<u32>(VCPU_EXIT_UNSUPPORTED_TRAP);
+        if (out) {
+            out->exit_reason = static_cast<u32>(VCPU_EXIT_UNSUPPORTED_TRAP);
+            out->last_esr = static_cast<u64>(E_NOTIMPL);
+        }
         return E_NOTIMPL;
     }
 
-    Vm* owner = find_vm_by_id(vcpu->owner_vm_id);
-    if (!owner || !owner->stage2.built || owner->stage2.mapped_pages == 0) {
-        note_error();
-        return E_INVALID;
+    Vm* owner = owner_for_vcpu(vcpu);
+    if (!owner) {
+        libk::printf("dango vcpu run invalid: owner vm missing id=%u vcpu=%u\n",
+                     static_cast<unsigned>(vcpu->owner_vm_id),
+                     static_cast<unsigned>(vcpu->vcpu_id));
+        return fail_vcpu_run_invalid(*vcpu, out, kVcpuRunInvalidNoOwner | static_cast<u64>(vcpu->owner_vm_id));
+    }
+    if (vcpu->owner_vm_id == 0) {
+        vcpu->owner_vm_id = owner->vm_id;
+    }
+    if (!owner->stage2.built) {
+        libk::printf("dango vcpu run invalid: stage2 not built vm=%u\n",
+                     static_cast<unsigned>(owner->vm_id));
+        return fail_vcpu_run_invalid(*vcpu, out, kVcpuRunInvalidStage2Built | static_cast<u64>(owner->vm_id));
+    }
+    if (owner->stage2.mapped_pages == 0) {
+        libk::printf("dango vcpu run invalid: stage2 empty vm=%u\n",
+                     static_cast<unsigned>(owner->vm_id));
+        return fail_vcpu_run_invalid(*vcpu, out, kVcpuRunInvalidStage2Empty | static_cast<u64>(owner->vm_id));
     }
 
     if (!owner->stage2.active) {
         rc = stage2_activate(&owner->stage2);
         if (rc != E_OK) {
-            note_error();
-            return rc;
+            libk::printf("dango vcpu run invalid: stage2 activate rc=%d vm=%u built=%u root=%llx mapped=%llu\n",
+                         static_cast<int>(rc),
+                         static_cast<unsigned>(owner->vm_id),
+                         owner->stage2.built ? 1u : 0u,
+                         static_cast<unsigned long long>(owner->stage2.root_table_phys),
+                         static_cast<unsigned long long>(owner->stage2.mapped_pages));
+            return fail_vcpu_run_invalid(*vcpu, out, kVcpuRunInvalidStage2Active | static_cast<u64>(owner->vm_id));
         }
     }
 
@@ -1133,12 +1208,21 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budg
 
         if (ec == kEcWfx) {
             vcpu->el2.pc += 4;
+            metric_inc(VM_DEBUG_VCPU_WFX_EXITS);
+
+            if (wfx_is_wfe(esr)) {
+                // Treat WFE as a guest yield.  Blocking here is too conservative:
+                // Linux can use WFE in short wait loops where no timer is armed,
+                // and turning it into a timer sleep makes early boot crawl.
+                if (run_budget_expired(budget, start_ns, exits + 1)) break;
+                continue;
+            }
+
             const bool pending_irq = vcpu_has_pending_virtual_irq(*vcpu);
             if (pending_irq) {
                 finish_vcpu_run(*vcpu, *owner, VCPU_READY, VCPU_EXIT_VIRTUAL_IRQ_PENDING, esr, used_ns, out);
                 return E_OK;
             }
-            metric_inc(VM_DEBUG_VCPU_WFX_EXITS);
             record_guest_timer_source(*vcpu);
             finish_vcpu_run(*vcpu, *owner, VCPU_BLOCKED_WFI, VCPU_EXIT_WFI_BLOCKED, esr, used_ns, out);
             vcpu->sched.blocked_wfi = true;
@@ -1172,6 +1256,14 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budg
     finish_vcpu_run(*vcpu, *owner, VCPU_READY, VCPU_EXIT_QUANTUM_EXPIRED,
                     vcpu->el2.exit_esr, used_ns, out);
     return E_OK;
+}
+
+void dispose_vcpu(void* target) {
+    auto* cpu = static_cast<Vcpu*>(target);
+    auto* owner = cpu->owner_lifetime;
+    object::release(cpu->sched.context_lifetime);
+    mm::slab_free(cpu, sizeof(Vcpu), alignof(Vcpu));
+    object::release(owner);
 }
 
 } // namespace vm

@@ -54,7 +54,22 @@ inline bool has_rights(const CapEntry* e, u32 rights) {
     return e && ((e->rights_mask & rights) == rights);
 }
 
-bool user_range_ok(u64 ptr, u64 len, u32 rights = RIGHT_READ) {
+struct UserAccess {
+    VmSpace space{};
+    bool valid = false;
+};
+
+UserAccess user_access_for(Process* p) {
+    UserAccess ua{};
+    if (p && p->ttbr0) {
+        ua.space.pgd_phys = p->ttbr0;
+        ua.space.pid = p->pid;
+        ua.valid = true;
+    }
+    return ua;
+}
+
+bool user_range_ok(const UserAccess& ua, u64 ptr, u64 len, u32 rights = RIGHT_READ) {
     if (ptr < kUserCopyMin || ptr >= kUserCopyMax) return false;
     if (len == 0) return true;
     u64 end = 0;
@@ -66,26 +81,22 @@ bool user_range_ok(u64 ptr, u64 len, u32 rights = RIGHT_READ) {
     const u64 kend = reinterpret_cast<u64>(&__kernel_end[0]);
     if (ptr < kend && end > kbase) return false;
 
-    Process* p = cur_proc();
-    if (!p || !p->ttbr0) return false;
-    VmSpace space{};
-    space.pgd_phys = p->ttbr0;
-    space.pid = p->pid;
-    return mm::user_range_mapped(space, ptr, len, rights);
+    if (!ua.valid) return false;
+    return mm::user_range_mapped(ua.space, ptr, len, rights);
 }
 
-[[maybe_unused]] bool copy_from_user(void* dst, u64 user_ptr, u64 len) {
+[[maybe_unused]] bool copy_from_user(const UserAccess& ua, void* dst, u64 user_ptr, u64 len) {
     if (!dst) return false;
     if (len == 0) return true;
-    if (!user_range_ok(user_ptr, len, RIGHT_READ)) return false;
+    if (!user_range_ok(ua, user_ptr, len, RIGHT_READ)) return false;
     libk::memcpy(dst, reinterpret_cast<const void*>(user_ptr), static_cast<usize>(len));
     return true;
 }
 
-[[maybe_unused]] bool copy_to_user(u64 user_ptr, const void* src, u64 len) {
+[[maybe_unused]] bool copy_to_user(const UserAccess& ua, u64 user_ptr, const void* src, u64 len) {
     if (!src) return false;
     if (len == 0) return true;
-    if (!user_range_ok(user_ptr, len, RIGHT_WRITE)) return false;
+    if (!user_range_ok(ua, user_ptr, len, RIGHT_WRITE)) return false;
     libk::memcpy(reinterpret_cast<void*>(user_ptr), src, static_cast<usize>(len));
     return true;
 }
@@ -103,21 +114,23 @@ u64 ring_bytes(const Ring& ring) {
     return sizeof(RingHeader) + (static_cast<u64>(1) << ring.order) * sizeof(RingSlot);
 }
 
+u64 round_page_size(u64 size) {
+    u64 rounded = 0;
+    if (__builtin_add_overflow(size, static_cast<u64>(PAGE_SIZE - 1), &rounded)) return 0;
+    return rounded & ~(static_cast<u64>(PAGE_SIZE - 1));
+}
+
 bool map_object(Process& proc, VirtAddr va, PhysAddr pa, u64 size, u32 rights, bool device) {
     if (va == 0 || (va & (PAGE_SIZE - 1)) != 0) return false;
     if (pa == 0 || (pa & (PAGE_SIZE - 1)) != 0) return false;
     if (size == 0) return false;
-    if (!user_range_ok(va, 1, RIGHT_READ)) {
-        // user_range_ok requires the mapping to exist, so only use the cheap
-        // syntactic checks for a destination that is about to be mapped.
-        if (va < kUserCopyMin || va >= kUserCopyMax) return false;
-        u64 end = 0;
-        if (__builtin_add_overflow(va, size, &end)) return false;
-        if (end > kUserCopyMax || end <= va) return false;
-        const u64 kbase = reinterpret_cast<u64>(&__text_start[0]);
-        const u64 kend = reinterpret_cast<u64>(&__kernel_end[0]);
-        if (va < kend && end > kbase) return false;
-    }
+    if (va < kUserCopyMin || va >= kUserCopyMax) return false;
+    u64 end = 0;
+    if (__builtin_add_overflow(va, size, &end)) return false;
+    if (end > kUserCopyMax || end <= va) return false;
+    const u64 kbase = reinterpret_cast<u64>(&__text_start[0]);
+    const u64 kend = reinterpret_cast<u64>(&__kernel_end[0]);
+    if (va < kend && end > kbase) return false;
     VmSpace space{};
     space.pgd_phys = proc.ttbr0;
     space.pid = proc.pid;
@@ -126,62 +139,6 @@ bool map_object(Process& proc, VirtAddr va, PhysAddr pa, u64 size, u32 rights, b
 }
 
 
-
-
-static void supervisor_event_lock(Process* p) {
-    if (!p) return;
-    while (__atomic_exchange_n(&p->supervisor_event_lock, 1u, __ATOMIC_ACQUIRE) != 0) {
-        asm volatile("yield" ::: "memory");
-    }
-}
-
-static void supervisor_event_unlock(Process* p) {
-    if (!p) return;
-    __atomic_store_n(&p->supervisor_event_lock, 0u, __ATOMIC_RELEASE);
-}
-
-static void wake_supervisor_process(Process* supervisor) {
-    if (!supervisor) return;
-
-    for (Thread* t = supervisor->threads; t; t = t->process_next) {
-        if (t->state != TS_DEAD) {
-            sched::wake(t);
-        }
-    }
-
-    // Wake CPUs that may be sleeping in WFI.
-    asm volatile("sev" ::: "memory");
-}
-
-
-
-void record_supervisor_event(Process* proc, long status) {
-    if (!proc || proc->supervisor_pid == 0) {
-        return;
-    }
-
-    Process* supervisor = sched::find_process(proc->supervisor_pid);
-    if (!supervisor) {
-        return;
-    }
-
-    bool published = false;
-
-    supervisor_event_lock(supervisor);
-
-    if (__atomic_load_n(&supervisor->supervisor_event_pending, __ATOMIC_RELAXED) == 0) {
-        supervisor->supervisor_event_pid = proc->pid;
-        supervisor->supervisor_event_status = status;
-        __atomic_store_n(&supervisor->supervisor_event_pending, 1u, __ATOMIC_RELEASE);
-        published = true;
-    }
-
-    supervisor_event_unlock(supervisor);
-
-    if (published) {
-        wake_supervisor_process(supervisor);
-    }
-}
 
 
 } // namespace
@@ -257,8 +214,8 @@ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
     }
 
     metric_inc(g_el0_fault_count);
-    record_supervisor_event(p, static_cast<long>(esr));
-    sched::mark_current_dead();
+    sched::record_exit(p, static_cast<long>(esr));
+    sched::mark_current_dead(true);
 }
 
 extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
@@ -275,7 +232,15 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         }
         return err(E_DEAD);
     }
+    if (p) {
+        Thread* t = sched::current();
+        ANKO_ASSERT(t && t->state == TS_RUNNING);
+    }
+    if (p && __atomic_load_n(&p->dying, __ATOMIC_ACQUIRE)) return err(E_DEAD);
+    const UserAccess ua = user_access_for(p);
 
+    vm::CallGuard vm_call((nr >= SYS_VM_CREATE && nr <= SYS_VM_MEMORY_WRITE) ||
+                          (nr >= SYS_VCPU_BIND_SCHED_CONTEXT && nr <= SYS_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER));
     switch (static_cast<Syscall>(nr)) {
 
     case SYS_YIELD:
@@ -283,24 +248,32 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         return ok(E_OK);
 
     case SYS_EXIT: {
-        record_supervisor_event(p, static_cast<long>(a0));
-        sched::mark_current_dead();
+        sched::record_exit(p, static_cast<long>(a0));
+        sched::mark_current_dead(true);
         return ok(E_OK);
     }
 
     case SYS_SPAWN: {
         if (!a0 || a1 == 0 || a1 > kMaxUserElfSize) return err(E_INVALID);
-        if (!user_range_ok(a0, a1)) return err(E_FAULT);
+        if (!user_range_ok(ua, a0, a1)) return err(E_FAULT);
+        char kname[32]{};
+        bool have_name = false;
+        if (a5 != 0) {
+            if (!copy_from_user(ua, kname, a5, sizeof(kname))) return err(E_FAULT);
+            kname[sizeof(kname) - 1] = '\0';
+            have_name = true;
+        }
 
         PrincipalClass principal = PRINCIPAL_NATIVE_SANDBOXED;
         if (!principal_from_id(a2, &principal)) return err(E_INVALID);
 
-        CapEntry* supervisor_e =
-            cap::lookup(*p->cap_table, static_cast<CapHandle>(a3), CAP_SUPERVISOR);
+        cap::Ref supervisor_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a3), CAP_SUPERVISOR);
         if (!supervisor_e) return err(E_NOTFOUND);
         if (!has_rights(supervisor_e, RIGHT_SPAWN)) return err(E_PERM);
         auto* supervisor = static_cast<Process*>(supervisor_e->target);
         if (!supervisor) return err(E_NOTFOUND);
+        if (supervisor->dying) return err(E_DEAD);
+        if (!cap::reserve_slots(*p->cap_table, 2)) return err(E_OVERFLOW);
 
         Thread* main_thread = nullptr;
         Process* child = kernel::init::spawn_image(reinterpret_cast<const void*>(a0),
@@ -310,40 +283,43 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
                                                   static_cast<u32>(a4),
                                                   &main_thread);
         if (!child) return err(E_NOMEM);
-        if (a5 != 0 && user_range_ok(a5, 1)) {
-            const char* uname = reinterpret_cast<const char*>(a5);
-            char kname[32];
-            u32 i = 0;
-            for (; i < 31 && uname[i] != '\0'; ++i) kname[i] = uname[i];
-            kname[i] = '\0';
-            sched::process_set_name(child, kname);
-        }
+        if (have_name) sched::process_set_name(child, kname);
         CapHandle h = cap::alloc(*p->cap_table, CAP_PROCESS, child,
                                  RIGHT_READ | RIGHT_KILL | RIGHT_DUP | RIGHT_SPAWN);
-        if (h == kNullCap) return err(E_OVERFLOW);
+        if (h == kNullCap) {
+            sched::process_destroy(child);
+            return err(E_OVERFLOW);
+        }
         CapHandle th = kNullCap;
         if (main_thread) {
             th = cap::alloc(*p->cap_table, CAP_THREAD, main_thread,
                             RIGHT_READ | RIGHT_DUP | RIGHT_THREAD_CONTROL);
-            if (th == kNullCap) return err(E_OVERFLOW);
+            if (th == kNullCap) {
+                cap::revoke(*p->cap_table, h);
+                sched::process_destroy(child);
+                return err(E_OVERFLOW);
+            }
         }
         return ok(static_cast<long>(h), static_cast<long>(th));
     }
 
     case SYS_KILL: {
-        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
         if (!e) return err(E_NOTFOUND);
         if (!has_rights(e, RIGHT_KILL)) return err(E_PERM);
         auto* target = static_cast<Process*>(e->target);
         if (!target) return err(E_NOTFOUND);
-        record_supervisor_event(target, -1);
+        sched::record_exit(target, -1);
+        if (target == p) {
+            sched::mark_current_dead(true);
+            return ok(E_OK);
+        }
         sched::process_destroy(target);
-        cap::revoke(*p->cap_table, static_cast<CapHandle>(a0));
         return ok(E_OK);
     }
 
     case SYS_MAP_PAGE: {
-        CapEntry* e = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a0));
+        cap::Ref e = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a0));
         if (!e) return err(E_NOTFOUND);
         if (!has_rights(e, RIGHT_MAP)) return err(E_PERM);
         if (a1 == 0 || (a1 & (PAGE_SIZE - 1)) != 0) return err(E_INVALID);
@@ -357,9 +333,21 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         if (e->type_tag == CAP_SHARED_RING) {
             auto* ring = static_cast<Ring*>(e->target);
             if (!ring) return err(E_NOTFOUND);
-            return map_object(*p, a1, ring->phys_base, ring_bytes(*ring), map_rights, false)
-                ? ok(E_OK)
-                : err(E_INVALID);
+            const u64 size = round_page_size(ring_bytes(*ring));
+            if (size == 0) return err(E_INVALID);
+            u32 arena_idx = 0;
+            if (!p->arena_table ||
+                !mm::arena_register(*p->arena_table, static_cast<VirtAddr>(a1),
+                                    ring->phys_base, size, p->pid,
+                                    RIGHT_READ | RIGHT_WRITE, 0, &arena_idx)) {
+                return err(E_OVERFLOW);
+            }
+            if (!map_object(*p, a1, ring->phys_base, size, map_rights, false)) {
+                mm::arena_unregister(*p->arena_table, arena_idx);
+                return err(E_INVALID);
+            }
+            mm::arena_retain_mapping(*p->arena_table, a1, e->object);
+            return ok(E_OK);
         }
         if (e->type_tag == CAP_PAGE) {
             auto* mem = static_cast<MemoryObject*>(e->target);
@@ -377,9 +365,20 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         if (e->type_tag == CAP_ARENA) {
             auto* arena = static_cast<Arena*>(e->target);
             if (!arena) return err(E_NOTFOUND);
-            return map_object(*p, a1, arena->base_va, arena->size, map_rights, false)
-                ? ok(E_OK)
-                : err(E_INVALID);
+            if (!arena->phys_base) return err(E_INVALID);
+            bool claimed_now = false;
+            if (!mm::arena_claim_va(*p->arena_table, *arena, static_cast<VirtAddr>(a1),
+                                    arena->size, &claimed_now)) {
+                return err(E_OVERFLOW);
+            }
+            if (!map_object(*p, a1, arena->phys_base, arena->size, map_rights, false)) {
+                if (claimed_now) {
+                    mm::arena_release_va(*p->arena_table, *arena, static_cast<VirtAddr>(a1));
+                }
+                return err(E_INVALID);
+            }
+            mm::arena_retain_mapping(*p->arena_table, a1, e->object);
+            return ok(E_OK);
         }
         return err(E_BADTYPE);
     }
@@ -390,6 +389,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         space.pgd_phys = p->ttbr0;
         space.pid = p->pid;
         mm::vm_unmap(space, a0);
+        mm::arena_unmap_page(*p->arena_table, a0);
         return ok(E_OK);
     }
 
@@ -406,61 +406,44 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         const usize pages = static_cast<usize>(rounded_size / PAGE_SIZE);
         if (pages == 0 || pages > kMaxArenaPages) return err(E_INVALID);
 
-        PhysAddr allocs[kMaxArenaPages]{};
-        PhysAddr base = 0;
-        PhysAddr expect = 0;
-        for (usize i = 0; i < pages; ++i) {
-            PhysAddr pa = mm::alloc_page();
-            if (!pa || (i != 0 && pa != expect)) {
-                if (pa) mm::free_page(pa);
-                for (usize j = 0; j < i; ++j) mm::free_page(allocs[j]);
-                return err(E_NOMEM);
-            }
-            allocs[i] = pa;
-            if (i == 0) base = pa;
-            expect = pa + PAGE_SIZE;
+        const PhysAddr base = mm::alloc_pages_contiguous_for(p->pid, pages);
+        if (!base) return err(E_NOMEM);
+        auto* arena = static_cast<Arena*>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
+        if (!arena) {
+            for (usize j = 0; j < pages; ++j) mm::free_page_for(p->pid, base + j * PAGE_SIZE);
+            return err(E_NOMEM);
         }
-
-        u32 idx = 0;
-        if (!mm::arena_register(*p->arena_table, static_cast<VirtAddr>(base),
-                                rounded_size, p->pid,
-                                RIGHT_READ | RIGHT_WRITE, static_cast<u32>(a1), &idx)) {
-            for (usize j = 0; j < pages; ++j) mm::free_page(allocs[j]);
-            return err(E_OVERFLOW);
-        }
-
-        Arena* arena = &p->arena_table->entries[idx];
-        CapHandle cap_h = cap::alloc(*p->cap_table, CAP_ARENA, arena,
-                                     RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
-        if (cap_h == kNullCap) {
-            for (usize j = 0; j < pages; ++j) mm::free_page(allocs[j]);
-            libk::memset(arena, 0, sizeof(*arena));
-            if (p->arena_table->count == idx + 1) p->arena_table->count = idx;
-            return err(E_OVERFLOW);
-        }
-        return ok(static_cast<long>(cap_h));
+        *arena = {};
+        arena->phys_base = base; arena->size = rounded_size;
+        arena->owner_pid = p->pid; arena->owner_generation = p->generation; arena->rights = RIGHT_READ | RIGHT_WRITE;
+        // User flags cannot request exposure of physical addresses or ownership.
+        arena->flags = kArenaFlagOwnsPages;
+        auto* root = object::create(arena, mm::destroy_arena);
+        if (!root) { mm::destroy_arena(arena); return err(E_NOMEM); }
+        const CapHandle handle = cap::alloc(*p->cap_table, CAP_ARENA, arena,
+            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
+        object::release(root);
+        return handle ? ok(static_cast<long>(handle)) : err(E_OVERFLOW);
     }
 
     case SYS_ARENA_REGISTER: {
-        if (!p->arena_table) return err(E_NOMEM);
-        u32 idx = 0;
-        if (!mm::arena_register(*p->arena_table, static_cast<VirtAddr>(a0), a1, p->pid,
-                                RIGHT_READ | RIGHT_WRITE, static_cast<u32>(a2), &idx)) {
-            return err(E_OVERFLOW);
-        }
-        Arena* arena = &p->arena_table->entries[idx];
-        CapHandle cap_h = cap::alloc(*p->cap_table, CAP_ARENA, arena,
-                                     RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
-        if (cap_h == kNullCap) {
-            libk::memset(arena, 0, sizeof(*arena));
-            if (p->arena_table->count == idx + 1) p->arena_table->count = idx;
-            return err(E_OVERFLOW);
-        }
-        return ok(static_cast<long>(cap_h));
+        if (!p->arena_table || !a0 || !a1 || (a0 | a1) & (PAGE_SIZE - 1)) return err(E_INVALID);
+        VmSpace space{p->ttbr0, p->pid};
+        if (!mm::user_range_mapped(space, a0, a1, RIGHT_READ | RIGHT_WRITE)) return err(E_INVALID);
+        auto* arena = static_cast<Arena*>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
+        if (!arena) return err(E_NOMEM);
+        *arena = {}; arena->base_va = a0; arena->size = a1;
+        arena->owner_pid = p->pid; arena->owner_generation = p->generation; arena->rights = RIGHT_READ | RIGHT_WRITE;
+        auto* root = object::create(arena, mm::destroy_arena);
+        if (!root) { mm::destroy_arena(arena); return err(E_NOMEM); }
+        const CapHandle handle = cap::alloc(*p->cap_table, CAP_ARENA, arena,
+            RIGHT_READ | RIGHT_WRITE | RIGHT_REGISTER | RIGHT_DUP);
+        object::release(root);
+        return handle ? ok(static_cast<long>(handle)) : err(E_OVERFLOW);
     }
 
     case SYS_CAP_DUP: {
-        CapEntry* src = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a0));
+        cap::Ref src = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a0));
         if (!src) return err(E_NOTFOUND);
         if (!has_rights(src, RIGHT_DUP)) return err(E_PERM);
         const u32 requested = static_cast<u32>(a1);
@@ -476,18 +459,18 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         return ok(E_OK);
 
     case SYS_CAP_IDENTIFY: {
-        CapEntry* e = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a0));
+        cap::Ref e = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a0));
         if (!e) return err(E_NOTFOUND);
         return ok(static_cast<long>(e->type_tag));
     }
 
     case SYS_CAP_GRANT: {
-        CapEntry* target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
+        cap::Ref target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
         if (!target_e || !has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
         auto* target_proc = static_cast<Process*>(target_e->target);
         if (!target_proc || !target_proc->cap_table) return err(E_NOTFOUND);
 
-        CapEntry* src = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a1));
+        cap::Ref src = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a1));
         if (!src) return err(E_NOTFOUND);
         if (!has_rights(src, RIGHT_DUP)) return err(E_PERM);
         const u32 requested = static_cast<u32>(a2);
@@ -512,7 +495,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     case SYS_RING_SHARE: {
         metric_inc(g_ipc_syscall_count);
-        CapEntry* target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
+        cap::Ref target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
         if (!target_e) return err(E_BADTYPE);
         if (!has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
         auto* target_proc = static_cast<Process*>(target_e->target);
@@ -532,7 +515,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     case SYS_DOORBELL_SHARE: {
         metric_inc(g_ipc_syscall_count);
-        CapEntry* target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
+        cap::Ref target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
         if (!target_e) return err(E_BADTYPE);
         if (!has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
         auto* target_proc = static_cast<Process*>(target_e->target);
@@ -545,7 +528,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     case SYS_NOTIFY: {
         metric_inc(g_ipc_syscall_count);
-        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
         if (!e) return err(E_NOTFOUND);
         if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
         const SysError rc = ipc::notify(static_cast<CapHandle>(a0), p->pid);
@@ -555,7 +538,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     case SYS_WAIT_DOORBELL: {
         metric_inc(g_ipc_syscall_count);
-        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
         if (!e) return err(E_NOTFOUND);
         if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
         const SysError rc = ipc::wait_doorbell(static_cast<CapHandle>(a0), a1, p->pid);
@@ -565,42 +548,24 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     case SYS_DOORBELL_READ: {
         metric_inc(g_ipc_syscall_count);
-        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
         if (!e) return err(E_NOTFOUND);
         if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
         return ok(static_cast<long>(ipc::doorbell_counter(static_cast<CapHandle>(a0), p->pid)));
     }
 
     case SYS_SUPERVISOR_POLL: {
-        CapEntry* supervisor_e =
-            cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_SUPERVISOR);
+        cap::Ref supervisor_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_SUPERVISOR);
         if (!supervisor_e) return err(E_NOTFOUND);
         if (!has_rights(supervisor_e, RIGHT_READ)) return err(E_PERM);
 
         auto* supervisor = static_cast<Process*>(supervisor_e->target);
         if (!supervisor) return err(E_NOTFOUND);
+        if (supervisor->dying) return err(E_DEAD);
 
-        if (__atomic_load_n(&supervisor->supervisor_event_pending, __ATOMIC_ACQUIRE) == 0) {
-            return err(E_NOTFOUND);
-        }
-
-        supervisor_event_lock(supervisor);
-
-        if (__atomic_load_n(&supervisor->supervisor_event_pending, __ATOMIC_ACQUIRE) == 0) {
-            supervisor_event_unlock(supervisor);
-            return err(E_NOTFOUND);
-        }
-
-        const u32 dead_pid = supervisor->supervisor_event_pid;
-        const long status = supervisor->supervisor_event_status;
-
-        supervisor->supervisor_event_pid = 0;
-        supervisor->supervisor_event_status = 0;
-        __atomic_store_n(&supervisor->supervisor_event_pending, 0u, __ATOMIC_RELEASE);
-
-        supervisor_event_unlock(supervisor);
-
-        return ok(static_cast<long>(dead_pid), status);
+        u64 identity = 0; long status = 0;
+        if (!sched::poll_exit(*supervisor, &identity, &status)) return err(E_NOTFOUND);
+        return ok(static_cast<long>(identity), status);
     }
 
     case SYS_THREAD_CREATE: {
@@ -609,7 +574,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
             // proc_cap==0 means "create a helper thread in my own process".
             target_proc = p;
         } else {
-            CapEntry* target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
+            cap::Ref target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PROCESS);
             if (!target_e || !has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
             target_proc = static_cast<Process*>(target_e->target);
         }
@@ -622,11 +587,12 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         if (!mm::user_range_mapped(target_space, static_cast<VirtAddr>(a1), 4, RIGHT_EXEC)) {
             return err(E_FAULT);
         }
+        if (!cap::reserve_slots(*p->cap_table, 1)) return err(E_OVERFLOW);
 
         u32 slot = target_proc->next_stack_slot;
         if (slot == 0) slot = 1;
         if (slot > kMaxStackSlots) return err(E_OVERFLOW);
-        const PhysAddr stack = mm::alloc_page();
+        const PhysAddr stack = mm::alloc_page_for(target_proc->pid);
         if (!stack) return err(E_NOMEM);
         libk::memset(reinterpret_cast<void*>(stack), 0, PAGE_SIZE);
 
@@ -634,11 +600,10 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         space.pgd_phys = target_proc->ttbr0;
         space.pid = target_proc->pid;
         const VirtAddr stack_base = USER_STACK_TOP - (static_cast<VirtAddr>(slot + 1) * PAGE_SIZE);
-        if (!mm::vm_map(space, stack_base, stack, RIGHT_READ | RIGHT_WRITE)) {
-            mm::free_page(stack);
+        if (!mm::vm_map_owned(space, stack_base, stack, RIGHT_READ | RIGHT_WRITE)) {
+            mm::free_page_for(target_proc->pid, stack);
             return err(E_INVALID);
         }
-        target_proc->next_stack_slot = slot + 1;
         const VirtAddr sp_top = stack_base + PAGE_SIZE - kStackFrameAlign;
 
         Thread* t = sched::thread_create(target_proc->pid,
@@ -647,16 +612,24 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
                                          PRIO_NORMAL,
                                          a2,
                                          static_cast<u32>(a3));
-        if (!t) return err(E_NOMEM);
+        if (!t) {
+            mm::vm_unmap_owned_range(space, stack_base, PAGE_SIZE);
+            return err(E_NOMEM);
+        }
         CapHandle th = cap::alloc(*p->cap_table, CAP_THREAD, t,
                                   RIGHT_READ | RIGHT_DUP | RIGHT_THREAD_CONTROL);
-        if (th == kNullCap) return err(E_OVERFLOW);
+        if (th == kNullCap) {
+            sched::thread_destroy(t);
+            mm::vm_unmap_owned_range(space, stack_base, PAGE_SIZE);
+            return err(E_OVERFLOW);
+        }
+        target_proc->next_stack_slot = slot + 1;
         if (!(static_cast<u32>(a3) & THREAD_SUSPENDED)) sched::enqueue(t);
         return ok(static_cast<long>(th));
     }
 
     case SYS_THREAD_SET_AFFINITY: {
-        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_THREAD);
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_THREAD);
         if (!e) return err(E_NOTFOUND);
         if (!has_rights(e, RIGHT_THREAD_CONTROL)) return err(E_PERM);
         auto* t = static_cast<Thread*>(e->target);
@@ -666,7 +639,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     }
 
     case SYS_THREAD_RESUME: {
-        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_THREAD);
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_THREAD);
         if (!e) return err(E_NOTFOUND);
         if (!has_rights(e, RIGHT_THREAD_CONTROL)) return err(E_PERM);
         auto* t = static_cast<Thread*>(e->target);
@@ -698,7 +671,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         vm::VmInfo info{};
         const SysError rc = vm::inspect_vm(*p, static_cast<CapHandle>(a0), &info);
         if (rc != E_OK) return err(rc);
-        return copy_to_user(a1, &info, sizeof(info)) ? ok(E_OK) : err(E_FAULT);
+        return copy_to_user(ua, a1, &info, sizeof(info)) ? ok(E_OK) : err(E_FAULT);
     }
 
     case SYS_VM_MEMORY_CREATE: {
@@ -725,11 +698,11 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         vm::VmMemoryInfo info{};
         const SysError rc = vm::inspect_memory(*p, static_cast<CapHandle>(a0), &info);
         if (rc != E_OK) return err(rc);
-        return copy_to_user(a1, &info, sizeof(info)) ? ok(E_OK) : err(E_FAULT);
+        return copy_to_user(ua, a1, &info, sizeof(info)) ? ok(E_OK) : err(E_FAULT);
     }
 
     case SYS_VM_MEMORY_WRITE: {
-        if (a3 != 0 && !user_range_ok(a2, a3, RIGHT_READ)) return err(E_FAULT);
+        if (a3 != 0 && !user_range_ok(ua, a2, a3, RIGHT_READ)) return err(E_FAULT);
         const SysError rc = vm::write_memory(*p,
                                              static_cast<CapHandle>(a0),
                                              a1,
@@ -762,23 +735,23 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         const SysError rc = vm::inspect_vcpu(*p, static_cast<CapHandle>(a0), &info);
         if (rc != E_OK) return err(rc);
         const u64 copy_len = (a2 < sizeof(info)) ? a2 : sizeof(info);
-        return copy_to_user(a1, &info, copy_len) ? ok(E_OK) : err(E_FAULT);
+        return copy_to_user(ua, a1, &info, copy_len) ? ok(E_OK) : err(E_FAULT);
     }
 
     case SYS_VCPU_RUN: {
         if (!a1 || !a2) return err(E_INVALID);
         vm::VcpuRunBudget budget{};
-        if (!copy_from_user(&budget, a1, sizeof(budget))) return err(E_FAULT);
+        if (!copy_from_user(ua, &budget, a1, sizeof(budget))) return err(E_FAULT);
         vm::VcpuRunResult result{};
         const SysError rc = vm::run_vcpu(*p, static_cast<CapHandle>(a0), budget, &result);
-        if (!copy_to_user(a2, &result, sizeof(result))) return err(E_FAULT);
+        if (!copy_to_user(ua, a2, &result, sizeof(result))) return err(E_FAULT);
         return rc == E_OK ? ok(E_OK) : err(rc);
     }
 
     case SYS_SCHED_CONTEXT_CREATE: {
         if (!a0 || a1 < sizeof(SchedContext)) return err(E_INVALID);
         SchedContext ctx{};
-        if (!copy_from_user(&ctx, a0, sizeof(ctx))) return err(E_FAULT);
+        if (!copy_from_user(ua, &ctx, a0, sizeof(ctx))) return err(E_FAULT);
         SysError rc = E_OK;
         CapHandle h = sched::sched_context_create(*p, ctx, &rc);
         if (h == kNullCap) return err(rc);
@@ -839,24 +812,28 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         vm::VmChannelInfo info{};
         const SysError rc = vm::inspect_channel(*p, static_cast<CapHandle>(a0), &info);
         if (rc != E_OK) return err(rc);
-        return copy_to_user(a1, &info, sizeof(info)) ? ok(E_OK) : err(E_FAULT);
+        return copy_to_user(ua, a1, &info, sizeof(info)) ? ok(E_OK) : err(E_FAULT);
     }
 
     case SYS_DEBUG_PUTS: {
         const u64 len = a1;
         if (!a0 || len > 4096) return err(E_INVALID);
-        if (!user_range_ok(a0, len)) return err(E_FAULT);
+        if (!user_range_ok(ua, a0, len)) return err(E_FAULT);
         const char* s = reinterpret_cast<const char*>(a0);
         metric_inc(g_debug_puts_count);
         for (u64 i = 0; i < len; ++i) libk::putchar(s[i]);
         return ok(E_OK);
     }
 
+    case SYS_CLOCK_NS: return ok(static_cast<long>(sched::sched_clock_ns()));
+
     case SYS_DEBUG_COUNTERS:
         if (a0 >= vm::VM_DEBUG_CREATE_CALLS && a0 <= vm::VM_DEBUG_VCPU_UNSUPPORTED_EXITS) {
             return ok(static_cast<long>(vm::debug_counter(a0)));
         }
         switch (a0) {
+        case 200: return ok(static_cast<long>(object::live_count()));
+        case 201: return ok(static_cast<long>(mm::allocated_page_count()));
         case DBG_SYSCALL_COUNT:         return ok(static_cast<long>(metric_load(g_syscall_count)));
         case DBG_IPC_SYSCALL_COUNT:     return ok(static_cast<long>(metric_load(g_ipc_syscall_count)));
         case DBG_CONTEXT_SWITCHES:      return ok(static_cast<long>(sched::context_switch_count()));
@@ -897,7 +874,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     case SYS_NOTIFY_HANDOFF: {
         metric_inc(g_ipc_syscall_count);
-        CapEntry* e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
         if (!e) return err(E_NOTFOUND);
         if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
         const SysError rc = ipc::notify_handoff(static_cast<CapHandle>(a0), a1, p->pid);
@@ -910,6 +887,110 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         const SysError rc = ipc::reply_handoff(a0, p->pid);
         if (rc != E_OK) return err(rc);
         return ok(E_OK);
+    }
+
+    case SYS_MAP_MMIO: {
+        // a0 = mmio_cap, a1 = va, a2 = rights
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_MMIO);
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_MAP)) return err(E_PERM);
+        auto* range = static_cast<MmioRange*>(e->target);
+        if (!range) return err(E_NOTFOUND);
+        const u32 requested = static_cast<u32>(a2);
+        if (a2 != requested || (requested & ~(RIGHT_READ | RIGHT_WRITE)) ||
+            !(requested & RIGHT_READ) || !has_rights(e, requested)) return err(E_PERM);
+        const bool device = (range->attr == MX_MMIO_DEVICE_nGnRnE ||
+                             range->attr == MX_MMIO_DEVICE_nGnRE);
+        if (!map_object(*p, static_cast<VirtAddr>(a1), range->phys_base,
+                        range->size, static_cast<u32>(a2), device))
+            return err(E_FAULT);
+        return ok(E_OK);
+    }
+
+    case SYS_IRQ_BIND_DOORBELL: {
+        // a0 = irq_cap, a1 = doorbell_cap, a2 = flags
+        cap::Ref irq_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_IRQ);
+        if (!irq_e) return err(E_NOTFOUND);
+        if (!has_rights(irq_e, RIGHT_WRITE)) return err(E_PERM);
+        cap::Ref db_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_DOORBELL);
+        if (!db_e) return err(E_NOTFOUND);
+        auto* line = static_cast<IrqLine*>(irq_e->target);
+        if (!line) return err(E_NOTFOUND);
+        // Driver interrupts are polled until GIC delivery and teardown exist.
+        return err(E_NOTIMPL);
+    }
+
+    case SYS_IRQ_ACK: {
+        // a0 = irq_cap
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_IRQ);
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_WRITE)) return err(E_PERM);
+        return err(E_NOTIMPL);
+    }
+
+    case SYS_CAP_INFO: {
+        if (!a1 || a2 < sizeof(MxCapInfo)) return err(E_INVALID);
+        cap::Ref e = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a0));
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_READ)) return err(E_PERM);
+
+        MxCapInfo info{};
+        info.type = e->type_tag;
+        info.rights = e->rights_mask;
+        switch (static_cast<CapType>(e->type_tag)) {
+        case CAP_PROCESS: {
+            auto* process = static_cast<Process*>(e->target);
+            info.base = sched::process_identity(*process);
+            info.flags = __atomic_load_n(&process->dying, __ATOMIC_ACQUIRE);
+            break;
+        }
+        case CAP_MMIO: {
+            auto* range = static_cast<MmioRange*>(e->target);
+            if (!range) return err(E_NOTFOUND);
+            info.base = range->phys_base;
+            info.size = range->size;
+            info.attr = range->attr;
+            info.flags = range->flags;
+            info.aux0 = range->device_hint;
+            break;
+        }
+        case CAP_ARENA: {
+            auto* arena = static_cast<Arena*>(e->target);
+            if (!arena) return err(E_NOTFOUND);
+            info.base = (arena->flags & kArenaFlagExposePhys)
+                            ? arena->phys_base
+                            : arena->base_va;
+            info.size = arena->size;
+            info.attr = 0;
+            info.flags = arena->flags & ~(kArenaFlagExposePhys | kArenaFlagOwnsPages);
+            info.aux0 = arena->owner_pid;
+            break;
+        }
+        case CAP_IRQ: {
+            auto* line = static_cast<IrqLine*>(e->target);
+            if (!line) return err(E_NOTFOUND);
+            info.base = line->irq_id;
+            info.size = 1;
+            info.attr = line->trigger;
+            info.flags = line->flags;
+            info.aux0 = line->device_hint;
+            break;
+        }
+        case CAP_PAGE: {
+            auto* mem = static_cast<MemoryObject*>(e->target);
+            if (!mem) return err(E_NOTFOUND);
+            info.base = mem->phys_base;
+            info.size = mem->size;
+            break;
+        }
+        case CAP_UART:
+            info.base = reinterpret_cast<PhysAddr>(e->target);
+            info.size = PAGE_SIZE;
+            break;
+        default:
+            break;
+        }
+        return copy_to_user(ua, a1, &info, sizeof(info)) ? ok(E_OK) : err(E_FAULT);
     }
 
     default:

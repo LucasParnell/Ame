@@ -35,7 +35,7 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
         return false;
     }
 
-    PhysAddr* backing = static_cast<PhysAddr*>(mm::heap_alloc(bytes, alignof(PhysAddr)));
+    PhysAddr* backing = static_cast<PhysAddr*>(mm::slab_alloc(bytes, alignof(PhysAddr)));
     if (!backing) {
         ANKO_LOG_ERROR("kernel/vm", "vm_memory backing array alloc failed");
         return false;
@@ -49,6 +49,7 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
                             static_cast<unsigned long long>(i),
                             static_cast<unsigned long long>(pages));
             for (usize j = 0; j < i; ++j) mm::free_page(backing[j]);
+            mm::slab_free(backing, bytes, alignof(PhysAddr));
             return false;
         }
         backing[i] = pa;
@@ -65,10 +66,8 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
 
 void free_backing_pages(PhysAddr* pages, usize page_count) {
     if (!pages) return;
-    for (usize i = 0; i < page_count; ++i) {
-        if (pages[i]) mm::free_page(pages[i]);
-        pages[i] = 0;
-    }
+    for (usize i = 0; i < page_count; ++i) if (pages[i]) mm::free_page(pages[i]);
+    mm::slab_free(pages, page_count * sizeof(PhysAddr), alignof(PhysAddr));
 }
 
 bool mapping_overlaps(const VmMemory& mem, u64 guest_pa, u64 size) {
@@ -94,7 +93,7 @@ bool guest_range_valid(u64 guest_pa, u64 size) {
 CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
                         SysError* out_error) {
     SysError rc = E_OK;
-    Vm* v = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
+    auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
     if (!v) {
         ANKO_LOGF_ERROR("kernel/vm", "vm_memory_create vm cap fail rc=%d",
                         static_cast<int>(rc));
@@ -106,13 +105,13 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
         note_error();
         return kNullCap;
     }
-    if (size == 0 || (size & (PAGE_SIZE - 1)) != 0) {
+    if (size == 0 || size > 256ull * 1024 * 1024 || (size & (PAGE_SIZE - 1)) != 0) {
         if (out_error) *out_error = E_INVALID;
         note_error();
         return kNullCap;
     }
 
-    VmMemory* mem = static_cast<VmMemory*>(mm::heap_alloc(sizeof(VmMemory), alignof(VmMemory)));
+    VmMemory* mem = static_cast<VmMemory*>(mm::slab_alloc(sizeof(VmMemory), alignof(VmMemory)));
     if (!mem) {
         if (out_error) *out_error = E_NOMEM;
         note_error();
@@ -128,7 +127,7 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
         backing_ok = alloc_backing_pages(pages, &backing);
     }
     if (!backing_ok) {
-        mem->dead = true;
+        mm::slab_free(mem, sizeof(VmMemory), alignof(VmMemory));
         ANKO_LOG_ERROR("kernel/vm", "vm_memory_create backing allocation failed");
         if (out_error) *out_error = E_NOMEM;
         note_error();
@@ -144,6 +143,9 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
     mem->size = size;
     mem->flags = static_cast<u32>(flags);
 
+    mem->owner_lifetime = v->lifetime; object::retain(mem->owner_lifetime);
+    mem->lifetime = object::create(mem, dispose_memory);
+    if (!mem->lifetime) { dispose_memory(mem); if (out_error) *out_error = E_NOMEM; return kNullCap; }
     const CapHandle cap_h = cap::alloc(*caller.cap_table, CAP_VM_MEMORY, mem,
                                        RIGHT_WRITE |
                                            RIGHT_VM_MEMORY_MAP |
@@ -151,7 +153,7 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
                                            RIGHT_DUP);
     if (cap_h == kNullCap) {
         ANKO_LOG_ERROR("kernel/vm", "vm_memory_create cap alloc failed");
-        destroy_memory_object(mem);
+        object::release(mem->lifetime);
         if (out_error) *out_error = E_OVERFLOW;
         note_error();
         return kNullCap;
@@ -167,10 +169,10 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
 SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
                     u64 guest_pa, u64 size, u32 rights) {
     SysError rc = E_OK;
-    Vm* v = vm_from_cap(caller, vm_cap, RIGHT_VM_MAP, &rc);
+    auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_MAP, &rc);
     if (!v) return rc;
 
-    VmMemory* mem = memory_from_cap(caller, memory_cap, RIGHT_VM_MEMORY_MAP, &rc);
+    auto mem = memory_from_cap(caller, memory_cap, RIGHT_VM_MEMORY_MAP, &rc);
     if (!mem) return rc;
     if (mem->owner_vm_id != v->vm_id) {
         note_error();
@@ -242,7 +244,7 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
 
 SysError unmap_memory(Process& caller, CapHandle vm_cap, u64 guest_pa, u64 size) {
     SysError rc = E_OK;
-    Vm* v = vm_from_cap(caller, vm_cap, RIGHT_VM_MAP, &rc);
+    auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_MAP, &rc);
     if (!v) return rc;
     if (!guest_range_valid(guest_pa, size)) {
         note_error();
@@ -283,7 +285,7 @@ SysError unmap_memory(Process& caller, CapHandle vm_cap, u64 guest_pa, u64 size)
 SysError inspect_memory(Process& caller, CapHandle memory_cap, VmMemoryInfo* out) {
     if (!out) return E_INVALID;
     SysError rc = E_OK;
-    VmMemory* mem = memory_from_cap(caller, memory_cap, RIGHT_VM_MEMORY_INSPECT, &rc);
+    auto mem = memory_from_cap(caller, memory_cap, RIGHT_VM_MEMORY_INSPECT, &rc);
     if (!mem) return rc;
 
     VmMemoryInfo info{};
@@ -305,7 +307,7 @@ SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset,
                       const void* src, u64 len) {
     if (!src && len != 0) return E_INVALID;
     SysError rc = E_OK;
-    VmMemory* mem = memory_from_cap(caller, memory_cap, RIGHT_WRITE, &rc);
+    auto mem = memory_from_cap(caller, memory_cap, RIGHT_WRITE, &rc);
     if (!mem) return rc;
     if (len == 0) return E_OK;
     u64 end = 0;
@@ -348,9 +350,14 @@ SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset,
                 return E_FAULT;
             }
 
-            libk::memcpy(reinterpret_cast<void*>(mem->pages[page_index] + page_off),
+            const PhysAddr dst_pa = mem->pages[page_index] + page_off;
+            libk::memcpy(reinterpret_cast<void*>(dst_pa),
                          reinterpret_cast<const void*>(src_pa),
                          chunk);
+            // Guest RAM can be executable through stage-2 immediately after this
+            // write. Make freshly-copied kernel/trampoline bytes visible to the
+            // instruction side before EL2 enters the guest.
+            mm::sync_icache_range(dst_pa, chunk);
             copied += chunk;
         }
     }
@@ -365,6 +372,14 @@ void destroy_memory_object(VmMemory* mem) {
     mem->host_phys_base = 0;
     mem->host_va = 0;
     mem->dead = true;
+}
+
+void dispose_memory(void* target) {
+    auto* mem = static_cast<VmMemory*>(target);
+    auto* owner = mem->owner_lifetime;
+    destroy_memory_object(mem);
+    mm::slab_free(mem, sizeof(VmMemory), alignof(VmMemory));
+    object::release(owner);
 }
 
 } // namespace vm

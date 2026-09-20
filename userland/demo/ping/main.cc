@@ -11,13 +11,13 @@
 #include "mochi/syscall.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
+#include "mochi/boot.h"
+#include "mochi/nameservice.h"
+#include "midix/abi/protocols/nameservice.h"
 
 constexpr uint32_t kRingOrder    = 6;
 constexpr uint32_t kMessageCount = 4096;
 constexpr bool kEmitBootMetrics = false;
-constexpr int64_t kCapTypeSharedRing = 4;
-constexpr int64_t kCapTypeDoorbell = 5;
-constexpr int64_t kCapTypeProcess = 2;
 
 constexpr uint32_t MSG_PING  = 1;
 constexpr uint32_t MSG_PONG  = 2;
@@ -29,26 +29,7 @@ constexpr uint32_t MSG_CPU_QUERY = 0x43505551; // 'CPUQ'
 constexpr uint32_t MSG_CPU_REPLY = 0x43505552; // 'CPUR'
 constexpr uint32_t MSG_HOT_START = 0x484F5453; // 'HOTS'
 constexpr uint32_t MSG_HOT_READY = 0x484F5452; // 'HOTR'
-constexpr uint32_t MSG_NS_RESOLVE = 0x4E530001;
-constexpr uint32_t MSG_NS_RESOLVE_REPLY = 0x4E530002;
 
-constexpr CapHandle cap_slot(uint32_t idx) {
-    return (static_cast<CapHandle>(1) << 32) | idx;
-}
-
-constexpr CapHandle kSendRing = cap_slot(0);
-constexpr CapHandle kRecvRing = cap_slot(1);
-constexpr CapHandle kPongDoorbell = cap_slot(2);
-constexpr CapHandle kPingDoorbell = cap_slot(3);
-constexpr CapHandle kConsoleRing = cap_slot(4);
-constexpr CapHandle kConsoleDoorbell = cap_slot(5);
-constexpr CapHandle kDoneDoorbell = cap_slot(6);
-constexpr CapHandle kNsRequestRing = cap_slot(7);
-constexpr CapHandle kNsReplyRing = cap_slot(8);
-constexpr CapHandle kNsDoorbell = cap_slot(9);
-constexpr CapHandle kNsReplyDoorbell = cap_slot(10);
-constexpr uint32_t RIGHT_READ  = 1u << 0;
-constexpr uint32_t RIGHT_WRITE = 1u << 1;
 constexpr uint64_t kVaSendRing = 0x2000'0000ull;
 constexpr uint64_t kVaRecvRing = 0x2001'0000ull;
 constexpr uint64_t kVaConsoleRing = 0x2002'0000ull;
@@ -84,48 +65,72 @@ static void try_console_log_counter(const char* key, uint64_t value) {
     mochi::log_counter(key, value);
 }
 
-static void resolve_pong() {
-    auto* request_ring = wait_map<RingPage>(kNsRequestRing, kCapTypeSharedRing,
-                                            kVaNsRequestRing, RIGHT_READ | RIGHT_WRITE);
-    auto* reply_ring = wait_map<RingPage>(kNsReplyRing, kCapTypeSharedRing,
-                                          kVaNsReplyRing, RIGHT_READ | RIGHT_WRITE);
-    wait_cap(kNsDoorbell, kCapTypeDoorbell);
-    wait_cap(kNsReplyDoorbell, kCapTypeDoorbell);
-
-    const char name[] = "demo.pong";
+static void resolve_pong(RingPage* request_ring, RingPage* reply_ring,
+                         CapHandle ns_doorbell, CapHandle ns_reply_doorbell) {
+    MxNsResolveRequest req{};
+    mochi::nameservice::copy_name(req.name, sizeof(req.name), "demo.pong");
     while (!ring_push(request_ring, kRingOrder, MSG_NS_RESOLVE,
-                      name, sizeof(name), kNsDoorbell)) {
+                      &req, sizeof(req), ns_doorbell)) {
         sys_yield();
     }
 
     RingSlot slot{};
     while (true) {
-        if (!ring_wait_pop(reply_ring, kRingOrder, &slot, kNsReplyDoorbell)) {
+        if (!ring_wait_pop(reply_ring, kRingOrder, &slot, ns_reply_doorbell)) {
             sys_yield();
             continue;
         }
-        if (slot.type != MSG_NS_RESOLVE_REPLY || slot.length < sizeof(uint64_t)) continue;
-
-        uint64_t handle = 0;
-        for (uint32_t i = 0; i < sizeof(handle); ++i) {
-            reinterpret_cast<uint8_t*>(&handle)[i] = slot.payload[i];
+        if (slot.type == MSG_NS_ERROR) {
+            try_console_log("nameservice: resolve failed\n");
+            while (true) sys_yield();
         }
-        if (sys_cap_identify(handle) == kCapTypeProcess) return;
+        if (slot.type != MSG_NS_RESOLVE_REPLY) continue;
+
+        MxEndpointDesc endpoint{};
+        if (slot.length >= sizeof(MxEndpointDesc)) {
+            for (uint32_t i = 0; i < sizeof(MxEndpointDesc); ++i) {
+                reinterpret_cast<uint8_t*>(&endpoint)[i] = slot.payload[i];
+            }
+            if (endpoint.magic == MX_ENDPOINT_MAGIC && endpoint.handle_count >= 1 &&
+                sys_cap_identify(endpoint.handles[0]) == kCapTypeProcess) {
+                return;
+            }
+        }
     }
 }
 
 extern "C" [[noreturn]] void _start() {
-    auto* send_ring = wait_map<RingPage>(kSendRing, kCapTypeSharedRing,
+    const MxBootInfo* boot = mochi::boot::map();
+    const CapHandle send_cap = mochi::boot::require_handle(boot, "ipc.tx");
+    const CapHandle recv_cap = mochi::boot::require_handle(boot, "ipc.rx");
+    const CapHandle pong_doorbell = mochi::boot::require_handle(boot, "ipc.peer.db");
+    const CapHandle ping_doorbell = mochi::boot::require_handle(boot, "ipc.self.db");
+    const CapHandle log_cap = mochi::boot::require_handle(boot, "log.ring");
+    const CapHandle log_doorbell = mochi::boot::require_handle(boot, "log.doorbell");
+    const CapHandle done_doorbell = mochi::boot::require_handle(boot, "ipc.done");
+    const CapHandle ns_req_cap = mochi::boot::require_handle(boot, "ns.tx");
+    const CapHandle ns_reply_cap = mochi::boot::require_handle(boot, "ns.rx");
+    const CapHandle ns_doorbell = mochi::boot::require_handle(boot, "ns.server.db");
+    const CapHandle ns_reply_doorbell = mochi::boot::require_handle(boot, "ns.reply.db");
+
+    auto* send_ring = wait_map<RingPage>(send_cap, kCapTypeSharedRing,
                                          kVaSendRing, RIGHT_READ | RIGHT_WRITE);
-    auto* recv_ring = wait_map<RingPage>(kRecvRing, kCapTypeSharedRing,
+    auto* recv_ring = wait_map<RingPage>(recv_cap, kCapTypeSharedRing,
                                          kVaRecvRing, RIGHT_READ | RIGHT_WRITE);
-    wait_cap(kPongDoorbell, kCapTypeDoorbell);
-    wait_cap(kPingDoorbell, kCapTypeDoorbell);
-    auto* log_ring = wait_map<RingPage>(kConsoleRing, kCapTypeSharedRing,
+    wait_cap(pong_doorbell, kCapTypeDoorbell);
+    wait_cap(ping_doorbell, kCapTypeDoorbell);
+    auto* log_ring = wait_map<RingPage>(log_cap, kCapTypeSharedRing,
                                         kVaConsoleRing, RIGHT_READ | RIGHT_WRITE);
-    wait_cap(kConsoleDoorbell, kCapTypeDoorbell);
-    mochi::log_set_sink(log_ring, kRingOrder, kConsoleDoorbell, "demo.ping");
-    resolve_pong();
+    wait_cap(log_doorbell, kCapTypeDoorbell);
+    mochi::log_set_sink(log_ring, kRingOrder, log_doorbell, "demo.ping");
+
+    auto* ns_request_ring = wait_map<RingPage>(ns_req_cap, kCapTypeSharedRing,
+                                               kVaNsRequestRing, RIGHT_READ | RIGHT_WRITE);
+    auto* ns_reply_ring = wait_map<RingPage>(ns_reply_cap, kCapTypeSharedRing,
+                                             kVaNsReplyRing, RIGHT_READ | RIGHT_WRITE);
+    wait_cap(ns_doorbell, kCapTypeDoorbell);
+    wait_cap(ns_reply_doorbell, kCapTypeDoorbell);
+    resolve_pong(ns_request_ring, ns_reply_ring, ns_doorbell, ns_reply_doorbell);
 
     RingSlot slot{};
     uint32_t total_sent = 0;
@@ -134,13 +139,13 @@ extern "C" [[noreturn]] void _start() {
     const uint32_t my_cpu = static_cast<uint32_t>(sys_thread_get_cpu());
     uint32_t cpu_query = 0;
     while (!ring_push(send_ring, kRingOrder, MSG_CPU_QUERY,
-                      &cpu_query, sizeof(cpu_query), kPongDoorbell)) {
+                      &cpu_query, sizeof(cpu_query), pong_doorbell)) {
         sys_yield();
     }
     ++total_sent;
     uint32_t pong_cpu = 0xFFFFu;
     while (pong_cpu == 0xFFFFu) {
-        if (!ring_wait_pop(recv_ring, kRingOrder, &slot, kPingDoorbell)) {
+        if (!ring_wait_pop(recv_ring, kRingOrder, &slot, ping_doorbell)) {
             sys_yield();
             continue;
         }
@@ -157,13 +162,13 @@ extern "C" [[noreturn]] void _start() {
 
     uint32_t hot_count = kMessageCount;
     while (!ring_push(send_ring, kRingOrder, MSG_HOT_START,
-                      &hot_count, sizeof(hot_count), kPongDoorbell)) {
+                      &hot_count, sizeof(hot_count), pong_doorbell)) {
         sys_yield();
     }
     ++total_sent;
     bool hot_ready = false;
     while (!hot_ready) {
-        if (!ring_wait_pop(recv_ring, kRingOrder, &slot, kPingDoorbell)) {
+        if (!ring_wait_pop(recv_ring, kRingOrder, &slot, ping_doorbell)) {
             sys_yield();
             continue;
         }
@@ -182,7 +187,7 @@ extern "C" [[noreturn]] void _start() {
     // Test A: cross-core hot ring path.  Do not use sys_yield as IPC progress.
     while (recv < kMessageCount) {
         while (sent < kMessageCount &&
-               ring_push(send_ring, kRingOrder, MSG_PING, &sent, sizeof(sent), kPongDoorbell)) {
+               ring_push(send_ring, kRingOrder, MSG_PING, &sent, sizeof(sent), pong_doorbell)) {
             ++sent;
             ++total_sent;
         }
@@ -208,14 +213,14 @@ extern "C" [[noreturn]] void _start() {
     // Test B: force doorbell sleep/wake.
     uint32_t sleep_magic = 0x12345678;
     while (!ring_push(send_ring, kRingOrder, MSG_SLEEP_TEST_START,
-                      &sleep_magic, sizeof(sleep_magic), kPongDoorbell)) {
+                      &sleep_magic, sizeof(sleep_magic), pong_doorbell)) {
         sys_yield();
     }
     ++total_sent;
 
     bool got_ready = false;
     while (!got_ready) {
-        if (!ring_wait_pop(recv_ring, kRingOrder, &slot, kPingDoorbell)) {
+        if (!ring_wait_pop(recv_ring, kRingOrder, &slot, ping_doorbell)) {
             sys_yield();
             continue;
         }
@@ -241,14 +246,14 @@ extern "C" [[noreturn]] void _start() {
 
     uint32_t sleep_seq = 0xCAFEBABE;
     while (!ring_push(send_ring, kRingOrder, MSG_SLEEP_TEST_PING,
-                      &sleep_seq, sizeof(sleep_seq), kPongDoorbell)) {
+                      &sleep_seq, sizeof(sleep_seq), pong_doorbell)) {
         sys_yield();
     }
     ++total_sent;
 
     bool got_sleep_pong = false;
     while (!got_sleep_pong) {
-        if (!ring_wait_pop(recv_ring, kRingOrder, &slot, kPingDoorbell)) {
+        if (!ring_wait_pop(recv_ring, kRingOrder, &slot, ping_doorbell)) {
             sys_yield();
             continue;
         }
@@ -277,8 +282,8 @@ extern "C" [[noreturn]] void _start() {
     try_console_log_counter("metric.cross.core.notify.calls",
                             notify_after_hot - notify_before_hot);
 
-    if (sys_cap_identify(kDoneDoorbell) == kCapTypeDoorbell) {
-        sys_notify(kDoneDoorbell);
+    if (sys_cap_identify(done_doorbell) == kCapTypeDoorbell) {
+        sys_notify(done_doorbell);
     }
 
     while (true) sys_yield();

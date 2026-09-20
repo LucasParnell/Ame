@@ -2,6 +2,7 @@
 
 #include "anko/smp.h"
 #include "anko/mm.h"
+#include "anko/hw_info.h"
 #include "anko/platform.h"
 #include "anko/sched.h"
 #include "anko/log.h"
@@ -112,7 +113,6 @@ static u64 psci_call(u64 fn, u64 a0, u64 a1, u64 a2) {
 void init(PhysAddr dtb_phys) {
     g_info = parse_dtb(dtb_phys);
     if (g_boot_el >= 2) g_info.psci_hvc = false;
-    if (g_info.count < 2) g_info.count = 2;
     if (g_info.count > kMaxCpus) g_info.count = kMaxCpus;
 
     g_cpu_started[0] = 1;
@@ -151,11 +151,13 @@ u32 cpu_count() {
 void send_wake_ipi(u32 cpu_id) {
     sched::note_ipi_sent(cpu_id);
     drivers::gic::send_sgi(cpu_id, kWakeSgi);
+    asm volatile("sev" ::: "memory");
 }
 
 void handle_ipi() {
     sched::note_ipi_handled();
     sched::drain_pending_wakes();
+    asm volatile("sev" ::: "memory");
 }
 
 extern "C" [[noreturn]] void secondary_kernel_main(u64 cpu_id) {
@@ -173,7 +175,7 @@ extern "C" [[noreturn]] void secondary_kernel_main(u64 cpu_id) {
         : "r"(&vectors)
         : "memory");
     drivers::gic::init_cpu();
-    drivers::timer::init_cpu(platform::kTimerIrqPhysNS);
+    drivers::timer::init_cpu(g_hw.timer_irq);
     sched::mark_cpu_online(static_cast<u32>(cpu_id));
     __atomic_store_n(&g_cpu_started[cpu_id], 1u, __ATOMIC_RELEASE);
     sched::enter_secondary(static_cast<u32>(cpu_id));

@@ -19,10 +19,45 @@
 .section .text.entry, "ax"
 .global _start
 _start:
+    // AArch64 Linux Image header. QEMU -kernel and U-Boot both enter at the
+    // first instruction, so keep this as a branch into the real entry path.
+    b       .Lprimary_entry
+    .long   0                           // reserved
+    .quad   ANKO_IMAGE_TEXT_OFFSET      // text_offset from DRAM base
+    .quad   __kernel_end - _start       // image_size
+    .quad   0                           // flags
+    .quad   0                           // reserved
+    .quad   0                           // reserved
+    .quad   0                           // reserved
+    .long   0x644d5241                  // "ARM\x64"
+    .long   0                           // reserved
+
+.Lprimary_entry:
     // Save DTB pointer in callee-saved register across BSS clear.
     mov     x19, x0
     mrs     x20, CurrentEL
     lsr     x20, x20, #2
+
+    // -----------------------------------------------------------------------
+    // T210 sign-of-life: paint full 1280×720 framebuffer red.
+    // FB is at 0xC0000000 (Hekate Erista constant, XRGB8888).
+    // Fires before stack, BSS clear, VBAR, or any C code.
+    // Full red screen = kernel _start was reached.
+    // Uses x21/x22/x23 as scratch; overwritten again by init_array loop.
+    // -----------------------------------------------------------------------
+#ifdef ANKO_BOARD_SWITCH_T210
+    mov     x21, #0xC000
+    lsl     x21, x21, #16           // x21 = 0xC0000000
+    mov     w22, #0xFF
+    lsl     w22, w22, #16           // w22 = 0x00FF0000 (red XRGB)
+    movz    x23, #0x1000            // 1280 * 720 = 0xE1000 pixels (full screen)
+    movk    x23, #0xe, lsl #16
+.Learly_fb_loop:
+    str     w22, [x21], #4
+    subs    x23, x23, #1
+    b.ne    .Learly_fb_loop
+    dsb     sy
+#endif
 
     // Drop from EL2 to EL1h if entered at EL2.
     cmp     x20, #2
@@ -62,9 +97,12 @@ _start:
     msr     ELR_EL2, x0
     eret
 1:
-    // Ensure MMU and caches are disabled (paranoia).
+    // Ensure MMU, caches, and alignment check are disabled (paranoia).
+    // Clear bit 1 (A) too — U-Boot may have set alignment checking, which
+    // would cause faults on the unaligned stack accesses we make before MMU.
     mrs     x0, SCTLR_EL1
     bic     x0, x0, #(1 << 0)           // M (MMU)
+    bic     x0, x0, #(1 << 1)           // A (alignment check)
     bic     x0, x0, #(1 << 2)           // C (data cache)
     bic     x0, x0, #(1 << 12)          // I (instruction cache)
     msr     SCTLR_EL1, x0
@@ -94,6 +132,20 @@ _start:
     adrp    x0, g_boot_el
     add     x0, x0, :lo12:g_boot_el
     str     x20, [x0]
+
+    // Run global constructors (.init_array) so non-trivial globals like g_hw
+    // are initialised before kernel_main touches them.
+    adrp    x21, __init_array_start
+    add     x21, x21, :lo12:__init_array_start
+    adrp    x22, __init_array_end
+    add     x22, x22, :lo12:__init_array_end
+4:  cmp     x21, x22
+    b.hs    5f
+    ldr     x0, [x21], #8
+    cbz     x0, 4b          // skip NULL slots (alignment padding)
+    blr     x0
+    b       4b
+5:
 
     // Into C++.
     bl      kernel_main

@@ -8,6 +8,19 @@ namespace drivers::timer { u64 tick_count(); }
 extern "C" u64 g_boot_el;
 
 namespace vm {
+static u32 g_call_lock;
+CallGuard::CallGuard(bool active) : active_(active), irq_(0) {
+    if (!active_) return;
+    asm volatile("mrs %0, DAIF; msr DAIFSet, #2" : "=r"(irq_) :: "memory");
+    while (__atomic_exchange_n(&g_call_lock, 1u, __ATOMIC_ACQUIRE)) asm volatile("yield" ::: "memory");
+}
+CallGuard::~CallGuard() {
+    if (!active_) return;
+    __atomic_store_n(&g_call_lock, 0u, __ATOMIC_RELEASE);
+    asm volatile("msr DAIF, %0" :: "r"(irq_) : "memory");
+}
+static void dispose_vm(void* target) { mm::slab_free(target, sizeof(Vm), alignof(Vm)); }
+
 
 namespace {
 
@@ -110,6 +123,7 @@ void note_error() {
 }
 
 void poll_blocked_vcpu_timers() {
+    if (__atomic_exchange_n(&g_call_lock, 1u, __ATOMIC_ACQUIRE)) return;
     for (u32 i = 0; i < kMaxVms; ++i) {
         Vm* v = g_vms[i];
         if (!is_vm_live(v)) continue;
@@ -117,6 +131,7 @@ void poll_blocked_vcpu_timers() {
             if (v->vcpus[j]) poll_vcpu_timer(*v->vcpus[j]);
         }
     }
+    __atomic_store_n(&g_call_lock, 0u, __ATOMIC_RELEASE);
 }
 
 void metric_inc(VmDebugCounter id) {
@@ -145,7 +160,7 @@ void metric_inc(VmDebugCounter id) {
     }
 }
 
-CapEntry* require_cap(Process& caller, CapHandle handle, CapType type,
+cap::Ref require_cap(Process& caller, CapHandle handle, CapType type,
                       u32 need_rights, SysError* out_error) {
     if (!caller.cap_table) {
         if (out_error) *out_error = E_NOTFOUND;
@@ -153,7 +168,7 @@ CapEntry* require_cap(Process& caller, CapHandle handle, CapType type,
         return nullptr;
     }
 
-    CapEntry* e = cap::lookup_any(*caller.cap_table, handle);
+    cap::Ref e = cap::lookup_any(*caller.cap_table, handle);
     if (!e) {
         if (out_error) *out_error = E_NOTFOUND;
         note_error();
@@ -173,50 +188,50 @@ CapEntry* require_cap(Process& caller, CapHandle handle, CapType type,
     return e;
 }
 
-Vm* vm_from_cap(Process& caller, CapHandle vm_cap, u32 need_rights, SysError* out_error) {
-    CapEntry* e = require_cap(caller, vm_cap, CAP_VM, need_rights, out_error);
+cap::Borrow<Vm> vm_from_cap(Process& caller, CapHandle vm_cap, u32 need_rights, SysError* out_error) {
+    cap::Ref e = require_cap(caller, vm_cap, CAP_VM, need_rights, out_error);
     auto* v = e ? static_cast<Vm*>(e->target) : nullptr;
     if (!is_vm_live(v)) {
         if (out_error) *out_error = E_DEAD;
         note_error();
         return nullptr;
     }
-    return v;
+    return cap::Borrow<Vm>(e);
 }
 
-Vcpu* vcpu_from_cap(Process& caller, CapHandle vcpu_cap, u32 need_rights, SysError* out_error) {
-    CapEntry* e = require_cap(caller, vcpu_cap, CAP_VCPU, need_rights, out_error);
+cap::Borrow<Vcpu> vcpu_from_cap(Process& caller, CapHandle vcpu_cap, u32 need_rights, SysError* out_error) {
+    cap::Ref e = require_cap(caller, vcpu_cap, CAP_VCPU, need_rights, out_error);
     auto* vcpu = e ? static_cast<Vcpu*>(e->target) : nullptr;
     if (!vcpu || vcpu->state == VCPU_DEAD) {
         if (out_error) *out_error = E_DEAD;
         note_error();
         return nullptr;
     }
-    return vcpu;
+    return cap::Borrow<Vcpu>(e);
 }
 
-VmMemory* memory_from_cap(Process& caller, CapHandle memory_cap,
+cap::Borrow<VmMemory> memory_from_cap(Process& caller, CapHandle memory_cap,
                           u32 need_rights, SysError* out_error) {
-    CapEntry* e = require_cap(caller, memory_cap, CAP_VM_MEMORY, need_rights, out_error);
+    cap::Ref e = require_cap(caller, memory_cap, CAP_VM_MEMORY, need_rights, out_error);
     auto* mem = e ? static_cast<VmMemory*>(e->target) : nullptr;
     if (!mem || mem->dead) {
         if (out_error) *out_error = E_DEAD;
         note_error();
         return nullptr;
     }
-    return mem;
+    return cap::Borrow<VmMemory>(e);
 }
 
-VmChannel* channel_from_cap(Process& caller, CapHandle channel_cap,
+cap::Borrow<VmChannel> channel_from_cap(Process& caller, CapHandle channel_cap,
                             u32 need_rights, SysError* out_error) {
-    CapEntry* e = require_cap(caller, channel_cap, CAP_VM_CHANNEL, need_rights, out_error);
+    cap::Ref e = require_cap(caller, channel_cap, CAP_VM_CHANNEL, need_rights, out_error);
     auto* channel = e ? static_cast<VmChannel*>(e->target) : nullptr;
     if (!channel || channel->dead) {
         if (out_error) *out_error = E_DEAD;
         note_error();
         return nullptr;
     }
-    return channel;
+    return cap::Borrow<VmChannel>(e);
 }
 
 Vm* find_vm_by_id(u32 vm_id) {
@@ -224,6 +239,36 @@ Vm* find_vm_by_id(u32 vm_id) {
     for (u32 i = 0; i < kMaxVms; ++i) {
         if (g_vms[i] && g_vms[i]->vm_id == vm_id) return g_vms[i];
     }
+    return nullptr;
+}
+
+Vm* owner_for_vcpu(Vcpu* vcpu) {
+    if (!vcpu || vcpu->state == VCPU_DEAD) return nullptr;
+
+    if (vcpu->owner_vm_id != 0) {
+        Vm* by_id = find_vm_by_id(vcpu->owner_vm_id);
+        if (by_id && is_vm_live(by_id)) {
+            for (u32 i = 0; i < by_id->vcpu_count; ++i) {
+                if (by_id->vcpus[i] == vcpu) return by_id;
+            }
+        }
+    }
+
+    // The VM owns the authoritative vCPU membership list.  Use it as a
+    // recovery path if the cached owner_vm_id was left zero or was otherwise
+    // stale.  This keeps vcpu_run from depending on duplicated ownership
+    // metadata in the hot path.
+    for (u32 i = 0; i < kMaxVms; ++i) {
+        Vm* candidate = g_vms[i];
+        if (!is_vm_live(candidate)) continue;
+        for (u32 j = 0; j < candidate->vcpu_count; ++j) {
+            if (candidate->vcpus[j] == vcpu) {
+                vcpu->owner_vm_id = candidate->vm_id;
+                return candidate;
+            }
+        }
+    }
+
     return nullptr;
 }
 
@@ -260,7 +305,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
     metric_inc(VM_DEBUG_CREATE_CALLS);
 
     SysError cap_error = E_OK;
-    CapEntry* root = require_cap(caller, root_cap, CAP_VM_ROOT, RIGHT_VM_CREATE, &cap_error);
+    cap::Ref root = require_cap(caller, root_cap, CAP_VM_ROOT, RIGHT_VM_CREATE, &cap_error);
     if (!root) {
         if (out_error) *out_error = cap_error;
         return kNullCap;
@@ -280,7 +325,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
         return kNullCap;
     }
 
-    Vm* v = static_cast<Vm*>(mm::heap_alloc(sizeof(Vm), alignof(Vm)));
+    Vm* v = static_cast<Vm*>(mm::slab_alloc(sizeof(Vm), alignof(Vm)));
     if (!v) {
         ANKO_LOG_ERROR("kernel/vm", "sys_vm_create heap alloc failed");
         if (out_error) *out_error = E_NOMEM;
@@ -291,6 +336,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
     libk::memset(v, 0, sizeof(*v));
     v->vm_id = g_next_vm_id++;
     v->owner_pid = caller.pid;
+    v->owner_identity = sched::process_identity(caller);
     v->state = VM_CREATED;
     v->flags = flags;
     v->created_ticks = drivers::timer::tick_count();
@@ -300,11 +346,18 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
         ANKO_LOGF_ERROR("kernel/vm", "sys_vm_create stage2 create fail rc=%d",
                         static_cast<int>(s2));
         v->state = VM_DEAD;
+        mm::slab_free(v, sizeof(Vm), alignof(Vm));
         if (out_error) *out_error = s2;
         note_error();
         return kNullCap;
     }
 
+    v->lifetime = object::create(v, dispose_vm);
+    if (!v->lifetime) {
+        stage2_destroy(&v->stage2); dispose_vm(v);
+        if (out_error) *out_error = E_NOMEM;
+        return kNullCap;
+    }
     const CapHandle cap_h = cap::alloc(*caller.cap_table, CAP_VM, v,
                                        RIGHT_VM_CONTROL | RIGHT_VM_MAP |
                                            RIGHT_VM_INSPECT | RIGHT_VM_DESTROY |
@@ -313,6 +366,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
         ANKO_LOG_ERROR("kernel/vm", "sys_vm_create cap alloc failed");
         v->state = VM_DEAD;
         stage2_destroy(&v->stage2);
+        object::release(v->lifetime);
         if (out_error) *out_error = E_OVERFLOW;
         note_error();
         return kNullCap;
@@ -324,28 +378,50 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
     return cap_h;
 }
 
-SysError destroy_vm(Process& caller, CapHandle vm_cap) {
-    SysError rc = E_OK;
-    Vm* v = vm_from_cap(caller, vm_cap, RIGHT_VM_DESTROY, &rc);
-    if (!v) return rc;
-
-    for (u32 i = 0; i < v->memory_count; ++i) destroy_memory_object(v->memory_objects[i]);
+static void retire_vm(Vm* v) {
+    if (!is_vm_live(v)) return;
+    v->state = VM_DEAD;
+    // CallGuard excludes guest entry. Invalidate translations before pages.
+    stage2_destroy(&v->stage2);
+    for (u32 i = 0; i < v->memory_count; ++i) {
+        auto* mem = v->memory_objects[i]; if (!mem) continue;
+        sched::sweep_process_caps(mem); object::release(mem->lifetime);
+        v->memory_objects[i] = nullptr;
+    }
     for (u32 i = 0; i < v->vcpu_count; ++i) {
-        if (v->vcpus[i]) v->vcpus[i]->state = VCPU_DEAD;
+        auto* cpu = v->vcpus[i]; if (!cpu) continue;
+        cpu->state = VCPU_DEAD;
+        sched::sweep_process_caps(cpu); object::release(cpu->lifetime);
+        v->vcpus[i] = nullptr;
     }
     for (u32 i = 0; i < v->channel_count; ++i) {
-        if (v->channels[i]) v->channels[i]->dead = true;
+        auto* channel = v->channels[i]; if (!channel) continue;
+        channel->dead = true;
+        sched::sweep_process_caps(channel); object::release(channel->lifetime);
+        v->channels[i] = nullptr;
     }
-    stage2_destroy(&v->stage2);
-    v->state = VM_DEAD;
-    metric_inc(VM_DEBUG_DESTROYED);
+    for (auto& slot : g_vms) if (slot == v) slot = nullptr;
+    sched::sweep_process_caps(v); metric_inc(VM_DEBUG_DESTROYED);
+    object::release(v->lifetime);
+}
+
+void destroy_owned_process(u64 identity) {
+    CallGuard guard(true);
+    for (auto* v : g_vms) if (v && v->owner_identity == identity) retire_vm(v);
+}
+
+SysError destroy_vm(Process& caller, CapHandle vm_cap) {
+    SysError rc = E_OK;
+    auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_DESTROY, &rc);
+    if (!v) return rc;
+    retire_vm(v);
     return E_OK;
 }
 
 SysError inspect_vm(Process& caller, CapHandle vm_cap, VmInfo* out) {
     if (!out) return E_INVALID;
     SysError rc = E_OK;
-    Vm* v = vm_from_cap(caller, vm_cap, RIGHT_VM_INSPECT, &rc);
+    auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_INSPECT, &rc);
     if (!v) return rc;
 
     VmInfo info{};

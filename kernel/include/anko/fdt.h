@@ -29,6 +29,10 @@ struct Callbacks {
 
 // Walk the structure section of a DTB blob, delivering events to cb.
 // Returns false if the blob is malformed, magic is wrong, or a callback aborts.
-bool walk(const u8* dtb, const Callbacks& cb);
+bool walk(const u8* dtb, const Callbacks& cb, usize available = 0);
+
+// Walk the DTB memory reservation block.  The callback receives each non-zero
+// [address, size] pair and may return false to abort the walk.
+bool walk_memreserve(const u8* dtb, void* ctx, bool (*entry)(void* ctx, u64 address, u64 size), usize available = 0);
 
 } // namespace fdt

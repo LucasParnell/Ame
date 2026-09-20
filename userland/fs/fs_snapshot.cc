@@ -8,7 +8,9 @@
 #include "mochi/log.h"
 
 SnapshotState* snapshot_by_id(mx_u64_t snapshot_id) {
-    if (snapshot_id == 0) return nullptr;
+    if (snapshot_id == 0) {
+        return nullptr;
+    }
     for (mx_u32_t i = 0; i < kMaxSnapshots; ++i) {
         if (g_snapshots[i].used && g_snapshots[i].snapshot_id == snapshot_id) {
             return &g_snapshots[i];
@@ -19,7 +21,9 @@ SnapshotState* snapshot_by_id(mx_u64_t snapshot_id) {
 
 static const InodeState* snapshot_inode(mx_u64_t snapshot_id, mx_u32_t inode_number) {
     const SnapshotState* snap = snapshot_by_id(snapshot_id);
-    if (!snap) return nullptr;
+    if (!snap) {
+        return nullptr;
+    }
     for (mx_u32_t i = 0; i < kMaxInodes; ++i) {
         if (snap->inodes[i].used && snap->inodes[i].inode_number == inode_number) {
             return &snap->inodes[i];
@@ -29,16 +33,22 @@ static const InodeState* snapshot_inode(mx_u64_t snapshot_id, mx_u32_t inode_num
 }
 
 const InodeState* any_inode(mx_u64_t snapshot_id, mx_u32_t inode_number) {
-    if (snapshot_id) return snapshot_inode(snapshot_id, inode_number);
+    if (snapshot_id) {
+        return snapshot_inode(snapshot_id, inode_number);
+    }
     return live_inode(inode_number);
 }
 
 static void pin_snapshot_extents(const SnapshotState& snap) {
     for (mx_u32_t i = 0; i < kMaxInodes; ++i) {
         const InodeState& inode = snap.inodes[i];
-        if (!inode.used) continue;
+        if (!inode.used) {
+            continue;
+        }
         for (mx_u32_t e = 0; e < kMaxExtentsPerInode; ++e) {
-            if (inode.extents[e].used) (void)inc_phys_ref(inode.extents[e].phys_block);
+            if (inode.extents[e].used) {
+                (void)inc_phys_ref(inode.extents[e].phys_block);
+            }
         }
     }
 }
@@ -46,9 +56,13 @@ static void pin_snapshot_extents(const SnapshotState& snap) {
 static void unpin_snapshot_extents(const SnapshotState& snap) {
     for (mx_u32_t i = 0; i < kMaxInodes; ++i) {
         const InodeState& inode = snap.inodes[i];
-        if (!inode.used) continue;
+        if (!inode.used) {
+            continue;
+        }
         for (mx_u32_t e = 0; e < kMaxExtentsPerInode; ++e) {
-            if (inode.extents[e].used) dec_phys_ref(inode.extents[e].phys_block);
+            if (inode.extents[e].used) {
+                dec_phys_ref(inode.extents[e].phys_block);
+            }
         }
     }
 }
@@ -58,7 +72,9 @@ void handle_snapshot(const mochi::fs::Server& fs, const RingSlot& slot) {
     reply.status = static_cast<mx_i32_t>(MX_ERR_NOMEM);
 
     for (mx_u32_t i = 0; i < kMaxSnapshots; ++i) {
-        if (g_snapshots[i].used) continue;
+        if (g_snapshots[i].used) {
+            continue;
+        }
         SnapshotState& snap = g_snapshots[i];
         zero_bytes(&snap, sizeof(snap));
         snap.used = true;
@@ -69,7 +85,7 @@ void handle_snapshot(const mochi::fs::Server& fs, const RingSlot& slot) {
         g_last_snapshot_id = snap.snapshot_id;
         reply.status = MX_OK;
         reply.snapshot_id = snap.snapshot_id;
-        note_metadata_delta(FsMutation::InodeWrite, 0);
+        mark_metadata_dirty();
         mochi::log_raw_marker("FS snapshot flush OK\n");
         break;
     }

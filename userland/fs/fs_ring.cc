@@ -78,14 +78,18 @@ extern "C" [[noreturn]] void _start() {
     register_service_arenas();
     format_memory_fs();
 
-    if (!g_sessions.map(boot)) mochi::boot::invalid_boot();
+    if (!g_sessions.map(boot)) {
+        mochi::boot::invalid_boot();
+    }
     fs_disk_init(boot);
 
     // Replay the durable /data region, if the mount exposed a safe one.
     const bool data_durable = durable_available();
     const bool data_loaded = durable_load();
 
-    for (mx_u32_t i = 0; i < g_sessions.directory->count; ++i) g_sessions.refresh(i, close_session);
+    for (mx_u32_t i = 0; i < g_sessions.directory->count; ++i) {
+        g_sessions.refresh(i, close_session);
+    }
     // Root is read-only; /tmp is volatile; /data is durable only when a safe
     // reserved disk region is mounted (see fs_internal.h and fs_durable.cc).
     if (!data_durable) {
@@ -99,7 +103,9 @@ extern "C" [[noreturn]] void _start() {
     while (true) {
         bool progress = false;
         for (mx_u32_t i = 0; i < g_sessions.directory->count; ++i) {
-            if (!g_sessions.refresh(i, close_session)) continue;
+            if (!g_sessions.refresh(i, close_session)) {
+                continue;
+            }
             g_session = i;
             g_session_generation = g_sessions.generation_of(i);
             const mochi::fs::Server fs{g_sessions.endpoints[i],
@@ -109,7 +115,9 @@ extern "C" [[noreturn]] void _start() {
             for (mx_u32_t n = 0; n < 8 && fs.try_recv(&slot); ++n) {
                 handle_slot(fs, slot);
                 progress = true;
-                if (!fs.reply_ok) break;
+                if (!fs.reply_ok) {
+                    break;
+                }
             }
             if (!fs.reply_ok) {
                 // The client is gone or stalled: drop its session. Only init
@@ -118,6 +126,8 @@ extern "C" [[noreturn]] void _start() {
                 g_sessions.drop(i, close_session);
             }
         }
-        if (!progress) mx_yield();
+        if (!progress) {
+            mx_yield();
+        }
     }
 }

@@ -41,7 +41,7 @@ mkdir -p "${DANGO_LINUX_OUT}"
 exec docker run --rm \
     --platform linux/arm64 \
     -e DANGO_LINUX_SRC=/linux \
-    -e DANGO_GPU_KOUT=/tmp/out-dango-gpu \
+    -e DANGO_GPU_KOUT=/ame/build/dango-linux-gpu-kout \
     -e DANGO_LINUX_OUT=/out \
     -e DEBIAN_FRONTEND=noninteractive \
     -v "${AME}:/ame" \
@@ -53,7 +53,7 @@ exec docker run --rm \
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends \
             build-essential bc bison flex libelf-dev libssl-dev cpio kmod \
-            python3 ca-certificates >/dev/null
+            file python3 ca-certificates >/dev/null
         cd /ame
         ./scripts/linux/build-gpu-linux.sh
     '

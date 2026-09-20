@@ -22,6 +22,10 @@ if [[ -n "${CROSS_COMPILE:-}" ]] && command -v "${CROSS_COMPILE}gcc" >/dev/null 
     "${CROSS_COMPILE}gcc" "${CFLAGS[@]}" -o "${DST}" "${SRC}"
 elif command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
     aarch64-linux-gnu-gcc "${CFLAGS[@]}" -o "${DST}" "${SRC}"
+elif command -v gcc >/dev/null 2>&1 && [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "aarch64" ]]; then
+    # Native aarch64 Linux host (e.g. the build container): plain gcc targets
+    # aarch64-linux directly.
+    gcc "${CFLAGS[@]}" -o "${DST}" "${SRC}"
 elif command -v clang >/dev/null 2>&1; then
     clang --target=aarch64-linux-gnu -fuse-ld=lld "${CFLAGS[@]}" -o "${DST}" "${SRC}"
 else

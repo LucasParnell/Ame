@@ -3,9 +3,9 @@ set -euo pipefail
 
 AME="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${DANGO_LINUX_OUT:-${AME}/build/dango-linux}"
-TEMPLATE="${AME}/linux-artifacts/dts/dango-linux-minimal.dts.in"
-GENERATED="${OUT}/dango-linux-minimal.generated.dts"
-DTB="${OUT}/dango-linux.dtb"
+TEMPLATE="${DANGO_DTS_TEMPLATE:-${AME}/linux-artifacts/dts/dango-linux-minimal.dts.in}"
+GENERATED="${OUT}/$(basename "${TEMPLATE}" .dts.in).generated.dts"
+DTB="${OUT}/${DANGO_DTB_NAME:-dango-linux.dtb}"
 INITRD="${OUT}/initramfs.cpio"
 INITRD_LOAD=$((0x46000000))
 : "${DANGO_LINUX_BOOTARGS:=console=ttyAMA0,115200n8 earlycon=pl011,0x09000000 loglevel=4 nosmp maxcpus=1 cma=0 coherent_pool=1M cpuidle.off=1 rdinit=/init panic=-1}"

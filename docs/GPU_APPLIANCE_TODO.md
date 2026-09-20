@@ -101,6 +101,29 @@ mappings, mediated config writes, MSI/MSI-X + INTx level routes → vGIC. See
    boot the appliance and assert Linux binds `virtio_gpu`, `/dev/dri/card0` exists, and IOMMU counters
    show no unexpected faults / no global bypass.
 
+### E.2 wire map (exact points, read from the tree)
+
+- `kernel/init/boot_caps.cc` (PCI section, ~line 258): the inventory already runs (`pci::log_inventory`,
+  `pci::contain_assignable`). Add: build a `pci::HostFunction` for the assignable **virtio-gpu-pci**
+  function plus an `IrqLine` for its INTx, retain them, and
+  `grant("gpu.function", CAP_PCI_FUNCTION, …)` + `grant("gpu.irq", CAP_IRQ, …)` beside the existing
+  `xhci.mmio`/`xhci.irq` grants. (`CAP_PCI_FUNCTION` is the authority
+  `SYS_VM_ASSIGN_DEVICE` looks up, `dispatch.cc:847`.)
+- `userland/init/main.cc`: read `"gpu.function"`/`"gpu.irq"` from BootInfo (near the other
+  `mochi::boot::handle` reads, ~line 1245) and `grant_to(svc, …, "gpu.function"/"gpu.irq")` in the
+  `dango.manager` branch (~line 727, next to `vm.root`).
+- `userland/manifest.v0` + its JSON caps: add the new cap tokens to the `dango.manager` entry
+  (currently `caps = ["vm"]`).
+- `userland/dango/manager/main.cc`: after `sys_vm_create`/`sys_vcpu_create` (~lines 653/744) and before
+  the first `sys_vcpu_run`, run the E.1 construction contract: `sys_vm_assign_device` →
+  `sys_vm_assign_map_mmio` (complete, aligned BARs) → `sys_vm_assign_route_irq` (INTx) →
+  `sys_vm_assign_expose_ecam(assign, 0x3f000000, 1 MiB)`. The mochi wrappers now exist in
+  `userland/lib/include/mochi/syscall.h` (plus the new `_svc6`).
+- `userland/CMakeLists.txt`: select the **GPU** artifact set (`build/dango-linux-gpu`, GPU DTB + manifest)
+  instead of the hard-coded hello one when the GPU profile is configured.
+- Harness: boot with `AME_QEMU_IOMMU=1 Dango build-linux-artifacts=ON`, then assert `virtio_gpu` binds,
+  `/dev/dri/card0` appears, and IOMMU counters stay clean.
+
 **Acceptance:** Linux binds `virtio_gpu`, creates a DRM primary device, no unexpected IOMMU faults, no
 global-bypass mapping.
 

@@ -86,6 +86,19 @@ static inline int64_t _svc5(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     return static_cast<int64_t>(x0);
 }
 
+static inline int64_t _svc6(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
+                            uint64_t a3, uint64_t a4, uint64_t a5) {
+    register uint64_t x0 asm("x0") = a0;
+    register uint64_t x1 asm("x1") = a1;
+    register uint64_t x2 asm("x2") = a2;
+    register uint64_t x3 asm("x3") = a3;
+    register uint64_t x4 asm("x4") = a4;
+    register uint64_t x5 asm("x5") = a5;
+    register uint64_t x8 asm("x8") = nr;
+    asm volatile("svc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x8) : : MOCHI_SVC_CLOBBERS_5);
+    return static_cast<int64_t>(x0);
+}
+
 struct SysPair { int64_t value; int64_t detail; };
 
 static inline SysPair _svc6_pair(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
@@ -156,6 +169,20 @@ static inline void sys_debug_puts(const char* s, uint64_t len) { _svc2(NR_DEBUG_
 static inline int64_t sys_debug_counter(uint64_t id) { return _svc1(NR_DEBUG_COUNTERS, id); }
 static inline int64_t sys_vm_assign_expose_ecam(CapHandle assignment, uint64_t ipa, uint64_t size) {
     return _svc3(NR_VM_ASSIGN_EXPOSE_ECAM, assignment, ipa, size);
+}
+static inline int64_t sys_vm_assign_device(CapHandle vm, CapHandle function, uint64_t flags) {
+    return _svc3(NR_VM_ASSIGN_DEVICE, vm, function, flags);
+}
+static inline int64_t sys_vm_assign_map_mmio(CapHandle assignment, uint32_t bar_index, uint64_t guest_ipa,
+                                             uint64_t size, uint32_t rights, uint32_t bar_offset) {
+    return _svc6(NR_VM_ASSIGN_MAP_MMIO, assignment, bar_index, guest_ipa, size, rights, bar_offset);
+}
+static inline int64_t sys_vm_assign_route_irq(CapHandle assignment, CapHandle irq, CapHandle vcpu,
+                                              uint32_t guest_irq, uint32_t flags) {
+    return _svc5(NR_VM_ASSIGN_ROUTE_IRQ, assignment, irq, vcpu, guest_irq, flags);
+}
+static inline int64_t sys_vm_assign_destroy(CapHandle assignment) {
+    return _svc1(NR_VM_ASSIGN_DESTROY, assignment);
 }
 static inline int64_t sys_vm_create(CapHandle vm_root, uint64_t flags) { return _svc2(NR_VM_CREATE, vm_root, flags); }
 static inline int64_t sys_vm_destroy(CapHandle vm) { return _svc1(NR_VM_DESTROY, vm); }

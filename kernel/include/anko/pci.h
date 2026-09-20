@@ -83,4 +83,144 @@ u32 contain_assignable(PhysAddr ecam_base);
 // Human-readable BAR type tag ("io", "mmio32", "mmio64", "none").
 const char* bar_type_name(BarType type);
 
+// ---------------------------------------------------------------------------
+// Phase D: host function authority and isolation groups (§6.1, §6.3, §8.13)
+// ---------------------------------------------------------------------------
+
+// Upper bound on the functions in one isolation group / one guest config view.
+constexpr u32 kMaxGroupFunctions = 8;
+constexpr u32 kMaxAssignFns = 8;
+
+// A capability-backed description of one assignable host PCI function.
+// Produced by the inventory; it is the authority a VM needs before it can create
+// an assignment, so the VM never names raw physical addresses itself (§6.1).
+struct HostFunction {
+    PciFunctionInfo info;
+    u32 group_id; // isolation group this function belongs to
+    u32 flags;
+};
+
+// PCI command-register bits the assignment layer mediates (PCI 3.0 §6.2.2).
+constexpr u16 kPciCmdIoEnable = 1u << 0;
+constexpr u16 kPciCmdMemoryEnable = 1u << 1;
+constexpr u16 kPciCmdBusMaster = 1u << 2;
+constexpr u16 kPciCmdWritableMask = kPciCmdIoEnable | kPciCmdMemoryEnable | kPciCmdBusMaster;
+
+// Isolation-group id: functions of the same PCIe device (segment/bus/device)
+// share a device reset and are commonly behind one root port, so they cannot be
+// independently reset or contained. They form one group that Dango must assign
+// together or reject (§6.3, §8.13). Derived purely from the BDF, so it is
+// stable across enumeration passes.
+constexpr u32 isolation_group_id(u8 segment, u8 bus, u8 device) {
+    return (static_cast<u32>(segment) << 16) | (static_cast<u32>(bus) << 8) |
+           static_cast<u32>(device & 0x1Fu);
+}
+
+struct PciIsolationGroup {
+    u32 group_id;
+    u16 segment;
+    u8 bus;
+    u8 device;
+    u32 function_mask; // one bit per function present in the group
+    u32 function_count;
+    u16 vendor_id; // of function 0 (informational)
+    u16 device_id;
+    u32 class_code;
+    u32 requester_ids[kMaxGroupFunctions];
+};
+static_assert(sizeof(PciIsolationGroup) <= 128, "PciIsolationGroup must stay small");
+
+// Enumerate isolation groups from the ECAM inventory. Returns the number of
+// groups written (<= cap). Functions collapse into their isolation group and the
+// group's `function_mask` carries which functions are present.
+u32 enumerate_groups(PhysAddr ecam_base, PciIsolationGroup* out, u32 cap);
+
+// Find the inventory record for a BDF. Returns false when absent.
+bool find_function(PhysAddr ecam_base, u8 bus, u8 device, u8 function, PciFunctionInfo* out);
+
+// Read the host PCI command register for a BDF.
+u16 read_command(u8 bus, u8 device, u8 function);
+// Read a single config byte / the 16-bit status+command word for a BDF.
+u8 cfg_read_byte(u8 bus, u8 device, u8 function, u32 off);
+u16 cfg_status_word(u8 bus, u8 device, u8 function);
+// Find the isolation group containing a function. Returns false when the
+// function is absent from the inventory.
+bool isolation_group_of(PhysAddr ecam_base, u8 bus, u8 device, PciIsolationGroup* out);
+// Clear or set the command register's bus-master bit, preserving every other
+// bit. These are the only host config writes the assignment layer performs, and
+// only during the §8.11 / §8.12 state machines.
+void set_bus_master(u8 bus, u8 device, u8 function, bool enable);
+// Enable/disable memory decoding for a BDF (required before a BAR is reachable).
+void set_memory_enable(u8 bus, u8 device, u8 function, bool enable);
+
+// ---------------------------------------------------------------------------
+// Phase D: synthetic / filtered guest PCI configuration view (§6.3, §8.11)
+// ---------------------------------------------------------------------------
+constexpr u32 kCfgSpaceBytes = 256;
+
+// Config-space offsets the mediator reasons about.
+constexpr u32 kRegCommand = 0x04;
+constexpr u32 kRegBar0 = 0x10;
+constexpr u32 kRegBarEnd = 0x28;
+constexpr u32 kRegRomBar = 0x30;
+constexpr u32 kRegCapPtr = 0x34;
+constexpr u32 kRegIntLine = 0x3C;
+
+enum class CfgWriteAction : u8 {
+    Accept,  // benign: store into the synthetic image
+    Mediate, // routed to a subsystem (bus-master, MSI/MSI-X); never raw-stored
+    Reject,  // hostile: dropped, and the mediator counter advances
+};
+
+// The filtered view a guest sees: only assigned functions, never the outer
+// ECAM or neighbouring functions on the same bus.
+struct GuestConfig {
+    u32 fn_count;
+    u32 pad0;
+    u8 space[kMaxAssignFns][kCfgSpaceBytes];
+    bool present[kMaxAssignFns];
+    bool bme_allowed[kMaxAssignFns]; // guest bus-master has been authorised
+    u8 pad1[2];
+};
+
+// Classify a guest config write. `offset` is within the function's 256 bytes.
+// BARs, the expansion ROM, the capability pointer and read-only fields are
+// rejected; the command register and MSI/MSI-X windows are mediated; benign
+// fields are accepted into the synthetic image.
+CfgWriteAction classify_config_write(const GuestConfig& cfg, u32 fn_index, u32 offset, u32 size);
+
+// ---------------------------------------------------------------------------
+// Phase D: MSI/MSI-X virtualization (§7.3)
+// ---------------------------------------------------------------------------
+// A guest MSI/MSI-X programming request, decoded from mediated config writes.
+// It never becomes a raw host MSI target: the assignment layer turns it into an
+// Anko IRQ route bound to the assigned function and appliance vCPU.
+struct MsiMessage {
+    u64 address;
+    u32 data;
+    u32 vector; // guest vector = data & 0xFF
+    bool enabled;
+};
+
+// MSI capability geometry for the synthetic view of one function.
+struct MsiState {
+    bool present;
+    bool msix;      // true: MSI-X table; false: MSI capability
+    bool enabled;
+    u32 cap_offset; // config-space offset of the MSI/MSI-X capability
+    u32 table_bar;  // MSI-X: BAR holding the vector table
+    u32 table_off;  // MSI-X: offset of the vector table in that BAR
+    u32 nvectors;
+    MsiMessage msg;
+};
+
+// Decode an MSI/MSI-X control/message write into `state`. Returns false when the
+// write does not touch the function's MSI capability.
+bool msi_decode_write(MsiState& state, u32 offset, u32 value, u32 size);
+
+// The host IRQ line Anko installs for an assigned function's MSI/MSI-X path.
+// QEMU's virtio-gpu-pci uses INTx for its config-time line; the MSI path is
+// synthesized. Anko binds the assignment's route to `host_irq`.
+u32 msi_host_irq(const MsiState& state, u32 fn_index, u32 fallback);
+
 } // namespace pci

@@ -65,6 +65,14 @@ void unbind_owner(u64 owner);
 // Delivery entry point. Called from the IRQ vector with the acknowledged id.
 void deliver(u32 irq_id);
 
+// Optional second-chance delivery hook. The VM device-assignment layer installs
+// it so an assigned device's host line can be routed into the guest vGIC
+// instead of (or in addition to) a driver doorbell. It runs for every bindable
+// SPI before the doorbell table is consulted, so a line with no doorbell binding
+// still reaches its route.
+using DeliverHook = void (*)(u32 irq_id);
+void set_deliver_hook(DeliverHook hook);
+
 // Debug counters (SYS_DEBUG_COUNTERS).
 u64 delivered_count();
 u64 binding_count();

@@ -62,6 +62,12 @@ enum MxSyscall : mx_u64_t {
     MX_NR_IRQ_ACK            = 53, // acknowledge IRQ (re-arm for level-triggered)
     MX_NR_CLOCK_NS           = 55, // monotonic nanoseconds for RPC deadlines
     MX_NR_CAP_INFO           = 54, // inspect trusted cap metadata into MxCapInfo
+
+    // Phase D: PCI device assignment into a VM (spec §6, §7, §8.11/§8.12).
+    MX_NR_VM_ASSIGN_DEVICE    = 56, // (vm_cap, function_cap, flags) -> assignment cap
+    MX_NR_VM_ASSIGN_MAP_MMIO  = 57, // (assign_cap, bar_index, guest_ipa, size, rights, bar_off)
+    MX_NR_VM_ASSIGN_ROUTE_IRQ = 58, // (assign_cap, irq_cap, vcpu_cap, guest_irq, flags)
+    MX_NR_VM_ASSIGN_DESTROY   = 59, // (assign_cap) -> E_OK
 };
 
 constexpr mx_u32_t MX_SPAWN_SUSPENDED = 1u << 0;
@@ -123,3 +129,7 @@ constexpr mx_u64_t NR_MAP_MMIO          = MX_NR_MAP_MMIO;
 constexpr mx_u64_t NR_IRQ_BIND_DOORBELL = MX_NR_IRQ_BIND_DOORBELL;
 constexpr mx_u64_t NR_IRQ_ACK           = MX_NR_IRQ_ACK;
 constexpr mx_u64_t NR_CAP_INFO          = MX_NR_CAP_INFO;
+constexpr mx_u64_t NR_VM_ASSIGN_DEVICE    = MX_NR_VM_ASSIGN_DEVICE;
+constexpr mx_u64_t NR_VM_ASSIGN_MAP_MMIO  = MX_NR_VM_ASSIGN_MAP_MMIO;
+constexpr mx_u64_t NR_VM_ASSIGN_ROUTE_IRQ = MX_NR_VM_ASSIGN_ROUTE_IRQ;
+constexpr mx_u64_t NR_VM_ASSIGN_DESTROY   = MX_NR_VM_ASSIGN_DESTROY;

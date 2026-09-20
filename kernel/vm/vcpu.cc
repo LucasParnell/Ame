@@ -324,6 +324,9 @@ void vgic_deactivate_irq(Vcpu& vcpu, u32 irq) {
     if (!irq_in_range(irq)) return;
     vgic_bit_clear(vcpu.vgic.active, irq);
     if (vgic_bit_test(vcpu.vgic.level, irq)) vgic_bit_set(vcpu.vgic.pending, irq);
+    // §7.4: a level route suppresses host delivery after injecting the virtual
+    // IRQ; the guest's EOI re-arms it. Device-assignment routes are notified here.
+    device_irq_on_guest_eoi(vcpu, irq);
 }
 
 u32 priority_word(const VgicState& gic, u32 index) {
@@ -1264,6 +1267,18 @@ void dispose_vcpu(void* target) {
     object::release(cpu->sched.context_lifetime);
     mm::slab_free(cpu, sizeof(Vcpu), alignof(Vcpu));
     object::release(owner);
+}
+
+void vgic_pending_set(Vcpu& vcpu, u32 irq) {
+    vgic_bit_set(vcpu.vgic.pending, irq);
+}
+
+bool vgic_pending_test(const Vcpu& vcpu, u32 irq) {
+    return vgic_bit_test(vcpu.vgic.pending, irq);
+}
+
+void vcpu_wake_irq(Vcpu& vcpu) {
+    wake_bound_runner(vcpu, WAKE_IRQ, IPC_HINT_LATENCY);
 }
 
 } // namespace vm

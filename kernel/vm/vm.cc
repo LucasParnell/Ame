@@ -51,6 +51,16 @@ u64 g_guest_linux_hello = 0;
 u64 g_vcpu_wfx_exits = 0;
 u64 g_vcpu_irq_exits = 0;
 u64 g_vcpu_unsupported_exits = 0;
+// Phase D device assignment counters.
+u64 g_vm_device_created = 0;
+u64 g_vm_device_active = 0;
+u64 g_vm_device_destroyed = 0;
+u64 g_vm_device_bar_mapped = 0;
+u64 g_vm_device_irq_routes = 0;
+u64 g_vm_device_irq_injected = 0;
+u64 g_vm_device_mediated_deny = 0;
+u64 g_vm_device_bme_enable = 0;
+u64 g_vm_device_quarantine = 0;
 
 inline void counter_inc(u64& counter) {
     __atomic_add_fetch(&counter, 1ull, __ATOMIC_RELAXED);
@@ -83,6 +93,7 @@ void init() {
     g_el_current = (current_el >> 2) & 0x3ull;
     g_el2_available = (g_boot_el >= 2) ? 1 : 0;
     g_vhe_available = 0;
+    device_irq_init();
 }
 
 VmRoot* root_object() {
@@ -114,6 +125,15 @@ u64 debug_counter(u64 id) {
     case VM_DEBUG_VCPU_WFX_EXITS: return counter_load(g_vcpu_wfx_exits);
     case VM_DEBUG_VCPU_IRQ_EXITS: return counter_load(g_vcpu_irq_exits);
     case VM_DEBUG_VCPU_UNSUPPORTED_EXITS: return counter_load(g_vcpu_unsupported_exits);
+    case VM_DEBUG_VM_DEVICE_CREATED: return counter_load(g_vm_device_created);
+    case VM_DEBUG_VM_DEVICE_ACTIVE: return counter_load(g_vm_device_active);
+    case VM_DEBUG_VM_DEVICE_DESTROYED: return counter_load(g_vm_device_destroyed);
+    case VM_DEBUG_VM_DEVICE_BAR_MAPPED: return counter_load(g_vm_device_bar_mapped);
+    case VM_DEBUG_VM_DEVICE_IRQ_ROUTES: return counter_load(g_vm_device_irq_routes);
+    case VM_DEBUG_VM_DEVICE_IRQ_INJECTED: return counter_load(g_vm_device_irq_injected);
+    case VM_DEBUG_VM_DEVICE_MEDIATED_DENY: return counter_load(g_vm_device_mediated_deny);
+    case VM_DEBUG_VM_DEVICE_BME_ENABLE: return counter_load(g_vm_device_bme_enable);
+    case VM_DEBUG_VM_DEVICE_QUARANTINE: return counter_load(g_vm_device_quarantine);
     default: return 0;
     }
 }
@@ -156,6 +176,15 @@ void metric_inc(VmDebugCounter id) {
     case VM_DEBUG_VCPU_WFX_EXITS: counter_inc(g_vcpu_wfx_exits); break;
     case VM_DEBUG_VCPU_IRQ_EXITS: counter_inc(g_vcpu_irq_exits); break;
     case VM_DEBUG_VCPU_UNSUPPORTED_EXITS: counter_inc(g_vcpu_unsupported_exits); break;
+    case VM_DEBUG_VM_DEVICE_CREATED: counter_inc(g_vm_device_created); break;
+    case VM_DEBUG_VM_DEVICE_ACTIVE: counter_inc(g_vm_device_active); break;
+    case VM_DEBUG_VM_DEVICE_DESTROYED: counter_inc(g_vm_device_destroyed); break;
+    case VM_DEBUG_VM_DEVICE_BAR_MAPPED: counter_inc(g_vm_device_bar_mapped); break;
+    case VM_DEBUG_VM_DEVICE_IRQ_ROUTES: counter_inc(g_vm_device_irq_routes); break;
+    case VM_DEBUG_VM_DEVICE_IRQ_INJECTED: counter_inc(g_vm_device_irq_injected); break;
+    case VM_DEBUG_VM_DEVICE_MEDIATED_DENY: counter_inc(g_vm_device_mediated_deny); break;
+    case VM_DEBUG_VM_DEVICE_BME_ENABLE: counter_inc(g_vm_device_bme_enable); break;
+    case VM_DEBUG_VM_DEVICE_QUARANTINE: counter_inc(g_vm_device_quarantine); break;
     default: break;
     }
 }
@@ -381,6 +410,10 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
 static void retire_vm(Vm* v) {
     if (!is_vm_live(v)) return;
     v->state = VM_DEAD;
+    // Device assignments bound to this VM must be revoked (DMA-safe, §8.12)
+    // before the stage-2 tables and RAM pages backing their BAR mappings and
+    // DMA ranges are freed.
+    device_release_for_vm(v);
     // CallGuard excludes guest entry. Invalidate translations before pages.
     stage2_destroy(&v->stage2);
     for (u32 i = 0; i < v->memory_count; ++i) {
@@ -418,6 +451,7 @@ static void retire_vm(Vm* v) {
 
 void destroy_owned_process(u64 identity) {
     CallGuard guard(true);
+    device_owner_died(identity);
     for (auto* v : g_vms) if (v && v->owner_identity == identity) retire_vm(v);
 }
 

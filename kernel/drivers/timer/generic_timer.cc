@@ -14,6 +14,7 @@
 
 #include "anko/platform.h"
 #include "anko/sched.h"
+#include "anko/smmuv3.h"
 #include "anko/vm.h"
 #include "libk/metric.h"
 
@@ -56,6 +57,13 @@ void init_cpu(u32 irq_id) {
 void handle_tick() {
     metric_inc(g_tick_count);
     rearm();
+    // Phase C: poll the SMMUv3 event queue.  IOMMU faults are security events
+    // and must not wait for a routed SMMU interrupt (routing one to a fault
+    // handler is Phase D work); the poll is throttled to one tick in four and
+    // bounded internally, and is a no-op when no SMMU is up.
+    if (iommu::smmuv3_ready() && (metric_load(g_tick_count) & 3ull) == 0) {
+        (void)iommu::smmuv3_drain_events();
+    }
     vm::poll_blocked_vcpu_timers();
     sched::tick();
 }

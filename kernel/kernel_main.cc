@@ -227,6 +227,24 @@ extern "C" [[noreturn]] void kernel_main() {
     }
     mm::heap_init();
     mm::vm_init();
+
+    // -----------------------------------------------------------------------
+    // Phase C: bring the SMMUv3 up into a default-deny state before any
+    // assignable PCI function can bus-master, then (dev builds only) run the
+    // opt-in iommu-testdev hostile-DMA selftest.  With no SMMU this is a no-op
+    // and the generic IOMMU core stays on its null backend.  It runs before the
+    // GIC and timer are armed, so the selftest sees no concurrent fault drain.
+    // -----------------------------------------------------------------------
+    {
+        const SysError rc = iommu::smmuv3_bring_up();
+        if (g_hw.has_smmu) {
+            ANKO_LOGF_INFO("kernel/iommu", "smmuv3 bring-up rc=%d ready=%d", static_cast<int>(rc),
+                           iommu::smmuv3_ready() ? 1 : 0);
+        }
+#ifdef ANKO_BUILD_DEV
+        iommu::smmuv3_selftest_if_testdev();
+#endif
+    }
     drivers::gic::init(g_hw.gic_dist_base, g_hw.gic_cpu_base);
 #ifdef ANKO_BUILD_DEV
     // End-to-end IRQ delivery check: raise a spare SPI and confirm it reaches a
@@ -243,24 +261,6 @@ extern "C" [[noreturn]] void kernel_main() {
 #ifdef ANKO_BOARD_SWITCH_T210
     fat_log::flush(); // persist log up to this point
 #endif
-
-    // -----------------------------------------------------------------------
-    // Phase C: bring the SMMUv3 up into a default-deny state before any
-    // assignable PCI function can bus-master.  With no SMMU this is a no-op and
-    // the generic IOMMU core stays on its null backend.
-    // -----------------------------------------------------------------------
-    {
-        const SysError rc = iommu::smmuv3_bring_up();
-        if (g_hw.has_smmu) {
-            ANKO_LOGF_INFO("kernel/iommu", "smmuv3 bring-up rc=%d ready=%d", static_cast<int>(rc),
-                           iommu::smmuv3_ready() ? 1 : 0);
-        }
-#ifdef ANKO_BUILD_DEV
-        // Opt-in hostile-DMA verification; no-op unless an iommu-testdev
-        // function is present in this topology.
-        iommu::smmuv3_selftest_if_testdev();
-#endif
-    }
 
     cap::init();
     ipc::init();

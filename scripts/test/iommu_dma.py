@@ -78,14 +78,18 @@ def main():
         '(d) detached': '(d) detached fault ok' in logs,
         '(e) quarantine': '(e) repeated faults ok' in logs and 'state=3' in logs,
         '(e) no queue overflow': 'gerror=0x0' in logs,
+        '(f) unmap+tlbi': '(f) unmap + scoped TLBI ok' in logs,
     }
     counters = {}
-    match = re.search(r'counters IOMMU_FAULTS=(\d+) IOMMU_QUARANTINES=(\d+) events=(\d+)', logs)
+    match = re.search(
+        r'counters IOMMU_FAULTS=(\d+) IOMMU_QUARANTINES=(\d+)(?: IOMMU_TLBI_RANGE=(\d+))? '
+        r'events=(\d+)', logs)
     if match:
         counters = {'faults': int(match.group(1)), 'quarantines': int(match.group(2)),
-                    'events': int(match.group(3))}
+                    'tlbi_range': int(match.group(3) or 0), 'events': int(match.group(4))}
         checks['faults_counter'] = counters['faults'] > 0
         checks['quarantine_counter'] = counters['quarantines'] > 0
+        checks['tlbi_range_counter'] = counters['tlbi_range'] > 0
     else:
         checks['faults_counter'] = False
 

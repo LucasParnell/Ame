@@ -285,12 +285,21 @@ SysError smmuv3_bring_up() {
     kernel::LockGuard guard(g_lock);
     g_base = g_hw.smmu_base;
 
+    // Fail closed first: while the SMMU is disabled GBPA.ABORT makes every
+    // stream terminate rather than bypass, so if anything below fails to reach
+    // an enabled, deny-by-default state the platform still does not bypass.
+    writel(kRegGbpa, kGbpaUpdate | kGbpaAbort);
+
     const u32 idr0 = readl(kRegIdr0);
     const u32 idr1 = readl(kRegIdr1);
     const u32 idr5 = readl(kRegIdr5);
     if ((idr0 & kIdr0S2P) == 0) {
-        // Stage-2 translation is the construct this backend relies on.
-        ANKO_LOG_ERROR("iommu/smmuv3", "device does not support stage-2 translation");
+        // Stage-2 translation is the construct this backend relies on.  Without
+        // it the Phase C backend cannot enforce a default-deny IOVA, so it
+        // refuses to enable and leaves the SMMU in global-abort (no bypass).
+        ANKO_LOG_ERROR("iommu/smmuv3",
+                       "no stage-2 translation support; Phase C cannot enforce isolation, "
+                       "leaving the SMMU in global-abort (no bypass)");
         g_state = State::Failed;
         return E_NOTIMPL;
     }
@@ -301,10 +310,6 @@ SysError smmuv3_bring_up() {
                    "idr0=0x%x idr1=0x%x idr5=0x%x sid_bits=%u cmdq_bits=%u evtq_bits=%u oas=%u",
                    idr0, idr1, idr5, hw_sid_size, idr1_cmdq_size(idr1), idr1_eventq_size(idr1),
                    idr5_oas(idr5));
-
-    // Default deny even before SMMUEN takes effect: while the SMMU is disabled
-    // GBPA.ABORT makes every stream terminate rather than bypass.
-    writel(kRegGbpa, kGbpaUpdate | kGbpaAbort);
 
     // Linear stream table, all entries invalid (=> fault).
     libk::memset(g_stream_table, 0, sizeof(g_stream_table));
@@ -331,8 +336,11 @@ SysError smmuv3_bring_up() {
     writel(kRegEventqProd, 0);
     writel(kRegEventqCons, 0);
 
-    // Poll the queues; no SMMU interrupts are enabled.
+    // Poll the queues; no SMMU interrupts are enabled.  CR2 configures MSI and
+    // stream matching, neither of which this mode uses, so it stays at its reset
+    // value and IRQ_CTRL is explicitly cleared.
     writel(kRegIrqCtrl, 0);
+    writel(kRegCr2, 0);
 
     // Enable.  From this point an unmapped/unbound stream faults.
     const u32 cr0 = kCr0SmmuEn | kCr0CmdqEn | kCr0EventqEn;

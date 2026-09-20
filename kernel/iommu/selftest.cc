@@ -309,6 +309,29 @@ void smmuv3_selftest_if_testdev() {
         ANKO_LOGF_INFO("iommu/selftest", "(a) mapped DMA ok result=0x%x", result);
     }
 
+    // (f) An IOVA that has been unmapped and synchronised can no longer be
+    // reached: the range-scoped TLBI must have dropped the cached translation,
+    // so the device's write faults and the released page is untouched.
+    {
+        const u64 tlbi0 = debug_counter(IOMMU_TLBI_RANGE);
+        const u64 faults0 = debug_counter(IOMMU_FAULTS);
+        IommuMap unmap{};
+        unmap.iova = kIovaMapped;
+        unmap.pa = target;
+        unmap.length = PAGE_SIZE;
+        check(domain->unmap_batch(&unmap, 1) == E_OK, "(f) unmap");
+        check(debug_counter(IOMMU_TLBI_RANGE) > tlbi0, "(f) range invalidation issued");
+        *reinterpret_cast<volatile u32*>(target) = kPoisonWord;
+        cache_clean(target, 4);
+        const u32 result = td_dma(kIovaMapped, target, 4);
+        (void)smmuv3_drain_events();
+        check(result == kResultErrTxFail, "(f) DMA to the unmapped IOVA faulted");
+        check(peek32(target) == kPoisonWord, "(f) the released page was not written");
+        check(debug_counter(IOMMU_FAULTS) > faults0, "(f) unmap fault recorded");
+        ANKO_LOGF_INFO("iommu/selftest", "(f) unmap + scoped TLBI ok result=0x%x tlbi_range=%llu",
+                       result, static_cast<unsigned long long>(debug_counter(IOMMU_TLBI_RANGE)));
+    }
+
     // (b) DMA to an unmapped IOVA faults and cannot touch the canary page.  The
     // unmapped IOVA is deliberately the canary's *physical* address, so an
     // identity (bypass) translation would have corrupted exactly that page.
@@ -372,9 +395,11 @@ void smmuv3_selftest_if_testdev() {
     }
 
     ANKO_LOGF_INFO("iommu/selftest",
-                   "counters IOMMU_FAULTS=%llu IOMMU_QUARANTINES=%llu events=%llu",
+                   "counters IOMMU_FAULTS=%llu IOMMU_QUARANTINES=%llu IOMMU_TLBI_RANGE=%llu "
+                   "events=%llu",
                    static_cast<unsigned long long>(debug_counter(IOMMU_FAULTS)),
                    static_cast<unsigned long long>(debug_counter(IOMMU_QUARANTINES)),
+                   static_cast<unsigned long long>(debug_counter(IOMMU_TLBI_RANGE)),
                    static_cast<unsigned long long>(smmuv3_events_drained()));
 
     if (g_failures == 0) {

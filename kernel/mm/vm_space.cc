@@ -31,6 +31,7 @@ namespace {
 
 constexpr u64 kBootstrapRamMapSize = 512ull * 1024ull * 1024ull;
 constexpr u64 kDeviceMapSize = 0x20000;
+constexpr u64 kSmmuMapSize = 0x20000; // SMMUv3 register window (QEMU virt)
 constexpr PhysAddr kTegraDc0Base = 0x5420'0000ull;
 constexpr u64 kTegraDc0MapSize = 0x40000;
 constexpr PhysAddr kTegraXusbBase = 0x7009'0000ull;
@@ -204,6 +205,12 @@ bool map_bootstrap_identity(VmSpace& space) {
         if (!map_identity_range(space, kTegraXusbBase, kTegraXusbMapSize, true)) return false;
     }
 
+    // SMMUv3 register window.  Phase C programs the SMMU from the kernel, so its
+    // control/queue registers must be reachable before any assignable device
+    // can bus-master.
+    if (g_hw.has_smmu &&
+        !map_identity_if_present(space, g_hw.smmu_base, kSmmuMapSize, true)) return false;
+
     if (g_hw.has_t210_dc) {
         const u64 fb_size = static_cast<u64>(g_hw.t210_dc_fb_width) *
                             static_cast<u64>(g_hw.t210_dc_fb_height) * 4ull;
@@ -344,6 +351,17 @@ void destroy_table(VmSpace& space, PhysAddr table_pa, u32 level) {
 }
 
 } // namespace
+
+bool map_kernel_device_mmio(PhysAddr base, u64 size) {
+    if (!g_kernel_root || size == 0 || (base & (PAGE_SIZE - 1))) return false;
+    VmSpace kernel{};
+    kernel.pgd_phys = g_kernel_root;
+    kernel.pid = 0;
+    kernel::LockGuard guard(g_vm_lock);
+    const bool ok = map_identity_range(kernel, base, size, true);
+    if (ok) tlbi_all();
+    return ok;
+}
 
 bool register_noncached_range(PhysAddr base, u64 size) {
     if (!size || ((base | size) & (PAGE_SIZE - 1)) || size > ~0ull - base) return false;

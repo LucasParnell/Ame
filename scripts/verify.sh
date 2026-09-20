@@ -14,6 +14,7 @@
 #   scripts/verify.sh                                  # out/verify, CPUs 1 2 4
 #   AME_VERIFY_BUILD=out/qemu-dev scripts/verify.sh    # reuse an existing tree
 #   AME_VERIFY_CPUS="2" scripts/verify.sh              # single-CPU matrix
+#   AME_VERIFY_IOMMU=1 scripts/verify.sh               # + Phase C SMMUv3 row
 #
 # Exit status is 0 only when every check passes.
 set -euo pipefail
@@ -105,6 +106,15 @@ do_durable() {
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> write={} read={} ({:.2f}s)".format(d["write_phase"], d["read_phase"], d["elapsed"])); sys.exit(0 if d["success"] else 1)'
 }
 
+# Phase C: SMMUv3 hostile-DMA verification (spec §8.14).  Opt-in because it
+# needs the iommu-testdev reference device and an SMMU-backed topology; the
+# default topology (and therefore this gate's byte-for-byte behaviour) is
+# unchanged unless AME_VERIFY_IOMMU=1 is set.
+do_iommu_dma() {
+    python3 scripts/test/iommu_dma.py --build "$BUILD_DIR" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("counters", {}); print("   -> {} faults={} quarantines={} ({:.2f}s)".format(d["reason"], c.get("faults"), c.get("quarantines"), d.get("elapsed") or 0)); sys.exit(0 if d["success"] else 1)'
+}
+
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
 # bespoke control flow below.
 CHECKS=(
@@ -117,6 +127,11 @@ CHECKS=(
     "supervision-restart:do_supervision"
     "durable-persistence:do_durable"
 )
+
+# Opt-in Phase C row.  Absent by default so the default gate is unchanged.
+if [[ "${AME_VERIFY_IOMMU:-0}" == "1" ]]; then
+    CHECKS+=("iommu-dma:do_iommu_dma")
+fi
 
 record_toolchain
 for check in "${CHECKS[@]}"; do

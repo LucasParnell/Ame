@@ -9,6 +9,7 @@
 #include "anko/smp.h"
 #include "anko/mm.h"
 #include "anko/platform.h"
+#include "anko/smmuv3.h"
 #include "anko/init.h"
 #include "anko/vm.h"
 #include "anko/ipc.h"
@@ -27,6 +28,7 @@ namespace drivers::pci_probe {
         PhysAddr bar0_phys;
         u64      bar0_size;
         u32      irq_line;
+        u32      requester_id; // PCI requester id == SMMU stream id
         bool     found;
     };
     XhciInfo find_xhci();
@@ -261,6 +263,10 @@ void issue_boot_caps(Process& init_proc,
         // read (bus-master observation) but never written here, and BAR probing
         // restores every BAR it touches, so find_xhci()'s enablement survives.
         pci::log_inventory(g_hw.ecam_base);
+        {
+            const u32 contained = pci::contain_assignable(g_hw.ecam_base);
+            ANKO_LOGF_INFO("kernel/init", "pci: contained %u assignable function(s)", contained);
+        }
         if (xhci.found) {
             MmioRange* xhci_mmio = drivers::pci_probe::alloc_xhci_mmio(xhci);
             IrqLine* xhci_irq    = drivers::pci_probe::alloc_xhci_irq(xhci);
@@ -284,6 +290,14 @@ void issue_boot_caps(Process& init_proc,
                            RIGHT_READ | RIGHT_WRITE | RIGHT_DUP);
                 grant("xhci.dma", CAP_ARENA, xhci_dma,
                            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
+                // Phase C: once the SMMU enforces translation the native xHCI
+                // needs a context too; register its wired DMA arena (IOVA == PA)
+                // at its stream id so the native USB path keeps working.
+                if (iommu::smmuv3_ready()) {
+                    (void)iommu::register_native_dma_arena(
+                        iommu::IommuDeviceId{pci::kSegment, xhci.requester_id}, xhci_dma_phys,
+                        static_cast<u64>(kXhciDmaPages) * PAGE_SIZE);
+                }
             } else {
                 ANKO_LOG_WARN("kernel/init", "xhci cap object allocation failed");
             }

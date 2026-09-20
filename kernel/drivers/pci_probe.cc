@@ -55,6 +55,7 @@ struct XhciInfo {
     PhysAddr bar0_phys;
     u64      bar0_size;
     u32      irq_line;
+    u32      requester_id; // PCI requester id == SMMU stream id
     bool     found;
 };
 
@@ -114,6 +115,7 @@ XhciInfo find_xhci() {
             result.bar0_phys = bar0_base;
             result.bar0_size = bar0_size;
             result.irq_line  = irq;
+            result.requester_id = (bus << 8) | (dev << 3);
             result.found     = true;
         }
     }

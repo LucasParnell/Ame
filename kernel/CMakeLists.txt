@@ -64,6 +64,12 @@ set(ANKO_SOURCES
     # ---- Phase B: backend-independent IOMMU core --------------------------
     iommu/core.cc
 
+    # ---- Phase C: ARM SMMUv3 backend, fault containment, native arenas ----
+    iommu/smmuv3.cc
+    iommu/faults.cc
+    iommu/native.cc
+    iommu/selftest.cc
+
     # ---- Framebuffer + PCI driver support (M2 / M3.5) --------------------
     drivers/fwcfg.cc
     drivers/pci_probe.cc

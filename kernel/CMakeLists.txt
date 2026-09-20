@@ -38,6 +38,8 @@ set(ANKO_SOURCES
     arch/arm64/context.S
     arch/arm64/psci.S
     sched/thread.cc
+    sched/sched_class.cc
+    sched/fair_queue.cc
     sched/runqueue.cc
     cap/cap_table.cc
     cap/object.cc

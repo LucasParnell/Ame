@@ -24,4 +24,37 @@ constexpr u64 kEcBreakpoint         = 0x3c; // breakpoint / watchpoint / BRK
 inline u64 esr_ec(u64 esr)  { return (esr >> 26) & 0x3Full; }
 inline u64 esr_iss(u64 esr) { return esr & 0x01FF'FFFFull; }
 
+struct MmioAccess {
+    u32 size;
+    u32 reg;
+    bool write;
+    bool sign_extend;
+    bool wide;
+};
+
+// Only emulate scalar AArch64 accesses with a valid syndrome and a stage-2
+// translation fault. Table walks, cache maintenance and external aborts must
+// reach the normal fault path rather than accidentally completing a store.
+inline bool decode_mmio(u64 esr, MmioAccess* out) {
+    const u32 fault = esr & 0x3f;
+    if (!out || esr_ec(esr) != kEcDataAbortLower || !(esr & (1ull << 25)) ||
+        !(esr & (1ull << 24)) || (esr & ((1ull << 10) | (1ull << 8) | (1ull << 7))) || fault < 4 ||
+        fault > 7) {
+        return false;
+    }
+    *out = {1u << ((esr >> 22) & 3), static_cast<u32>((esr >> 16) & 31), bool(esr & (1ull << 6)),
+            bool(esr & (1ull << 21)), bool(esr & (1ull << 15))};
+    return !(out->size == 8 && (!out->wide || out->sign_extend)) &&
+           !(out->write && out->sign_extend);
+}
+
+inline u64 mmio_load_value(const MmioAccess& access, u64 value) {
+    const u64 mask = access.size == 8 ? ~0ull : (1ull << (access.size * 8)) - 1;
+    value &= mask;
+    if (access.sign_extend && (value & (1ull << (access.size * 8 - 1)))) {
+        value |= ~mask;
+    }
+    return access.wide ? value : value & 0xffffffffull;
+}
+
 } // namespace arm64

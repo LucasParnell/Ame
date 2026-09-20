@@ -112,6 +112,17 @@ less complete than it is. Do **not** treat these as status:
 | VM negative-authority probe | Implemented | Default boot: `dango.auth_probe: authority check passed` | Runs as a native probe, not a guest |
 | Stage-2 allocation/prune regression | Implemented | `tests/stage2_probe.cc` + `tests/test_stage2.py` (`test_failed_allocations_and_sparse_unmap_reclaim_tables`) | Host-only |
 
+### GPU appliance: Phase E.1 continuation
+
+| Capability | Status | Evidence / limit |
+|---|---|---|
+| Synthetic PCI ECAM through stage-2 faults | Implemented for INTx bootstrap | `kernel/pci/ecam.cc`, `kernel/vm/vcpu.cc`, syscall 60; real AArch64 guest probe in `vm_device_selftest.cc`, 43 assignment checks. Fixed BARs; only mapped virtio MMIO capabilities; MSI-X table/PBA mappings rejected. |
+| Config and mapping isolation | Implemented | ASan/UBSan ECAM + stage-2 probes; trapped ranges reject RAM/MMIO overlap; active-VM revoke removes Device leaves; BME requires an ACTIVE DMA domain. |
+| Linux `virtio_gpu` binds and creates DRM device | Not yet proven | Dango construction, function/IRQ authority, GPU artifact selection and Linux INTx delivery remain. This guest probe exercises PCI accesses only. |
+
+See [Phase E.1 delivery](../DELIVERY/gpu-appliance-phase-e1.md) and
+[remaining phases](GPU_APPLIANCE_TODO.md).
+
 ### 1.7 Kernel drivers (in-kernel minimal set)
 
 | Feature | Status | Evidence | Limitations |

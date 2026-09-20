@@ -109,21 +109,6 @@ u64 fault_ipa(const El2RunState& state, u64 ec) {
     return 0;
 }
 
-u32 data_abort_size(u64 esr) {
-    const u64 iss = esr & 0x01FF'FFFFull;
-    if (((iss >> 24) & 1ull) == 0) return 0;
-    const u32 sas = static_cast<u32>((iss >> 22) & 0x3ull);
-    return 1u << sas;
-}
-
-u32 data_abort_reg(u64 esr) {
-    return static_cast<u32>((esr >> 16) & 0x1Full);
-}
-
-bool data_abort_write(u64 esr) {
-    return ((esr >> 6) & 1ull) != 0;
-}
-
 u64 read_reg(const El2RunState& state, u32 reg) {
     if (reg >= 31) return 0;
     return state.regs[reg];
@@ -470,18 +455,17 @@ void gic_cpu_write(Vcpu& vcpu, u64 offset, u32 size, u64 value) {
     }
 }
 
-bool emulate_mmio(Vcpu& vcpu, u64 ipa, u64 esr) {
-    const u32 size = data_abort_size(esr);
-    const u32 reg = data_abort_reg(esr);
-    const bool write = data_abort_write(esr);
-    u64 value = 0;
+bool emulate_mmio(Vcpu& vcpu, Vm& owner, u64 ipa, u64 esr) {
+    arm64::MmioAccess access{};
+    if (!arm64::decode_mmio(esr, &access) || (ipa & (access.size - 1))) return false;
+    const u32 size = access.size;
+    const u32 reg = access.reg;
+    const bool write = access.write;
+    u64 value = write ? read_reg(vcpu.el2, reg) & mask_width(size) : 0;
     bool handled = false;
-    if (size == 0) {
-        if (write) { vcpu.el2.pc += 4; return true; }
-        return false;
-    }
-    if (size > 8) return false;
-    if (ipa >= kQemuUartBase && ipa < kQemuUartBase + kMmioPageSize) {
+    if (device_emulate_ecam(owner, ipa, size, write, &value)) {
+        handled = true;
+    } else if (ipa >= kQemuUartBase && ipa < kQemuUartBase + kMmioPageSize) {
         const u64 offset = ipa - kQemuUartBase;
         if (write) pl011_write(offset, read_reg(vcpu.el2, reg) & mask_width(size));
         else value = pl011_read(offset);
@@ -498,7 +482,7 @@ bool emulate_mmio(Vcpu& vcpu, u64 ipa, u64 esr) {
         handled = true;
     }
     if (!handled) return false;
-    if (!write) write_reg(vcpu.el2, reg, value, size);
+    if (!write) write_reg(vcpu.el2, reg, arm64::mmio_load_value(access, value), access.wide ? 8 : 4);
     vcpu.el2.pc += 4;
     return true;
 }
@@ -811,6 +795,25 @@ void init_el2_state(Vcpu& vcpu, const Vm& owner) {
 }
 
 } // namespace
+
+#ifdef ANKO_BUILD_DEV
+bool vcpu_ecam_probe(Vcpu& vcpu, Vm& owner) {
+    init_el2_state(vcpu, owner);
+    for (u32 exits = 0; exits < 64; ++exits) {
+        const u64 esr = vm_el2_run(&vcpu.el2);
+        if (vcpu.el2.exit_kind == 1) continue;
+        if (vcpu.el2.exit_kind != 0) return false;
+        if (arm64::esr_ec(esr) == arm64::kEcHvc64) return true;
+        if (!emulate_mmio(vcpu, owner, data_abort_ipa(vcpu.el2), esr)) {
+            ANKO_LOGF_ERROR("vm/selftest", "ECAM probe exit esr=0x%llx pc=0x%llx",
+                           static_cast<unsigned long long>(esr),
+                           static_cast<unsigned long long>(vcpu.el2.pc));
+            return false;
+        }
+    }
+    return false;
+}
+#endif
 
 CapHandle create_vcpu(Process& caller, CapHandle vm_cap, u64 flags, SysError* out_error) {
     SysError rc = E_OK;
@@ -1203,7 +1206,7 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budg
 
         if (ec == kEcDataAbortLower || ec == kEcDataAbortCurrent) {
             const u64 ipa = data_abort_ipa(vcpu->el2);
-            if (emulate_mmio(*vcpu, ipa, esr)) {
+            if (emulate_mmio(*vcpu, *owner, ipa, esr)) {
                 if (run_budget_expired(budget, start_ns, exits + 1)) break;
                 continue;
             }

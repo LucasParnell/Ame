@@ -186,6 +186,9 @@ SysError stage2_validate_no_overlap(Stage2AddressSpace* s2, u64 ipa, u64 size) {
     if (!s2 || !s2->built || s2->active) return E_INVALID;
     if (size == 0) return E_INVALID;
     if ((ipa & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0) return E_INVALID;
+    if (ipa >= (1ull << s2->ipa_bits) || size > (1ull << s2->ipa_bits) - ipa) return E_INVALID;
+    for (const auto& trap : s2->traps)
+        if (trap.size && range_overlaps(ipa, size, trap.base, trap.size)) return E_BUSY;
 
     for (u32 i = 0; i < kMaxStage2Mappings; ++i) {
         const Stage2Mapping& mapping = s2->mappings[i];
@@ -193,6 +196,21 @@ SysError stage2_validate_no_overlap(Stage2AddressSpace* s2, u64 ipa, u64 size) {
         if (range_overlaps(ipa, size, mapping.ipa, PAGE_SIZE)) return E_BUSY;
     }
     return E_OK;
+}
+
+SysError stage2_reserve_trap(Stage2AddressSpace* s2, u64 ipa, u64 size) {
+    const auto rc = stage2_validate_no_overlap(s2, ipa, size);
+    if (rc != E_OK) return rc;
+    for (auto& trap : s2->traps) {
+        if (!trap.size) { trap = {ipa, size}; return E_OK; }
+    }
+    return E_OVERFLOW;
+}
+
+void stage2_release_trap(Stage2AddressSpace* s2, u64 ipa, u64 size) {
+    if (!s2 || s2->active) return;
+    for (auto& trap : s2->traps)
+        if (trap.base == ipa && trap.size == size) { trap = {}; return; }
 }
 
 SysError stage2_map_page(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights) {
@@ -209,6 +227,8 @@ SysError stage2_map_page_ex(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 ri
     if ((rights & ~(RIGHT_READ | RIGHT_WRITE | RIGHT_EXEC)) != 0) return E_INVALID;
 
     if (ipa >= (1ull << s2->ipa_bits) || (pa & ~S2_DESC_ADDR_MASK) || !rights) return E_INVALID;
+    for (const auto& trap : s2->traps)
+        if (trap.size && range_overlaps(ipa, PAGE_SIZE, trap.base, trap.size)) return E_BUSY;
     if (s2->mapped_pages >= kMaxStage2Mappings) return E_OVERFLOW;
     PhysAddr table_pa = s2->root_table_phys;
     for (u32 level = 1; level < 3; ++level) {
@@ -229,9 +249,15 @@ SysError stage2_map_page_ex(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 ri
     return E_OK;
 }
 
-SysError stage2_unmap_page(Stage2AddressSpace* s2, u64 ipa) {
-    if (!s2 || !s2->built || s2->active) return E_INVALID;
+static SysError unmap_page(Stage2AddressSpace* s2, u64 ipa, bool revoke_device) {
+    if (!s2 || !s2->built || (s2->active && !revoke_device)) return E_INVALID;
     if ((ipa & (PAGE_SIZE - 1)) != 0 || ipa >= (1ull << s2->ipa_bits)) return E_INVALID;
+
+    if (revoke_device) {
+        Stage2MemType type{};
+        if (!stage2_lookup_page(s2, ipa, nullptr, &type)) return E_NOTFOUND;
+        if (type != Stage2MemType::Device) return E_PERM;
+    }
 
     const u64 l1_desc = table_ptr(s2->root_table_phys)[level_index(ipa, 1)];
     if (is_table_desc(l1_desc)) {
@@ -252,6 +278,16 @@ SysError stage2_unmap_page(Stage2AddressSpace* s2, u64 ipa) {
         return E_OK;
     }
     return E_NOTFOUND;
+}
+
+SysError stage2_unmap_page(Stage2AddressSpace* s2, u64 ipa) {
+    return unmap_page(s2, ipa, false);
+}
+
+SysError stage2_revoke_device_page(Stage2AddressSpace* s2, u64 ipa) {
+    // CallGuard excludes all guest execution. EL2 entry invalidates translations
+    // for the selected VMID on every CPU before any guest instruction resumes.
+    return unmap_page(s2, ipa, true);
 }
 
 SysError stage2_destroy(Stage2AddressSpace* s2) {

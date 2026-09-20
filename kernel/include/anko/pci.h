@@ -181,7 +181,29 @@ struct GuestConfig {
     bool present[kMaxAssignFns];
     bool bme_allowed[kMaxAssignFns]; // guest bus-master has been authorised
     u16 msi_cap_off[kMaxAssignFns];  // config offset of each MSI/MSI-X capability (0 = none)
+    u32 bar_mask[kMaxAssignFns][kMaxBars];
+    u8 bar_probe[kMaxAssignFns];
+    u8 bar_upper[kMaxAssignFns];
 };
+
+// One synthetic bus. Assigned functions occupy device 1, functions 0..7.
+constexpr u64 kGuestEcamSize = 1ull << 20;
+constexpr u32 kGuestDevice = 1;
+struct EcamAddress {
+    u32 function;
+    u32 offset;
+    bool assigned_device;
+};
+bool decode_ecam(u64 offset, u32 size, EcamAddress* out);
+u32 config_read(const GuestConfig& cfg, u32 function, u32 offset, u32 size);
+// BAR sizing/restoration affects only the synthetic image, never host BARs.
+bool config_bar_write(GuestConfig& cfg, u32 function, u32 offset, u32 value, u32 size);
+bool config_set_bar(GuestConfig& cfg, u32 function, u32 bar, u64 base, const PciBar& info);
+// Reject raw mappings of MSI-X table/PBA bytes (including their enclosing pages).
+bool bar_range_safe(const u8* host, const PciBar* bars, u32 bar, u64 offset, u64 size);
+// Rebuild a bounded capability list containing only mapped virtio MMIO regions.
+// MSI/MSI-X and indirect PCI_CFG capabilities are not exposed by this INTx profile.
+bool config_filter_virtio_caps(GuestConfig& cfg, u32 function, const u8* host);
 
 // Classify a guest config write. `offset` is within the function's 256 bytes.
 // BARs, the expansion ROM, the capability pointer and read-only fields are

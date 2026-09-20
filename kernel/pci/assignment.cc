@@ -68,9 +68,11 @@ void set_bus_master(u8 bus, u8 device, u8 function, bool enable) {
     }
     // Read-modify-write so only the bus-master bit changes. The ECAM window is
     // bootstrap-identity mapped and never reachable from a guest.
-    volatile u32* reg = ecam_reg(g_hw.ecam_base, bus, device, function, kRegCommand);
+    // Use a halfword store: the adjacent status register contains W1C bits.
+    volatile u16* reg = reinterpret_cast<volatile u16*>(
+        ecam_reg(g_hw.ecam_base, bus, device, function, kRegCommand));
     asm volatile("dsb sy" ::: "memory");
-    u32 value = *reg;
+    u16 value = *reg;
     if (enable) {
         value |= 1u << 2;
     } else {
@@ -84,9 +86,11 @@ void set_memory_enable(u8 bus, u8 device, u8 function, bool enable) {
     if (g_hw.ecam_base == 0) {
         return;
     }
-    volatile u32* reg = ecam_reg(g_hw.ecam_base, bus, device, function, kRegCommand);
+    // Use a halfword store: the adjacent status register contains W1C bits.
+    volatile u16* reg = reinterpret_cast<volatile u16*>(
+        ecam_reg(g_hw.ecam_base, bus, device, function, kRegCommand));
     asm volatile("dsb sy" ::: "memory");
-    u32 value = *reg;
+    u16 value = *reg;
     if (enable) {
         value |= 1u << 1;
     } else {
@@ -172,53 +176,6 @@ bool isolation_group_of(PhysAddr ecam_base, u8 bus, u8 device, PciIsolationGroup
         }
     }
     return false;
-}
-
-// ---------------------------------------------------------------------------
-// Filtered guest config + mediation
-// ---------------------------------------------------------------------------
-
-CfgWriteAction classify_config_write(const GuestConfig& cfg, u32 fn_index, u32 offset, u32 size) {
-    if (fn_index >= kMaxAssignFns || !cfg.present[fn_index]) {
-        return CfgWriteAction::Reject;
-    }
-    if (size == 0 || size > 4 || offset >= kCfgSpaceBytes || (offset + size) > kCfgSpaceBytes) {
-        return CfgWriteAction::Reject;
-    }
-    // The command register is always mediated: the caller decides which bits a
-    // guest may actually change, and the bus-master bit only after ACTIVE.
-    if (offset >= kRegCommand && offset < kRegCommand + 4) {
-        return CfgWriteAction::Mediate;
-    }
-    // BAR relocation, the expansion ROM BAR and the capability pointer must
-    // never be guest-controlled: moving a BAR would point the window at another
-    // function's registers or at host memory (§6.3).
-    if (offset >= kRegBar0 && offset < kRegBarEnd) {
-        return CfgWriteAction::Reject;
-    }
-    if (offset >= kRegRomBar && offset < kRegRomBar + 4) {
-        return CfgWriteAction::Reject;
-    }
-    if (offset >= kRegCapPtr && offset < kRegCapPtr + 4) {
-        return CfgWriteAction::Reject;
-    }
-    // Interrupt line/pin and the cache-line/latency bytes are benign fields with
-    // no isolation consequences.
-    if (offset >= kRegIntLine && offset < 0x40) {
-        return CfgWriteAction::Accept;
-    }
-    if (offset >= 0x0C && offset < kRegBar0) {
-        return CfgWriteAction::Accept;
-    }
-    // MSI/MSI-X capability windows are mediated: the guest may program them,
-    // but the value is bent into an Anko route, never a raw host MSI target.
-    const u32 msi_off = cfg.msi_cap_off[fn_index];
-    if (msi_off != 0 && offset >= msi_off && offset < msi_off + 24u) {
-        return CfgWriteAction::Mediate;
-    }
-    // Anything else (device-specific read-only fields, power management, reset)
-    // is rejected rather than blindly stored.
-    return CfgWriteAction::Reject;
 }
 
 } // namespace pci

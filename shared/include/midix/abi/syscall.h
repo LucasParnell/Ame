@@ -68,6 +68,7 @@ enum MxSyscall : mx_u64_t {
     MX_NR_VM_ASSIGN_MAP_MMIO  = 57, // (assign_cap, bar_index, guest_ipa, size, rights, bar_off)
     MX_NR_VM_ASSIGN_ROUTE_IRQ = 58, // (assign_cap, irq_cap, vcpu_cap, guest_irq, flags)
     MX_NR_VM_ASSIGN_DESTROY   = 59, // (assign_cap) -> E_OK
+    MX_NR_VM_ASSIGN_EXPOSE_ECAM = 60, // (assign_cap, guest_ipa, size) -> E_OK
 };
 
 constexpr mx_u32_t MX_SPAWN_SUSPENDED = 1u << 0;
@@ -133,3 +134,4 @@ constexpr mx_u64_t NR_VM_ASSIGN_DEVICE    = MX_NR_VM_ASSIGN_DEVICE;
 constexpr mx_u64_t NR_VM_ASSIGN_MAP_MMIO  = MX_NR_VM_ASSIGN_MAP_MMIO;
 constexpr mx_u64_t NR_VM_ASSIGN_ROUTE_IRQ = MX_NR_VM_ASSIGN_ROUTE_IRQ;
 constexpr mx_u64_t NR_VM_ASSIGN_DESTROY   = MX_NR_VM_ASSIGN_DESTROY;
+constexpr mx_u64_t NR_VM_ASSIGN_EXPOSE_ECAM = MX_NR_VM_ASSIGN_EXPOSE_ECAM;

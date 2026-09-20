@@ -84,6 +84,7 @@ set(ANKO_SOURCES
 
     # ---- Phase D: PCI assignment, mediation, MSI virtualization -----------
     pci/assignment.cc
+    pci/ecam.cc
     pci/msi.cc
 )
 

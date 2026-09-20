@@ -77,6 +77,26 @@ int main() {
         assert(pages.size() == baseline && s->next_level_table_count == 0);
     }
 
+    // A trap owns an unmapped IPA range; neither bulk validation nor a direct
+    // leaf insertion may turn it into RAM/MMIO. Failure allocates no tables.
+    constexpr u64 ecam = 0x3f000000;
+    assert(vm::stage2_reserve_trap(s, ecam, 1 << 20) == E_OK);
+    assert(vm::stage2_lookup_page(s, ecam, nullptr) == 0);
+    assert(vm::stage2_validate_no_overlap(s, ecam - PAGE_SIZE, 2 * PAGE_SIZE) == E_BUSY);
+    assert(vm::stage2_map_page(s, ecam, 0x1000, RIGHT_READ) == E_BUSY);
+    assert(vm::stage2_map_page(s, ecam + (1 << 20) - PAGE_SIZE, 0x1000, RIGHT_READ) == E_BUSY);
+    assert(pages.size() == baseline && s->next_level_table_count == 0);
+    assert(vm::stage2_reserve_trap(s, ecam, PAGE_SIZE) == E_BUSY);
+    assert(vm::stage2_reserve_trap(s, (1ull << 39) - PAGE_SIZE, 2 * PAGE_SIZE) == E_INVALID);
+    for (unsigned i = 1; i < 8; ++i)
+        assert(vm::stage2_reserve_trap(s, ecam + (i << 20), 1 << 20) == E_OK);
+    assert(vm::stage2_reserve_trap(s, ecam + (8 << 20), 1 << 20) == E_OVERFLOW);
+    for (unsigned i = 0; i < 8; ++i)
+        vm::stage2_release_trap(s, ecam + (i << 20), 1 << 20);
+    assert(vm::stage2_map_page(s, ecam, 0x1000, RIGHT_READ) == E_OK);
+    assert(vm::stage2_reserve_trap(s, ecam, 1 << 20) == E_BUSY);
+    assert(vm::stage2_unmap_page(s, ecam) == E_OK);
+
     // --- stage-2 memory attribute classes -----------------------------------
     // The default mapping class must remain plain NormalWB with no XN when the
     // guest may execute from it: identical to the pre-existing RAM behaviour.
@@ -152,6 +172,16 @@ int main() {
     assert(vm::stage2_unmap_page(s, dev_ipa) == E_OK);
     assert(vm::stage2_unmap_page(s, wb2_ipa) == E_OK);
     assert(s->mapped_pages == 0 && s->next_level_table_count == 0);
+
+    assert(vm::stage2_map_page_ex(s, dev_ipa, 0x12000, RIGHT_READ | RIGHT_WRITE,
+                                  vm::Stage2MemType::Device) == E_OK);
+    assert(vm::stage2_map_page(s, wb_ipa, 0x13000, RIGHT_READ) == E_OK);
+    assert(vm::stage2_activate(s) == E_OK);
+    assert(vm::stage2_unmap_page(s, dev_ipa) == E_INVALID);
+    assert(vm::stage2_revoke_device_page(s, wb_ipa) == E_PERM);
+    assert(vm::stage2_revoke_device_page(s, dev_ipa) == E_OK);
+    assert(vm::stage2_lookup_page(s, dev_ipa, nullptr) == 0);
+    assert(vm::stage2_lookup_page(s, wb_ipa, nullptr) == 0x13000);
 
     assert(vm::stage2_map_page(s, 1ull << 39, 0x1000, RIGHT_READ) == E_INVALID);
     assert(vm::stage2_destroy(s) == E_OK);

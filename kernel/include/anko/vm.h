@@ -168,6 +168,11 @@ struct Stage2AddressSpace {
     bool built;
     bool active;
     u8 pad[6];
+    struct TrapRange {
+        u64 base;
+        u64 size;
+    };
+    TrapRange traps[8];
     Stage2Mapping mappings[kMaxStage2Mappings];
 };
 
@@ -503,6 +508,10 @@ SysError stage2_map_page(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 right
 SysError stage2_map_page_ex(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights,
                             Stage2MemType mem_type);
 SysError stage2_unmap_page(Stage2AddressSpace* s2, u64 ipa);
+// CallGuard required: revoke a Device leaf even after the VM has first run.
+SysError stage2_revoke_device_page(Stage2AddressSpace* s2, u64 ipa);
+SysError stage2_reserve_trap(Stage2AddressSpace* s2, u64 ipa, u64 size);
+void stage2_release_trap(Stage2AddressSpace* s2, u64 ipa, u64 size);
 SysError stage2_destroy(Stage2AddressSpace* s2);
 SysError stage2_validate_no_overlap(Stage2AddressSpace* s2, u64 ipa, u64 size);
 SysError stage2_activate(Stage2AddressSpace* s2);
@@ -662,6 +671,8 @@ struct VmDeviceAssignment {
     // Synthetic / filtered guest config view (§6.3): only assigned functions.
     pci::GuestConfig cfg;
     pci::MsiState msi[pci::kMaxAssignFns];
+    u64 ecam_ipa;
+    u64 ecam_size;
 
     u64 created_ticks;
     u64 revoke_step;
@@ -705,6 +716,10 @@ SysError device_route_irq(Process& caller, CapHandle assign_cap, CapHandle irq_c
 
 // DMA-safe revoke then release (§8.12).
 SysError device_destroy(Process& caller, CapHandle assign_cap);
+// Publish a synthetic ECAM window after BARs/routes exist; no host ECAM mapping.
+SysError device_expose_ecam_internal(VmDeviceAssignment* a, u64 ipa, u64 size);
+SysError device_expose_ecam(Process& caller, CapHandle assign_cap, u64 ipa, u64 size);
+bool device_emulate_ecam(Vm& owner, u64 ipa, u32 size, bool write, u64* value);
 
 // --- kernel-internal entry points (boot path + native proof) ---------------
 // Allocate an assignment bound to `owner` (may be null in the native proof).
@@ -761,5 +776,10 @@ void vgic_pending_set(Vcpu& vcpu, u32 irq);
 bool vgic_pending_test(const Vcpu& vcpu, u32 irq);
 // Wake a vCPU's runner because a virtual IRQ was made pending.
 void vcpu_wake_irq(Vcpu& vcpu);
+
+#ifdef ANKO_BUILD_DEV
+// Boot-time opt-in guest probe; runs the same EL2 entry and MMIO handler as run_vcpu.
+bool vcpu_ecam_probe(Vcpu& vcpu, Vm& owner);
+#endif
 
 } // namespace vm

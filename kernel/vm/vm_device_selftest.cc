@@ -33,6 +33,36 @@
 #include "anko/smmuv3.h"
 #include "libk/string.h"
 
+// Position-independent guest code, copied into a private executable page.
+extern "C" const u8 ecam_probe_start[], ecam_probe_end[];
+asm(R"(
+.pushsection .rodata.ecam_probe, "a"
+.balign 4
+.global ecam_probe_start, ecam_probe_end
+ecam_probe_start:
+    ldr w1, [x0]
+    ldrh w2, [x0]
+    ldrb w3, [x0, #1]
+    mov w4, #-1
+    str w4, [x0, #16]
+    ldr w5, [x0, #16]
+    mov w6, #0x40000000
+    str w6, [x0, #16]
+    ldr w7, [x0, #16]
+    ldr w8, [x0, #4096]
+    sub x10, x0, #0x8000
+    ldr w9, [x10]
+    add x10, x0, #4096
+    ldrsb x11, [x10]
+    ldr wzr, [x0]
+    mov w12, #0x1234
+    str w12, [x0, #16]
+    ldr w13, [x0, #16]
+    hvc #0
+ecam_probe_end:
+.popsection
+)");
+
 namespace vm {
 
 namespace {
@@ -300,6 +330,40 @@ void vm_device_selftest_if_testdev() {
                        mt == Stage2MemType::Device ? 1u : 0u);
     }
 
+    // E.1: real guest loads/stores must fault into the production ECAM path.
+    // No Linux or device driver is involved in this narrow transport proof.
+    constexpr u64 ecam = 0x3f000000;
+    constexpr u64 code_ipa = 0x41000000;
+    const PhysAddr code = mm::alloc_page();
+    check(code != 0, "(v) guest code page");
+    if (code) {
+        const usize bytes = ecam_probe_end - ecam_probe_start;
+        libk::memcpy(reinterpret_cast<void*>(code), ecam_probe_start, bytes);
+        cache_clean(code, bytes);
+        asm volatile("ic iallu; dsb sy; isb" ::: "memory");
+        check(stage2_map_page(&owner->stage2, code_ipa, code, RIGHT_READ | RIGHT_EXEC) == E_OK,
+              "(v) executable guest page");
+        check(device_expose_ecam_internal(a, ecam, pci::kGuestEcamSize) == E_OK, "(v) expose ECAM");
+        check(stage2_map_page(&owner->stage2, ecam, code, RIGHT_READ) == E_BUSY,
+              "(v) ECAM cannot be replaced with RAM");
+        libk::memset(&g_vcpu, 0, sizeof(g_vcpu));
+        g_vcpu.entry_pc = code_ipa;
+        g_vcpu.arg0 = ecam + 0x8000;
+        const bool ran = vcpu_ecam_probe(g_vcpu, *owner);
+        check(ran, "(v) guest ECAM faults resume through HVC");
+        const auto& r = g_vcpu.el2.regs;
+        check(r[1] == (u32(kTestdevDevice) << 16 | kTestdevVendor) &&
+              r[2] == kTestdevVendor && r[3] == (kTestdevVendor >> 8), "(v) sized config reads");
+        check(r[5] == 0xfffff000u && r[7] == kGuestPhysMin && r[13] == kGuestPhysMin,
+              "(v) BAR sizing, restore and denied relocation");
+        check(r[8] == 0xffffffffu && r[9] == 0xffffffffu && r[11] == ~0ull,
+              "(v) absent function/device and signed load");
+        if (ran && g_failures == 0) ANKO_LOG_INFO("vm/selftest", "(v) ECAM guest trap proof passed");
+        // The boot-only probe has exited EL2; no runner can reference this page.
+        (void)stage2_unmap_page(&owner->stage2, code_ipa);
+        mm::free_page(code);
+    }
+
     // (ii) Mediated guest BME write (memory decode + bus master), then DMA.
     a->cfg.present[0] = true; // expose already set this; keep it explicit
     SysError mrc = device_mediate_config_write(a, 0, kCfgCommand, 0x0006u, 4);
@@ -382,10 +446,17 @@ void vm_device_selftest_if_testdev() {
           "(iv) ROM write rejected");
     check(debug_counter(VM_DEBUG_VM_DEVICE_MEDIATED_DENY) >= deny0 + 2, "(iv) mediations counted");
 
+    // Model the normal run_vcpu lifecycle: a VM remains active after guest exit.
+    check(stage2_activate(&owner->stage2) == E_OK, "(v) stage-2 active before revoke");
     // (iii) DMA-safe revoke: BME cleared, DMA rejected, canary intact.
     *reinterpret_cast<volatile u32*>(target) = kPoisonWord;
     cache_clean(target, 4);
     check(device_revoke(a) == E_OK, "(iii) revoke completed");
+    check(stage2_lookup_page(&owner->stage2, kGuestPhysMin, nullptr) == 0,
+          "(v) revoke removes active VM BAR mapping");
+    u64 absent = 0;
+    check(device_emulate_ecam(*owner, ecam + 0x8000, 4, false, &absent) && absent == 0xffffffffu,
+          "(v) revoked ECAM returns absent");
     check((pci::read_command(fn.bus, fn.device, fn.function) & pci::kPciCmdBusMaster) == 0,
           "(iii) host bus-master cleared");
     const u64 faults0 = iommu::debug_counter(iommu::IOMMU_FAULTS);

@@ -150,4 +150,21 @@ Notes:
   separate store, not the root's journal; mutating the read-only root through the
   B+tree remains unimplemented (and deliberately so).
 
+### Session 2026-09-20 (GPU appliance E.1)
+
+- Synthetic ECAM uses fixed records and bounded operations with no allocation in the fault path.
+  Guest PCI enumeration supports sized reads, fixed BAR probing/restoration and mediated command
+  writes; malformed accesses, config relocation and indirect PCI config access fail closed.
+- Trap ranges prevent RAM/MMIO aliasing. Raw MSI-X table/PBA pages are denied. Host command stores
+  use 16 bits to preserve adjacent write-one-to-clear status. Device revoke removes BAR leaves even
+  after a VM has first run, under the existing VM call guard.
+- Real AArch64 guest fault/resume proof added to the assignment gate (43 checks), alongside host
+  sanitizer tests (16 host tests total). The final full gate with IOMMU and assignment rows passes;
+  log: `out/validation/ecam-verify.log`.
+- Fixed stale-log acceptance when reusing the boot harness output directory, with a regression.
+- GPU DTB generation now uses the portable host file-size helper on macOS. Its ECAM is one bus
+  (1 MiB); the MMIO window is outside the guest RAM and channel region.
+- Linux GPU assignment/probe is still pending; see `GPU_APPLIANCE_TODO.md` and
+  `DELIVERY/gpu-appliance-phase-e1.md`.
+
 This file is a progress record, not a completion claim.

@@ -84,6 +84,7 @@ def main():
         '(iii) revoke': '(iii) revoke bm=0 dma=rejected' in logs and
                         'canary=0xa5a5a5a5' in logs and 'state=revoked' in logs,
         '(iv) msi_pending': '(iv) msi route injected vector=42 pending=1' in logs,
+        '(v) ecam_guest': '(v) ECAM guest trap proof passed' in logs,
         '(iv) level_rearm': '(iv) level route ok deliveries=1->2' in logs,
     }
     counters = {}

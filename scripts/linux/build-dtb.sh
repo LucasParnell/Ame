@@ -2,6 +2,8 @@
 set -euo pipefail
 
 AME="$(cd "$(dirname "$0")/../.." && pwd)"
+source "${AME}/scripts/host.sh"
+ame_host_tools
 OUT="${DANGO_LINUX_OUT:-${AME}/build/dango-linux}"
 TEMPLATE="${DANGO_DTS_TEMPLATE:-${AME}/linux-artifacts/dts/dango-linux-minimal.dts.in}"
 GENERATED="${OUT}/$(basename "${TEMPLATE}" .dts.in).generated.dts"
@@ -17,7 +19,7 @@ if [[ ! -f "${INITRD}" ]]; then
     exit 1
 fi
 
-initrd_size=$(stat -c%s "${INITRD}")
+initrd_size=$(ame_file_size "${INITRD}")
 # Keep the DTB range page-aligned so the eventual VM loader can copy/map it
 # without needing byte-granular guest memory metadata.
 initrd_end=$((INITRD_LOAD + ((initrd_size + 4095) & ~4095)))

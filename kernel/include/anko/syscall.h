@@ -102,8 +102,9 @@ enum Syscall : unsigned {
     SYS_VM_ASSIGN_ROUTE_IRQ = MX_NR_VM_ASSIGN_ROUTE_IRQ, // (assign, irq_cap, vcpu_cap, irq, flags)
     SYS_VM_ASSIGN_DESTROY = MX_NR_VM_ASSIGN_DESTROY,     // (assign_cap)
 
+    SYS_VM_ASSIGN_EXPOSE_ECAM = MX_NR_VM_ASSIGN_EXPOSE_ECAM, // (assign, ipa, size)
     SYS_CLOCK_NS = MX_NR_CLOCK_NS,
-    SYS_COUNT,
+    SYS_COUNT = MX_NR_VM_ASSIGN_EXPOSE_ECAM + 1,
 };
 
 static_assert(static_cast<unsigned>(SYS_YIELD) == static_cast<unsigned>(MX_NR_YIELD), "syscall number drift: YIELD");

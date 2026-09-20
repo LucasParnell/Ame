@@ -54,6 +54,10 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
     markers = markers or ['system ready']
     success = False
     reason = 'timeout'
+    # Clear previous evidence before Popen: QEMU may not open its serial files
+    # before our first poll, especially when a caller reuses --output.
+    for log in (host, guest):
+        log.write_text('')
     with (output / 'qemu.log').open('w') as errors:
         proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=errors, stderr=errors)
         started = time.monotonic()

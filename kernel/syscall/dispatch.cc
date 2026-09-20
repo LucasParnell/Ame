@@ -242,7 +242,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     vm::CallGuard vm_call((nr >= SYS_VM_CREATE && nr <= SYS_VM_MEMORY_WRITE) ||
                           (nr >= SYS_VCPU_BIND_SCHED_CONTEXT && nr <= SYS_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER) ||
-                          (nr >= SYS_VM_ASSIGN_DEVICE && nr <= SYS_VM_ASSIGN_DESTROY));
+                          (nr >= SYS_VM_ASSIGN_DEVICE && nr <= SYS_VM_ASSIGN_EXPOSE_ECAM));
     switch (static_cast<Syscall>(nr)) {
 
     case SYS_YIELD:
@@ -857,7 +857,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     case SYS_VM_ASSIGN_MAP_MMIO: {
         // a0 = assign, a1 = bar_index, a2 = guest_ipa, a3 = size, a4 = rights, a5 = bar_offset
         const u32 bar_index = static_cast<u32>(a1);
-        if (bar_index >= pci::kMaxBars) return err(E_INVALID);
+        if (a1 != bar_index || bar_index >= pci::kMaxBars || a5 > 0xffffffffull) return err(E_INVALID);
         const u32 rights = static_cast<u32>(a4);
         if (a4 != rights) return err(E_INVALID);
         const SysError rc = vm::device_map_bar(*p, static_cast<CapHandle>(a0), bar_index,
@@ -869,7 +869,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     case SYS_VM_ASSIGN_ROUTE_IRQ: {
         // a0 = assign, a1 = irq_cap, a2 = vcpu_cap, a3 = guest_irq, a4 = flags
         const u32 guest_irq = static_cast<u32>(a3);
-        if (guest_irq >= vm::kVgicMaxIrqs) return err(E_INVALID);
+        if (a3 != guest_irq || guest_irq >= vm::kVgicMaxIrqs) return err(E_INVALID);
         const u32 flags = static_cast<u32>(a4);
         if (a4 != flags || flags != 0) return err(E_INVALID);
         const SysError rc = vm::device_route_irq(*p, static_cast<CapHandle>(a0),
@@ -878,6 +878,9 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         if (rc != E_OK) return err(rc);
         return ok(E_OK);
     }
+
+    case SYS_VM_ASSIGN_EXPOSE_ECAM:
+        return err(vm::device_expose_ecam(*p, static_cast<CapHandle>(a0), a1, a2));
 
     case SYS_VM_ASSIGN_DESTROY:
         return err(vm::device_destroy(*p, static_cast<CapHandle>(a0)));

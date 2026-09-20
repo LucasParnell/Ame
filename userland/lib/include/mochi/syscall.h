@@ -154,6 +154,9 @@ static inline int64_t sys_thread_get_cpu() { return _svc1(NR_THREAD_GET_CPU, 0);
 static inline void sys_thread_exit(int32_t code) { _svc1(NR_THREAD_EXIT, static_cast<uint64_t>(code)); }
 static inline void sys_debug_puts(const char* s, uint64_t len) { _svc2(NR_DEBUG_PUTS, reinterpret_cast<uint64_t>(s), len); }
 static inline int64_t sys_debug_counter(uint64_t id) { return _svc1(NR_DEBUG_COUNTERS, id); }
+static inline int64_t sys_vm_assign_expose_ecam(CapHandle assignment, uint64_t ipa, uint64_t size) {
+    return _svc3(NR_VM_ASSIGN_EXPOSE_ECAM, assignment, ipa, size);
+}
 static inline int64_t sys_vm_create(CapHandle vm_root, uint64_t flags) { return _svc2(NR_VM_CREATE, vm_root, flags); }
 static inline int64_t sys_vm_destroy(CapHandle vm) { return _svc1(NR_VM_DESTROY, vm); }
 static inline int64_t sys_vm_inspect(CapHandle vm, void* info, uint64_t info_len) { return _svc3(NR_VM_INSPECT, vm, reinterpret_cast<uint64_t>(info), info_len); }

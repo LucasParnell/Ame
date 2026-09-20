@@ -29,7 +29,7 @@ Master reference points: `kernel/iommu/{core,smmuv3,faults}.cc`, `kernel/vm/vm_d
 | B generic IOMMU core | **Done** |
 | C SMMUv3 backend + hostile DMA | **Done** (22 checks, `iommu-testdev`) |
 | D PCI assignment + IRQ virtualization | **Done** (32 checks) |
-| E Linux virtio-gpu-pci probe | **Partial** — guest kernel + pipeline exist; PCI config mediation + Dango wiring missing |
+| E Linux virtio-gpu-pci probe | **Partial** — guest kernel + pipeline exist; INTx-profile ECAM mediation proven; Dango construction + Linux probe remain |
 | F standalone Linux KMS | Not started |
 | G guest-visible Dango channel | Not started (ABI only) |
 | H `dango-gpud` control plane | Not started |
@@ -77,16 +77,19 @@ mappings, mediated config writes, MSI/MSI-X + INTx level routes → vGIC. See
 - GPU guest DTS drafted: `linux-artifacts/dts/dango-linux-gpu.dts.in` (synthetic ECAM PCI host bridge,
   INTx→GIC map, assigned-function MMIO window, channel reserved-memory).
 
-**Remaining (ordered)**
-1. **Mediated guest PCI config (the hard part).** Linux enumeration writes config space (BAR sizing with
-   `0xFFFFFFFF`, command/BME, MSI control). A mapped ECAM cannot be read-only. Need a **stage-2 data-abort
-   emulation path**: trap guest writes to the synthetic ECAM IPA, decode, and forward to the assignment
-   layer (BAR ownership, BME mediation, MSI vector capture), returning synthesised reads. Files:
-   `kernel/vm/stage2.cc` (fault hook), a new `kernel/pci/ecam.cc`, `kernel/syscall/dispatch.cc`.
-   *This is the single largest remaining E item and gates F/G.*
+**Ordered substeps**
+1. **Mediated guest PCI config — done for the INTx bootstrap profile.**
+   `SYS_VM_ASSIGN_EXPOSE_ECAM` reserves one trap-only bus at an ownership-checked IPA.
+   Actual AArch64 stage-2 aborts use bounded byte/halfword/word config emulation, fixed BAR
+   sizing/restoration, and ACTIVE-domain BME mediation. Only mapped virtio MMIO capabilities
+   are published; MSI/MSI-X and indirect PCI config capabilities stay hidden. MSI-X table/PBA
+   pages cannot be mapped raw. Host MSI delivery remains a later extension of this profile.
+   Proof: sanitizer probes plus `AME_VERIFY_ASSIGN=1` (43 checks, including actual guest
+   ECAM loads/stores and BAR removal after the VM has run). See
+   [Phase E.1 delivery](../DELIVERY/gpu-appliance-phase-e1.md).
 2. **Dango GPU appliance construction.** `userland/dango/manager/main.cc` must, for the GPU profile:
-   create the VM, **assign the virtio-gpu-pci function** (`SYS_VM_ASSIGN_DEVICE`), map the synthetic ECAM
-   + assigned BAR as stage-2 **Device**, install the INTx routes (`SYS_VM_ASSIGN_ROUTE_IRQ`), and only then
+   create the VM, **assign the virtio-gpu-pci function** (`SYS_VM_ASSIGN_DEVICE`), reserve the synthetic ECAM trap
+   + map assigned BARs as stage-2 **Device**, install the INTx routes (`SYS_VM_ASSIGN_ROUTE_IRQ`), and only then
    resume the vCPU. Today the manager only creates VM/vCPU/channel and has no PCI knowledge.
 3. **Artifact packaging for the GPU profile.** `userland/CMakeLists.txt` hardcodes
    `build/dango-linux` names and the hello fragment; add a GPU artifact dir/flow so `linux/Image`,
@@ -210,8 +213,7 @@ fence transfer, and IOMMU registration lifetimes.
 - **Docs.** Keep `docs/FEATURE_STATUS.md` and `docs/CLEANUP_STATUS.md` current as phases land.
 
 ## Immediate next actions (in order)
-1. Phase E.1 — synthetic-ECAM mediation (stage-2 data-abort trap + `kernel/pci/ecam.cc`).
-2. Phase E.2/E.3 — Dango GPU appliance construction + GPU artifact packaging; boot it.
-3. Phase E.4/E.5 — vGIC SPI delivery + end-to-end assertion.
-4. Phase F — KMS self-test + `screendump` capture.
-5. Phase G — channel guest mapping + vIRQ/HVC + `/dev/dango-channel0` + ping/pong.
+1. Phase E.2/E.3 — Dango GPU appliance construction + GPU artifact packaging; boot it.
+2. Phase E.4/E.5 — vGIC SPI delivery + end-to-end assertion.
+3. Phase F — KMS self-test + `screendump` capture.
+4. Phase G — channel guest mapping + vIRQ/HVC + `/dev/dango-channel0` + ping/pong.

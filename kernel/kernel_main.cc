@@ -15,9 +15,11 @@
 #include "anko/hw_info.h"
 #include "anko/ipc.h"
 #include "anko/irq.h"
+#include "anko/iommu.h"
 #include "anko/mm.h"
 #include "anko/platform.h"
 #include "anko/sched.h"
+#include "anko/smmuv3.h"
 #include "anko/smp.h"
 #include "anko/syscall.h"
 #include "anko/vm.h"
@@ -241,6 +243,24 @@ extern "C" [[noreturn]] void kernel_main() {
 #ifdef ANKO_BOARD_SWITCH_T210
     fat_log::flush(); // persist log up to this point
 #endif
+
+    // -----------------------------------------------------------------------
+    // Phase C: bring the SMMUv3 up into a default-deny state before any
+    // assignable PCI function can bus-master.  With no SMMU this is a no-op and
+    // the generic IOMMU core stays on its null backend.
+    // -----------------------------------------------------------------------
+    {
+        const SysError rc = iommu::smmuv3_bring_up();
+        if (g_hw.has_smmu) {
+            ANKO_LOGF_INFO("kernel/iommu", "smmuv3 bring-up rc=%d ready=%d", static_cast<int>(rc),
+                           iommu::smmuv3_ready() ? 1 : 0);
+        }
+#ifdef ANKO_BUILD_DEV
+        // Opt-in hostile-DMA verification; no-op unless an iommu-testdev
+        // function is present in this topology.
+        iommu::smmuv3_selftest_if_testdev();
+#endif
+    }
 
     cap::init();
     ipc::init();

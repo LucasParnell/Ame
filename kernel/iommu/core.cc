@@ -24,6 +24,10 @@ namespace {
 // --- AArch64 long-descriptor bits, used generically -------------------------
 constexpr u64 kDescValid = 1ull << 0;
 constexpr u64 kDescTable = 1ull << 1;
+// Level-3 descriptor type field [1:0] = 0b11 selects a 4 KiB page.  It is
+// numerically shared with kDescTable (which means "table" at levels 1-2) because
+// the encoding is level dependent; block leaves at levels 1-2 stay 0b01.
+constexpr u64 kDescPageType = 0b11ull;
 constexpr u64 kDescMemNormal = 0xFull << 2;
 constexpr u64 kDescShInner = 3ull << 8;
 constexpr u64 kDescAf = 1ull << 10;
@@ -172,7 +176,8 @@ SysError emit_pages(IommuDomain* domain, const IommuMap& map) {
         if (leaf & kDescValid) {
             return E_BUSY;
         }
-        leaf = (pa & kAddrMask) | leaf_attrs(map.perms);
+        // A level-3 entry must be a page descriptor: type field [1:0] = 0b11.
+        leaf = (pa & kAddrMask) | leaf_attrs(map.perms) | kDescPageType;
     }
     return E_OK;
 }
@@ -416,6 +421,15 @@ void ensure_initialised() {
     g_initialised = true;
 }
 
+// Install the requester's translation context through the backend. A null hook
+// means the platform has no programmable IOMMU, so there is nothing to do.
+bool program_stream(IommuDomain* domain, IommuDeviceId device) {
+    if (!domain->backend_.attach_stream) {
+        return true;
+    }
+    return domain->backend_.attach_stream(domain->backend_.ctx, device, domain) == E_OK;
+}
+
 } // namespace
 
 const IommuBackendOps& null_backend() {
@@ -563,6 +577,11 @@ SysError IommuDomain::attach(IommuDeviceId device) {
         if (binding.domain_index != kQuarantineIndex) {
             return E_BUSY; // already owned by another active domain
         }
+        // Program the backend context before committing the binding, so a
+        // failed install leaves the requester on its previous (deny) context.
+        if (!program_stream(this, device)) {
+            return E_FAULT;
+        }
         binding.domain_index = index_;
         __atomic_or_fetch(&attached_mask_, 1ull << i, __ATOMIC_RELAXED);
         return E_OK;
@@ -571,6 +590,9 @@ SysError IommuDomain::attach(IommuDeviceId device) {
         StreamBinding& binding = g_streams[i];
         if (binding.used) {
             continue;
+        }
+        if (!program_stream(this, device)) {
+            return E_FAULT;
         }
         binding.used = true;
         binding.segment = device.segment;
@@ -597,6 +619,14 @@ SysError IommuDomain::detach(IommuDeviceId device) {
         binding.domain_index = kQuarantineIndex;
         __atomic_and_fetch(&attached_mask_, ~(1ull << i), __ATOMIC_RELAXED);
         counter_inc(IOMMU_QUARANTINES);
+        // Redirect the requester to a faulting context. If the backend cannot
+        // prove it stopped translating, quarantine this domain so its pages
+        // stay pinned rather than being recycled (§8.12).
+        if (backend_.detach_stream && backend_.detach_stream(backend_.ctx, device) != E_OK) {
+            state_ = DomainState::Quarantined;
+            counter_inc(IOMMU_QUARANTINES);
+            return E_FAULT;
+        }
         return E_OK;
     }
     return E_NOTFOUND;
@@ -701,6 +731,10 @@ void note_fault(IommuDeviceId device, u64 iova, u32 reason) {
     g_last_fault.iova = iova;
     g_last_fault.reason = reason;
     g_last_fault.pad = 0;
+}
+
+void note_quarantine() {
+    counter_inc(IOMMU_QUARANTINES);
 }
 
 u64 debug_counter(u64 id) {

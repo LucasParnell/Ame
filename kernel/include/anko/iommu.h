@@ -132,6 +132,14 @@ struct IommuBackendOps {
     SysError (*publish_page_table_range)(void* ctx, PhysAddr table_pa, u64 length);
     SysError (*invalidate_iotlb_range)(void* ctx, IommuDomain* domain, u64 iova, u64 length);
     SysError (*sync_command_stream)(void* ctx);
+    // Bind a requester to a domain (its translation context) and unbind it back
+    // to the default-deny state. These run inside IommuDomain::attach/detach
+    // after the core's binding table is updated; the backend programs the
+    // architecture-specific stream entry so that a requester whose context is
+    // not (yet) installed faults instead of bypassing translation. A null
+    // pointer is a no-op success (the platform has no programmable IOMMU).
+    SysError (*attach_stream)(void* ctx, IommuDeviceId device, IommuDomain* domain);
+    SysError (*detach_stream)(void* ctx, IommuDeviceId device);
     void* ctx;
 };
 
@@ -280,6 +288,10 @@ void init();
 // in Phase C). The full rate-limited logging and ACTIVE→FAULTED→… state machine
 // live in kernel/iommu/faults.cc; this core entry point only records it.
 void note_fault(IommuDeviceId device, u64 iova, u32 reason);
+
+// Record that a requester or domain was moved into quarantine (called by the
+// backend's fault-containment path alongside note_fault).
+void note_quarantine();
 
 // ---------------------------------------------------------------------------
 // Debug counters (§8.15). Index with IommuCounter; unknown ids return 0.

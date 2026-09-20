@@ -24,7 +24,10 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
     # Opt-in Phase A topology: attach an SMMUv3 (no default bus bypass) and a
     # virtio-gpu-pci display function, while keeping ramfb.  The default gate
     # topology below stays byte-for-byte unchanged unless the env opts in.
+    # AME_QEMU_TESTDEV=1 additionally attaches the QEMU iommu-testdev reference
+    # device used by the Phase C hostile-DMA verification.
     iommu = os.environ.get('AME_QEMU_IOMMU') == '1'
+    testdev = os.environ.get('AME_QEMU_TESTDEV') == '1'
     machine = 'virt,virtualization=on,gic-version=2'
     if iommu:
         machine += ',iommu=smmuv3,default-bus-bypass-iommu=off'
@@ -35,6 +38,8 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
             '-serial', f'file:{host}', '-serial', f'file:{guest}']
     if iommu:
         args += ['-device', 'virtio-gpu-pci']
+    if testdev:
+        args += ['-device', 'iommu-testdev']
     if disk:
         snapshot_arg = 'snapshot=on' if snapshot else 'snapshot=off'
         args += ['-drive',
@@ -69,7 +74,7 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
                 except subprocess.TimeoutExpired: proc.kill(); proc.wait()
     result = dict(success=success, reason=reason, mode=mode, cpus=cpus,
                   elapsed=time.monotonic() - started, logs=str(output), command=args,
-                  snapshot=snapshot, iommu=iommu)
+                  snapshot=snapshot, iommu=iommu, testdev=testdev)
     (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result))
     return success

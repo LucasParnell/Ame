@@ -108,6 +108,10 @@ void* slab_alloc(usize size, usize align);
 void slab_free(void* ptr, usize size, usize align);
 
 bool register_noncached_range(PhysAddr base, u64 size); // boot only
+// Map a device MMIO window into the kernel address space (identity, Device
+// attributes).  Used by the Phase C SMMU backend and the iommu-testdev
+// selftest to reach registers outside the bootstrap identity map.
+bool map_kernel_device_mmio(PhysAddr base, u64 size);
 void vm_init();
 void vm_enable_kernel();
 VmSpace vm_space_create(u32 pid);

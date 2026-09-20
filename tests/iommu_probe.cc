@@ -244,6 +244,9 @@ int main() {
         const u64 leaf = page_leaf(d, 0x4000'0000);
         assert((leaf & kDescApRead) && !(leaf & kDescApWrite));
         assert((leaf & kAddrMask) == pa_owned);
+        // A level-3 entry must be a page descriptor (type field [1:0] = 0b11);
+        // 0b01 is reserved at level 3 and would fault in a real walk.
+        assert((leaf & 0x3ull) == 0x3ull);
         assert(d->pinned_pages() == 1);
 
         // A 2 MiB-aligned read/write run is installed as block descriptors.
@@ -251,6 +254,7 @@ int main() {
         assert(d->map_batch(&blk, 1) == E_OK);
         const u64 be = block_leaf(d, 0x4020'0000);
         assert((be & kDescValid) && !(be & kDescTable));
+        assert((be & 0x3ull) == 0x1ull); // block descriptor: bits[1:0] = 0b01
         assert((be & kAddrMask) == pa_block);
         assert(d->pinned_pages() == 1 + 512);
 

@@ -28,6 +28,10 @@ constexpr u32 kCfgBar0 = 0x10;
 constexpr u16 kCmdMemoryEnable = 1u << 1;
 constexpr u16 kCmdBusMaster = 1u << 2;
 
+// USB xHCI class code: the one PCI function Ame drives natively, so its
+// bus-master enablement is left to drv.usb.xhci.
+constexpr u32 kClassXhci = 0x0C0330u;
+
 // The bootstrap identity map covers only the first kPciEcamProbeSize bytes of
 // ECAM (16 buses × 32 devices × 8 functions × 4 KiB).  Stay inside it.
 constexpr u32 kScanBuses = 16;
@@ -217,6 +221,34 @@ void log_inventory(PhysAddr ecam_base) {
                            static_cast<unsigned long long>(bar.size), bar.prefetchable ? 1u : 0u);
         }
     }
+}
+
+u32 contain_assignable(PhysAddr ecam_base) {
+    if (ecam_base == 0) {
+        return 0;
+    }
+    static PciFunctionInfo functions[kMaxFunctions];
+    const u32 count = enumerate(ecam_base, functions, kMaxFunctions);
+    u32 contained = 0;
+    for (u32 i = 0; i < count; ++i) {
+        const PciFunctionInfo& f = functions[i];
+        // The native xHCI function keeps the bus-master enablement its driver
+        // relies on, and PCI-to-PCI bridges/root ports are not assignable
+        // devices, so neither is touched.  Every other function is held
+        // non-bus-mastering until an assignment is fully constructed.
+        const u32 base_class = (f.class_code >> 16) & 0xFFu;
+        if (f.class_code == kClassXhci || base_class == 0x06u) {
+            continue;
+        }
+        const u32 command = cfg_read(ecam_base, f.bus, f.device, f.function, kCfgCommand);
+        const u32 contained_cmd = command & ~static_cast<u32>(kCmdBusMaster);
+        if (contained_cmd == command) {
+            continue;
+        }
+        cfg_write(ecam_base, f.bus, f.device, f.function, kCfgCommand, contained_cmd);
+        ++contained;
+    }
+    return contained;
 }
 
 } // namespace pci

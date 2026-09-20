@@ -74,6 +74,12 @@ u32 enumerate(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap);
 // plus one line per non-empty BAR.  Used by the Phase A inventory.
 void log_inventory(PhysAddr ecam_base);
 
+// Hold every assignable (non-native) function non-bus-mastering with interrupts
+// disabled until an assignment is fully constructed.  The native xHCI function
+// is left untouched so the native USB path keeps working.  Returns the number
+// of functions whose command register was changed.
+u32 contain_assignable(PhysAddr ecam_base);
+
 // Human-readable BAR type tag ("io", "mmio32", "mmio64", "none").
 const char* bar_type_name(BarType type);
 

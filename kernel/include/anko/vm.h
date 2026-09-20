@@ -121,11 +121,25 @@ struct VmRoot {
     u32 magic;
 };
 
+// Stage-2 memory attribute class.
+//
+// Guest RAM uses NormalWB.  NormalNC exists for host-visible non-cacheable
+// buffers the guest shares with a DMA master.  Device is the MMIO class: it
+// selects Device-nGnRE, is always execute-never, and is what the GPU spec
+// (§6.2) requires for aperture/register windows.  The class is orthogonal to
+// the S2AP access rights carried in `rights`.
+enum class Stage2MemType : u32 {
+    NormalWB = 0,
+    NormalNC = 1,
+    Device = 2,
+};
+
 struct Stage2Mapping {
     u64 ipa;
     PhysAddr pa;
     u32 rights;
     bool valid;
+    Stage2MemType mem_type;
     u8 pad[3];
 };
 
@@ -473,11 +487,14 @@ void poll_vcpu_timer(Vcpu& vcpu);
 
 SysError stage2_create(Stage2AddressSpace* s2);
 SysError stage2_map_page(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights);
+SysError stage2_map_page_ex(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights,
+                            Stage2MemType mem_type);
 SysError stage2_unmap_page(Stage2AddressSpace* s2, u64 ipa);
 SysError stage2_destroy(Stage2AddressSpace* s2);
 SysError stage2_validate_no_overlap(Stage2AddressSpace* s2, u64 ipa, u64 size);
 SysError stage2_activate(Stage2AddressSpace* s2);
-PhysAddr stage2_lookup_page(Stage2AddressSpace* s2, u64 ipa, u32* out_rights);
+PhysAddr stage2_lookup_page(Stage2AddressSpace* s2, u64 ipa, u32* out_rights,
+                            Stage2MemType* out_mem_type = nullptr);
 
 CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* out_error);
 SysError destroy_vm(Process& caller, CapHandle vm_cap);

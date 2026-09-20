@@ -11,6 +11,8 @@ constexpr u64 S2_DESC_AF = 1ull << 10;
 constexpr u64 S2_DESC_SH_INNER = 3ull << 8;
 constexpr u64 S2_DESC_S2AP_READ = 1ull << 6;
 constexpr u64 S2_DESC_S2AP_WRITE = 1ull << 7;
+constexpr u64 S2_DESC_MEM_DEVICE_NGNRE = 0x1ull << 2;
+constexpr u64 S2_DESC_MEM_NORMAL_NC = 0x3ull << 2;
 constexpr u64 S2_DESC_MEM_NORMAL = 0xFull << 2;
 constexpr u64 S2_DESC_XN = 1ull << 54;
 constexpr u64 S2_DESC_ADDR_MASK = 0x0000'FFFF'FFFF'F000ull;
@@ -78,21 +80,50 @@ void prune_tables(Stage2AddressSpace* s2, u64 ipa) {
     if (table_empty(l2)) { root = 0; release_table(s2, l2); }
 }
 
-u64 stage2_page_attrs(u32 rights) {
+bool mem_type_valid(Stage2MemType mem_type) {
+    switch (mem_type) {
+    case Stage2MemType::NormalWB:
+    case Stage2MemType::NormalNC:
+    case Stage2MemType::Device:
+        return true;
+    }
+    return false;
+}
+
+u64 stage2_page_attrs(u32 rights, Stage2MemType mem_type) {
     /*
      * Stage-2 S2AP is independent from host capability rights.  Preserve the
      * exact guest access requested by the VM monitor rather than silently
      * upgrading every mapping to RWX.  Bits [7:6] are read/write permission in
      * the stage-2 long-descriptor format; XN blocks instruction fetches.
+     *
+     * MemAttr[3:0] lives in descriptor bits [5:2]:
+     *   0b1111 Normal, inner/outer write-back (guest RAM)
+     *   0b0011 Normal, inner/outer non-cacheable (shared/DMA buffers)
+     *   0b0001 Device-nGnRE (MMIO), which is always execute-never.
      */
-    u64 attrs = S2_DESC_MEM_NORMAL | S2_DESC_SH_INNER | S2_DESC_AF;
+    u64 attrs = S2_DESC_SH_INNER | S2_DESC_AF;
+    switch (mem_type) {
+    case Stage2MemType::NormalWB:
+        attrs |= S2_DESC_MEM_NORMAL;
+        break;
+    case Stage2MemType::NormalNC:
+        attrs |= S2_DESC_MEM_NORMAL_NC;
+        break;
+    case Stage2MemType::Device:
+        attrs |= S2_DESC_MEM_DEVICE_NGNRE;
+        break;
+    }
     if (rights & RIGHT_READ) attrs |= S2_DESC_S2AP_READ;
     if (rights & RIGHT_WRITE) attrs |= S2_DESC_S2AP_WRITE;
-    if ((rights & RIGHT_EXEC) == 0) attrs |= S2_DESC_XN;
+    if (mem_type == Stage2MemType::Device || (rights & RIGHT_EXEC) == 0) {
+        attrs |= S2_DESC_XN;
+    }
     return attrs;
 }
 
-SysError record_mapping(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights) {
+SysError record_mapping(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights,
+                        Stage2MemType mem_type) {
     if (!s2) return E_INVALID;
 
     // Fast append path. The common VM-RAM mapping path maps a contiguous IPA
@@ -104,6 +135,7 @@ SysError record_mapping(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights
             mapping.ipa = ipa;
             mapping.pa = pa;
             mapping.rights = rights;
+            mapping.mem_type = mem_type;
             mapping.valid = true;
             ++s2->mapped_pages;
             metric_inc(VM_DEBUG_STAGE2_PAGES_MAPPED);
@@ -119,6 +151,7 @@ SysError record_mapping(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights
         mapping.ipa = ipa;
         mapping.pa = pa;
         mapping.rights = rights;
+        mapping.mem_type = mem_type;
         mapping.valid = true;
         ++s2->mapped_pages;
         metric_inc(VM_DEBUG_STAGE2_PAGES_MAPPED);
@@ -163,6 +196,14 @@ SysError stage2_validate_no_overlap(Stage2AddressSpace* s2, u64 ipa, u64 size) {
 }
 
 SysError stage2_map_page(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights) {
+    return stage2_map_page_ex(s2, ipa, pa, rights, Stage2MemType::NormalWB);
+}
+
+SysError stage2_map_page_ex(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights,
+                            Stage2MemType mem_type) {
+    if (!mem_type_valid(mem_type)) {
+        return E_INVALID;
+    }
     if (!s2 || !s2->built || s2->active) return E_INVALID;
     if ((ipa & (PAGE_SIZE - 1)) != 0 || (pa & (PAGE_SIZE - 1)) != 0) return E_INVALID;
     if ((rights & ~(RIGHT_READ | RIGHT_WRITE | RIGHT_EXEC)) != 0) return E_INVALID;
@@ -182,9 +223,9 @@ SysError stage2_map_page(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 right
     }
     auto& leaf = table_ptr(table_pa)[level_index(ipa, 3)];
     if (leaf & S2_DESC_VALID) return E_BUSY;
-    const SysError rc = record_mapping(s2, ipa, pa, rights);
+    const SysError rc = record_mapping(s2, ipa, pa, rights, mem_type);
     if (rc != E_OK) { prune_tables(s2, ipa); return rc; }
-    leaf = (pa & S2_DESC_ADDR_MASK) | S2_DESC_BLOCK_PAGE | stage2_page_attrs(rights);
+    leaf = (pa & S2_DESC_ADDR_MASK) | S2_DESC_BLOCK_PAGE | stage2_page_attrs(rights, mem_type);
     return E_OK;
 }
 
@@ -233,13 +274,17 @@ SysError stage2_activate(Stage2AddressSpace* s2) {
     return E_OK;
 }
 
-PhysAddr stage2_lookup_page(Stage2AddressSpace* s2, u64 ipa, u32* out_rights) {
+PhysAddr stage2_lookup_page(Stage2AddressSpace* s2, u64 ipa, u32* out_rights,
+                            Stage2MemType* out_mem_type) {
     if (!s2 || !s2->built) return 0;
     const u64 page_ipa = ipa & ~(static_cast<u64>(PAGE_SIZE - 1));
     for (u32 i = 0; i < kMaxStage2Mappings; ++i) {
         const Stage2Mapping& mapping = s2->mappings[i];
         if (!mapping.valid || mapping.ipa != page_ipa) continue;
         if (out_rights) *out_rights = mapping.rights;
+        if (out_mem_type) {
+            *out_mem_type = mapping.mem_type;
+        }
         return mapping.pa;
     }
     return 0;

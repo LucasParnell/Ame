@@ -18,7 +18,7 @@ function(mochi_service name src load_base)
         @ONLY
     )
 
-    add_executable(${name} ${src})
+    add_executable(${name} ${src} ${ARGN})
     target_include_directories(${name} PRIVATE ${MOCHI_INCLUDES})
     target_link_libraries(${name} PRIVATE freestanding_memory ame_format)
     target_link_options(${name} PRIVATE
@@ -77,7 +77,18 @@ set(FS_SOURCES
     fs/fs_snapshot.cc
     fs/fs_disk.cc)
 mochi_service(io.fs        "${FS_SOURCES}"               0x10E00000)
-mochi_service(msh             msh/main.cc                 0x10F00000)
+# msh is split into cohesive modules behind userland/msh/msh.h.
+set(MSH_SOURCES
+    msh/main.cc
+    msh/msh_io.cc
+    msh/msh_line.cc
+    msh/msh_parse.cc
+    msh/msh_builtins.cc
+    msh/msh_fs.cc
+    msh/msh_svc.cc
+)
+mochi_service(msh "${MSH_SOURCES}" 0x10F00000)
+mochi_service(app.hello   app/hello/main.cc       0x11400000)
 
 set(MOCHI_BOOT_MANIFEST "${ANKO_BOOT_MANIFEST}")
 if(NOT MOCHI_BOOT_MANIFEST)

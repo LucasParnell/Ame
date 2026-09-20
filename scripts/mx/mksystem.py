@@ -90,6 +90,7 @@ def dependencies_for(name: str) -> list[str]:
         "drv.blk.virtio": ["io.console"],
         "io.fs": ["drv.blk.virtio"],
         "msh": ["io.fs", "tty.fb0"],
+        "app.hello": ["nameservice", "io.fs"],
     }
     return deps.get(name, ["io.console"] if name != "io.console" else [])
 

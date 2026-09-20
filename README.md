@@ -147,7 +147,11 @@ testing.
 - `third_party/monocypher/`: pinned signature implementation and provenance.
 
 Normal service supervision, per-client IPC sessions, filesystem mount semantics,
-and application interfaces still need cleanup. Existing writable filesystem
-state is volatile; a successful `sync` is not proof of persistence. Hardware IRQ
-bind/ack operations return not implemented. Durable storage, hardware IRQ routing,
-and physical Switch acceptance remain later milestones.
+and application interfaces still need cleanup. The `/data` volume is durable when
+a writable disk exposes a safe reserved region (`FS_SYNC` writes it back through
+`BLK_WRITE` and commits with `BLK_FLUSH`; `scripts/test/durable-persistence.py`
+proves a written-and-synced file survives a reboot). `/tmp` is always volatile,
+the read-only root is never mutated, and with no durable region `FS_SYNC` returns
+not-implemented rather than implying persistence. The journaled on-disk B+tree
+writer, hardware IRQ bind/ack, and physical Switch acceptance remain later
+milestones.

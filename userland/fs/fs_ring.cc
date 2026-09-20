@@ -61,7 +61,7 @@ static void handle_slot(const mochi::fs::Server& fs, const RingSlot& slot) {
         handle_snapshot_drop(fs, slot);
         break;
     case FS_SYNC:
-        send_status_only(fs, slot, FS_SYNC_REPLY, MX_ERR_NOT_IMPLEMENTED);
+        handle_sync(fs, slot);
         break;
     case FS_PREFETCH:
         break;
@@ -81,10 +81,20 @@ extern "C" [[noreturn]] void _start() {
     if (!g_sessions.map(boot)) mochi::boot::invalid_boot();
     fs_disk_init(boot);
 
+    // Replay the durable /data region, if the mount exposed a safe one.
+    const bool data_durable = durable_available();
+    const bool data_loaded = durable_load();
+
     for (mx_u32_t i = 0; i < g_sessions.directory->count; ++i) g_sessions.refresh(i, close_session);
-    // Root is read-only and /tmp is volatile: the disk image is never written
-    // and every /tmp inode lives only in memory. See fs_internal.h.
-    mochi::log_raw_marker("io.fs: read-only root and volatile /tmp ready\n");
+    // Root is read-only; /tmp is volatile; /data is durable only when a safe
+    // reserved disk region is mounted (see fs_internal.h and fs_durable.cc).
+    if (!data_durable) {
+        mochi::log_raw_marker("io.fs: read-only root, volatile /tmp, non-durable /data\n");
+    } else if (data_loaded) {
+        mochi::log_raw_marker("io.fs: read-only root, volatile /tmp, durable /data replayed\n");
+    } else {
+        mochi::log_raw_marker("io.fs: read-only root, volatile /tmp, durable /data empty\n");
+    }
     mochi::boot::ready(boot);
     while (true) {
         bool progress = false;

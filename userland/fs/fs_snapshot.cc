@@ -106,5 +106,5 @@ void handle_snapshot_drop(const mochi::fs::Server& fs, const RingSlot& slot) {
             status = static_cast<mx_i32_t>(MX_ERR_NOT_FOUND);
         }
     }
-    (void)fs.send_reply(slot, FS_SYNC_REPLY, status);
+    (void)fs.send_reply(slot, FS_SNAPSHOT_DROP_REPLY, status);
 }

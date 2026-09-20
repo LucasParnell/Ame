@@ -70,7 +70,9 @@ void handle_close(const mochi::fs::Server& fs, const RingSlot& slot) {
         auto* h = handle_state(token);
         if (h && token != kRootHandle) { *h = {}; status = MX_OK; }
     }
-    send_status_only(fs, slot, FS_SYNC_REPLY, status);
+    // Dedicated reply type: a close acknowledgement must never be mistaken for
+    // an FS_SYNC_REPLY by a client waiting on a sync.
+    send_status_only(fs, slot, FS_CLOSE_REPLY, status);
 }
 
 void handle_open(const mochi::fs::Server& fs, const RingSlot& slot) {
@@ -93,9 +95,13 @@ void handle_open(const mochi::fs::Server& fs, const RingSlot& slot) {
         const auto* parent_handle = handle_state(req.parent_inode ? req.parent_inode : kRootHandle);
         const bool root_parent = parent_handle && parent_handle->inode_number == kRootInode;
         const bool tmp_mount = root_parent && req.name_len == 3 && name_eq("tmp", req.name, 3);
-        // Disk-backed parents are read-only. /tmp is redirected away from the
-        // disk entirely and served from the volatile in-memory table.
-        if (disk_mounted() && !tmp_mount && parent_handle &&
+        // /data is the durable user volume; like /tmp it is served from the
+        // in-memory table (the read-only root is never mutated) and its
+        // persistence is handled by fs_durable on sync.
+        const bool data_mount = root_parent && req.name_len == 4 && name_eq("data", req.name, 4);
+        // Disk-backed parents are read-only. /tmp and /data are redirected away
+        // from the disk and served from the in-memory table.
+        if (disk_mounted() && !tmp_mount && !data_mount && parent_handle &&
             (root_parent || parent_handle->disk_backed)) {
             bool disk_parent = false;
             InodeLeafEntry parent{};
@@ -152,7 +158,7 @@ void handle_open(const mochi::fs::Server& fs, const RingSlot& slot) {
         mx_u32_t parent_inode = kRootInode;
         mx_u64_t snapshot_id = 0;
         bool read_only_parent = false;
-        if (tmp_mount) { parent_inode = kRootInode; read_only_parent = false; reply.status = MX_OK; }
+        if (tmp_mount || data_mount) { parent_inode = kRootInode; read_only_parent = false; reply.status = MX_OK; }
         else reply.status = parent_from_token(req.parent_inode, &parent_inode,
                                          &snapshot_id, &read_only_parent);
         if (reply.status == MX_OK) {

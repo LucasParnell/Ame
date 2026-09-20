@@ -24,6 +24,15 @@
 //     redirected away from the disk root on open (fs_handles handle_open), and
 //     is discarded on service restart. Nothing under /tmp is ever written back
 //     to the disk image.
+//
+//   * /data is the DURABLE user volume. It is also served from the in-memory
+//     inode table (so the read-only root is never mutated), but on FS_SYNC the
+//     whole /data subtree is serialised into the disk's reserved journal region
+//     through the block service (BLK_WRITE) and flushed with BLK_FLUSH. On the
+//     next mount the region is replayed, so a file written and synced survives a
+//     reboot. When no writable region exists (memory backend, or a disk without
+//     a usable reserved region) /data is an explicitly NON-DURABLE in-memory
+//     volume and FS_SYNC returns MX_ERR_NOT_IMPLEMENTED. See fs_durable.cc.
 
 #include "mochi/syscall.h"
 #include "mochi/ring.h"
@@ -46,6 +55,8 @@ constexpr mx_u32_t kMaxSnapshots = 8;
 constexpr mx_u32_t kMaxName = 47;
 constexpr mx_u32_t kBlockSize = FS_BLOCK_SIZE;
 constexpr mx_u32_t kSectorsPerFsBlock = FS_BLOCK_SIZE / 512;
+// Smallest reserved region io.fs will treat as a durable /data backing store.
+constexpr mx_u64_t kMinDurableRegionBlocks = 8;
 
 // ---------------------------------------------------------------------------
 // In-memory state records. Members are ordered so the common scans touch the
@@ -131,6 +142,9 @@ extern mx_u32_t g_next_inode;
 extern mx_u64_t g_generation;
 extern mx_u64_t g_last_snapshot_id;
 extern bool g_metadata_dirty;
+// Inode number of the durable user volume root (/data); 0 if it could not be
+// created. Set by fs_core format_memory_fs().
+extern mx_u32_t g_data_inode;
 
 // Currently served client, set by the session loop before dispatching a request.
 extern mx_u32_t g_session;
@@ -193,6 +207,10 @@ static inline RingPage* map_ring_from_boot(const MxBootInfo* boot, const char* n
 // fs_core.cc — in-memory core.
 // ---------------------------------------------------------------------------
 mx_u32_t crc32_ieee(const mx_u8_t* data, mx_u64_t len);
+// Running (pre-complement) CRC-32 update. Seed the first call with 0xFFFF'FFFF
+// and complement the final value; crc32_ieee() is exactly that for one buffer.
+// Used by the durable store to fold a CRC over non-contiguous blocks.
+mx_u32_t crc32_ieee_update(mx_u32_t state, const mx_u8_t* data, mx_u64_t len);
 mx_u32_t name_hash32(const char* name, mx_u8_t len);
 mx_u32_t checksum_block(const mx_u8_t* data);
 void note_metadata_delta(FsMutation type, mx_u32_t target);
@@ -209,6 +227,10 @@ mx_i32_t inc_phys_ref(mx_u64_t phys_block);
 void dec_phys_ref(mx_u64_t phys_block);
 void release_inode_extents(InodeState& inode);
 mx_i32_t write_inline(InodeState& inode, mx_u64_t offset, const mx_u8_t* data, mx_u32_t len);
+// Unbounded data write used by the durable replay path (write_inline caps at
+// FS_INLINE_WRITE_MAX). Same CoW/checksum semantics as write_inline.
+mx_i32_t write_bytes_unbounded(InodeState& inode, mx_u64_t offset,
+                               const mx_u8_t* data, mx_u32_t len);
 mx_i32_t verify_refcount_index();
 void format_memory_fs();
 void register_service_arenas();
@@ -243,13 +265,33 @@ void handle_snapshot_mount(const mochi::fs::Server& fs, const RingSlot& slot);
 void handle_snapshot_drop(const mochi::fs::Server& fs, const RingSlot& slot);
 
 // ---------------------------------------------------------------------------
-// fs_disk.cc — read-only midix-fs-v1 disk backend.
+// fs_disk.cc — read-only midix-fs-v1 disk backend + durable region access.
 // ---------------------------------------------------------------------------
 bool disk_mounted();
+// Read one fs block (cache-coherent) through the block service.
+bool disk_read_block(mx_u64_t block, mx_u8_t* out);
+// Write one fs block through the block service and keep the cache coherent.
+bool disk_write_block(mx_u64_t block, const mx_u8_t* data);
+// BLK_FLUSH; returns MX_OK when the device reports durable completion.
+mx_i32_t disk_flush();
+// The reserved, non-root region io.fs may use for durable user data. Returns
+// false unless a mount succeeded and the region is provably disjoint from every
+// block the read-only root allocates.
+bool disk_durable_region(mx_u64_t* start_block, mx_u64_t* block_count);
 bool disk_inode(mx_u32_t inode_number, InodeLeafEntry* out);
 bool disk_dir_lookup(const InodeLeafEntry& dir, mx_u32_t parent_inode,
                      const char* name, mx_u8_t name_len, InodeLeafEntry* out_inode);
 fs_handle_t alloc_disk_handle(const InodeLeafEntry& inode);
+// ---------------------------------------------------------------------------
+// fs_durable.cc — durable /data store backed by the reserved disk region.
+// ---------------------------------------------------------------------------
+bool durable_available();
+// Replay the region into the in-memory /data subtree. Returns true when a
+// committed region was fully validated and imported.
+bool durable_load();
+// Verify invariants, serialise /data into the region, and flush the device.
+mx_i32_t durable_sync();
+void handle_sync(const mochi::fs::Server& fs, const RingSlot& slot);
 mx_i32_t disk_read_file(const OpenHandle& handle, mx_u64_t offset,
                         mx_u32_t length, FsReadReply* reply);
 mx_i32_t disk_readdir(const OpenHandle& handle, const FsReaddirRequest& req,

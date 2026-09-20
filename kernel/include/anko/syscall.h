@@ -193,4 +193,8 @@ enum DebugCounter : unsigned {
     DBG_WAKE_DOORBELL         = 64,
     DBG_WAKE_REMOTE           = 65,
     DBG_WAKE_RESUME           = 66,
+    // IRQ → doorbell delivery (kernel/drivers/gic/irq_table.cc).
+    DBG_IRQ_DELIVERED         = 67,
+    DBG_IRQ_BOUND             = 68,
+    DBG_IRQ_SELFTEST          = 69,
 };

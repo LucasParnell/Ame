@@ -27,6 +27,8 @@ static constexpr uint64_t kFixtureDataPages = 2048;       // > sandbox page quot
 // the userland image, which does not include kernel headers.
 static constexpr uint64_t kCounterVmCreated = 33;
 static constexpr uint64_t kCounterVmDestroyed = 34;
+// IRQ delivery selftest status (anko/syscall.h: DBG_IRQ_SELFTEST).
+static constexpr uint64_t kCounterIrqSelftest = 69;
 
 static void print(const char* text) {
     sys_debug_puts(text, libk::strlen(text));
@@ -349,6 +351,10 @@ extern "C" [[noreturn]] void _start() {
     bundle.size = mochi::boot::find(boot, "boot.initrd")->aux0;
     libk::memcpy(&bundle.header, bundle.data, sizeof(bundle.header));
     print("lifecycle regression started\n");
+
+    // The kernel raised a spare SPI at boot and delivered it to a doorbell;
+    // this confirms real interrupt delivery, not just the binding plumbing.
+    check(sys_debug_counter(kCounterIrqSelftest) == 1, "irq delivery selftest");
 
     const long objects = sys_debug_counter(200), pages = sys_debug_counter(201);
     uint64_t previous[65]{};

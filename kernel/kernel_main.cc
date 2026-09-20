@@ -14,6 +14,7 @@
 #include "anko/fat_log.h"
 #include "anko/hw_info.h"
 #include "anko/ipc.h"
+#include "anko/irq.h"
 #include "anko/mm.h"
 #include "anko/platform.h"
 #include "anko/sched.h"
@@ -221,6 +222,16 @@ extern "C" [[noreturn]] void kernel_main() {
     mm::heap_init();
     mm::vm_init();
     drivers::gic::init(g_hw.gic_dist_base, g_hw.gic_cpu_base);
+#ifdef ANKO_BUILD_DEV
+    // End-to-end IRQ delivery check: raise a spare SPI and confirm it reaches a
+    // doorbell. Runs with IRQs masked, before the timer is armed, so it cannot
+    // perturb the timer or IPI paths.
+    if (irq::run_selftest() == 1) {
+        ANKO_LOG_INFO("kernel/gic", "irq delivery selftest ok");
+    } else {
+        ANKO_LOG_ERROR("kernel/gic", "irq delivery selftest FAILED");
+    }
+#endif
     drivers::timer::init(g_hw.timer_irq);
     fb_stage(0x00FFFFFFu); // white: GIC + timer done
 #ifdef ANKO_BOARD_SWITCH_T210

@@ -11,6 +11,7 @@ set(ANKO_SOURCES
     drivers/uart/tegra_uart.cc
     drivers/console.cc
     drivers/gic/gicv2.cc
+    drivers/gic/irq_table.cc
     drivers/timer/generic_timer.cc
     platform/hw_info.cc
     platform/probe.cc

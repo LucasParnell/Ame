@@ -6,6 +6,7 @@
 #include "anko/cap.h"
 #include "anko/sched.h"
 #include "anko/ipc.h"
+#include "anko/irq.h"
 #include "anko/mm.h"
 #include "anko/init.h"
 #include "anko/platform.h"
@@ -454,9 +455,21 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         return ok(static_cast<long>(h));
     }
 
-    case SYS_CAP_REVOKE:
+    case SYS_CAP_REVOKE: {
+        // Revoking the line capability tears the binding down (and disables the
+        // SPI) so a driver that loses its IRQ authority cannot leave an enabled
+        // stub behind.
+        IrqLine* revoked_line = nullptr;
+        {
+            cap::Ref e = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a0));
+            if (e && e->type_tag == CAP_IRQ) {
+                revoked_line = static_cast<IrqLine*>(e->target);
+            }
+        }
         cap::revoke(*p->cap_table, static_cast<CapHandle>(a0));
+        if (revoked_line) irq::unbind_line(revoked_line, sched::process_identity(*p));
         return ok(E_OK);
+    }
 
     case SYS_CAP_IDENTIFY: {
         cap::Ref e = cap::lookup_any(*p->cap_table, static_cast<CapHandle>(a0));
@@ -869,6 +882,9 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         case DBG_WAKE_DOORBELL:         return ok(static_cast<long>(sched::wake_doorbell_count()));
         case DBG_WAKE_REMOTE:           return ok(static_cast<long>(sched::wake_remote_count()));
         case DBG_WAKE_RESUME:           return ok(static_cast<long>(sched::wake_resume_count()));
+        case DBG_IRQ_DELIVERED:         return ok(static_cast<long>(irq::delivered_count()));
+        case DBG_IRQ_BOUND:             return ok(static_cast<long>(irq::binding_count()));
+        case DBG_IRQ_SELFTEST:          return ok(static_cast<long>(irq::selftest_status()));
         default: return err(E_INVALID);
         }
 
@@ -914,18 +930,29 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         if (!has_rights(irq_e, RIGHT_WRITE)) return err(E_PERM);
         cap::Ref db_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_DOORBELL);
         if (!db_e) return err(E_NOTFOUND);
+        if (!has_rights(db_e, RIGHT_NOTIFY)) return err(E_PERM);
         auto* line = static_cast<IrqLine*>(irq_e->target);
         if (!line) return err(E_NOTFOUND);
-        // Driver interrupts are polled until GIC delivery and teardown exist.
-        return err(E_NOTIMPL);
+        const u32 flags = static_cast<u32>(a2);
+        if (flags != a2) return err(E_INVALID);
+        const SysError rc = irq::bind(line, static_cast<Doorbell*>(db_e->target),
+                                      sched::process_identity(*p), flags);
+        if (rc != E_OK) return err(rc);
+        line->doorbell_cap = a1;
+        return ok(E_OK);
     }
 
     case SYS_IRQ_ACK: {
-        // a0 = irq_cap
+        // a0 = irq_cap. Edge lines were EOI'd at IRQ; level lines are paused on
+        // delivery and re-armed here once the driver has serviced the source.
         cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_IRQ);
         if (!e) return err(E_NOTFOUND);
         if (!has_rights(e, RIGHT_WRITE)) return err(E_PERM);
-        return err(E_NOTIMPL);
+        auto* line = static_cast<IrqLine*>(e->target);
+        if (!line) return err(E_NOTFOUND);
+        const SysError rc = irq::ack(line, sched::process_identity(*p));
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
     }
 
     case SYS_CAP_INFO: {

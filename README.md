@@ -31,6 +31,46 @@ ctest --preset qemu-dev
 Linux guest construction is optional and disabled in the presets. Enable
 `DANGO_BUILD_LINUX_ARTIFACTS` explicitly when preparing guest regression runs.
 
+### Build targets
+
+An ordinary build (`cmake --build --preset qemu-dev`) builds everything; the
+targets below are the ones worth knowing by name.
+
+| Target             | Produces |
+|--------------------|----------|
+| `anko`             | The microkernel ELF and `anko.bin` raw image |
+| `mochi_system`     | The Mochi services plus the signed `system.mxb` bundle and `manifest.json` |
+| `kernel_regressions` | `lifecycle.mxb` (dev builds only), the kernel lifecycle fixture |
+| `ame_vfs`          | A QEMU virtual-filesystem image (`fs.img`) with the built Ame tree under `/ame` |
+| `ame_disk`         | A U-Boot/QEMU raw-boot + AmeFS disk image for the disk boot path |
+| `provenance`       | `generated/provenance.json` and `generated/provenance.h` (see below) |
+
+The packaging targets share the same sources as `anko` and `mochi_system` and
+forward the build directory to their scripts, so they can be built on their own:
+
+```sh
+cmake --build out/qemu-dev --target ame_vfs
+cmake --build out/qemu-dev --target ame_disk
+```
+
+### Build provenance
+
+Every build emits a machine-readable provenance record next to the other
+generated headers:
+
+```
+out/qemu-dev/generated/provenance.json   # canonical record
+out/qemu-dev/generated/provenance.h      # C++ view (ame::provenance::…)
+```
+
+It captures the source revision (`git describe`, commit, branch, dirty flag),
+the configuration (build type, board, dev/release mode), the signing identity
+(trust mode, key fingerprint, trusted-key count), and the sha256 of the
+produced `system.mxb`. Generation is best-effort and data-oriented: when `git`
+is unavailable every revision field is recorded as `null` rather than failing
+the build, and identical content is not rewritten, so a no-op rebuild stays a
+no-op.
+
 For a single end-to-end health check — configure, build, host regressions, a
 headless direct boot, and the kernel lifecycle matrix — run:
 
@@ -40,6 +80,8 @@ scripts/verify.sh
 
 It records the exact toolchain it validated (Homebrew Clang 23.1.1, CMake
 4.4.0, QEMU 11.1.1 at the last pass) and exits non-zero on the first failure.
+`AME_VERIFY_BUILD=out/qemu-dev scripts/verify.sh` reuses an existing tree and
+`AME_VERIFY_CPUS="2" scripts/verify.sh` narrows the CPU matrix.
 
 Release builds require an Ed25519 private key in PKCS8 format and explicitly
 configured trusted public keys (PEM or raw 32-byte files). Keep private keys
@@ -69,7 +111,8 @@ python3 scripts/test/boot.py --build out/qemu-dev --mode direct --cpus 4 \
 The runner saves host and guest serial logs plus a JSON result, enforces a
 deadline, and uses a QEMU disk snapshot when a disk is supplied. For disk boot,
 pass `--mode disk --disk PATH --firmware PATH`. Build a disk with the `ame_disk`
-CMake target and QEMU firmware with `scripts/build-u-boot-qemu-arm64.sh`.
+CMake target, a virtual filesystem image with the `ame_vfs` target, and QEMU
+firmware with `scripts/build-u-boot-qemu-arm64.sh`.
 
 Switch packages can be staged without writing an SD card:
 
@@ -88,6 +131,7 @@ testing.
 - `shared/`: ABI definitions and bounded image, bundle, and integrity routines.
 - `userland/`: init, discovery, console, polling drivers, filesystem, and shell.
 - `scripts/mx/`: native image conversion, manifests, signing, and packaging.
+- `scripts/provenance.py`: emits the per-build provenance record (see above).
 - `tests/`: host sanitizer tests and QEMU kernel lifecycle fixtures.
 - `third_party/monocypher/`: pinned signature implementation and provenance.
 

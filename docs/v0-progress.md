@@ -26,7 +26,7 @@ spec item.
 - [x] Doorbell object (`create`, `notify`, `wait`)
 - [x] Ring object (`create`, `share`) with V0 layout
 - [x] `init` process creation path
-- [x] Boot-cap issuance (manifest/initrd/supervisor/nameservice/UART)
+- [x] Boot-cap issuance (manifest/system.mxb/supervisor/nameservice/UART)
 - [x] `SYS_SPAWN` accepts image bytes from init instead of kernel service names
 - [x] `SYS_MAP_PAGE` maps caps at explicit user VAs and returns status
 - [x] `SYS_SUPERVISOR_POLL` reports a V0 child-death event to init
@@ -34,7 +34,7 @@ spec item.
 ## Userspace (Mochi)
 
 - [x] `init` builds and uses syscall ABI
-- [x] `init` parses `manifest.v0` line entries and spawns services from initrd image bytes
+- [x] `init` reads the verified manifest body from `system.mxb` and spawns services from `MXI1` image bytes
 - [ ] `nameservice` fixed-table register/resolve flow
 - [x] `demo.ping` resolves `demo.pong` through the V0 nameservice resolve path
 - [x] `io.console` service prints `hello world` first
@@ -53,7 +53,7 @@ spec item.
 
 - V0 target path is direct QEMU `-kernel build/kernel/anko`.
 - `boot/` shim remains out of the critical path for V0.
-- Acceptance path boots real Mochi services from the boot archive/embedded payload.
+- Acceptance path boots real Mochi services from the signed `system.mxb` bundle.
 - `kernel/arch/arm64/user_stub.S` is no longer part of the acceptance build path.
 - IPC success is emitted by `demo.ping` after completing the ping/pong loop, not by init after wiring.
 - Current ring demo uses cooperative yield-on-empty while the dedicated blocking doorbell path is hardened.

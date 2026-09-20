@@ -24,8 +24,8 @@ stub path. Full benchmarking remains open work.
 ## Phase 0 — Build and Run
 **Goal:** `kernel prints hello over UART in QEMU`
 
-- [x] Cross-compiler toolchain (`aarch64-none-elf-g++`)
-- [ ] `scripts/linker/kernel.ld`
+- [x] Cross-compiler toolchain (`aarch64-none-elf-g++`, or the Homebrew LLVM clang fallback)
+- [x] `scripts/linker/kernel.ld`
 - [x] `kernel/arch/arm64/entry.S` — stack, BSS clear, call `kernel_main`
 - [x] `kernel/drivers/uart/pl011.cc` — raw MMIO putchar
 - [x] `kernel_main` prints `ANKO\n` and halts
@@ -35,11 +35,11 @@ stub path. Full benchmarking remains open work.
 ## Phase 1 — Kernel Base
 **Goal:** `kernel receives timer ticks and survives invalid exceptions`
 
-- [ ] `kernel/arch/arm64/vectors.S` — VBAR_EL1 table; debug dump handler
+- [x] `kernel/arch/arm64/vectors.S` — VBAR_EL1 table; debug dump handler
 - [x] `kernel/arch/arm64/entry.S` / `kernel/mm/vm_space.cc` — MMU enable (page tables + SCTLR_EL1)
 - [x] `kernel/mm/phys.cc` — physical page allocator (bitmap)
 - [x] `kernel/mm/vm_space.cc` — page table build/map/unmap
-- [ ] `boot/dtb/fdt.cc` — DTB parse: RAM, UART, GIC, timer → `HwInfo`
+- [x] `kernel/init/fdt.cc` — DTB parse: RAM, UART, GIC, timer → `HwInfo`
 - [x] `kernel/drivers/gic/gicv2.cc` — distributor + CPU interface init
 - [x] `kernel/drivers/timer/generic_timer.cc` — 10ms tick via CNTP
 
@@ -59,7 +59,7 @@ stub path. Full benchmarking remains open work.
 
 - [x] `kernel/sched/thread.cc` — Thread/Process create/destroy
 - [x] `kernel/sched/runqueue.cc` — round-robin queue, `tick`, `yield`, `block`, `wake`
-- [ ] `kernel/arch/arm64/context.S` — `context_switch`
+- [x] `kernel/arch/arm64/context.S` — `context_switch`
 - [x] `SYS_YIELD` wired to `sched::yield()`
 - [x] Timer tick preempts current thread
 
@@ -100,7 +100,7 @@ stub path. Full benchmarking remains open work.
 ## Phase 8 — Services
 **Goal:** `init starts nameservice, console, ping, and pong from manifest`
 
-- [x] `userland/init/main.cc` — parse manifest, spawn all 4 services
+- [x] `userland/init/main.cc` — read manifest, spawn all services
 - [ ] `userland/nameservice/main.cc` — flat `register`/`resolve` table
 - [x] `userland/nameservice/main.cc` — fixed V0 resolve path used by `demo.ping`
 - [x] `userland/console/main.cc` — UART cap, log ring, print output
@@ -111,7 +111,7 @@ stub path. Full benchmarking remains open work.
 **Goal:** `demo.pong crashes, init restarts it, demo.ping reconnects`
 
 - [x] Child death notifies supervisor cap
-- [ ] `init` applies `restart = "always"` / `restart = "never"` from manifest
+- [x] `init` applies `restart = "always"` / `restart = "never"` from the manifest
 - [x] `demo.pong` crashes on `MSG_CRASH`; init restarts it
 - [x] Boot prints: `SUPERVISION OK`
 

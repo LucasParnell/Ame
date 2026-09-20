@@ -14,7 +14,7 @@ kernel log rings  →  io.console  →  UART (always)
 
 USB kbd  →  drv.usb.xhci  →  drv.usb.hid  →  ui.input  →  tty.fb0 (line discipline)
 
-shell stdout ring  →  tty.fb0 (render)  →  io.framebuffer (blit)
+shell/msh stdout ring  →  tty.fb0 (render)  →  io.framebuffer (blit)
 ```
 
 ## Capability policy
@@ -27,14 +27,14 @@ shell stdout ring  →  tty.fb0 (render)  →  io.framebuffer (blit)
 | drv.usb.xhci   | `"xhci.mmio"` CAP_MMIO + `"xhci.irq"` CAP_IRQ + `"xhci.dma"` CAP_ARENA |
 | drv.usb.hid    | USB interface endpoint from xhci + ui.input write ring    |
 | ui.input       | drv.usb.hid read ring + tty.fb0 write ring                |
-| shell          | tty.fb0 stdin/stdout rings + restricted nameservice       |
+| msh (shell)    | tty.fb0 stdin/stdout rings + restricted nameservice + io.fs |
 
 ## Invariants
 
 - `io.console` never holds framebuffer memory.
 - `io.framebuffer` is the only service that maps `"fb.memory"`.
 - `tty.fb0` never reads kernel log rings.
-- Shell must never see USB MMIO.
+- msh (the shell) must never see USB MMIO.
 - Typed characters never appear in kernel log rings or UART output.
 
 ## Why

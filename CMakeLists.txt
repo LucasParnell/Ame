@@ -119,3 +119,53 @@ add_custom_target(ame_disk
 # add_subdirectory(boot)
 
 # Mochi services are added before the kernel so anko can embed their blobs.
+
+# ---------------------------------------------------------------------------
+# Build provenance — records the source revision, the build configuration, the
+# signing identity, and the sha256 of the produced system.mxb.
+#
+# This is intentionally best-effort: scripts/provenance.py degrades to null
+# fields when git (or a key) is unavailable and never fails the build. An
+# ordinary `cmake --build` therefore always lands generated/provenance.json
+# and generated/provenance.h next to the other generated headers.
+# ---------------------------------------------------------------------------
+set(AME_PROVENANCE_JSON ${CMAKE_BINARY_DIR}/generated/provenance.json)
+set(AME_PROVENANCE_HEADER ${CMAKE_BINARY_DIR}/generated/provenance.h)
+set(AME_TRUST_MODE development)
+if(NOT ANKO_BUILD_DEV)
+    set(AME_TRUST_MODE release)
+endif()
+# Refresh provenance when the checkout moves HEAD; harmless for non-git trees.
+set(AME_PROVENANCE_GIT_DEPS)
+if(EXISTS ${CMAKE_SOURCE_DIR}/.git/HEAD)
+    list(APPEND AME_PROVENANCE_GIT_DEPS ${CMAKE_SOURCE_DIR}/.git/HEAD)
+endif()
+# Optional arguments are appended only when configured, so an empty value never
+# collapses into a stray flag in the command line.
+set(AME_PROVENANCE_OPT_ARGS)
+if(AME_SIGNING_KEY)
+    list(APPEND AME_PROVENANCE_OPT_ARGS --signing-key ${AME_SIGNING_KEY})
+    list(APPEND AME_PROVENANCE_OPT_ARGS --trusted ${AME_TRUSTED_KEY_FILES})
+endif()
+add_custom_command(
+    OUTPUT ${AME_PROVENANCE_JSON} ${AME_PROVENANCE_HEADER}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/provenance.py
+            --source-dir ${CMAKE_SOURCE_DIR}
+            --build-dir ${CMAKE_BINARY_DIR}
+            --output-json ${AME_PROVENANCE_JSON}
+            --output-header ${AME_PROVENANCE_HEADER}
+            --build-type ${CMAKE_BUILD_TYPE}
+            --board ${ANKO_BOARD}
+            --build-dev $<BOOL:${ANKO_BUILD_DEV}>
+            --trust-mode ${AME_TRUST_MODE}
+            --system-mxb ${CMAKE_BINARY_DIR}/system.mxb
+            ${AME_PROVENANCE_OPT_ARGS}
+    DEPENDS ${CMAKE_BINARY_DIR}/system.mxb
+            ${CMAKE_SOURCE_DIR}/scripts/provenance.py
+            ${AME_SIGNING_KEY}
+            ${AME_PROVENANCE_GIT_DEPS}
+    COMMENT "Recording build provenance (generated/provenance.json)"
+    VERBATIM)
+add_custom_target(provenance ALL
+    DEPENDS ${AME_PROVENANCE_JSON} ${AME_PROVENANCE_HEADER})

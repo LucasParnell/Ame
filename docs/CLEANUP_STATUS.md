@@ -31,6 +31,10 @@ Implemented and initially exercised:
   normal boot reaching `init: all services ready`.
 - Single verification gate `scripts/verify.sh`: configure → build → host regressions → direct
   boot → kernel lifecycle matrix, all green on the toolchain recorded below.
+- Per-build provenance record emitted by the ordinary build: `generated/provenance.json`
+  (git revision + dirty flag, build type, board, dev/release mode, signing key fingerprint,
+  `system.mxb` sha256) with a `generated/provenance.h` companion. Best-effort when git is
+  absent. See README for the field list.
 
 ### Session 2026-09-20 (development-readiness pass)
 
@@ -45,10 +49,18 @@ Implemented and initially exercised:
   exists. Boot now completes to `init: all services ready`.
 - Added `scripts/verify.sh`; recorded the validated toolchain (Homebrew Clang 23.1.1, CMake 4.4.0,
   QEMU 11.1.1).
+- Added `scripts/provenance.py` and wired it into the top-level `CMakeLists.txt` so every build
+  lands `generated/provenance.json`/`.h`. Confirmed the qemu-dev (Debug) tree reports
+  `ninja: no work to do` on a second build with no source changes, and that qemu-release (Release)
+  and switch (RelWithDebInfo) configure and build and emit correct provenance (release mode
+  records a release key fingerprint distinct from the dev seed).
 
 Still required before completion:
 
-1. Finish build/launcher/packaging/docs integration and provenance recording; validate clean/no-op Debug/Release/Switch builds.
+1. Finish launcher integration (the build/launcher/packaging/docs integration is largely in place:
+   `ame_vfs`/`ame_disk` packaging targets, `scripts/verify.sh`, and the provenance record are
+   documented in README; clean/no-op Debug/Release/Switch builds are validated). Remaining:
+   unify the QEMU launch paths behind the documented entry points and drop any stale launcher docs.
 2. Finish the object-lifetime audit (including VM final ownership and failed page-table allocation)
    and separate scheduler queue, accounting, handoff, and lifecycle modules.
 3. Consume the new exit records in normal supervision (steady-state path) and verify dependency

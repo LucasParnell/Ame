@@ -31,6 +31,11 @@ static const HwInfo kFallback = {
     .t210_dc_fb_width  = 0,
     .t210_dc_fb_height = 0,
     .xhci_noreset  = false,
+    // One virtio-mmio transport at the QEMU virt fixed slot; probe() refines.
+    .virtio_count  = 1,
+    .virtio_bases  = {0x0a00'0000ull},
+    .has_smmu      = false,
+    .smmu_base     = 0,
 };
 
 const HwInfo& get_board_fallback() { return kFallback; }

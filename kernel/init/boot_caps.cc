@@ -4,6 +4,7 @@
 
 #include "anko/cap.h"
 #include "anko/hw_info.h"
+#include "anko/pci.h"
 #include "anko/sched.h"
 #include "anko/smp.h"
 #include "anko/mm.h"
@@ -256,6 +257,10 @@ void issue_boot_caps(Process& init_proc,
         // QEMU path: PCI xHCI scan.
         constexpr usize kXhciDmaPages = 16;
         const drivers::pci_probe::XhciInfo xhci = drivers::pci_probe::find_xhci();
+        // Phase A: inventory the ECAM hierarchy.  The PCI command register is
+        // read (bus-master observation) but never written here, and BAR probing
+        // restores every BAR it touches, so find_xhci()'s enablement survives.
+        pci::log_inventory(g_hw.ecam_base);
         if (xhci.found) {
             MmioRange* xhci_mmio = drivers::pci_probe::alloc_xhci_mmio(xhci);
             IrqLine* xhci_irq    = drivers::pci_probe::alloc_xhci_irq(xhci);

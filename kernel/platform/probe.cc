@@ -72,6 +72,7 @@ constexpr u8 kFwCfg = 5;
 constexpr u8 kVirtio = 6;
 constexpr u8 kPCIe = 7;
 constexpr u8 kSimpleFb = 8;
+constexpr u8 kSMMU = 9;
 
 struct NodeSlot {
     u8 kind;
@@ -173,10 +174,24 @@ static void probe_end(void* v, u32 depth) {
         }
         break;
     case kVirtio:
-        // Record only the first virtio-mmio instance.
-        if (!hw.has_virtio_blk && s.reg_len >= 8) {
-            hw.has_virtio_blk = true;
-            hw.virtio_base = read_phys_be(s.reg, s.reg_len);
+        // Record every virtio-mmio transport; the legacy has_virtio_blk /
+        // virtio_base fields still point at the first instance.
+        if (s.reg_len >= 8) {
+            const PhysAddr base = read_phys_be(s.reg, s.reg_len);
+            if (!hw.has_virtio_blk) {
+                hw.has_virtio_blk = true;
+                hw.virtio_base = base;
+            }
+            if (hw.virtio_count < HwInfo::kMaxVirtioMmio) {
+                hw.virtio_bases[hw.virtio_count++] = base;
+            }
+        }
+        break;
+    case kSMMU:
+        // SMMUv3 register base (arm,smmu-v3 reg).  Keep the first instance.
+        if (s.reg_len >= 8 && !hw.has_smmu) {
+            hw.has_smmu = true;
+            hw.smmu_base = read_phys_be(s.reg, s.reg_len);
         }
         break;
     case kPCIe:
@@ -227,6 +242,8 @@ static void probe_prop(void* v, const char* name, const u8* data, u32 len, u32 d
             new_kind = kVirtio;
         } else if (compat_has(data, len, "pci-host-ecam-generic")) {
             new_kind = kPCIe;
+        } else if (compat_has(data, len, "arm,smmu-v3")) {
+            new_kind = kSMMU;
         } else if (compat_has(data, len, "simple-framebuffer")) {
             new_kind = kSimpleFb;
         }

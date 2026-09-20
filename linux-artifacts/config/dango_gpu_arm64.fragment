@@ -1,0 +1,43 @@
+# Dango GPU appliance guest profile (Phase E).
+#
+# Applied *in addition to* dango_hello_arm64.fragment so the minimal bring-up
+# profile stays untouched and boot regressions stay bisectable. It adds exactly
+# what the virtio-gpu appliance needs and nothing else -- see
+# docs/LINUX_APPLIANCE_MINIMAL.md and scripts/linux/check-minimal-config.py.
+#
+# Deliberately left off, with reasons (also enforced by the checker deny-list):
+# - CONFIG_PCI_MSI / CONFIG_PCI_MSI_IRQ_DOMAIN / ITS: the synthetic host bridge
+#   exposes a legacy INTx interrupt-map to the vGIC, so virtio-pci uses INTx,
+#   delivered through the Phase D level-route machinery. MSI arrives with the
+#   physical amdgpu profile, which needs it for real.
+# - CONFIG_VIRTIO_IOMMU: the host SMMU translates IOVA == guest physical
+#   address; the guest uses plain dma-direct and needs no IOMMU of its own.
+# - CONFIG_DRM_FBDEV_EMULATION: the KMS path drives DRM/KMS directly; a legacy
+#   fbdev console is not part of any flow.
+# - CONFIG_VIRTIO_DMA_SHARED_BUFFER: zero-copy/dma-buf import is Phase M.
+
+# --- PCI host bridge (generic ECAM; Ame serves a filtered config view) -------
+CONFIG_PCI=y
+CONFIG_PCI_HOST_COMMON=y
+CONFIG_PCI_HOST_GENERIC=y
+CONFIG_PCI_DOMAINS=y
+CONFIG_PCI_DOMAINS_GENERIC=y
+CONFIG_PCIEPORTBUS=n
+
+# --- virtio core + PCI transport --------------------------------------------
+CONFIG_VIRTIO_MENU=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_PCI_LEGACY=y
+
+# --- DRM + virtio-gpu (KMS) -------------------------------------------------
+CONFIG_DRM=y
+CONFIG_DRM_KMS_HELPER=y
+CONFIG_DRM_GEM_SHMEM_HELPER=y
+CONFIG_DRM_VIRTIO_GPU=y
+CONFIG_DRM_VIRTIO_GPU_KMS=y
+
+# --- explicitly off (minimality) --------------------------------------------
+CONFIG_DRM_FBDEV_EMULATION=n
+CONFIG_VIRTIO_DMA_SHARED_BUFFER=n
+CONFIG_VIRTIO_IOMMU=n

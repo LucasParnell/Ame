@@ -37,6 +37,21 @@ SECURITY, BPF_SYSCALL, PERF_EVENTS, FTRACE, KPROBES, SWAP, HIBERNATION, SUSPEND,
 
 Also: no filesystem beyond the initramfs needs, no net, no modules, single vCPU (`SMP=n`), no cpuidle.
 
+## Known forced-on (empirically verified 2026-09-20, Linux v6.12 / arm64)
+
+A `=n` in a fragment is only effective if nothing else `select`s the symbol.
+These were observed to resist `=n`; the checker reports them as warnings:
+
+| Symbol | Why it stays on | Fix |
+|---|---|---|
+| `SMP` | arm64 Kconfig: `config SMP def_bool y` — **architecture-forced**, not user-settable | none (arm64 is SMP-only) |
+| `CGROUPS` | `SCHED_AUTOGROUP=y` (defconfig default) `select`s it | **fixed**: the hello fragment now sets `SCHED_AUTOGROUP=n` (+ `SCHED_MC`/`SCHED_SMT`/`CPU_FREQ=n`) |
+| `CPU_IDLE` | `default y if ACPI`; forcing path not yet removed | investigate (drop ACPI, or find the selector) |
+| `PERF_EVENTS` | `default y`; forcing path not yet removed | investigate |
+
+Lesson: when a deny-list entry will not turn off, find its `select`/`def_bool`
+parent rather than re-adding the `=n` line.
+
 ## Per-flow allow-lists
 
 | Profile | Adds (beyond the arm64 boot baseline) |

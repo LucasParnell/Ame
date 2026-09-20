@@ -1,19 +1,27 @@
 // Discovery uses one SPSC session per client. Init owns the live export catalog.
+//
+// Each client slot has its own request/reply rings and doorbell pair; the
+// service keeps no global session state. Replies are bounded by
+// mochi::kSessionReplyTimeoutNs: if a client has died or stopped draining its
+// reply ring, the send expires and the slot is dropped, so nameservice never
+// wedges on an unresponsive peer.
 #include "mochi/sessions.h"
 #include "mochi/boot_log.h"
 #include "midix/abi/protocols/nameservice.h"
+
+static void no_close(uint32_t) {}
 
 extern "C" [[noreturn]] void _start() {
     auto* boot = mochi::boot::map();
     (void)mochi::log_map_from_boot(boot, 0x20020000, "nameservice");
     static mochi::ServerSessions sessions;
     if (!sessions.map(boot)) mochi::boot::invalid_boot();
-    for (uint32_t i = 0; i < sessions.directory->count; ++i) sessions.refresh(i, [](uint32_t) {});
+    for (uint32_t i = 0; i < sessions.directory->count; ++i) sessions.refresh(i, no_close);
     mochi::boot::ready(boot);
     for (;;) {
         bool progress = false;
         for (uint32_t i = 0; i < sessions.directory->count; ++i) {
-            if (!sessions.refresh(i, [](uint32_t) {})) continue;
+            if (!sessions.refresh(i, no_close)) continue;
             const auto& endpoint = sessions.endpoints[i];
             RingSlot slot{};
             if (!endpoint.try_recv(&slot)) continue;
@@ -37,8 +45,15 @@ extern "C" [[noreturn]] void _start() {
                     break;
                 }
             }
-            if (status == MX_OK) endpoint.send_spinning(MSG_NS_RESOLVE_REPLY, &result, sizeof(result));
-            else endpoint.send_spinning(MSG_NS_ERROR, &status, sizeof(status));
+            const mx_u64_t deadline = mx_clock_ns() + mochi::kSessionReplyTimeoutNs;
+            const bool sent = (status == MX_OK)
+                ? endpoint.send_bounded(MSG_NS_RESOLVE_REPLY, &result, sizeof(result), deadline)
+                : endpoint.send_bounded(MSG_NS_ERROR, &status, sizeof(status), deadline);
+            if (!sent) {
+                // Peer dead or stalled: drop the slot; init re-establishes it
+                // with a newer generation. The resolve result is discarded.
+                sessions.drop(i, no_close);
+            }
         }
         if (!progress) sys_yield();
     }

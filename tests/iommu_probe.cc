@@ -200,34 +200,34 @@ int main() {
 
     iommu::IommuDomain* d = nullptr;
     assert(iommu::domain_create(kOwner, owner_ops(), backend_ops(), &d) == E_OK);
-    assert(d && d->is_active() && d->root_table_ != 0);
+    assert(d && iommu::domain_is_active(*d) && d->root_table_ != 0);
 
     // (a) Ownership is proven by the query, never by the numeric PA.
     {
         const iommu::IommuMap foreign = make_map(0x4000'0000, pa_other, PAGE_SIZE, kPermRW);
         const iommu::IommuMap unknown = make_map(0x4000'0000, pa_unowned, PAGE_SIZE, kPermRW);
-        assert(d->map_batch(&foreign, 1) == E_PERM);
-        assert(d->map_batch(&unknown, 1) == E_PERM);
-        assert(d->live_mappings() == 0 && d->pinned_pages() == 0);
+        assert(iommu::domain_map_batch(*d, &foreign, 1) == E_PERM);
+        assert(iommu::domain_map_batch(*d, &unknown, 1) == E_PERM);
+        assert(iommu::domain_live_mappings(*d) == 0 && iommu::domain_pinned_pages(*d) == 0);
     }
 
     // (c) A None-class page is never reachable by a device.
     {
         const iommu::IommuMap none_map = make_map(0x4000'0000, pa_none, PAGE_SIZE, kPermRW);
-        assert(d->map_batch(&none_map, 1) == E_INVALID);
-        assert(d->live_mappings() == 0);
+        assert(iommu::domain_map_batch(*d, &none_map, 1) == E_INVALID);
+        assert(iommu::domain_live_mappings(*d) == 0);
     }
 
     // (d) IOVA arithmetic overflow and out-of-range addresses are rejected.
     {
         const iommu::IommuMap wrap =
             make_map(~0ull - (PAGE_SIZE - 1), pa_owned, PAGE_SIZE, kPermRW);
-        assert(d->map_batch(&wrap, 1) == E_OVERFLOW);
+        assert(iommu::domain_map_batch(*d, &wrap, 1) == E_OVERFLOW);
         const iommu::IommuMap beyond =
             make_map(1ull << iommu::kIommuIovaBits, pa_owned, PAGE_SIZE, kPermRW);
-        assert(d->map_batch(&beyond, 1) == E_INVALID);
+        assert(iommu::domain_map_batch(*d, &beyond, 1) == E_INVALID);
         const iommu::IommuMap misaligned = make_map(0x4000'0000, pa_owned + 1, PAGE_SIZE, kPermRW);
-        assert(d->map_batch(&misaligned, 1) == E_INVALID);
+        assert(iommu::domain_map_batch(*d, &misaligned, 1) == E_INVALID);
     }
 
     // (e) Counters move, and installed translations carry the right permissions.
@@ -240,23 +240,23 @@ int main() {
         // A read-only mapping must stay read-only: no silent upgrade.
         const iommu::IommuMap ro =
             make_map(0x4000'0000, pa_owned, PAGE_SIZE, static_cast<u32>(iommu::DmaPerm::Read));
-        assert(d->map_batch(&ro, 1) == E_OK);
+        assert(iommu::domain_map_batch(*d, &ro, 1) == E_OK);
         const u64 leaf = page_leaf(d, 0x4000'0000);
         assert((leaf & kDescApRead) && !(leaf & kDescApWrite));
         assert((leaf & kAddrMask) == pa_owned);
         // A level-3 entry must be a page descriptor (type field [1:0] = 0b11);
         // 0b01 is reserved at level 3 and would fault in a real walk.
         assert((leaf & 0x3ull) == 0x3ull);
-        assert(d->pinned_pages() == 1);
+        assert(iommu::domain_pinned_pages(*d) == 1);
 
         // A 2 MiB-aligned read/write run is installed as block descriptors.
         const iommu::IommuMap blk = make_map(0x4020'0000, pa_block, 2u * 1024 * 1024, kPermRW);
-        assert(d->map_batch(&blk, 1) == E_OK);
+        assert(iommu::domain_map_batch(*d, &blk, 1) == E_OK);
         const u64 be = block_leaf(d, 0x4020'0000);
         assert((be & kDescValid) && !(be & kDescTable));
         assert((be & 0x3ull) == 0x1ull); // block descriptor: bits[1:0] = 0b01
         assert((be & kAddrMask) == pa_block);
-        assert(d->pinned_pages() == 1 + 512);
+        assert(iommu::domain_pinned_pages(*d) == 1 + 512);
 
         assert(iommu::debug_counter(iommu::IOMMU_MAP_OPS) == map_ops0 + 2);
         assert(iommu::debug_counter(iommu::IOMMU_MAP_BYTES) ==
@@ -267,24 +267,24 @@ int main() {
 
         // Unmap releases exactly the recorded range, after invalidation.
         g_invalidated_since_release_check = false;
-        assert(d->unmap_batch(&blk, 1) == E_OK);
+        assert(iommu::domain_unmap_batch(*d, &blk, 1) == E_OK);
         assert(g_invalidated_since_release_check);
         assert(g_invalidate_calls > 0);
         assert(g_last_invalidate_iova == 0x4020'0000);
         assert(g_last_invalidate_len == 2u * 1024 * 1024);
         assert(g_last_release_pa == pa_block && g_last_release_len == 2u * 1024 * 1024);
         assert(iommu::debug_counter(iommu::IOMMU_TLBI_RANGE) == range0 + 1);
-        assert(d->pinned_pages() == 1);
+        assert(iommu::domain_pinned_pages(*d) == 1);
 
         // The cleared IOVA can be remapped with a different backing page.
-        assert(d->unmap_batch(&ro, 1) == E_OK);
+        assert(iommu::domain_unmap_batch(*d, &ro, 1) == E_OK);
         const iommu::IommuMap fresh = make_map(0x4000'0000, pa_owned, PAGE_SIZE, kPermRW);
-        assert(d->map_batch(&fresh, 1) == E_OK);
+        assert(iommu::domain_map_batch(*d, &fresh, 1) == E_OK);
         // Unmap is matched by IOVA/length only, so an unmap entry need not
         // restate permissions.
         const iommu::IommuMap fresh_unmap = make_map(0x4000'0000, 0, PAGE_SIZE, 0);
-        assert(d->unmap_batch(&fresh_unmap, 1) == E_OK);
-        assert(d->live_mappings() == 0 && d->pinned_pages() == 0);
+        assert(iommu::domain_unmap_batch(*d, &fresh_unmap, 1) == E_OK);
+        assert(iommu::domain_live_mappings(*d) == 0 && iommu::domain_pinned_pages(*d) == 0);
     }
 
     // (b) Teardown cannot release still-reachable pages.
@@ -292,16 +292,16 @@ int main() {
         iommu::IommuDomain* q = nullptr;
         assert(iommu::domain_create(kOwner, owner_ops(), backend_ops(), &q) == E_OK);
         const iommu::IommuMap mm = make_map(0x5000'0000, pa_owned, PAGE_SIZE, kPermRW);
-        assert(q->map_batch(&mm, 1) == E_OK);
+        assert(iommu::domain_map_batch(*q, &mm, 1) == E_OK);
 
         const int releases0 = g_release_calls;
         const u64 quarantines0 = iommu::debug_counter(iommu::IOMMU_QUARANTINES);
 
         g_sync_fail = true; // the backend cannot prove the device stopped
-        assert(q->unmap_batch(&mm, 1) == E_FAULT);
+        assert(iommu::domain_unmap_batch(*q, &mm, 1) == E_FAULT);
         assert(g_release_calls == releases0); // page stays pinned
-        assert(q->pinned_pages() == 1);
-        assert(q->state() == iommu::DomainState::Quarantined);
+        assert(iommu::domain_pinned_pages(*q) == 1);
+        assert(iommu::domain_state(*q) == iommu::DomainState::Quarantined);
 
         // Destruct while still unprovable: still nothing released, domain kept.
         iommu::domain_destroy(q);
@@ -319,32 +319,32 @@ int main() {
     {
         const iommu::IommuDeviceId dev{0, 42};
         const iommu::IommuDeviceId dev2{0, 43};
-        assert(d->attach(dev) == E_OK);
-        assert(d->attach(dev) == E_OK); // redundant
-        assert(d->attach(dev2) == E_OK);
+        assert(iommu::domain_attach(*d, dev) == E_OK);
+        assert(iommu::domain_attach(*d, dev) == E_OK); // redundant
+        assert(iommu::domain_attach(*d, dev2) == E_OK);
         assert(iommu::stream_domain(dev) == d);
 
         iommu::IommuDomain* rival = nullptr;
         assert(iommu::domain_create(kOwner, owner_ops(), backend_ops(), &rival) == E_OK);
-        assert(rival->attach(dev) == E_BUSY); // one active domain per requester
+        assert(iommu::domain_attach(*rival, dev) == E_BUSY); // one active domain per requester
 
-        assert(d->detach(dev) == E_OK);
+        assert(iommu::domain_detach(*d, dev) == E_OK);
         assert(iommu::stream_domain(dev) == iommu::quarantine_domain());
-        assert(d->detach(dev) == E_NOTFOUND);
+        assert(iommu::domain_detach(*d, dev) == E_NOTFOUND);
 
         // The quarantine domain is empty and never maps.
         const iommu::IommuMap qm = make_map(0x4000'0000, pa_owned, PAGE_SIZE, kPermRW);
-        assert(iommu::quarantine_domain()->map_batch(&qm, 1) == E_PERM);
-        assert(iommu::quarantine_domain()->live_mappings() == 0);
+        assert(iommu::domain_map_batch(*iommu::quarantine_domain(), &qm, 1) == E_PERM);
+        assert(iommu::domain_live_mappings(*iommu::quarantine_domain()) == 0);
 
         // A requester may be bound to the quarantine domain directly.
         const iommu::IommuDeviceId dev3{0, 99};
-        assert(iommu::quarantine_domain()->attach(dev3) == E_OK);
+        assert(iommu::domain_attach(*iommu::quarantine_domain(), dev3) == E_OK);
         assert(iommu::stream_domain(dev3) == iommu::quarantine_domain());
 
         // An unbound requester resolves to no domain, so the backend faults it.
         assert(iommu::stream_domain(iommu::IommuDeviceId{7, 7}) == nullptr);
-        assert(d->detach(dev2) == E_OK);
+        assert(iommu::domain_detach(*d, dev2) == E_OK);
         iommu::domain_destroy(rival);
     }
 
@@ -354,10 +354,10 @@ int main() {
         iommu::IommuDomain* dn = nullptr;
         assert(iommu::domain_create(kOwner, owner_ops(), iommu::null_backend(), &dn) == E_OK);
         const iommu::IommuMap mm = make_map(0x4000'0000, pa_owned, PAGE_SIZE, kPermRW);
-        assert(dn->map_batch(&mm, 1) == E_OK);
-        assert(dn->sync() == E_OK);
+        assert(iommu::domain_map_batch(*dn, &mm, 1) == E_OK);
+        assert(iommu::domain_sync(*dn) == E_OK);
         const int releases0 = g_release_calls;
-        assert(dn->unmap_batch(&mm, 1) == E_OK);
+        assert(iommu::domain_unmap_batch(*dn, &mm, 1) == E_OK);
         assert(g_release_calls == releases0 + 1);
         iommu::domain_destroy(dn);
 

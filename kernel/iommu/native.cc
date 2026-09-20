@@ -95,7 +95,7 @@ SysError register_native_dma_arena(IommuDeviceId device, PhysAddr base, u64 size
     map.length = size;
     map.perms = static_cast<u32>(DmaPerm::Read) | static_cast<u32>(DmaPerm::Write);
     map.reserved = 0;
-    SysError rc = g_native_domain->map_batch(&map, 1);
+    SysError rc = domain_map_batch(*g_native_domain, &map, 1);
     if (rc != E_OK) {
         ANKO_LOGF_ERROR("iommu/native", "arena map failed base=0x%llx size=0x%llx rc=%d",
                         static_cast<unsigned long long>(base),
@@ -103,7 +103,7 @@ SysError register_native_dma_arena(IommuDeviceId device, PhysAddr base, u64 size
         return rc;
     }
 
-    rc = g_native_domain->attach(device);
+    rc = domain_attach(*g_native_domain, device);
     if (rc != E_OK) {
         ANKO_LOGF_ERROR("iommu/native", "stream attach failed seg=%u sid=%u rc=%d", device.segment,
                         device.requester_or_stream_id, static_cast<int>(rc));

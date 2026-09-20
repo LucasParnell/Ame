@@ -194,7 +194,7 @@ SysError hook_invalidate(void*, IommuDomain* domain, u64 iova, u64 length) {
     if (g_state != State::Ready || !domain) {
         return E_FAULT;
     }
-    const u16 vmid = static_cast<u16>(domain->index());
+    const u16 vmid = static_cast<u16>(domain_index(*domain));
     kernel::LockGuard guard(g_lock);
     if (length == ~0ull) {
         // Domain-scoped invalidation (used by teardown).
@@ -379,7 +379,7 @@ SysError smmuv3_program_stream(IommuDeviceId device, IommuDomain* domain) {
     if (!domain || domain->root_table_ == 0) {
         return program_deny_locked(device.requester_or_stream_id);
     }
-    const u16 vmid = static_cast<u16>(domain->index());
+    const u16 vmid = static_cast<u16>(domain_index(*domain));
     return program_ste_locked(
         device.requester_or_stream_id,
         make_ste_stage2(domain->root_table_, vmid, kT0Sz, kS2Sl0Level1, kS2Ps44, true));

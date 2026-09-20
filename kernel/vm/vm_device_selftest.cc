@@ -280,7 +280,8 @@ void vm_device_selftest_if_testdev() {
     check((pci::read_command(fn.bus, fn.device, fn.function) & pci::kPciCmdBusMaster) == 0,
           "(i) host not bus-mastering after attach");
     ANKO_LOGF_INFO("vm/selftest", "(i) contained bm=0 state=%s dma_mapped_pages=%u",
-                   device_state_name(a->state), a->dma_domain ? a->dma_domain->pinned_pages() : 0);
+                   device_state_name(a->state),
+                   a->dma_domain ? iommu::domain_pinned_pages(*a->dma_domain) : 0);
 
     // BAR stage-2 Device mapping: map BAR0's first page into the guest.
     const u32 bar_lo = cfg_read(fn.bus, fn.device, fn.function, kCfgBar0) & ~0xFull;

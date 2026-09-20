@@ -115,7 +115,7 @@ struct IommuOwnerOps {
     void* ctx;
 };
 
-class IommuDomain;
+struct IommuDomain;
 
 // Backend hooks (§8.8). Every hook is optional: a null pointer is a no-op that
 // succeeds, which is exactly how the core runs on a platform with no IOMMU.
@@ -133,7 +133,7 @@ struct IommuBackendOps {
     SysError (*invalidate_iotlb_range)(void* ctx, IommuDomain* domain, u64 iova, u64 length);
     SysError (*sync_command_stream)(void* ctx);
     // Bind a requester to a domain (its translation context) and unbind it back
-    // to the default-deny state. These run inside IommuDomain::attach/detach
+    // to the default-deny state. These run inside domain_attach/domain_detach
     // after the core's binding table is updated; the backend programs the
     // architecture-specific stream entry so that a requester whose context is
     // not (yet) installed faults instead of bypassing translation. A null
@@ -183,60 +183,14 @@ static_assert(sizeof(IommuMapping) == 48);
 // ---------------------------------------------------------------------------
 // IommuDomain
 //
-// A domain belongs to one device assignment / security principal. Its members
-// are public because the kernel is data-oriented, but callers must treat them
-// as opaque and go through the methods and free functions below.
+// A domain belongs to one device assignment / security principal. It is a plain
+// data record — the kernel is data-oriented, so a domain is reached only
+// through the `domain_*` free functions below, never through member functions.
 // ---------------------------------------------------------------------------
-class IommuDomain {
-  public:
-    // Install translations for every map. All-or-nothing: on any validation or
-    // allocation failure nothing is installed and the domain is unchanged.
-    SysError map_batch(const IommuMap* maps, u32 count);
-
-    // Remove translations previously installed by map_batch. Each record's host
-    // pages are released to the owner only after the backend confirms
-    // invalidation; if it cannot, the domain is quarantined and the pages stay
-    // pinned (§8.6, §8.12).
-    SysError unmap_batch(const IommuMap* maps, u32 count);
-
-    // Force the backend command stream to complete.
-    SysError sync();
-
-    // Bind a requester/stream ID to this domain. Fails with E_BUSY if it is
-    // already bound to a different active domain. Rebinding away from the
-    // quarantine domain is permitted, as is a redundant attach.
-    SysError attach(IommuDeviceId device);
-
-    // Unbind a requester from this domain and redirect it to the quarantine
-    // domain, so it faults instead of bypassing translation.
-    SysError detach(IommuDeviceId device);
-
-    u32 id() const {
-        return index_;
-    }
-    u32 index() const {
-        return index_;
-    }
-    DomainState state() const {
-        return state_;
-    }
-    bool is_active() const {
-        return state_ == DomainState::Active;
-    }
-    u32 live_mappings() const {
-        return mapping_count_;
-    }
-    u32 pinned_pages() const {
-        return pinned_pages_;
-    }
-    u64 attached_mask() const {
-        return __atomic_load_n(&attached_mask_, __ATOMIC_RELAXED);
-    }
-
-    // --- internals (public for data-oriented access; not a stable interface) ---
+struct IommuDomain {
     // Members carry no default initialisers so the static domain pool is
     // trivially default constructible and lands in .bss with no dynamic
-    // initialisation; domain_create()/init() establish every value explicitly.
+    // initialisation; domain_create() establishes every value explicitly.
     u32 index_;
     u32 mapping_count_;
     u32 table_count_;
@@ -253,6 +207,44 @@ class IommuDomain {
     SpinLock lock_;
     IommuMapping mappings_[kMaxDomainMappings];
 };
+
+// ---------------------------------------------------------------------------
+// Domain operations
+//
+// Every operation takes the domain by reference: pass `*ptr` when you hold a
+// pointer (as returned by domain_create / stream_domain / quarantine_domain).
+// ---------------------------------------------------------------------------
+
+// Install translations for every map. All-or-nothing: on any validation or
+// allocation failure nothing is installed and the domain is unchanged.
+SysError domain_map_batch(IommuDomain& domain, const IommuMap* maps, u32 count);
+
+// Remove translations previously installed by domain_map_batch. Each record's
+// host pages are released to the owner only after the backend confirms
+// invalidation; if it cannot, the domain is quarantined and the pages stay
+// pinned (§8.6, §8.12).
+SysError domain_unmap_batch(IommuDomain& domain, const IommuMap* maps, u32 count);
+
+// Force the backend command stream to complete.
+SysError domain_sync(IommuDomain& domain);
+
+// Bind a requester/stream ID to this domain. Fails with E_BUSY if it is already
+// bound to a different active domain. Rebinding away from the quarantine domain
+// is permitted, as is a redundant attach.
+SysError domain_attach(IommuDomain& domain, IommuDeviceId device);
+
+// Unbind a requester from this domain and redirect it to the quarantine domain,
+// so it faults instead of bypassing translation.
+SysError domain_detach(IommuDomain& domain, IommuDeviceId device);
+
+// Accessors. These read plain data; callers must not depend on the member
+// layout, only on these functions.
+u32 domain_index(const IommuDomain& domain);
+DomainState domain_state(const IommuDomain& domain);
+bool domain_is_active(const IommuDomain& domain);
+u32 domain_live_mappings(const IommuDomain& domain);
+u32 domain_pinned_pages(const IommuDomain& domain);
+u64 domain_attached_mask(const IommuDomain& domain);
 
 // ---------------------------------------------------------------------------
 // Domain lifecycle and lookup
@@ -272,8 +264,8 @@ void domain_destroy(IommuDomain* domain);
 IommuDomain* domain_by_index(u32 index);
 
 // The permanent empty quarantine domain. Detached requesters are redirected
-// here, where map_batch always fails, so a stale translation can never reach a
-// page. Created lazily; never destroyed.
+// here, where domain_map_batch always fails, so a stale translation can never
+// reach a page. Created lazily; never destroyed.
 IommuDomain* quarantine_domain();
 
 // Resolve a requester/stream ID to its domain, or null if it is unbound. A null

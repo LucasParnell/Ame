@@ -391,7 +391,7 @@ SysError device_map_authorized_ram(VmDeviceAssignment* a) {
         map.perms =
             static_cast<u32>(iommu::DmaPerm::Read) | static_cast<u32>(iommu::DmaPerm::Write);
         map.reserved = 0;
-        const SysError rc = a->dma_domain->map_batch(&map, 1);
+        const SysError rc = iommu::domain_map_batch(*a->dma_domain, &map, 1);
         if (rc != E_OK) {
             return rc;
         }
@@ -463,7 +463,8 @@ SysError step_domain(VmDeviceAssignment* a) {
         return rc;
     }
     a->state = VM_DEV_DOMAIN_READY;
-    ANKO_LOGF_INFO("kernel/vm", "assign: domain ready index=%u", a->dma_domain->index());
+    ANKO_LOGF_INFO("kernel/vm", "assign: domain ready index=%u",
+                   iommu::domain_index(*a->dma_domain));
     return E_OK;
 }
 
@@ -474,7 +475,7 @@ SysError step_map_ram(VmDeviceAssignment* a) {
     }
     a->state = VM_DEV_RAM_MAPPED;
     ANKO_LOGF_INFO("kernel/vm", "assign: ram mapped ranges=%u pages=%u", a->ram_count,
-                   a->dma_domain->pinned_pages());
+                   iommu::domain_pinned_pages(*a->dma_domain));
     return E_OK;
 }
 
@@ -482,7 +483,7 @@ SysError step_attach_streams(VmDeviceAssignment* a) {
     for (u32 i = 0; i < a->fn_count; ++i) {
         const pci::PciFunctionInfo& fn = a->fns[i].info;
         const iommu::IommuDeviceId device{static_cast<u32>(fn.segment), fn.requester_id};
-        const SysError rc = a->dma_domain->attach(device);
+        const SysError rc = iommu::domain_attach(*a->dma_domain, device);
         if (rc != E_OK) {
             return rc;
         }
@@ -496,7 +497,7 @@ SysError step_sync(VmDeviceAssignment* a) {
     if (!a->dma_domain) {
         return E_INVALID;
     }
-    const SysError rc = a->dma_domain->sync();
+    const SysError rc = iommu::domain_sync(*a->dma_domain);
     if (rc != E_OK) {
         return rc;
     }
@@ -562,7 +563,8 @@ void abort_attach(VmDeviceAssignment* a) {
         const pci::PciFunctionInfo& fn = a->fns[i].info;
         pci::set_bus_master(fn.bus, fn.device, fn.function, false);
         if (a->dma_domain) {
-            (void)a->dma_domain->detach(
+            (void)iommu::domain_detach(
+                *a->dma_domain,
                 iommu::IommuDeviceId{static_cast<u32>(fn.segment), fn.requester_id});
         }
     }
@@ -958,8 +960,8 @@ SysError device_revoke(VmDeviceAssignment* a) {
         if (!a->dma_domain) {
             break;
         }
-        const SysError rc = a->dma_domain->detach(
-            iommu::IommuDeviceId{static_cast<u32>(fn.segment), fn.requester_id});
+        const SysError rc = iommu::domain_detach(
+            *a->dma_domain, iommu::IommuDeviceId{static_cast<u32>(fn.segment), fn.requester_id});
         if (rc != E_OK) {
             detach_failed = true;
         }
@@ -968,7 +970,7 @@ SysError device_revoke(VmDeviceAssignment* a) {
 
     // INVALIDATE + SYNC.
     if (a->dma_domain) {
-        (void)a->dma_domain->sync();
+        (void)iommu::domain_sync(*a->dma_domain);
     }
     a->revoke_step = 6;
 
@@ -988,14 +990,14 @@ SysError device_revoke(VmDeviceAssignment* a) {
             map.length = r.size;
             map.perms =
                 static_cast<u32>(iommu::DmaPerm::Read) | static_cast<u32>(iommu::DmaPerm::Write);
-            const SysError rc = a->dma_domain->unmap_batch(&map, 1);
+            const SysError rc = iommu::domain_unmap_batch(*a->dma_domain, &map, 1);
             if (rc != E_OK) {
                 quarantine = true;
                 break;
             }
             r.mapped = false;
         }
-        (void)a->dma_domain->sync();
+        (void)iommu::domain_sync(*a->dma_domain);
     }
     a->revoke_step = 7;
 
@@ -1017,7 +1019,7 @@ SysError device_revoke(VmDeviceAssignment* a) {
         a->state = VM_DEV_QUARANTINED;
         metric_inc(VM_DEBUG_VM_DEVICE_QUARANTINE);
         ANKO_LOGF_WARN("kernel/vm", "revoke: quarantined device=%u pages pinned=%u", a->device_id,
-                       a->dma_domain ? a->dma_domain->pinned_pages() : 0);
+                       a->dma_domain ? iommu::domain_pinned_pages(*a->dma_domain) : 0);
         return E_FAULT; // keep the assignment (and the pinned pages) alive
     }
 

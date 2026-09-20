@@ -41,6 +41,7 @@ kernel::SpinLock g_lock{};
 u64 g_delivered = 0;
 u64 g_bindings = 0;
 u64 g_selftest = 0;
+DeliverHook g_deliver_hook = nullptr;
 
 void zero_bytes(void* p, usize n) {
     auto* b = static_cast<u8*>(p);
@@ -156,6 +157,12 @@ void unbind_owner(u64 owner) {
 
 void deliver(u32 irq_id) {
     if (!irq_bindable(irq_id)) return; // timer/IPI/PPIs/SGIs are never redirected
+
+    // Second-chance hook: the VM device-assignment layer routes assigned-device
+    // host lines into the guest vGIC. It is independent of the doorbell table,
+    // so it runs even when no driver holds a binding on this line.
+    if (g_deliver_hook) g_deliver_hook(irq_id);
+
     const u32 idx = irq_index(irq_id);
 
     kernel::LockGuard guard(g_lock);
@@ -174,6 +181,10 @@ void deliver(u32 irq_id) {
 u64 delivered_count() { return __atomic_load_n(&g_delivered, __ATOMIC_RELAXED); }
 u64 binding_count() { return __atomic_load_n(&g_bindings, __ATOMIC_RELAXED); }
 u64 selftest_status() { return __atomic_load_n(&g_selftest, __ATOMIC_RELAXED); }
+
+void set_deliver_hook(DeliverHook hook) {
+    __atomic_store_n(&g_deliver_hook, hook, __ATOMIC_RELEASE);
+}
 
 u64 run_selftest() {
     constexpr u32 kTestIrq = 100; // spare SPI, wired to nothing on either board

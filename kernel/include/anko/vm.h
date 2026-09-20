@@ -7,7 +7,9 @@
 #include "anko/types.h"
 #include "anko/cap.h"
 #include "anko/ipc.h"
+#include "anko/iommu.h"
 #include "anko/mm.h"
+#include "anko/pci.h"
 #include "anko/sched.h"
 #include "anko/syscall.h"
 
@@ -115,6 +117,17 @@ enum VmDebugCounter : u64 {
     VM_DEBUG_VCPU_WFX_EXITS = 52,
     VM_DEBUG_VCPU_IRQ_EXITS = 53,
     VM_DEBUG_VCPU_UNSUPPORTED_EXITS = 54,
+    // Phase D device assignment (§6, §7, §8.11, §8.12).
+    VM_DEBUG_VM_DEVICE_CREATED = 55,
+    VM_DEBUG_VM_DEVICE_ACTIVE = 56,
+    VM_DEBUG_VM_DEVICE_DESTROYED = 57,
+    VM_DEBUG_VM_DEVICE_BAR_MAPPED = 58,
+    VM_DEBUG_VM_DEVICE_IRQ_ROUTES = 59,
+    VM_DEBUG_VM_DEVICE_IRQ_INJECTED = 60,
+    VM_DEBUG_VM_DEVICE_MEDIATED_DENY = 61,
+    VM_DEBUG_VM_DEVICE_BME_ENABLE = 62,
+    VM_DEBUG_VM_DEVICE_QUARANTINE = 63,
+    VM_DEBUG_VM_DEVICE_MAX = 63,
 };
 
 struct VmRoot {
@@ -526,5 +539,227 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
 CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_kind,
                            u32 rights, SysError* out_error);
 SysError inspect_channel(Process& caller, CapHandle channel_cap, VmChannelInfo* out);
+
+// ===========================================================================
+// Phase D: VM device assignment (§6 device-assignment model, §7 interrupt
+// routing, §8.11 secure attach, §8.12 DMA-safe revoke).
+//
+// A VmDeviceAssignment binds a set of host resources to exactly one VM and is
+// the single lifetime/revocation point for them: it owns the IommuDomain the
+// assigned functions DMA through, the guest MMIO (BAR) regions, and the IRQ
+// routes. It retains every host object it references and tears them down
+// together.
+// ===========================================================================
+constexpr u32 kMaxVmDevices = 8;
+constexpr u32 kMaxAssignMmio = 8;
+constexpr u32 kMaxAssignIrqs = 8;
+constexpr u32 kMaxAssignRam = 16;
+constexpr u32 kMaxAssignRetained = 24;
+
+enum class VmDeviceKind : u32 { Pci = 1 };
+
+// Secure-attach state machine (§8.11) plus the revoke states (§8.12). The
+// numeric order of the attach states is the exact order of the spec's steps, so
+// a stuck assignment reports precisely how far it got.
+enum VmDeviceState : u32 {
+    VM_DEV_EMPTY = 0,
+    VM_DEV_CLAIMED = 1,          // CLAIM FUNCTION / ISOLATION GROUP
+    VM_DEV_CONTAINED = 2,        // CLEAR HOST BUS MASTER + MASK INTERRUPTS
+    VM_DEV_QUIESCED = 3,         // RESET/QUIESCE DEVICE IF REQUIRED
+    VM_DEV_DOMAIN_READY = 4,     // CREATE EMPTY IOMMU DOMAIN
+    VM_DEV_RAM_MAPPED = 5,       // MAP AUTHORIZED APPLIANCE RAM
+    VM_DEV_STREAMS_ATTACHED = 6, // ATTACH ALL REQUESTER/STREAM IDs
+    VM_DEV_SYNCED = 7,           // IOMMU INVALIDATE + SYNC
+    VM_DEV_IRQS_INSTALLED = 8,   // INSTALL HOST IRQ ROUTES
+    VM_DEV_EXPOSED = 9,          // EXPOSE SYNTHETIC/FILTERED PCI FUNCTION
+    VM_DEV_BME_ALLOWED = 10,     // ALLOW GUEST BUS-MASTER ENABLE
+    VM_DEV_ACTIVE = 11,          // ACTIVE
+    VM_DEV_FAILED = 12,          // aborted; function left non-bus-mastering
+    VM_DEV_REVOKING = 13,        // revoke in progress (§8.12)
+    VM_DEV_REVOKED = 14,         // torn down cleanly
+    VM_DEV_QUARANTINED = 15,     // could not prove DMA stopped; pages pinned
+};
+
+// One host PCI function in the assignment's isolation group.
+struct VmAssignFn {
+    pci::PciFunctionInfo info; // inventory record (BDF, ids, BARs, requester id)
+    bool primary;              // the function named by the caller
+    u8 pad[3];
+};
+
+// An assigned BAR subrange mapped into the guest as a stage-2 Device mapping.
+struct VmAssignMmio {
+    PhysAddr host_base; // host physical base of the subrange
+    u64 size;
+    u64 guest_ipa;
+    u32 rights;
+    u32 fn_index;
+    u32 bar_index;
+    u32 bar_offset; // byte offset within the BAR
+    bool mapped;
+    u8 pad[3];
+};
+
+// A host IRQ route bound to a guest vGIC vector.
+struct VmAssignIrq {
+    u32 host_irq;
+    u32 guest_irq;
+    u32 trigger; // 0 = level, 1 = edge (§7.4)
+    u32 fn_index;
+    u32 vcpu_id;
+    bool installed;
+    bool suppressed; // level route: host delivery paused until guest EOI
+    bool msi;        // installed via the MSI/MSI-X virtualization path
+    u8 pad;
+    u64 deliveries;
+    Vcpu* target; // resolved appliance vCPU (owned by owner_vm)
+};
+
+// An authorised appliance-RAM range. Guest IPA == device IOVA (§8.2).
+struct VmAssignRam {
+    PhysAddr base;
+    u64 size;
+    u64 iova;
+    bool mapped;
+    u8 pad[7];
+};
+
+struct VmDeviceAssignment {
+    object::Record* lifetime;
+    Vm* owner_vm;
+    u32 device_id;
+    u32 state; // VmDeviceState
+    VmDeviceKind kind;
+    u32 flags;
+    bool active;
+    u8 pad0[3];
+    u64 owner_identity;
+    u32 owner_pid;
+
+    u32 fn_count;
+    VmAssignFn fns[pci::kMaxAssignFns];
+
+    u32 mmio_count;
+    VmAssignMmio mmio[kMaxAssignMmio];
+
+    u32 irq_count;
+    VmAssignIrq irq[kMaxAssignIrqs];
+
+    u32 ram_count;
+    VmAssignRam ram[kMaxAssignRam];
+
+    iommu::IommuDomain* dma_domain;
+    // Identity the DMA domain is authorised against; the page-owner query only
+    // reports pages inside `ram` as owned by this object (§8.3, §8.6).
+    u64 authorized_object_;
+
+    // Retained references on every host object the assignment names (host
+    // function objects, MMIO ranges, IRQ lines). Released exactly once at
+    // destroy, so a revoked assignment cannot leave a dangling grant behind.
+    u32 retained_count;
+    object::Record* retained[kMaxAssignRetained];
+
+    // Synthetic / filtered guest config view (§6.3): only assigned functions.
+    pci::GuestConfig cfg;
+    pci::MsiState msi[pci::kMaxAssignFns];
+
+    u64 created_ticks;
+    u64 revoke_step;
+    bool body_released; // creator reference already dropped (idempotent teardown)
+    u8 pad1[7];
+};
+
+// Host-side description of the isolation group to assign. Filled from the host
+// function capability; every field is kernel-trusted.
+struct DeviceAssignSpec {
+    u32 group_id;
+    u32 fn_count;
+    struct Fn {
+        u8 segment;
+        u8 bus;
+        u8 device;
+        u8 function;
+        u32 requester_id;
+    } fns[pci::kMaxAssignFns];
+};
+
+// Human-readable state name, for logs and tests.
+const char* device_state_name(u32 state);
+
+cap::Borrow<VmDeviceAssignment> assignment_from_cap(Process& caller, CapHandle cap, u32 rights,
+                                                    SysError* out_error);
+
+// §8.11 secure attach, driven from a VM cap + host function cap. On success the
+// assignment is ACTIVE and its capability is returned. On any failure the host
+// function is left non-bus-mastering and the assignment is FAILED.
+SysError device_secure_attach(Process& caller, CapHandle vm_cap, const pci::HostFunction& host_fn,
+                              u64 flags, CapHandle* out_cap);
+
+// Assigned BAR subrange -> guest IPA as a stage-2 Device mapping (§6.2).
+SysError device_map_bar(Process& caller, CapHandle assign_cap, u32 bar_index, u32 bar_offset,
+                        u64 size, u64 guest_ipa, u32 rights);
+
+// Host IRQ cap -> vCPU / guest irq route (§7.2).
+SysError device_route_irq(Process& caller, CapHandle assign_cap, CapHandle irq_cap,
+                          CapHandle vcpu_cap, u32 guest_irq, u32 flags);
+
+// DMA-safe revoke then release (§8.12).
+SysError device_destroy(Process& caller, CapHandle assign_cap);
+
+// --- kernel-internal entry points (boot path + native proof) ---------------
+// Allocate an assignment bound to `owner` (may be null in the native proof).
+VmDeviceAssignment* device_alloc(Vm* owner, u64 flags, SysError* out_error);
+
+// Authorise a host RAM range for DMA and map it into the domain (Iova rule of
+// §8.2). The native proof registers its test pages this way.
+SysError device_authorize_ram(VmDeviceAssignment* a, PhysAddr base, u64 size, u64 iova);
+
+// Run the full §8.11 state machine against an already-claimed assignment.
+SysError device_attach(VmDeviceAssignment* a, const DeviceAssignSpec& spec);
+
+// Run the full §8.12 revoke state machine and release the assignment body.
+SysError device_revoke(VmDeviceAssignment* a);
+
+// Mediate a guest config-space write through the §6.3 policy. Returns E_PERM
+// when the write is rejected, E_OK otherwise.
+SysError device_mediate_config_write(VmDeviceAssignment* a, u32 fn_index, u32 offset, u64 value,
+                                     u32 size);
+// Assigned BAR subrange -> guest IPA as a stage-2 Device mapping (internal).
+SysError device_map_bar_internal(VmDeviceAssignment* a, u32 bar_index, u32 bar_offset, u64 size,
+                                 u64 guest_ipa, u32 rights);
+// Record (and, once past the route step, install) a host IRQ route (internal).
+SysError device_add_route(VmDeviceAssignment* a, u32 fn_index, u32 host_irq, u32 guest_irq,
+                          u32 trigger, Vcpu* target, bool msi);
+// Map every authorised RAM range into the domain (internal step 5).
+SysError device_map_authorized_ram(VmDeviceAssignment* a);
+
+// Opt-in Phase D proof (§8.11/§8.12/§7). Dev-build only; a no-op otherwise.
+void vm_device_selftest_if_testdev();
+
+void device_dispose(void* target);
+void device_release_for_vm(Vm* v);
+void device_owner_died(u64 identity);
+
+// --- interrupt virtualization (vm_device_irq.cc) ---------------------------
+// Install the delivery hook once; the IRQ vector then routes assigned-device
+// lines into the vGIC via device_irq_deliver().
+void device_irq_init();
+void device_irq_deliver(u32 host_irq);
+// Re-arm level routes for a guest EOI (§7.4).
+void device_irq_on_guest_eoi(Vcpu& vcpu, u32 guest_irq);
+// Number of live routes (diagnostics/tests).
+u64 device_irq_route_count();
+// Register / deregister a route for host-IRQ delivery. Called by the §8.11
+// "INSTALL HOST IRQ ROUTES" and §8.12 "remove interrupt routes" steps.
+SysError device_irq_install(VmDeviceAssignment* a, u32 route_index);
+void device_irq_uninstall(VmDeviceAssignment* a, u32 route_index);
+// Inject a guest vector into a vCPU (used by route delivery and tests).
+void device_irq_inject(Vcpu& vcpu, u32 guest_irq, u32 trigger);
+
+// --- vGIC pending-bit accessors (vcpu.cc) ----------------------------------
+void vgic_pending_set(Vcpu& vcpu, u32 irq);
+bool vgic_pending_test(const Vcpu& vcpu, u32 irq);
+// Wake a vCPU's runner because a virtual IRQ was made pending.
+void vcpu_wake_irq(Vcpu& vcpu);
 
 } // namespace vm

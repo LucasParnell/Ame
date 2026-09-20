@@ -96,6 +96,12 @@ enum Syscall : unsigned {
     SYS_IRQ_ACK = MX_NR_IRQ_ACK, // (irq_cap) → E_OK
     SYS_CAP_INFO = MX_NR_CAP_INFO, // (cap, MxCapInfo* out, out_len) → E_OK
 
+    // Phase D: PCI device assignment (spec §6, §7, §8.11/§8.12).
+    SYS_VM_ASSIGN_DEVICE = MX_NR_VM_ASSIGN_DEVICE,       // (vm_cap, function_cap, flags) -> cap
+    SYS_VM_ASSIGN_MAP_MMIO = MX_NR_VM_ASSIGN_MAP_MMIO,   // (assign, bar_idx, ipa, size, rights, off)
+    SYS_VM_ASSIGN_ROUTE_IRQ = MX_NR_VM_ASSIGN_ROUTE_IRQ, // (assign, irq_cap, vcpu_cap, irq, flags)
+    SYS_VM_ASSIGN_DESTROY = MX_NR_VM_ASSIGN_DESTROY,     // (assign_cap)
+
     SYS_CLOCK_NS = MX_NR_CLOCK_NS,
     SYS_COUNT,
 };
@@ -111,6 +117,10 @@ static_assert(static_cast<unsigned>(SYS_MAP_MMIO)          == static_cast<unsign
 static_assert(static_cast<unsigned>(SYS_IRQ_BIND_DOORBELL) == static_cast<unsigned>(MX_NR_IRQ_BIND_DOORBELL), "syscall number drift: IRQ_BIND_DOORBELL");
 static_assert(static_cast<unsigned>(SYS_IRQ_ACK)           == static_cast<unsigned>(MX_NR_IRQ_ACK),           "syscall number drift: IRQ_ACK");
 static_assert(static_cast<unsigned>(SYS_CAP_INFO)          == static_cast<unsigned>(MX_NR_CAP_INFO),          "syscall number drift: CAP_INFO");
+static_assert(static_cast<unsigned>(SYS_VM_ASSIGN_DEVICE)    == static_cast<unsigned>(MX_NR_VM_ASSIGN_DEVICE),    "syscall number drift: VM_ASSIGN_DEVICE");
+static_assert(static_cast<unsigned>(SYS_VM_ASSIGN_MAP_MMIO)  == static_cast<unsigned>(MX_NR_VM_ASSIGN_MAP_MMIO),  "syscall number drift: VM_ASSIGN_MAP_MMIO");
+static_assert(static_cast<unsigned>(SYS_VM_ASSIGN_ROUTE_IRQ) == static_cast<unsigned>(MX_NR_VM_ASSIGN_ROUTE_IRQ), "syscall number drift: VM_ASSIGN_ROUTE_IRQ");
+static_assert(static_cast<unsigned>(SYS_VM_ASSIGN_DESTROY)   == static_cast<unsigned>(MX_NR_VM_ASSIGN_DESTROY),   "syscall number drift: VM_ASSIGN_DESTROY");
 
 // ---------------------------------------------------------------------------
 // Error codes — negative, returned in x0

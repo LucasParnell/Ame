@@ -61,6 +61,11 @@ set(ANKO_SOURCES
     vm/vcpu.cc
     vm/vm_channel.cc
 
+    # ---- Phase D: PCI device assignment + interrupt virtualization --------
+    vm/vm_device.cc
+    vm/vm_device_irq.cc
+    vm/vm_device_selftest.cc
+
     # ---- Phase B: backend-independent IOMMU core --------------------------
     iommu/core.cc
 
@@ -76,6 +81,10 @@ set(ANKO_SOURCES
 
     # ---- Phase A: PCI / IOMMU inventory -----------------------------------
     pci/enumerate.cc
+
+    # ---- Phase D: PCI assignment, mediation, MSI virtualization -----------
+    pci/assignment.cc
+    pci/msi.cc
 )
 
 add_executable(anko ${ANKO_SOURCES})

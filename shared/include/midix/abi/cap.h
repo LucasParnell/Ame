@@ -24,6 +24,8 @@ enum MxCapType : mx_u16_t {
     MX_CAP_SCHED_CONTEXT = 16,
     MX_CAP_MMIO          = 17,  // device MMIO range object (phys_base, size, memory attrs)
     MX_CAP_IRQ           = 18,  // IRQ line object; driver binds to a doorbell explicitly
+    MX_CAP_PCI_FUNCTION  = 19,  // host PCI function authority object (Phase D)
+    MX_CAP_VM_DEVICE     = 20,  // VM device-assignment object (Phase D, spec §6.1)
 };
 
 struct MxCapInfo {
@@ -117,5 +119,7 @@ constexpr mx_i64_t kCapTypeVmChannel = MX_CAP_VM_CHANNEL;
 constexpr mx_i64_t kCapTypeSchedContext = MX_CAP_SCHED_CONTEXT;
 constexpr mx_i64_t kCapTypeMmio = MX_CAP_MMIO;
 constexpr mx_i64_t kCapTypeIrq = MX_CAP_IRQ;
+constexpr mx_i64_t kCapTypePciFunction = MX_CAP_PCI_FUNCTION;
+constexpr mx_i64_t kCapTypeVmDevice = MX_CAP_VM_DEVICE;
 
 #endif // MIDIX_ABI_NO_COMPAT_NAMES

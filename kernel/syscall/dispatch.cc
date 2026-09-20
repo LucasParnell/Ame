@@ -241,7 +241,8 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     const UserAccess ua = user_access_for(p);
 
     vm::CallGuard vm_call((nr >= SYS_VM_CREATE && nr <= SYS_VM_MEMORY_WRITE) ||
-                          (nr >= SYS_VCPU_BIND_SCHED_CONTEXT && nr <= SYS_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER));
+                          (nr >= SYS_VCPU_BIND_SCHED_CONTEXT && nr <= SYS_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER) ||
+                          (nr >= SYS_VM_ASSIGN_DEVICE && nr <= SYS_VM_ASSIGN_DESTROY));
     switch (static_cast<Syscall>(nr)) {
 
     case SYS_YIELD:
@@ -840,8 +841,49 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     case SYS_CLOCK_NS: return ok(static_cast<long>(sched::sched_clock_ns()));
 
+    // Phase D: PCI device assignment into a VM (§6, §7, §8.11/§8.12).
+    case SYS_VM_ASSIGN_DEVICE: {
+        // a0 = vm_cap, a1 = host function cap, a2 = flags
+        cap::Ref fn_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PCI_FUNCTION);
+        if (!fn_e) return err(E_NOTFOUND);
+        auto* host_fn = static_cast<pci::HostFunction*>(fn_e->target);
+        if (!host_fn) return err(E_NOTFOUND);
+        CapHandle out = kNullCap;
+        const SysError rc = vm::device_secure_attach(*p, static_cast<CapHandle>(a0), *host_fn, a2, &out);
+        if (rc != E_OK) return err(rc);
+        return ok(static_cast<long>(out));
+    }
+
+    case SYS_VM_ASSIGN_MAP_MMIO: {
+        // a0 = assign, a1 = bar_index, a2 = guest_ipa, a3 = size, a4 = rights, a5 = bar_offset
+        const u32 bar_index = static_cast<u32>(a1);
+        if (bar_index >= pci::kMaxBars) return err(E_INVALID);
+        const u32 rights = static_cast<u32>(a4);
+        if (a4 != rights) return err(E_INVALID);
+        const SysError rc = vm::device_map_bar(*p, static_cast<CapHandle>(a0), bar_index,
+                                               static_cast<u32>(a5), a3, a2, rights);
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
+    }
+
+    case SYS_VM_ASSIGN_ROUTE_IRQ: {
+        // a0 = assign, a1 = irq_cap, a2 = vcpu_cap, a3 = guest_irq, a4 = flags
+        const u32 guest_irq = static_cast<u32>(a3);
+        if (guest_irq >= vm::kVgicMaxIrqs) return err(E_INVALID);
+        const u32 flags = static_cast<u32>(a4);
+        if (a4 != flags || flags != 0) return err(E_INVALID);
+        const SysError rc = vm::device_route_irq(*p, static_cast<CapHandle>(a0),
+                                                 static_cast<CapHandle>(a1),
+                                                 static_cast<CapHandle>(a2), guest_irq, flags);
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
+    }
+
+    case SYS_VM_ASSIGN_DESTROY:
+        return err(vm::device_destroy(*p, static_cast<CapHandle>(a0)));
+
     case SYS_DEBUG_COUNTERS:
-        if (a0 >= vm::VM_DEBUG_CREATE_CALLS && a0 <= vm::VM_DEBUG_VCPU_UNSUPPORTED_EXITS) {
+        if (a0 >= vm::VM_DEBUG_CREATE_CALLS && a0 <= vm::VM_DEBUG_VM_DEVICE_MAX) {
             return ok(static_cast<long>(vm::debug_counter(a0)));
         }
         switch (a0) {

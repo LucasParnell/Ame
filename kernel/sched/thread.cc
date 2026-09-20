@@ -7,6 +7,7 @@
 
 #include "anko/sched.h"
 #include "anko/ipc.h"
+#include "anko/irq.h"
 #include "anko/vm.h"
 #include "anko/mm.h"
 #include "anko/panic.h"
@@ -127,6 +128,8 @@ static void destroy_process_storage(void* target) {
         cap::clear(*p->cap_table);
         mm::slab_free(p->cap_table, sizeof(CapTable), alignof(CapTable));
     }
+    // A dying driver must not leave an enabled IRQ line behind.
+    irq::unbind_owner(process_identity(*p));
     release_principal(p->principal_id);
     release_reserved_pid(p->pid);
     mm::slab_free(p, sizeof(Process), alignof(Process));
@@ -390,6 +393,7 @@ void process_destroy(Process* p) {
     if (completed) {
         sweep_process_caps(p);
         cap::clear(*p->cap_table);
+        irq::unbind_owner(process_identity(*p));
         {
             kernel::LockGuard guard(g_lifecycle_lock);
             auto& event = g_exits[p->pid];

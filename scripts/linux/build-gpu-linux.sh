@@ -69,20 +69,28 @@ mkdir -p "${OUT}" "${KOUT}"
 stamp="${KOUT}/.dango-gpu-configured"
 if [[ ! -f "${stamp}" || "${FRAG_GPU}" -nt "${stamp}" || "${FRAG_HELLO}" -nt "${stamp}" ]]; then
     rm -f "${stamp}"
-    "${MAKE}" LLVM=1 ARCH=arm64 O="${KOUT}" -C "${DANGO_LINUX_SRC}" defconfig
+    MAKE_ARGS=(ARCH=arm64)
+if command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1; then
+    MAKE_ARGS+=(LLVM=1)
+elif [[ "${CROSS_COMPILE:-}" == "" && "$(uname -m)" != "aarch64" ]]; then
+    echo "error: need clang+lld (LLVM=1) or a native aarch64 host / CROSS_COMPILE" >&2
+    exit 1
+fi
+
+"${MAKE}" "${MAKE_ARGS[@]}" O="${KOUT}" -C "${DANGO_LINUX_SRC}" defconfig
     # Kernel-sanctioned fragment merge (-m: write the merged file, no make; the
     # caller runs olddefconfig). It rewrites duplicates rather than appending,
     # which is required because kconfig keeps the first assignment.
     "${DANGO_LINUX_SRC}/scripts/kconfig/merge_config.sh" -m -O "${KOUT}" \
         "${KOUT}/.config" "${FRAG_HELLO}" "${FRAG_GPU}"
-    "${MAKE}" LLVM=1 ARCH=arm64 O="${KOUT}" -C "${DANGO_LINUX_SRC}" olddefconfig
+    "${MAKE}" "${MAKE_ARGS[@]}" O="${KOUT}" -C "${DANGO_LINUX_SRC}" olddefconfig
     "${CHECK}" --config "${KOUT}/.config" --flow gpu
     touch "${stamp}"
 else
     "${CHECK}" --config "${KOUT}/.config" --flow gpu
 fi
 
-"${MAKE}" LLVM=1 ARCH=arm64 O="${KOUT}" -C "${DANGO_LINUX_SRC}" -j"$(sysctl -n hw.logicalcpu 2>/dev/null || nproc)" Image
+"${MAKE}" "${MAKE_ARGS[@]}" O="${KOUT}" -C "${DANGO_LINUX_SRC}" -j"$(sysctl -n hw.logicalcpu 2>/dev/null || nproc)" Image
 
 cp "${KOUT}/arch/arm64/boot/Image" "${OUT}/Image"
 cp "${KOUT}/vmlinux" "${OUT}/vmlinux" 2>/dev/null || true

@@ -196,6 +196,18 @@ SysError map_one_bar_page(VmDeviceAssignment* a, u64 ipa, PhysAddr pa, u32 right
 
 } // namespace
 
+// Drop the assignment's creator reference exactly once. Several teardown paths
+// (explicit destroy, VM retire, owner death) can race to release it; the
+// retained body keeps any pinned pages alive until every capability reference
+// is gone.
+static void release_body_once(VmDeviceAssignment* a) {
+    if (!a || !a->lifetime || a->body_released) {
+        return;
+    }
+    a->body_released = true;
+    object::release(a->lifetime);
+}
+
 // ---------------------------------------------------------------------------
 // Pool / lifetime
 // ---------------------------------------------------------------------------
@@ -325,7 +337,7 @@ SysError device_authorize_ram(VmDeviceAssignment* a, PhysAddr base, u64 size, u6
 }
 
 SysError device_map_authorized_ram(VmDeviceAssignment* a) {
-    if (!a->dma_domain) {
+    if (!a || !a->dma_domain) {
         return E_INVALID;
     }
     for (u32 i = 0; i < a->ram_count; ++i) {
@@ -991,7 +1003,7 @@ SysError device_destroy(Process& caller, CapHandle assign_cap) {
     // quarantined assignment keeps its pages pinned and is not freed.
     sched::sweep_process_caps(raw);
     if (rc2 == E_OK) {
-        object::release(raw->lifetime);
+        release_body_once(raw);
     }
     return rc2;
 }
@@ -1006,7 +1018,7 @@ void device_release_for_vm(Vm* v) {
             continue;
         }
         (void)device_revoke(a);
-        object::release(a->lifetime);
+        release_body_once(a);
     }
 }
 
@@ -1020,7 +1032,7 @@ void device_owner_died(u64 identity) {
             continue;
         }
         (void)device_revoke(a);
-        object::release(a->lifetime);
+        release_body_once(a);
     }
 }
 

@@ -665,6 +665,8 @@ struct VmDeviceAssignment {
 
     u64 created_ticks;
     u64 revoke_step;
+    bool body_released; // creator reference already dropped (idempotent teardown)
+    u8 pad1[7];
 };
 
 // Host-side description of the isolation group to assign. Filled from the host

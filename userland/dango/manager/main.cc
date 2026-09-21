@@ -779,7 +779,11 @@ extern "C" [[noreturn]] void _start() {
     const CapHandle gpu_function = mochi::boot::handle(boot, "gpu.function");
     const CapHandle gpu_irq = mochi::boot::handle(boot, "gpu.irq");
     if (have_linux && gpu_function != kNullCap) {
-        const CapHandle assign = as_cap(sys_vm_assign_device(vm, gpu_function, 0));
+        // Opt in to host BAR assignment: direct -kernel boot has no firmware, so
+        // the function's BARs read as 0 until we program them from the PCIe MMIO
+        // window (spec §6.2.5.1).
+        const CapHandle assign =
+            as_cap(sys_vm_assign_device(vm, gpu_function, dango::ASSIGN_FLAG_ASSIGN_BARS));
         if (assign == kNullCap) fail("gpu assign failed\n");
 
         // Map BAR4 (the virtio modern common/notify/ISR window) into the DTB MMIO
@@ -787,6 +791,9 @@ extern "C" [[noreturn]] void _start() {
         // mapped: it carries the MSI-X table/PBA, which the assignment layer
         // refuses to expose (the appliance uses INTx, not MSI-X).
         const uint32_t bar_rights = dango::RIGHT_READ | dango::RIGHT_WRITE;
+        // A BAR's guest IPA must be aligned to its aperture size (the kernel
+        // rejects otherwise); BAR4 is 16 KiB.  Assert it at compile time.
+        static_assert((0x5000'0000ull % 0x4000ull) == 0, "BAR4 guest IPA must be 16 KiB aligned");
         const int64_t bar4_rc = sys_vm_assign_map_mmio(assign, 4, 0x5000'0000ull, 0x4000, bar_rights, 0);
         if (bar4_rc != 0) {
             dango_counter("gpu.bar4_rc", static_cast<uint64_t>(bar4_rc));

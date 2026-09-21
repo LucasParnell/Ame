@@ -29,7 +29,7 @@
 
     memory@40000000 {
         device_type = "memory";
-        reg = <0x0 0x40000000 0x0 0x08000000>; // 128 MiB
+        reg = <0x0 0x40000000 0x0 0x08000000>; // 128 MiB (see memory_size in the manifest)
     };
 
     reserved-memory {

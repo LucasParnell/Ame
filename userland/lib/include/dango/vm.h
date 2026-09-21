@@ -6,6 +6,8 @@
 
 namespace dango {
 
+constexpr uint32_t ASSIGN_FLAG_ASSIGN_BARS = 1u << 0; // sys_vm_assign_device flags
+
 constexpr int64_t E_PERM = MX_ERR_PERM;
 constexpr int64_t E_NOTIMPL = MX_ERR_NOT_IMPLEMENTED;
 

@@ -563,6 +563,9 @@ void abort_attach(VmDeviceAssignment* a) {
 // (Phase E.3).  This is the host-side BAR assignment the ECAM model then reports
 // to the guest.
 static SysError step_assign_bars(VmDeviceAssignment* a) {
+    if ((a->flags & kAssignFlagAssignBars) == 0) {
+        return E_OK; // firmware-assigned BARs (or not needed for this platform)
+    }
     if (!g_hw.has_pci_mmio || g_hw.pci_mmio_size == 0) {
         return E_NOTFOUND;
     }
@@ -599,6 +602,15 @@ SysError device_attach(VmDeviceAssignment* a, const DeviceAssignSpec& spec) {
     }
     if (rc == E_OK) {
         rc = step_map_ram(a);
+    }
+    // Guard (Phase E regression): guest RAM is mapped page-granular, so a large
+    // guest can consume the whole stage-2 table and leave none for the device/BAR
+    // mappings that follow.  Fail clearly here instead of overflow deeper in.
+    if (rc == E_OK &&
+        (kMaxAssignMmio * 4u) > kMaxStage2Mappings - a->owner_vm->stage2.mapped_pages) {
+        ANKO_LOG_ERROR("kernel/vm",
+                       "assign: guest RAM leaves no stage-2 headroom for device mappings");
+        rc = E_OVERFLOW;
     }
     if (rc == E_OK) {
         rc = step_attach_streams(a);

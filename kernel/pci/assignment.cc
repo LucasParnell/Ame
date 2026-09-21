@@ -20,6 +20,7 @@
 #include "anko/pci.h"
 
 #include "anko/hw_info.h"
+#include "anko/panic.h"
 #include "libk/string.h"
 
 namespace pci {
@@ -142,6 +143,8 @@ bool assign_bars(PciFunctionInfo* info, PhysAddr window_base, u64 window_size,
         if (bar.type != BarType::Mmio32 && bar.type != BarType::Mmio64) {
             continue;
         }
+        // BAR apertures are powers of two; alignment and masking below rely on it.
+        ANKO_ASSERT((bar.size & (bar.size - 1)) == 0);
         offset = (offset + bar.size - 1) & ~(bar.size - 1);
         if (offset > window_size || bar.size > window_size - offset) {
             return false;

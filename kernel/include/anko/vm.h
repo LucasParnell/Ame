@@ -19,9 +19,9 @@ constexpr u32 kMaxVms = 4;
 constexpr u32 kMaxVcpusPerVm = 4;
 constexpr u32 kMaxVmMemoryObjects = 32;
 constexpr u32 kMaxVmChannels = 16;
-// Guest RAM is mapped page-granular, so the table must hold it plus headroom for
-// device/BAR mappings the assignment layer adds (Phase E).  A 128 MiB guest is
-// 32768 pages on its own.
+// Guest RAM is mapped page-granular, so the table must hold all of it plus
+// headroom for the device/BAR mappings the assignment layer adds (Phase E).  A
+// 128 MiB guest is 32768 pages on its own.
 constexpr u32 kMaxStage2Mappings = 40960;
 constexpr u32 kVgicMaxIrqs = 64;
 constexpr u32 kVgicBitmapWords = kVgicMaxIrqs / 32;
@@ -564,6 +564,11 @@ SysError inspect_channel(Process& caller, CapHandle channel_cap, VmChannelInfo* 
 // ===========================================================================
 constexpr u32 kMaxVmDevices = 8;
 constexpr u32 kMaxAssignMmio = 8;
+
+// Assignment flags (SYS_VM_ASSIGN_DEVICE a2).  BAR assignment is opt-in so the
+// default path (and the assignment self-test) is unchanged on platforms where
+// firmware has already programmed the BARs.
+constexpr u64 kAssignFlagAssignBars = 1ull << 0;
 constexpr u32 kMaxAssignIrqs = 8;
 constexpr u32 kMaxAssignRam = 16;
 constexpr u32 kMaxAssignRetained = 24;

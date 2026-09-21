@@ -149,8 +149,19 @@ size `0x2eff0000` in the Phase A fixture), so:
    register(s) via config space (handle the two-register `mmio64` BAR4), then refresh the cached
    bases so `device_map_bar` can map the host range as a guest stage-2 **Device** mapping.
 
-After that: INTx delivery (guest SPI 12) and the Linux-side `virtio_gpu` / `/dev/dri/card0`
-assertions for Phase E.5.
+**Status after BAR assignment landed:** the appliance now reaches
+`assign: bars window=0x10000000 size=0x2eff0000 bar1=0x10000000 bar4=0x10004000` and
+`assign: bar4 mapped ipa=0x50000000 host=0x10004000 size=0x4000` — the virtio modern BAR is stage-2
+**Device**-mapped into the guest.  Bars are assigned only when the caller passes
+`ASSIGN_FLAG_ASSIGN_BARS` (the GPU manager does; the default path and the assignment self-test are
+unchanged).  Guards added for the bugs found: BAR size power-of-two assert, BAR-IPA alignment
+`static_assert`, and a stage-2 headroom check after RAM mapping (`kMaxStage2Mappings` raised to 40960 =
+128 MiB of guest RAM plus device headroom).
+
+**Next blocker:** `gpu irq route failed`.  `device_route_irq` now passes cap/vCPU checks and reaches
+`device_irq_install`; the install step is what fails (the host INTx line created in `boot_caps` is not yet
+wired to a live GIC SPI / vGIC route).  Remaining E work: make the INTx line real (SPI enable + bind), then
+the Linux-side `virtio_gpu` / `/dev/dri/card0` assertions for Phase E.5.
 
 **Acceptance:** Linux binds `virtio_gpu`, creates a DRM primary device, no unexpected IOMMU faults, no
 global-bypass mapping.

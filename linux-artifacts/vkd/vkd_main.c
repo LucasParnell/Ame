@@ -60,7 +60,7 @@ static void vkd_error(struct gpud_channel* channel, const struct dango_ring_slot
 }
 
 static void vkd_handle(struct gpud_channel* channel, const struct dango_ring_slot* request,
-                       const uint8_t* arena, uint32_t arena_bytes) {
+                       uint8_t* arena, uint32_t arena_bytes) {
     switch (request->type) {
     case VK_SESSION_OPEN: {
         MxVkSessionOpenRequest req;
@@ -77,7 +77,7 @@ static void vkd_handle(struct gpud_channel* channel, const struct dango_ring_slo
         rep.max_outstanding = MX_VK_SESSION_MAX_OUTSTANDING;
         rep.flags = MX_VK_SESSION_FLAG_ARENA_READY;
         if (vkd_vulkan_available()) {
-            rep.flags |= MX_VK_SESSION_FLAG_VULKAN_LIVE | MX_VK_SESSION_FLAG_WSI;
+            rep.flags |= MX_VK_SESSION_FLAG_VULKAN_LIVE;
         }
         vkd_reply(channel, VK_SESSION_OPEN_REPLY, request, &rep, (uint32_t)sizeof(rep));
         break;
@@ -85,7 +85,7 @@ static void vkd_handle(struct gpud_channel* channel, const struct dango_ring_slo
     case VK_SESSION_SUBMIT: {
         MxVkSessionSubmitRequest req;
         if (mx_vk_slot_decode(request, VK_SESSION_SUBMIT, (uint32_t)sizeof(req), &req) != 0) {
-            vkd_error(channel, request, MX_ERR_BAD_PROTOCOL, req.session_id, request->length);
+            vkd_error(channel, request, MX_ERR_BAD_PROTOCOL, 0, request->length);
             return;
         }
         if (!vkd_vulkan_available()) {
@@ -114,7 +114,7 @@ static void vkd_handle(struct gpud_channel* channel, const struct dango_ring_slo
     case VK_SESSION_SYNC_WAIT: {
         MxVkSessionSyncWaitRequest req;
         if (mx_vk_slot_decode(request, VK_SESSION_SYNC_WAIT, (uint32_t)sizeof(req), &req) != 0) {
-            vkd_error(channel, request, MX_ERR_BAD_PROTOCOL, req.session_id, request->length);
+            vkd_error(channel, request, MX_ERR_BAD_PROTOCOL, 0, request->length);
             return;
         }
         /* Execution is synchronous per submit, so the token is already reached. */
@@ -128,7 +128,7 @@ static void vkd_handle(struct gpud_channel* channel, const struct dango_ring_slo
     case VK_SESSION_SWAPCHAIN_PRESENT: {
         MxVkSwapchainPresentRequest req;
         if (mx_vk_slot_decode(request, VK_SESSION_SWAPCHAIN_PRESENT, (uint32_t)sizeof(req), &req) != 0) {
-            vkd_error(channel, request, MX_ERR_BAD_PROTOCOL, req.session_id, request->length);
+            vkd_error(channel, request, MX_ERR_BAD_PROTOCOL, 0, request->length);
             return;
         }
         uint32_t copied = 0;
@@ -173,21 +173,26 @@ int dango_vkd_run(void) {
 
     /* Bind the Vulkan executor. Without VKD_HAVE_VULKAN (or a missing ICD) the
      * executor reports no device and every submit is refused cleanly. */
-    int device = 0;
     if (vkd_vulkan_init() == 0 && vkd_vulkan_available()) {
-        device = 1;
         mx_puts("dango-vkd: lavapipe device ready\n");
     } else {
         mx_puts("dango-vkd: no Vulkan device; submits will be refused\n");
     }
 
-    const uint8_t* arena = channel.staging;
+    if (!channel.staging || channel.staging_len <= MX_VK_COMMAND_REGION_BYTES ||
+        channel.staging_len > MX_VK_SESSION_MAX_ARENA_BYTES) {
+        mx_puts("dango-vkd: invalid staging arena FAILED\n");
+        vkd_vulkan_shutdown();
+        gpud_channel_close(&channel);
+        return 0;
+    }
+    uint8_t* arena = channel.staging;
     const uint32_t arena_bytes = (uint32_t)channel.staging_len;
     mx_puts("dango-vkd: serving\n");
 
     for (;;) {
         struct dango_ring_slot request;
-        if (gpud_channel_peek(&channel, &request) == 1) {
+        if (!gpud_channel_full(&channel) && gpud_channel_peek(&channel, &request) == 1) {
             vkd_handle(&channel, &request, arena, arena_bytes);
             gpud_channel_consume(&channel);
             continue;
@@ -198,7 +203,7 @@ int dango_vkd_run(void) {
         }
     }
 
-    if (device) vkd_vulkan_shutdown();
+    vkd_vulkan_shutdown();
     gpud_channel_close(&channel);
     return 1;
 }

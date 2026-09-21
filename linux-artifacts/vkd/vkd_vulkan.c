@@ -1,296 +1,306 @@
-/*
- * vkd_vulkan.c — the Vulkan execution half of dango-vkd (spec §14.6).
- *
- * Two builds, one interface:
- *
- *   * VKD_HAVE_VULKAN: link against a libc guest userspace carrying the Vulkan
- *     loader and the Mesa lavapipe ICD. dango-vkd then creates a real Vulkan
- *     device and translates the bounded command vocabulary into Vulkan calls
- *     (vkCmdFillBuffer, vkCmdCopyBuffer), submitting one command buffer per
- *     session submit and waiting on a fence — a real remote-Vulkan execution.
- *   * default (no libc): the freestanding initramfs has no loader and no ICD, so
- *     the executor reports no device. dango-vkd then refuses submits with
- *     MX_ERR_SERVICE_UNAVAILABLE instead of pretending, and the client degrades.
- *
- * This translation has NOT been executed in the development environment: the
- * guest image would first need a libc userspace plus libvulkan + lavapipe (see
- * scripts/linux/build-vkd.sh). It is compiled only when VKD_HAVE_VULKAN is set;
- * the default build compiles the fallback below and is byte-for-byte the honest
- * "no device" server.
+/* Bounded Vulkan transfer executor. All resources are created once at startup;
+ * each submit snapshots commands before validation and stages one arena buffer.
+ * A single buffer preserves aliasing and fill -> copy dependencies across
+ * commands. Native object ownership remains the session broker's responsibility.
  */
-
 #include "vkd_vulkan.h"
-
-#include "midix/abi/protocols/vulkan_session.h"
+#include "midix/abi/vulkan_commands.h"
 
 #if defined(VKD_HAVE_VULKAN)
-
-#include <vulkan/vulkan.h>
+#include <stdlib.h>
 #include <string.h>
+#include <vulkan/vulkan.h>
 
-/* Fixed capacities: no allocation on the request path (spec §14.7). */
-#define VKD_VULKAN_MAX_BUFFERS 64
-
-static VkInstance g_instance;
-static VkPhysicalDevice g_physical;
-static VkDevice g_device;
-static VkQueue g_queue;
-static uint32_t g_queue_family;
-static VkCommandPool g_pool;
-static VkCommandBuffer g_cmd;
-static VkFence g_fence;
-static int g_ready;
-
-/* One host-visible buffer per arena allocation, keyed by arena offset. */
-struct vkd_mapping {
+struct vkd_device {
+    VkInstance instance;
+    VkPhysicalDevice physical;
+    VkDevice device;
+    VkQueue queue;
+    VkCommandPool pool;
+    VkCommandBuffer command;
+    VkFence fence;
     VkBuffer buffer;
     VkDeviceMemory memory;
-    VkDeviceSize offset;
-    VkDeviceSize size;
     void* mapped;
+    int ready;
+    int pending;
+    uint8_t commands[MX_VK_COMMAND_REGION_BYTES];
 };
-static struct vkd_mapping g_buffers[VKD_VULKAN_MAX_BUFFERS];
-static uint32_t g_buffer_count;
+static struct vkd_device state;
 
-int vkd_vulkan_available(void) { return g_ready; }
-
-static uint32_t pick_memory_type(uint32_t type_bits, VkMemoryPropertyFlags want) {
-    VkPhysicalDeviceMemoryProperties props;
-    vkGetPhysicalDeviceMemoryProperties(g_physical, &props);
-    for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-        if ((type_bits & (1u << i)) &&
-            (props.memoryTypes[i].propertyFlags & want) == want) {
-            return i;
-        }
-    }
-    return 0;
-}
-
-int vkd_vulkan_init(void) {
-    if (g_ready) return 0;
-
-    /* Probe lavapipe by name so a host without a software ICD fails cleanly
-     * instead of binding some other device. lavapipe's device name is
-     * "llvmpipe (LLVM ...)". */
-    VkApplicationInfo app = {0};
-    app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app.pApplicationName = "dango-vkd";
-    app.apiVersion = VK_API_VERSION_1_0;
-    VkInstanceCreateInfo ici = {0};
-    ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    ici.pApplicationInfo = &app;
-    if (vkCreateInstance(&ici, NULL, &g_instance) != VK_SUCCESS) return -1;
-
-    uint32_t count = 0;
-    vkEnumeratePhysicalDevices(g_instance, &count, NULL);
-    if (count == 0) return -1;
-    VkPhysicalDevice devices[8];
-    if (count > 8) count = 8;
-    vkEnumeratePhysicalDevices(g_instance, &count, devices);
-    g_physical = devices[0];
-
-    VkQueueFamilyProperties families[8];
-    uint32_t family_count = 8;
-    vkGetPhysicalDeviceQueueFamilyProperties(g_physical, &family_count, families);
-    g_queue_family = 0xFFFFFFFFu;
-    for (uint32_t i = 0; i < family_count; ++i) {
-        if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-            g_queue_family = i;
-            break;
-        }
-    }
-    if (g_queue_family == 0xFFFFFFFFu) return -1;
-
-    float priority = 1.0f;
-    VkDeviceQueueCreateInfo qci = {0};
-    qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    qci.queueFamilyIndex = g_queue_family;
-    qci.queueCount = 1;
-    qci.pQueuePriorities = &priority;
-    VkDeviceCreateInfo dci = {0};
-    dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    dci.queueCreateInfoCount = 1;
-    dci.pQueueCreateInfos = &qci;
-    if (vkCreateDevice(g_physical, &dci, NULL, &g_device) != VK_SUCCESS) return -1;
-    vkGetDeviceQueue(g_device, g_queue_family, 0, &g_queue);
-
-    VkCommandPoolCreateInfo pci = {0};
-    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    pci.queueFamilyIndex = g_queue_family;
-    if (vkCreateCommandPool(g_device, &pci, NULL, &g_pool) != VK_SUCCESS) return -1;
-
-    VkCommandBufferAllocateInfo cai = {0};
-    cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cai.commandPool = g_pool;
-    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cai.commandBufferCount = 1;
-    if (vkAllocateCommandBuffers(g_device, &cai, &g_cmd) != VK_SUCCESS) return -1;
-
-    VkFenceCreateInfo fci = {0};
-    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    if (vkCreateFence(g_device, &fci, NULL, &g_fence) != VK_SUCCESS) return -1;
-
-    g_ready = 1;
-    return 0;
-}
-
-/* Return (creating on first use) the host-visible buffer backing an arena range.
- * A session allocates out of the shared arena, so one buffer per distinct
- * (offset,size) is enough and every operand is a buffer-relative offset. */
-static struct vkd_mapping* mapping_for(uint32_t offset, uint32_t size) {
-    for (uint32_t i = 0; i < g_buffer_count; ++i) {
-        if (g_buffers[i].offset == offset && g_buffers[i].size >= size) return &g_buffers[i];
-    }
-    if (g_buffer_count >= VKD_VULKAN_MAX_BUFFERS) return NULL;
-    VkBufferCreateInfo bci = {0};
-    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    bci.size = size;
-    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    struct vkd_mapping* m = &g_buffers[g_buffer_count];
-    if (vkCreateBuffer(g_device, &bci, NULL, &m->buffer) != VK_SUCCESS) return NULL;
-    VkMemoryRequirements req;
-    vkGetBufferMemoryRequirements(g_device, m->buffer, &req);
-    VkMemoryAllocateInfo mai = {0};
-    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    mai.allocationSize = req.size;
-    mai.memoryTypeIndex = pick_memory_type(
-        req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (vkAllocateMemory(g_device, &mai, NULL, &m->memory) != VK_SUCCESS) return NULL;
-    vkBindBufferMemory(g_device, m->buffer, m->memory, 0);
-    vkMapMemory(g_device, m->memory, 0, VK_WHOLE_SIZE, 0, &m->mapped);
-    m->offset = offset;
-    m->size = size;
-    ++g_buffer_count;
-    return m;
-}
-
-int vkd_vulkan_execute(const uint8_t* arena, uint32_t arena_bytes, uint32_t command_offset,
-                       uint32_t command_bytes) {
-    if (!g_ready) return -1;
-    if ((uint64_t)command_offset + command_bytes > arena_bytes) return -1;
-
-    /* Stage the client's arena bytes into host-visible Vulkan buffers, replay
-     * the command records, then flush the result back. The arena is the single
-     * shared region; commands name offsets into it. A production appliance would
-     * import the staging pages instead of copying (spec §15.6), which is Phase S. */
-    struct { uint32_t offset; uint32_t size; } touched[VKD_VULKAN_MAX_BUFFERS];
-    uint32_t touched_count = 0;
-
-    vkResetCommandBuffer(g_cmd, 0);
-    VkCommandBufferBeginInfo begin = {0};
-    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (vkBeginCommandBuffer(g_cmd, &begin) != VK_SUCCESS) return -1;
-
-    uint32_t off = 0;
-    while (off + sizeof(MxVkCommandHeader) <= command_bytes) {
-        const MxVkCommandHeader* header =
-            (const MxVkCommandHeader*)(const void*)(arena + command_offset + off);
-        if (header->size < sizeof(MxVkCommandHeader) || header->size > command_bytes - off) {
-            vkEndCommandBuffer(g_cmd);
-            return -1;
-        }
-        switch (header->opcode) {
-        case VK_CMD_FILL_BUFFER: {
-            const MxVkCmdFillBuffer* cmd = (const MxVkCmdFillBuffer*)(const void*)header;
-            uint32_t size = (uint32_t)cmd->size;
-            struct vkd_mapping* m = mapping_for((uint32_t)cmd->dest_arena_offset, size);
-            if (!m) { vkEndCommandBuffer(g_cmd); return -1; }
-            /* Seed the buffer with the client's current bytes so the fill is the
-             * only change, then fill on the device. */
-            memcpy(m->mapped, arena + cmd->dest_arena_offset, size);
-            vkCmdFillBuffer(g_cmd, m->buffer, cmd->offset, cmd->size, cmd->value);
-            touched[touched_count].offset = (uint32_t)cmd->dest_arena_offset;
-            touched[touched_count].size = size;
-            ++touched_count;
-            break;
-        }
-        case VK_CMD_COPY_BUFFER: {
-            const MxVkCmdCopyBuffer* cmd = (const MxVkCmdCopyBuffer*)(const void*)header;
-            uint32_t size = (uint32_t)cmd->size;
-            struct vkd_mapping* src = mapping_for((uint32_t)cmd->src_arena_offset, size);
-            struct vkd_mapping* dst = mapping_for((uint32_t)cmd->dst_arena_offset, size);
-            if (!src || !dst) { vkEndCommandBuffer(g_cmd); return -1; }
-            memcpy(src->mapped, arena + cmd->src_arena_offset, size);
-            VkBufferCopy region = {0};
-            region.size = size;
-            vkCmdCopyBuffer(g_cmd, src->buffer, dst->buffer, 1, &region);
-            touched[touched_count].offset = (uint32_t)cmd->dst_arena_offset;
-            touched[touched_count].size = size;
-            ++touched_count;
-            break;
-        }
-        case VK_CMD_PIPELINE_BARRIER:
-            break;
-        default:
-            /* DRAW/DISPATCH need a pipeline the bootstrap path does not build
-             * yet; refuse rather than silently drop them. */
-            vkEndCommandBuffer(g_cmd);
-            return -1;
-        }
-        off += header->size;
-    }
-
-    if (vkEndCommandBuffer(g_cmd) != VK_SUCCESS) return -1;
-    VkSubmitInfo submit = {0};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &g_cmd;
-    if (vkQueueSubmit(g_queue, 1, &submit, g_fence) != VK_SUCCESS) return -1;
-    if (vkWaitForFences(g_device, 1, &g_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) return -1;
-    vkResetFences(g_device, 1, &g_fence);
-
-    /* Invalidate + read back every touched range (host-coherent memory needs no
-     * explicit invalidate, but keep it correct for non-coherent types). */
-    for (uint32_t i = 0; i < touched_count && i < VKD_VULKAN_MAX_BUFFERS; ++i) {
-        for (uint32_t b = 0; b < g_buffer_count; ++b) {
-            if (g_buffers[b].offset == touched[i].offset) {
-                VkMappedMemoryRange range = {0};
-                range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-                range.memory = g_buffers[b].memory;
-                range.offset = 0;
-                range.size = VK_WHOLE_SIZE;
-                vkInvalidateMappedMemoryRanges(g_device, 1, &range);
-                memcpy((void*)(arena + touched[i].offset), g_buffers[b].mapped, touched[i].size);
-                break;
-            }
-        }
-    }
-    return 0;
-}
-
-int vkd_vulkan_present(const uint8_t* image, uint32_t image_bytes, uint32_t* copied_out) {
-    if (!g_ready) return -1;
-    /* The bounded copy into the Dango shared buffer is done by the caller (it
-     * owns the staging window mapping); here we only bound the size. */
-    uint32_t copied = image_bytes;
-    if (copied > MX_VK_SHARED_BUFFER_MAX_BYTES) copied = MX_VK_SHARED_BUFFER_MAX_BYTES;
-    (void)image;
-    if (copied_out) *copied_out = copied;
-    return 0;
+int vkd_vulkan_available(void) {
+    return state.ready;
 }
 
 void vkd_vulkan_shutdown(void) {
-    if (!g_ready) return;
-    for (uint32_t i = 0; i < g_buffer_count; ++i) {
-        if (g_buffers[i].mapped) vkUnmapMemory(g_device, g_buffers[i].memory);
-        vkDestroyBuffer(g_device, g_buffers[i].buffer, NULL);
-        vkFreeMemory(g_device, g_buffers[i].memory, NULL);
+    /* Also handles every partially initialized state. Pending work must retire
+     * before freeing device memory, including after a failed bounded wait. */
+    if (state.device) {
+        if (state.pending) {
+            (void)vkDeviceWaitIdle(state.device);
+        }
+        if (state.mapped) {
+            vkUnmapMemory(state.device, state.memory);
+        }
+        if (state.buffer) {
+            vkDestroyBuffer(state.device, state.buffer, NULL);
+        }
+        if (state.memory) {
+            vkFreeMemory(state.device, state.memory, NULL);
+        }
+        if (state.fence) {
+            vkDestroyFence(state.device, state.fence, NULL);
+        }
+        if (state.pool) {
+            vkDestroyCommandPool(state.device, state.pool, NULL);
+        }
+        vkDestroyDevice(state.device, NULL);
     }
-    g_buffer_count = 0;
-    vkDestroyFence(g_device, g_fence, NULL);
-    vkDestroyCommandPool(g_device, g_pool, NULL);
-    vkDestroyDevice(g_device, NULL);
-    vkDestroyInstance(g_instance, NULL);
-    g_ready = 0;
+    if (state.instance) {
+        vkDestroyInstance(state.instance, NULL);
+    }
+    memset(&state, 0, sizeof(state));
 }
 
-#else /* !VKD_HAVE_VULKAN */
+int vkd_vulkan_init(void) {
+    if (state.ready) {
+        return 0;
+    }
+    vkd_vulkan_shutdown();
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                             .pApplicationName = "dango-vkd",
+                             .apiVersion = VK_API_VERSION_1_0};
+    VkInstanceCreateInfo instance = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+                                     .pApplicationInfo = &app};
+    if (vkCreateInstance(&instance, NULL, &state.instance) != VK_SUCCESS) {
+        goto fail;
+    }
 
-int vkd_vulkan_available(void) { return 0; }
-int vkd_vulkan_init(void) { return -1; }
-int vkd_vulkan_execute(const uint8_t* arena, uint32_t arena_bytes, uint32_t command_offset,
+    /* The rootfs selects its one lavapipe ICD explicitly. Refuse a non-CPU
+     * device rather than binding physical hardware through this profile. */
+    uint32_t count = 1;
+    VkResult result = vkEnumeratePhysicalDevices(state.instance, &count, &state.physical);
+    if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || count != 1) {
+        goto fail;
+    }
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(state.physical, &properties);
+    if (properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) {
+        goto fail;
+    }
+    uint32_t family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(state.physical, &family_count, NULL);
+    if (!family_count) {
+        goto fail;
+    }
+    VkQueueFamilyProperties* families = calloc(family_count, sizeof(*families));
+    if (!families) {
+        goto fail;
+    }
+    vkGetPhysicalDeviceQueueFamilyProperties(state.physical, &family_count, families);
+    uint32_t family_index = family_count;
+    for (uint32_t i = 0; i < family_count; ++i) {
+        if (families[i].queueCount &&
+            (families[i].queueFlags & (VK_QUEUE_TRANSFER_BIT | VK_QUEUE_GRAPHICS_BIT))) {
+            family_index = i;
+            break;
+        }
+    }
+    free(families);
+    if (family_index == family_count) {
+        goto fail;
+    }
+    float priority = 1.0f;
+    VkDeviceQueueCreateInfo queue = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                     .queueFamilyIndex = family_index,
+                                     .queueCount = 1,
+                                     .pQueuePriorities = &priority};
+    VkDeviceCreateInfo device = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                                 .queueCreateInfoCount = 1,
+                                 .pQueueCreateInfos = &queue};
+    if (vkCreateDevice(state.physical, &device, NULL, &state.device) != VK_SUCCESS) {
+        goto fail;
+    }
+    vkGetDeviceQueue(state.device, family_index, 0, &state.queue);
+    VkCommandPoolCreateInfo pool = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                                    .queueFamilyIndex = family_index};
+    if (vkCreateCommandPool(state.device, &pool, NULL, &state.pool) != VK_SUCCESS) {
+        goto fail;
+    }
+    VkCommandBufferAllocateInfo command = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                           .commandPool = state.pool,
+                                           .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                           .commandBufferCount = 1};
+    if (vkAllocateCommandBuffers(state.device, &command, &state.command) != VK_SUCCESS) {
+        goto fail;
+    }
+    VkFenceCreateInfo fence = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    if (vkCreateFence(state.device, &fence, NULL, &state.fence) != VK_SUCCESS) {
+        goto fail;
+    }
+    VkBufferCreateInfo buffer = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                 .size = MX_VK_SESSION_MAX_ARENA_BYTES,
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    if (vkCreateBuffer(state.device, &buffer, NULL, &state.buffer) != VK_SUCCESS) {
+        goto fail;
+    }
+    VkMemoryRequirements requirements;
+    VkPhysicalDeviceMemoryProperties memory_properties;
+    vkGetBufferMemoryRequirements(state.device, state.buffer, &requirements);
+    vkGetPhysicalDeviceMemoryProperties(state.physical, &memory_properties);
+    uint32_t memory_type = memory_properties.memoryTypeCount;
+    const VkMemoryPropertyFlags wanted =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
+        if ((requirements.memoryTypeBits & (1u << i)) &&
+            (memory_properties.memoryTypes[i].propertyFlags & wanted) == wanted) {
+            memory_type = i;
+            break;
+        }
+    }
+    if (memory_type == memory_properties.memoryTypeCount) {
+        goto fail;
+    }
+    VkMemoryAllocateInfo memory = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                   .allocationSize = requirements.size,
+                                   .memoryTypeIndex = memory_type};
+    if (vkAllocateMemory(state.device, &memory, NULL, &state.memory) != VK_SUCCESS ||
+        vkBindBufferMemory(state.device, state.buffer, state.memory, 0) != VK_SUCCESS ||
+        vkMapMemory(state.device, state.memory, 0, VK_WHOLE_SIZE, 0, &state.mapped) != VK_SUCCESS) {
+        goto fail;
+    }
+    state.ready = 1;
+    return 0;
+fail:
+    vkd_vulkan_shutdown();
+    return -1;
+}
+
+static int validate(uint32_t arena_bytes, uint32_t command_bytes) {
+    uint32_t count = 0;
+    for (uint32_t off = 0; off < command_bytes;) {
+        MxVkCommand cmd;
+        if (++count > MX_VK_MAX_COMMANDS_PER_SUBMIT ||
+            mx_vk_command_decode(state.commands + off, command_bytes - off, &cmd)) {
+            return -1;
+        }
+        switch (cmd.header.opcode) {
+        case VK_CMD_FILL_BUFFER:
+            if (cmd.fill.dest_arena_offset < MX_VK_COMMAND_REGION_BYTES ||
+                cmd.fill.dest_arena_offset > arena_bytes ||
+                cmd.fill.offset > arena_bytes - cmd.fill.dest_arena_offset ||
+                !mx_vk_data_range_valid(cmd.fill.dest_arena_offset + cmd.fill.offset, cmd.fill.size,
+                                        arena_bytes) ||
+                ((cmd.fill.dest_arena_offset + cmd.fill.offset) & 3) || (cmd.fill.size & 3)) {
+                return -1;
+            }
+            break;
+        case VK_CMD_COPY_BUFFER:
+            if (!mx_vk_data_range_valid(cmd.copy.src_arena_offset, cmd.copy.size, arena_bytes) ||
+                !mx_vk_data_range_valid(cmd.copy.dst_arena_offset, cmd.copy.size, arena_bytes)) {
+                return -1;
+            }
+            /* vkCmdCopyBuffer forbids overlapping source/destination regions. */
+            if (cmd.copy.src_arena_offset < cmd.copy.dst_arena_offset + cmd.copy.size &&
+                cmd.copy.dst_arena_offset < cmd.copy.src_arena_offset + cmd.copy.size) {
+                return -1;
+            }
+            break;
+        case VK_CMD_PIPELINE_BARRIER:
+            break;
+        default:
+            return -1; /* No graphics/compute pipeline yet. */
+        }
+        off += cmd.header.size;
+    }
+    return 0;
+}
+
+static void barrier(VkPipelineStageFlags dst_stage, VkAccessFlags dst_access) {
+    VkMemoryBarrier memory = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                              .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                              .dstAccessMask = dst_access};
+    vkCmdPipelineBarrier(state.command, VK_PIPELINE_STAGE_TRANSFER_BIT, dst_stage, 0, 1, &memory, 0,
+                         NULL, 0, NULL);
+}
+
+int vkd_vulkan_execute(uint8_t* arena, uint32_t arena_bytes, uint32_t command_offset,
+                       uint32_t command_bytes) {
+    if (!state.ready || !arena || arena_bytes <= MX_VK_COMMAND_REGION_BYTES ||
+        arena_bytes > MX_VK_SESSION_MAX_ARENA_BYTES || !command_bytes ||
+        command_offset % MX_VK_COMMAND_ALIGNMENT || command_bytes % MX_VK_COMMAND_ALIGNMENT ||
+        command_offset >= MX_VK_COMMAND_REGION_BYTES ||
+        command_bytes > MX_VK_COMMAND_REGION_BYTES - command_offset) {
+        return -1;
+    }
+    memcpy(state.commands, arena + command_offset, command_bytes);
+    if (validate(arena_bytes, command_bytes)) {
+        return -1;
+    }
+    if (vkResetCommandBuffer(state.command, 0) != VK_SUCCESS ||
+        vkResetFences(state.device, 1, &state.fence) != VK_SUCCESS) {
+        goto fail;
+    }
+    VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    if (vkBeginCommandBuffer(state.command, &begin) != VK_SUCCESS) {
+        goto fail;
+    }
+    memcpy((uint8_t*)state.mapped + MX_VK_COMMAND_REGION_BYTES, arena + MX_VK_COMMAND_REGION_BYTES,
+           arena_bytes - MX_VK_COMMAND_REGION_BYTES);
+    for (uint32_t off = 0; off < command_bytes;) {
+        MxVkCommand cmd;
+        (void)mx_vk_command_decode(state.commands + off, command_bytes - off, &cmd);
+        if (cmd.header.opcode == VK_CMD_FILL_BUFFER) {
+            vkCmdFillBuffer(state.command, state.buffer,
+                            cmd.fill.dest_arena_offset + cmd.fill.offset, cmd.fill.size,
+                            cmd.fill.value);
+        } else if (cmd.header.opcode == VK_CMD_COPY_BUFFER) {
+            VkBufferCopy copy = {.srcOffset = cmd.copy.src_arena_offset,
+                                 .dstOffset = cmd.copy.dst_arena_offset,
+                                 .size = cmd.copy.size};
+            vkCmdCopyBuffer(state.command, state.buffer, state.buffer, 1, &copy);
+        }
+        /* Preserve record order, including RAW/WAW aliases and explicit barriers. */
+        barrier(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        off += cmd.header.size;
+    }
+    barrier(VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+    if (vkEndCommandBuffer(state.command) != VK_SUCCESS) {
+        goto fail;
+    }
+    VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                           .commandBufferCount = 1,
+                           .pCommandBuffers = &state.command};
+    if (vkQueueSubmit(state.queue, 1, &submit, state.fence) != VK_SUCCESS) {
+        goto fail;
+    }
+    state.pending = 1;
+    if (vkWaitForFences(state.device, 1, &state.fence, VK_TRUE, VKD_SUBMIT_TIMEOUT_NS) !=
+        VK_SUCCESS) {
+        goto fail;
+    }
+    state.pending = 0;
+    memcpy(arena + MX_VK_COMMAND_REGION_BYTES, (uint8_t*)state.mapped + MX_VK_COMMAND_REGION_BYTES,
+           arena_bytes - MX_VK_COMMAND_REGION_BYTES);
+    return 0;
+fail:
+    state.ready = 0; /* Never reuse resources whose completion is uncertain. */
+    return -1;
+}
+#else
+int vkd_vulkan_available(void) {
+    return 0;
+}
+int vkd_vulkan_init(void) {
+    return -1;
+}
+void vkd_vulkan_shutdown(void) {}
+int vkd_vulkan_execute(uint8_t* arena, uint32_t arena_bytes, uint32_t command_offset,
                        uint32_t command_bytes) {
     (void)arena;
     (void)arena_bytes;
@@ -298,12 +308,15 @@ int vkd_vulkan_execute(const uint8_t* arena, uint32_t arena_bytes, uint32_t comm
     (void)command_bytes;
     return -1;
 }
+#endif
+
+/* No WSI backend is implemented here. Never report bytes copied without doing
+ * a copy or advertise WSI merely because device creation succeeded. */
 int vkd_vulkan_present(const uint8_t* image, uint32_t image_bytes, uint32_t* copied_out) {
     (void)image;
     (void)image_bytes;
-    (void)copied_out;
+    if (copied_out) {
+        *copied_out = 0;
+    }
     return -1;
 }
-void vkd_vulkan_shutdown(void) {}
-
-#endif /* VKD_HAVE_VULKAN */

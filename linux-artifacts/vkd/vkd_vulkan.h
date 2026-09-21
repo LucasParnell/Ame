@@ -21,6 +21,8 @@
 
 #include <stdint.h>
 
+#define VKD_SUBMIT_TIMEOUT_NS UINT64_C(5000000000)
+
 /* 1 when a real Vulkan device is present and usable. */
 int vkd_vulkan_available(void);
 
@@ -30,12 +32,11 @@ int vkd_vulkan_init(void);
 
 /* Execute the command stream [command_offset, command_offset+command_bytes) of
  * `arena` (the session arena). Returns 0 on success, -1 on failure. */
-int vkd_vulkan_execute(const uint8_t *arena, uint32_t arena_bytes, uint32_t command_offset,
+int vkd_vulkan_execute(uint8_t* arena, uint32_t arena_bytes, uint32_t command_offset,
                        uint32_t command_bytes);
 
-/* Bounded copy of a finished image into the appliance shared buffer (the Dango
- * staging window the host scans out). Returns 0 on success, -1 on failure. */
-int vkd_vulkan_present(const uint8_t *image, uint32_t image_bytes, uint32_t *copied_out);
+/* WSI seam: currently unsupported, returns -1 and reports zero copied bytes. */
+int vkd_vulkan_present(const uint8_t* image, uint32_t image_bytes, uint32_t* copied_out);
 
 void vkd_vulkan_shutdown(void);
 

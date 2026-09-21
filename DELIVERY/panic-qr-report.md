@@ -43,22 +43,50 @@ same fields in a wider, human-readable form plus the frame-by-frame call trace.
 - **Gate.** `AME_VERIFY_IOMMU=1 AME_VERIFY_ASSIGN=1 AME_VERIFY_CHANNEL=1 AME_VERIFY_GPU=1
   AME_VERIFY_KMS=1 AME_VERIFY_PANIC=1 scripts/verify.sh` → all rows green.
 
+## Review-driven hardening
+
+An adversarial review of the panic path found real defects, all now fixed and guarded:
+
+- **The frame walk could fault inside the handler** and lose the whole report. The backtrace now only
+  follows pointers inside the kernel RAM window (and 8-byte aligned), so a stale or attacker-shaped
+  `x29` cannot fault there; the panic path is documented as never dereferencing outside RAM.
+- **Ownership was claimed after capture**, so a second panicking CPU could overwrite the record.
+  `claim_or_park()` now runs first on every entry point; only the first CPU ever touches the record.
+- **The panic path no longer takes locks or touches the log ring** (the Fatal path took a doorbell
+  spinlock). The whole report leaves through `log::panic_dump()` on the UART only.
+- **Interrupts are masked** on entry, so the parked `wfi` state is stable for both trap and explicit
+  panics.
+- **The logo no longer paints over the report text**: the key-data column is clipped to the QR column
+  and `tests/panic_screen_probe.cc` now fails if a caption pixel reaches into the logo band.
+- **No silent QR loss**: the screen tries ECC M then L, returns whether a code was drawn, and the
+  serial dump records payload truncation or a missing QR.
+
 ## Fixed along the way
 
 The GPU build staged prebuilt Linux artifacts by inlining `copy_if_different` into the `system.mxb`
 custom command, with the copies undeclared and, crucially, freshness decided by **mtime** — so an
 artifact directory refreshed with older timestamps (`rsync -a`, restored backup) silently kept the
 previous payload in `system.mxb` (this is what made the `dango-channel` row time out once). The bundle
-now also depends on a **content-hash stamp** for the artifacts, so a content change always re-runs
-staging and packing regardless of timestamps. Verified by changing an artifact with an old mtime:
-ninja re-schedules *"Packing Ame signed system bundle"*.
+now also depends on a **content-hash stamp** for the artifacts, computed when CMake configures, so any
+configure→build cycle (which is what `scripts/verify.sh` and the handoff iteration commands do) always
+re-stages and re-packs when artifact *content* changes, regardless of timestamps. Verified by changing
+an artifact with an old mtime and confirming ninja re-schedules *"Packing Ame signed system bundle"*.
+
+**Stated limit:** a bare `ninja` with no reconfigure still cannot see a content change that comes with
+older mtimes — that is ninja's mtime model, not this project's logic. A follow-up will remove the
+staging copies altogether (pointing `mksystem.py` at the artifact directory) and/or drive the stamp
+from an always-run step, which removes the staging directory as a class of failure.
 
 ## Limits (stated, not hidden)
 
 - Payloads larger than a version-40 symbol at the chosen ECC level are truncated (the renderers set a
-  truncation flag); the report is sized to stay inside ECC M.
-- The QR is drawn at the largest integer module size that fits the box; very dense reports on small
-  displays get small modules — the serial dump is the authoritative record.
-- A panic halts only the panicking core. Other cores keep running and the framebuffer service could in
-  principle repaint; recovery is a machine reset (QEMU `system_reset`/Ctrl-Alt-Del at the emulator, or
-  power). The guest has no i8042, so Ctrl-Alt-Del is not observable from inside the guest.
+  truncation flag, and the panic path reports it on the UART); the report is sized to stay inside ECC M.
+- The QR is drawn at the largest integer module size that fits the box; a very dense report on a very
+  small panel can leave no whole module size, in which case no QR is drawn and the serial dump says so.
+  The serial dump is the authoritative record.
+- A panic halts only the panicking core. Other cores keep running, so their log lines can interleave
+  with the panic dump on the shared UART, and the framebuffer service could in principle repaint;
+  recovery is a machine reset (QEMU `system_reset`/Ctrl-Alt-Del at the emulator, or power). The guest
+  has no i8042, so Ctrl-Alt-Del is not observable from inside the guest.
+- Explicit `panic()`/`panicf()` have no trap frame, so ESR/FAR are zero and the reason is the message;
+  hardware faults (`kernel_sync_fault`) carry the full trap state.

@@ -111,6 +111,24 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
     check(title_y_min > h / 2, "title in the lower half");
     check(title_x_max < w / 2, "title left-aligned");
 
+    // The key-data column must not run under the logo: no caption pixel may
+    // reach into the logo's horizontal band.
+    uint32_t art_x_min = w;
+    for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+            const uint32_t c = f.px[static_cast<size_t>(y) * w + x];
+            if ((near(c, kArtDim) || near(c, kArtBright)) && x < art_x_min) art_x_min = x;
+        }
+    }
+    uint32_t caption_in_logo = 0;
+    for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = art_x_min; x < w; ++x) {
+            const uint32_t c = f.px[static_cast<size_t>(y) * w + x];
+            if (near(c, kCaption)) ++caption_in_logo;
+        }
+    }
+    check(caption_in_logo == 0, "caption stays out of the logo column");
+
     // Determinism.
     Frame g(w, h);
     anko::panic_screen::bind(reinterpret_cast<volatile uint32_t*>(g.px.data()), w, h);

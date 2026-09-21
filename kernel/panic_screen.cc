@@ -155,15 +155,18 @@ u32 draw_qr(const anko::qr::Code& code, u32 x0, u32 y0, u32 module) {
     return side;
 }
 
-// Draw up to `max_lines` newline-separated lines of `text`, left-aligned.
-void draw_block(u32 x, u32 y, u32 scale, u32 fg, const char* text, u32 max_lines) {
+// Draw up to `max_lines` newline-separated lines of `text`, left-aligned and
+// clipped to `max_chars` characters so a column never runs into its neighbour.
+void draw_block(u32 x, u32 y, u32 scale, u32 fg, const char* text, u32 max_lines,
+                u32 max_chars) {
     if (!text) return;
     u32 line = 0;
     const char* p = text;
     while (*p && line < max_lines) {
         const char* end = p;
         while (*end && *end != '\n') ++end;
-        draw_text(x, y, scale, fg, p, (end - p) > 0 ? static_cast<u32>(end - p) : 0);
+        const u32 width = static_cast<u32>(end - p);
+        draw_text(x, y, scale, fg, p, width < max_chars ? width : max_chars);
         ++line;
         y += kCellH * scale;
         if (!*end) break;
@@ -222,14 +225,15 @@ bool show(const char* title, const char* reason, const char* payload) {
         }
     }
 
-    // --- key data under the QR --------------------------------------------
+    // --- key data under the QR, confined to the QR column ------------------
     const u32 caption_x = kMargin;
     u32 caption_y = kMargin + qr_height + (qr_height ? kMargin : 0);
     const u32 band_h = kCellH * kTitleScale + kCellH + 2u * kMargin;
     const u32 caption_limit = g_h > band_h + kCellH ? g_h - band_h - kCellH : caption_y;
     const u32 caption_lines = caption_limit > caption_y ? (caption_limit - caption_y) / kCellH : 0;
+    const u32 caption_cols = (qr_width ? qr_width : g_w - 2u * kMargin) / (kCellW * kCaptionScale);
     draw_block(caption_x, caption_y, kCaptionScale, kCaptionFg, payload,
-               smaller(caption_lines, kMaxCaptionLines));
+               smaller(caption_lines, kMaxCaptionLines), caption_cols);
 
     // --- logo, in the space to the right of the QR -------------------------
     const u32 art_x0 = kMargin + qr_width + (qr_width ? kMargin : 0);

@@ -54,7 +54,10 @@ void capture_registers(Report& report, const u64* x, u64 sp, u64 elr, u64 spsr,
                        u64 esr, u64 far);
 
 // Walk the AArch64 frame-pointer chain from `fp` into report.trace (bounded).
-void capture_backtrace(Report& report, u64 fp);
+// Only pointers inside [lo, hi) are followed: the chain lives on the kernel
+// stack in RAM, so restricting the walk to that window means the panic path
+// never dereferences an attacker-shaped or stale frame pointer.
+void capture_backtrace(Report& report, u64 fp, u64 lo, u64 hi);
 
 // Compact line-oriented form for the QR code. Returns bytes written (excluding
 // the NUL) and sets *truncated when the record did not fit.

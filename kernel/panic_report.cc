@@ -75,14 +75,17 @@ void capture_registers(Report& report, const u64* x, u64 sp, u64 elr, u64 spsr,
     report.regs.far = far;
 }
 
-void capture_backtrace(Report& report, u64 fp) {
+void capture_backtrace(Report& report, u64 fp, u64 lo, u64 hi) {
     report.trace_count = 0;
-    constexpr u64 kKernelVaBase = 0xffff000000000000ull;
     for (u32 i = 0; i < kMaxBacktrace; ++i) {
-        if (fp == 0 || (fp & 7u) != 0 || fp < kKernelVaBase) break;
+        // Stay inside a caller-supplied window (kernel RAM) and require 8-byte
+        // alignment: outside it a frame record cannot be trusted, and following
+        // it could fault inside the panic handler.
+        if (fp < lo || fp + 16u > hi || (fp & 7u) != 0) break;
         const u64* record = reinterpret_cast<const u64*>(fp);
+        const u64 next = record[0];
         report.trace[report.trace_count++] = record[1];
-        fp = record[0];
+        fp = next;
     }
 }
 

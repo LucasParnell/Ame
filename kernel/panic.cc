@@ -99,41 +99,54 @@ static void capture_current_registers() {
 // Shared epilogue: publish the report, paint the screen, halt this CPU.
 // ---------------------------------------------------------------------------
 
-[[noreturn]] static void halt_with(const char* reason, u64 fp) {
+// The first CPU to panic owns the record; any other CPU parks immediately so it
+// cannot overwrite the report while it is being rendered. Interrupts are masked
+// here as well, so the parked state is stable and `wfi` does not spin.
+static void claim_or_park() {
     if (__atomic_exchange_n(&g_panic_owner, 1u, __ATOMIC_ACQ_REL) != 0u) {
+        asm volatile("msr daifset, #2" ::: "memory");
         for (;;) asm volatile("wfi" ::: "memory");
     }
+    asm volatile("msr daifset, #2" ::: "memory");
+}
+
+// Everything below runs with the record exclusively owned. Nothing on this path
+// takes a lock, allocates, or calls the log ring: the report reaches the UART
+// through log::panic_dump only.
+[[noreturn]] static void halt_and_report(const char* reason, u64 fp) {
     g_report.title  = "KERNEL PANIC";
     g_report.reason = reason ? reason : "unknown";
-    g_report.core   = 0; // TPIDR_EL1 holds the boot CPU id
     {
         u64 core = 0;
         asm volatile("mrs %0, TPIDR_EL1" : "=r"(core));
         g_report.core = static_cast<u32>(core);
     }
     capture_hardware();
-    anko::panic_report::capture_backtrace(g_report, fp);
+
+    // The frame chain lives on the kernel stack in RAM; restrict the walk to
+    // that window so a stale or corrupt x29 cannot fault inside the handler.
+    if (g_hw.ram_size != 0) {
+        anko::panic_report::capture_backtrace(g_report, fp, g_hw.ram_base,
+                                              g_hw.ram_base + g_hw.ram_size);
+    }
 
     bool truncated = false;
-    (void)anko::panic_report::format_serial(g_report, g_serial_text,
-                                            sizeof(g_serial_text), &truncated);
+    const u32 serial_len = anko::panic_report::format_serial(
+        g_report, g_serial_text, sizeof(g_serial_text), &truncated);
+    (void)serial_len;
     anko::log::panic_dump(g_serial_text);
-    if (truncated) {
-        anko::log::write(anko::log::Level::Fatal, "panic", "(serial report truncated)");
-    }
+    if (truncated) anko::log::panic_dump("(serial report truncated)\n");
 
     bool qr_truncated = false;
-    (void)anko::panic_report::format_qr(g_report, g_qr_payload,
-                                        sizeof(g_qr_payload), &qr_truncated);
+    const u32 qr_len = anko::panic_report::format_qr(g_report, g_qr_payload,
+                                                     sizeof(g_qr_payload), &qr_truncated);
+    (void)qr_len;
+    if (qr_truncated) anko::log::panic_dump("(panic screen: QR payload truncated)\n");
     if (!anko::panic_screen::show(g_report.title, g_report.reason, g_qr_payload)) {
-        anko::log::write(anko::log::Level::Fatal, "panic",
-                         "(panic screen: report too large for a QR code)");
+        anko::log::panic_dump("(panic screen: QR not drawn; report too large or screen too small)\n");
     }
 
-    anko::log::write(anko::log::Level::Fatal, "panic",
-                     "--- system halted: reset (Ctrl-Alt-Del / system_reset) to reboot ---");
-    // Halt only this core. Interrupts stay masked so the report is never
-    // clobbered; recovery is a machine reset, which is an external event.
+    // Halt only this core. Recovery is a machine reset, which is external.
     for (;;) asm volatile("wfi" ::: "memory");
 }
 
@@ -142,11 +155,11 @@ static void capture_current_registers() {
 // ---------------------------------------------------------------------------
 
 extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* frame) {
+    claim_or_park();
     const u32 ec = static_cast<u32>(arm64::esr_ec(esr));
-    const char* reason = ec_name(ec);
     anko::panic_report::capture_registers(g_report, frame->x, frame->sp_el0,
                                           frame->elr, frame->spsr, esr, far);
-    halt_with(reason, frame->x[29]);
+    halt_and_report(ec_name(ec), frame->x[29]);
 }
 
 // ---------------------------------------------------------------------------
@@ -154,20 +167,18 @@ extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* fram
 // ---------------------------------------------------------------------------
 
 [[noreturn]] void panic(const char* msg) {
+    claim_or_park();
     capture_current_registers();
-    halt_with(msg ? msg : "panic", g_report.regs.x[29]);
+    halt_and_report(msg ? msg : "panic", g_report.regs.x[29]);
 }
 
 [[noreturn]] void panicf(const char* fmt, ...) {
+    claim_or_park();
     static char message[anko::panic_report::kMaxSerialText];
     va_list ap;
     va_start(ap, fmt);
-    va_list ap_screen;
-    va_copy(ap_screen, ap);
-    anko::log::vrawf(fmt, ap);
-    anko::log::vformat_to(message, sizeof(message), fmt, ap_screen);
-    va_end(ap_screen);
+    anko::log::vformat_to(message, sizeof(message), fmt, ap);
     va_end(ap);
     capture_current_registers();
-    halt_with(message, g_report.regs.x[29]);
+    halt_and_report(message, g_report.regs.x[29]);
 }

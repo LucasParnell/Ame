@@ -9,7 +9,7 @@ Legend: **blocker** = needs something not in the tree yet · **hardening** = wor
 
 | # | Item | Phase | Kind | Why it is left |
 |---|---|---|---|---|
-| 1 | Real Vulkan execution | N/O | **blocker** | The session transport is verified against a *reference software backend on the same wire*, not Vulkan. The guest is a no-libc freestanding initramfs, so it cannot `dlopen` the staged lavapipe ICD; the macOS host has no Vulkan. Needs a **libc guest rootfs** + Mesa lavapipe linked into `dango-vkd`, then re-run the N/O acceptance (instance/device, host-visible alloc, record/submit/sync, offscreen validation) and the WSI triangle presenting through `virtio_gpu`. `linux-artifacts/vkd/` + `scripts/linux/build-vkd*.sh` already stage it; the build reports the missing rootfs instead of faking it. |
+| 1 | Real Vulkan execution | N/O | **partial; integration blocker** | A libc/lavapipe rootfs now builds on macOS via Docker, and the real transfer executor passes in a container chroot and standalone Linux (`AME_VERIFY_VULKAN=1`). The native client/broker tests still use the reference backend. Remaining: fit the rootfs into Dango's memory/load layout, bind per-session arenas through the manager and guest channel, and implement graphics/WSI before the native triangle acceptance. See the execution notes below. |
 | 2 | Drop the staging→dumb copy | M | **blocker** | `dango_shm` exports a dma-buf and `gpud` tries `PRIME_FD_TO_HANDLE`, but the import is impossible for `virtio_gpu` (documented in `GPU_ZEROCOPY_IMPORT.md`: import stub returns `-ENODEV`, foreign GEM mis-cast in scanout). The path is also dormant until `GPU_BUFFER_REGISTER.shm_id` carries a **Phase L region id**. Pays off only for a backend that can import (lavapipe/Vulkan, or a physical backend). A one-shot probe prints `TEST FAILED` if the documented assumption stops holding. |
 | 3 | Remove the fb.memory→staging mirror | J | **hardening** | `io.framebuffer` renders to its own `fb.memory` and the bootstrap mirrors it into the shared staging window, because a native process cannot map `MX_VM_MEMORY` and the arena cap is 64 pages. Giving the framebuffer a live mapping of the staging window removes the copy. |
 | 4 | TTY acceptance row | J | **polish** | There is no screendump row asserting the **tty frame** through the appliance (the `gpud` row asserts the bootstrap 4-bar pattern). Add one. |
@@ -26,10 +26,51 @@ Legend: **blocker** = needs something not in the tree yet · **hardening** = wor
 
 ## Suggested order
 
-1→(#1 libc guest rootfs) unlocks 2, 12.
+1→(#1 appliance integration of the libc guest rootfs) unlocks 2, 12.
 3/4 are small and improve the J milestone's evidence.
 5/6/7/8/9 are hardening that does not block anything.
 10–14 are polish.
+
+## Real Vulkan execution progress (2026-09-21)
+
+`scripts/linux/build-vkd.sh` now builds the libc `dango-vkd`, packages the AArch64
+ELF dependency closure (loader, libc, Vulkan loader, lavapipe and its dependencies),
+and writes `build/dango-vkd/initramfs.cpio.gz`. On macOS it delegates to the arm64
+Docker builder. The compiler and validation layer stay in the build container;
+`rootfs-manifest.json` records package versions and shipped ELF hashes.
+
+The actual lavapipe executor creates a device and a preallocated host-coherent
+arena buffer, snapshots and validates command records, executes ordered fill/copy
+commands, waits for a fence, and verifies readback. The regression covers malformed
+sizes, overflow, alignment, command-region access, overlapping copies, command
+quota, repeated submits, failed ICD initialization and teardown/reinitialization.
+Graphics/compute commands are refused; WSI is not advertised and cannot claim a
+copy that did not happen. Wire decoding and arena bounds live in the shared
+C/C++ `midix/abi/vulkan_commands.h` header. No Vulkan parsing was added to Anko.
+
+Run:
+
+```sh
+scripts/linux/build-vkd.sh
+python3 scripts/test/vulkan-executor.py --output out/validation/vulkan-executor
+AME_VERIFY_VULKAN=1 scripts/verify.sh
+```
+
+This proves **standalone Linux executor execution**, not native N/O acceptance.
+The remaining integration is larger than adding libc:
+
+- The measured Ubuntu closure is about 186 MiB unpacked / 58 MiB compressed.
+  Its standalone acceptance uses 512 MiB RAM. Dango currently has 128 MiB RAM,
+  a 16 MiB initramfs load window and bounded page-mapping metadata. The rootfs
+  is deliberately built separately; expanding the VM requires reconciling these
+  bounds and the fixed channel/shared-memory guest addresses, or reducing the
+  runtime footprint. Simply changing the manifest RAM size is insufficient.
+- `dango.manager` still initializes `VulkanBackend{}`. It needs the actual
+  per-session arena/channel bridge and channel ownership coordinated with `gpud`.
+  The standalone executor probe does not exercise that bridge.
+- The executor implements transfer commands only. Real graphics pipelines,
+  swapchain image transfer into the compositor/`gpud` path, a native triangle
+  screendump and appliance-death recovery remain acceptance requirements.
 
 ## Explicitly out of scope here
 

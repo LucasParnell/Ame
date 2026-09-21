@@ -42,8 +42,8 @@ Master reference points: `kernel/iommu/{core,smmuv3,faults}.cc`, `kernel/vm/vm_d
 | K lifecycle hardening | **Done** — real channel `boot_generation` + stale-handle rejection, ring back-pressure, DMA-safe faulting teardown + IOMMU quarantine, tests |
 | L dynamic shared arenas | **Done** — `SYS_VM_SHARED_MEMORY_ATTACH` + explicit `SharedGpu` registration; guest `dango_shm` |
 | M zero-copy/import | **Done (verdict: keep the copy)** — dma-buf export + import path implemented; import proven impossible for `virtio_gpu` (`docs/GPU_ZEROCOPY_IMPORT.md`) |
-| N remote Vulkan session transport | **Done (transport)** — wire ABI + per-client brokerage + native client; verified vs a same-wire reference backend. Real lavapipe needs a libc guest rootfs |
-| O Vulkan WSI bootstrap | **Done (transport)** — bounded copy into a Dango shared buffer; same lavapipe caveat |
+| N remote Vulkan session transport | **Done (transport)** — wire ABI + per-client brokerage + native client; verified vs a same-wire reference backend. Real lavapipe transfer execution now passes in a standalone libc Linux guest; native bridge/graphics remain open |
+| O Vulkan WSI bootstrap | **Done (transport)** — bounded copy into a Dango shared buffer; real graphics/scanout acceptance remains open |
 | P physical GPU backend | Deferred (by decision — virtio appliance only) |
 | Q amdgpu appliance | Deferred (by decision — virtio appliance only) |
 | R RADV backend | Deferred (by decision — virtio appliance only) |
@@ -251,14 +251,16 @@ DMA-safe teardown tests, IOMMU-fault quarantine, appliance restart/reconnect.
 `dango_shm` exposing shared pages via a Linux-importable object (dma-buf/memfd) so the bootstrap memcpy
 can be dropped — or a documented reason to keep it. Must not weaken IOMMU ownership/revocation.
 
-## Phase N — remote Vulkan session transport — Not started (ABI only: `protocols/vulkan_session.h` to add)
+## Phase N — remote Vulkan session transport — Partial (transport and standalone Vulkan transfers verified)
 Native loader + `ame_remote` ICD, per-client session brokerage in `drv.gpu.linux`,
-`linux-artifacts/vkd/` running Mesa **lavapipe**. Acceptance: a native test creates a Vulkan
+`linux-artifacts/vkd/` runs Mesa **lavapipe** transfer commands in a standalone libc Linux guest.
+The native bridge and graphics pipeline remain open; see [remaining work](GPU_APPLIANCE_REMAINING.md).
+Acceptance: a native test creates a Vulkan
 instance/device, allocates host-visible memory, records/submits a command buffer, waits on sync, and
 validates an offscreen result — with no Vulkan parsing in Anko and per-session shared rings, not one
 RPC per call.
 
-## Phase O — Vulkan WSI bootstrap — Not started
+## Phase O — Vulkan WSI bootstrap — Partial (reference transport only)
 Surface/swapchain integration with a bounded copy into a Dango shared buffer; scanout stays with the
 native compositor/`dango-gpud`. A native Vulkan triangle presents through Linux `virtio_gpu`; killing
 the appliance yields clean device/session loss.

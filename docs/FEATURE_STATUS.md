@@ -113,7 +113,7 @@ less complete than it is. Do **not** treat these as status:
 | VM negative-authority probe | Implemented | Default boot: `dango.auth_probe: authority check passed` | Runs as a native probe, not a guest |
 | Stage-2 allocation/prune regression | Implemented | `tests/stage2_probe.cc` + `tests/test_stage2.py` (`test_failed_allocations_and_sparse_unmap_reclaim_tables`) | Host-only |
 
-### GPU appliance — Phases E and F
+### GPU appliance — verified execution paths
 
 | Capability | Status | Evidence / limit |
 |---|---|---|
@@ -122,6 +122,7 @@ less complete than it is. Do **not** treat these as status:
 | Dango GPU appliance construction (assignment, BAR allocation, ECAM, INTx) | Implemented | `userland/dango/manager/main.cc`, `kernel/init/boot_caps.cc` (`gpu.function`/`gpu.irq`); boot: `assign: ACTIVE device=1`, `assign: bar4 mapped ipa=0x50000000`. |
 | Linux `virtio_gpu` binds and creates a DRM device | Implemented | Opt-in `gpu-appliance` row: `dango: DRM card0 driver=virtio_gpu dumb_buffer=1`, `dango: Linux virtio ISR observed`; counters `faults=0 quarantines=0 smmu=1`. |
 | Standalone Linux KMS modeset asserted from the host | Implemented | Opt-in `kms-display` row: guest raw-ioctl KMS (`linux-artifacts/kms_test/`), host `screendump` at `1024x768` showing mid-row R/G/B/W. See [Phase F delivery](../DELIVERY/gpu-appliance-phase-f.md). |
+| Real lavapipe transfer executor | Partial | `linux-artifacts/vkd/`, `scripts/linux/build-vkd.sh`, opt-in `AME_VERIFY_VULKAN=1`: libc rootfs boots under Linux, real device/fill/copy/fence/readback and malformed-command regressions pass. Native session bridge, larger appliance memory layout and graphics/WSI are still open; see [remaining work](GPU_APPLIANCE_REMAINING.md). |
 
 See [Phase E delivery](../DELIVERY/gpu-appliance-phase-e.md),
 [Phase E.1 delivery](../DELIVERY/gpu-appliance-phase-e1.md),

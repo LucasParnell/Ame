@@ -51,8 +51,13 @@ in `kernel/panic_report.cc` / `kernel/panic.cc`. Captured and decoded end-to-end
 `/dev/dango-channel0`, and 512 ordered Linux ↔ Mochi round trips. See
 `DELIVERY/gpu-appliance-phase-g.md`. Rebuild the GPU kernel for its built-in channel driver.
 
-**Remaining:** H (`dango-gpud` control plane), I (shared staging
-framebuffer), J (framebuffer/TTY migration), K–M (lifecycle, dynamic arenas, zero-copy), N–S (Vulkan).
+**GPU continuation:** H–O code has since landed; use
+`docs/GPU_APPLIANCE_REMAINING.md` for the current unfinished work. The libc/lavapipe
+rootfs now builds with `scripts/linux/build-vkd.sh` (Docker on macOS), and
+`AME_VERIFY_VULKAN=1 scripts/verify.sh` runs the real transfer executor under
+standalone Linux. Native N/O still needs the session bridge, appliance memory/load
+layout changes and graphics/WSI acceptance. This rootfs is in `build/dango-vkd/`,
+separate from the existing `build/dango-linux-gpu/` artifacts.
 **Deferred by decision: P/Q/R (physical backend, amdgpu, RADV)** — build the plumbing
 backend-agnostic, no AMD-specific code yet.
 

@@ -177,3 +177,20 @@ The GPU Linux build adds its built-in driver through a read-only source overlay.
 post-exchange IOMMU counters; sanitizer and lifecycle tests cover ARM races,
 capability/VM isolation and mapped-channel reclamation. See
 [Phase G delivery](../DELIVERY/gpu-appliance-phase-g.md).
+
+### GPU executor cleanup (2026-09-21)
+
+- Added a macOS Docker / arm64 Linux libc-rootfs build with an explicit ELF
+  dependency closure and provenance; both plain and deterministic gzip initramfs
+  packaging use the existing archive writer/checker.
+- Replaced the unexecuted Vulkan per-range buffer cache with a preallocated arena
+  buffer. Command snapshots prevent shared-record validation/execution races;
+  shared decoding rejects truncated records, reserved fields and invalid opcodes.
+  Overflow-safe operand bounds, command quotas, transfer dependencies and checked
+  Vulkan return values cover the bugs found while enabling the real executor.
+- Partial initialization unwinds every created object; invalid submits leave
+  arena bytes unchanged. WSI now refuses unsupported work instead of claiming
+  that bytes were copied. Real lavapipe transfer execution passes in the build
+  container/chroot and a standalone Linux boot.
+- Native N/O completion is still open: appliance RAM/load layout, session arena
+  bridge and real graphics/scanout acceptance. See `GPU_APPLIANCE_REMAINING.md`.

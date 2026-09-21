@@ -46,12 +46,14 @@ sequence/counter checks became relative, because the bootstrap GPU exchange shar
   (gpud holds DRM master, then the self-tests).
 - The bootstrap mode is part of the shared binding, so manager/DTS/harness no longer restate `1024x768`.
 
-## Outstanding rule item
+## `protocols/gpu.h` is now C/C++ compatible (the outstanding rule item, done)
 
-`shared/include/midix/abi/protocols/gpu.h` is C++-only, so `linux-artifacts/gpud/gpud_protocol.h`
-carries a byte-exact **C projection** of it (spec §13.1 requires that header to compile in the native
-client, `drv.gpu.linux` **and** the Linux `dango-gpud` build). Fix: make `gpu.h` C/C++-compatible
-(guard the `types.h`/`ring.h` includes with a C branch, plain `enum`s, a `MX_STATIC_ASSERT` macro,
-`typedef` for the object id, `#define` for the scalar protocol constants, C++-guard the
-constexpr uniqueness check) and delete the projection. Mechanical; not done here to avoid an unverified
-last-minute header refactor.
+`shared/include/midix/abi/protocols/gpu.h` is the single authority for the GPU wire contract, and
+spec §13.1 requires it to compile in the native client, `drv.gpu.linux` **and** the Linux `dango-gpud`
+build. It is now C/C++ compatible (guarded includes; C gets the Dango channel ring types; plain enums;
+`#define` scalars; an `MX_STATIC_ASSERT` macro; C forward struct typedefs; the opcode-uniqueness table
+stays a C++ `constexpr` check), as are its `abi/types.h` and `abi/status.h` dependencies. Commit
+`730e480`. `linux-artifacts/gpud/gpud_protocol.h` now simply includes it — the byte-exact C projection
+and its drift risk are gone, and `tests/gpu_proto_probe.cc` keeps pinning the wire contract
+independently. Guest (C) and host (C++) both build clean; `scripts/verify.sh` and every opt-in row
+re-ran green afterwards.

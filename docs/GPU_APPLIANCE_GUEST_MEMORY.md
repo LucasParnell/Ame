@@ -1,0 +1,53 @@
+# Guest memory layout for the lavapipe guest (blocker #1)
+
+How the appliance's guest memory *should* work so a libc guest with a real Vulkan ICD fits, and why it
+does not today. Everything below is measured from the tree at `c32ba56`.
+
+## Why it does not fit today
+
+| Fact | Where |
+|---|---|
+| Guest RAM is 128 MiB at `0x4000_0000` | `kernel/include/anko/vm.h` `kDangoRamBase/Size` |
+| Stage 2 installs **4 KiB leaves only** | `kernel/vm/stage2.cc` — the L3 leaf descriptor is the only one written; L1/L2 links are tables, never blocks |
+| The mapping budget is a **fixed soft table** | `Stage2AddressSpace::mappings[40960]`, 24 B/entry ⇒ ~960 KiB of kernel BSS |
+| ⇒ total addressable guest space is capped at 40960 × 4 KiB = **160 MiB** | RAM alone is 32768 entries; the device windows (BAR 16 MiB = 4096, staging 3 MiB = 768, shm 1 MiB = 256, channel 128 KiB = 32) take it past 37k |
+| The initrd load window is 16 MiB | `linux-artifacts/dts/dango-linux-gpu.dts.in`, `scripts/linux/dango-load.env` |
+
+The lavapipe guest needs ~186 MiB unpacked / **58 MiB compressed** for the rootfs and its acceptance was
+measured at **512 MiB RAM**. Both numbers are outside today's hard bounds, and neither is fixed by
+bumping the manifest — the kernel constants are the real limit.
+
+## How it should work
+
+1. **Support level-2 block mappings in stage 2, and use them for guest RAM.** 2 MiB blocks are the
+   architectural answer (that is what a real stage-2 does for RAM): a 512 MiB guest becomes 256 block
+   entries instead of 131072 page entries. The leaf writer in `stage2.cc` gains a `S2_DESC_BLOCK`
+   path, and `Stage2Mapping` gains a granularity so unmap/teardown can split or drop a whole block.
+   Device windows (BAR/staging/shm/channel) keep 4 KiB pages, because they need page-granular rights.
+2. **Pick a RAM size from a measurement, not a guess.** With blocks, the soft-table cost stops mattering,
+   so the number should come from the smallest RAM the libc guest + lavapipe actually boots and runs the
+   acceptance in. 256 MiB is the first thing to try; 512 MiB is the known-good figure.
+3. **Deliver the rootfs as a disk, not as an initrd.** 58 MiB compressed will not fit a 16 MiB initrd
+   window, and growing that window means reserving a large contiguous chunk at a fixed address for a
+   one-shot copy. The guest already has a virtio-blk driver and a durable `/data` path, so the right
+   answer for a 186 MiB userland is a **virtio-blk root** (or a small initrd that `switch_root`s to it).
+4. **Move the fixed windows with RAM.** The channel (0x4800_0000), staging (0x4900_0000) and shm
+   (0x4A00_0000) windows sit immediately above RAM. Growing RAM past 0x4800_0000 collides with them, so
+   the windows move up in the same change. This is safe because the binding in
+   `midix/abi/dango_channel_guest.h` is the single source: change it there, regenerate the DTS, and the
+   kernel, manager and guest driver all follow (the asserts in `vm.h` bind the two together).
+5. **"Which guest" must reach the kernel, not just the artifacts.** `kDangoRamSize` and the window bases
+   are kernel constants, so the selection has to be an Anko build option as well as an artifact
+   selection. Plumbed now: `DANGO_LINUX_GUEST=minimal|lavapipe` (manifest field + CMake cache var, read
+   by `dango.manager`). Still needed: an `ANKO_GUEST_LAYOUT` option that feeds the same choice into the
+   `vm.h` constants, with a `static_assert` tying the two so a mismatch is a build failure rather than a
+   guest that faults.
+
+## Order
+
+1. stage-2 block mappings (kernel) + a host test that a 512 MiB RAM map fits the budget.
+2. `ANKO_GUEST_LAYOUT` + moved windows, defaulting to today's `minimal` layout (no behaviour change).
+3. virtio-blk rootfs delivery for the lavapipe guest.
+4. Re-run `AME_VERIFY_VULKAN` — the standalone executor acceptance — with the guest actually booting it.
+
+Until 1–3 land, `AME_VERIFY_VULKAN` stays the *standalone* proof and the in-appliance claim stays open.

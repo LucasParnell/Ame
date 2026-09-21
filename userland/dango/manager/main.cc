@@ -94,6 +94,10 @@ struct LinuxArtifacts {
     dango::VmLayout layout;
     uint64_t entry;
     bool gpu_profile;
+    // Which guest userspace the artifact set carries (manifest `guest`). Absent
+    // means the freestanding appliance initramfs; `lavapipe` is the libc guest
+    // with a real Vulkan ICD, which only fits once the guest memory layout grows.
+    bool lavapipe_guest;
 };
 
 static uint32_t slen(const char* s) {
@@ -448,6 +452,11 @@ static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
                                          "profile", &profile_len);
     artifacts->gpu_profile = profile && token_equals(profile, profile_len, "gpu");
     if (profile && !artifacts->gpu_profile && !token_equals(profile, profile_len, "hello")) return false;
+    uint64_t guest_len = 0;
+    const auto* guest = manifest_value(artifacts->manifest, artifacts->manifest_size,
+                                       "guest", &guest_len);
+    artifacts->lavapipe_guest = guest && token_equals(guest, guest_len, "lavapipe");
+    if (guest && !artifacts->lavapipe_guest && !token_equals(guest, guest_len, "minimal")) return false;
     if (artifacts->gpu_profile) {
         layout.channel_base = dango::kChannelGuestBase;
         layout.channel_size = dango::kChannelGuestSize;
@@ -511,6 +520,7 @@ static bool discover_linux_artifacts(const uint8_t* archive, LinuxArtifacts* out
     out->layout.channel_size = artifacts.layout.channel_size;
     out->entry = artifacts.entry;
     out->gpu_profile = artifacts.gpu_profile;
+    out->lavapipe_guest = artifacts.lavapipe_guest;
     return true;
 }
 

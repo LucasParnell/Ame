@@ -121,6 +121,15 @@ endif()
 set(DANGO_LINUX_ARTIFACT_DIR "" CACHE PATH "Optional prebuilt Dango Linux artifact directory")
 set(DANGO_LINUX_PROFILE "hello" CACHE STRING "Dango Linux profile: hello or gpu")
 set_property(CACHE DANGO_LINUX_PROFILE PROPERTY STRINGS hello gpu)
+# Which guest userspace the appliance boots. `minimal` is the freestanding
+# appliance initramfs the tree has always built; `lavapipe` is the libc guest
+# carrying a real Vulkan ICD (Mesa lavapipe), which is what the Phase N/O
+# acceptance needs and why the guest memory layout has to grow.
+set(DANGO_LINUX_GUEST "minimal" CACHE STRING "Dango Linux guest variant: minimal or lavapipe")
+set_property(CACHE DANGO_LINUX_GUEST PROPERTY STRINGS minimal lavapipe)
+if(NOT DANGO_LINUX_GUEST MATCHES "^(minimal|lavapipe)$")
+    message(FATAL_ERROR "DANGO_LINUX_GUEST must be minimal or lavapipe")
+endif()
 if(NOT DANGO_LINUX_PROFILE MATCHES "^(hello|gpu)$")
     message(FATAL_ERROR "DANGO_LINUX_PROFILE must be hello or gpu")
 endif()

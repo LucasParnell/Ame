@@ -11,6 +11,10 @@
 # Env:
 #   DANGO_LINUX_OUT          artifact dir (default: <repo>/build/dango-linux)
 #   DANGO_LINUX_PROFILE      profile written to the manifest (default: hello)
+#   DANGO_LINUX_GUEST        guest variant written to the manifest (default: minimal).
+#                            `minimal` is the freestanding appliance initramfs;
+#                            `lavapipe` is the libc guest that carries a real
+#                            Vulkan ICD and needs the larger memory layout.
 #   DANGO_MANIFEST_NAME      manifest "name" field (default: dango-linux-<profile>)
 #   DANGO_LINUX_BOOTARGS     bootargs (default: the appliance default)
 #   DANGO_LINUX_KERNEL_LOAD  explicit kernel load address override
@@ -20,6 +24,11 @@ AME="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${AME}/scripts/linux/dango-load.env"
 OUT="${DANGO_LINUX_OUT:-${AME}/build/dango-linux}"
 PROFILE="${DANGO_LINUX_PROFILE:-hello}"
+GUEST="${DANGO_LINUX_GUEST:-minimal}"
+case "${GUEST}" in
+    minimal|lavapipe) ;;
+    *) echo "error: DANGO_LINUX_GUEST must be minimal or lavapipe, got '${GUEST}'" >&2; exit 1 ;;
+esac
 NAME="${DANGO_MANIFEST_NAME:-dango-linux-${PROFILE}}"
 : "${DANGO_LINUX_BOOTARGS:=console=ttyAMA0,115200n8 earlycon=pl011,0x09000000 loglevel=4 nosmp maxcpus=1 cma=0 coherent_pool=1M cpuidle.off=1 rdinit=/init panic=-1}"
 
@@ -57,6 +66,7 @@ fi
 cat > "${OUT}/manifest.toml" <<EOF_MANIFEST
 name = "${NAME}"
 profile = "${PROFILE}"
+guest = "${GUEST}"
 arch = "aarch64"
 
 kernel = "Image"

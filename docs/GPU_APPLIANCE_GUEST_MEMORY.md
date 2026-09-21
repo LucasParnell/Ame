@@ -51,3 +51,37 @@ bumping the manifest — the kernel constants are the real limit.
 4. Re-run `AME_VERIFY_VULKAN` — the standalone executor acceptance — with the guest actually booting it.
 
 Until 1–3 land, `AME_VERIFY_VULKAN` stays the *standalone* proof and the in-appliance claim stays open.
+
+## Stage-2 block mappings — exact change list
+
+Read against `kernel/vm/stage2.cc` at `daa3dc8`. Blocks are the right first step because they are both the
+robustness fix and the **smallest footprint**: one descriptor per 2 MiB instead of 512, and one soft-table
+record instead of 512.
+
+1. **Constants.** `S2_DESC_BLOCK_PAGE` today is the *L3 page* descriptor (`VALID|TABLE`); add
+   `S2_DESC_BLOCK` (`VALID` with no `TABLE`) plus `kStage2BlockSize = 2 MiB` / `kStage2BlockPages = 512`.
+   Stage-2 block descriptors must be 2 MiB aligned on both `ipa` and `pa`.
+2. **Accounting.** `Stage2Mapping` gains a granularity (`u8 pages` or `bool block`), and `mapped_pages`
+   then counts *pages covered* so the RAM/device budget stays meaningful. Note `record_mapping` currently
+   relies on `mapped_pages` also being the next free record slot (`stage2.cc:130-156`) — that invariant
+   breaks with blocks, so use the existing sparse-map free-slot scan unconditionally and cap *records*
+   separately from *covered pages*.
+3. **`stage2_map_block(s2, ipa, pa, rights, mem_type)`** — validate 2 MiB alignment, trap overlap and
+   `ipa_bits`; require the L2 slot to be empty; install the block descriptor and one record.
+4. **Split on page map.** `stage2_map_page_ex` currently returns `E_BUSY` when the L2 slot holds a block
+   (`stage2.cc:236-238`). Replace with a split: allocate an L3 table, write 512 leaves derived from the
+   block (same `pa` base + i·4 KiB, same attrs/mem_type), replace the L2 link, replace the block record
+   with 512 page records, then write the requested leaf.
+5. **Unmap + reclaim.** `unmap_page` must detect a covering block, split, clear the leaf, then *reclaim*:
+   if all 512 leaves of the 2 MiB unit are absent, free the L3 table and restore a single block record.
+6. **Lookup.** `stage2_lookup_page` must resolve a page inside a block (`pa = block_base + offset`,
+   rights/mem_type from the block record) — it is used by the device-revoke path.
+7. **Overlap.** `stage2_validate_no_overlap` must treat a mapped block as covering its full 2 MiB.
+8. **Teardown.** Blocks own no tables; `prune_tables`/`stage2_destroy` free L3 tables exactly as today.
+9. **Use it for RAM.** Map the guest RAM range with `map_block` (256 records for 512 MiB instead of
+   131072); device windows (BAR/staging/shm/channel) keep 4 KiB pages because they need page-granular
+   rights and revocation.
+10. **Tests** (`tests/kernel/`): block-mapped RAM accounting and coverage; page-map inside a block splits
+    with neighbours and attributes intact; unmap back to a block reclaims; overlap detection across a
+    block boundary; teardown with a mix of blocks and pages; and a capacity test that the old 160 MiB
+    ceiling is gone.

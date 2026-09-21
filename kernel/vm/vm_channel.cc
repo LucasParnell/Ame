@@ -1,6 +1,7 @@
 #include "anko/vm.h"
 #include "libk/string.h"
 #include "midix/abi/dango_channel_guest.h"
+#include "midix/abi/dango_shm_guest.h"
 
 namespace vm {
 
@@ -287,6 +288,19 @@ SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
             return E_NOMEM;
         }
         libk::memset(reinterpret_cast<void*>(shm_page), 0, PAGE_SIZE);
+        // The kernel is the single writer of the descriptor header fields
+        // (midix/abi/dango_shm_guest.h): publishing them turns "window present,
+        // nothing attached" into a valid empty table the guest driver binds to
+        // instead of an invalid descriptor it rejects at probe. The host appends
+        // regions (count/regions[]) here when it attaches an arena; the guest
+        // only ever reads, because the window is read-only at stage 2.
+        auto* shm_desc = reinterpret_cast<dango_shm_desc*>(shm_page);
+        shm_desc->magic = DANGO_SHM_DESC_MAGIC;
+        shm_desc->version_major = DANGO_SHM_VER_MAJOR;
+        shm_desc->version_minor = DANGO_SHM_VER_MINOR;
+        shm_desc->count = 0;
+        shm_desc->reserved0 = 0;
+        shm_desc->boot_generation = channel->boot_generation;
         u64 shm_off = 0;
         for (; shm_off < DANGO_SHM_GUEST_SIZE; shm_off += PAGE_SIZE) {
             rc = stage2_map_page(&owner->stage2, DANGO_SHM_GUEST_BASE + shm_off, shm_page,

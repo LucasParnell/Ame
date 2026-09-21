@@ -37,10 +37,17 @@
 #define MX_PROT_EXEC 0x4
 #define MX_MAP_SHARED 0x1
 
-/* Errnos the channel device deliberately returns (linux/errno.h). */
+/* Errnos the guest device ABIs deliberately return (asm-generic/errno.h).
+ * MX_EBUSY/MX_EINVAL/MX_ENOTTY are what the Dango channel device returns from
+ * its ioctls and mmap. MX_EPERM/MX_ENODEV/MX_EOPNOTSUPP are the refusals the
+ * shared-region device and its dma-buf path return (dango_shm.c), named here so
+ * userspace probes recognise a refusal by name, not by a bare number. */
+#define MX_EPERM 1
 #define MX_EBUSY 16
+#define MX_ENODEV 19
 #define MX_EINVAL 22
 #define MX_ENOTTY 25
+#define MX_EOPNOTSUPP 95
 
 /* ppoll(2) sigsetsize for aarch64 (sizeof(struct kernel_sigset_t)). */
 #define MX_SIGSET_BYTES 8

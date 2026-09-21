@@ -26,17 +26,22 @@ def stage(source: Path, dest: Path, repo: Path):
                 link.unlink()
             link.symlink_to(entry, target_is_directory=entry.is_dir())
     misc = dest / "drivers/misc"
-    for name, origin in {
+    # Built-in Dango drivers (Phase G channel, Phase L/M shared regions) plus
+    # the shared ABI headers they include. One table so a new driver is added in
+    # one place and its object file is named from the same key.
+    drivers = {
         "dango_channel.c": repo / "linux-artifacts/guest-driver/dango_channel.c",
-        "midix": repo / "shared/include/midix",
-    }.items():
+        "dango_shm.c": repo / "linux-artifacts/guest-driver/dango_shm.c",
+    }
+    for name, origin in {**drivers, "midix": repo / "shared/include/midix"}.items():
         link = misc / name
         if not link.is_symlink():
             link.symlink_to(origin, target_is_directory=origin.is_dir())
         elif link.readlink() != origin:
             link.unlink()
             link.symlink_to(origin, target_is_directory=origin.is_dir())
-    makefile = (source / "drivers/misc/Makefile").read_text() + "\nobj-y += dango_channel.o\n"
+    obj_lines = "".join(f"obj-y += {Path(name).with_suffix('.o').name}\n" for name in drivers)
+    makefile = (source / "drivers/misc/Makefile").read_text() + "\n" + obj_lines
     output = misc / "Makefile"
     # A previous symlink-only overlay must never turn this write into a write
     # through to the caller's original source Makefile.

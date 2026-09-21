@@ -7,6 +7,9 @@
  *   Phase H control plane : GPU_HELLO / GPU_ENUM_OUTPUTS / GPU_GET_MODES
  *   Phase I present path  : GPU_BUFFER_REGISTER / GPU_BUFFER_UNREGISTER /
  *                           GPU_SET_MODE / GPU_PRESENT -> GPU_PRESENT_COMPLETE
+ *   Phase M import probe  : decide once whether scanout can read a Dango shared
+ *                           region directly (imported dma-buf) or must copy it
+ *                           into a dumb buffer; the copy is the fallback.
  *
  * The server is event driven. It blocks in the channel `read` doorbell when it
  * has nothing to do, and only ever uses a bounded poll while the guest -> host
@@ -26,6 +29,8 @@
 #include "gpud_drm.h"
 #include "gpud_protocol.h"
 
+#include "midix/abi/dango_channel_guest.h"
+#include "midix/abi/dango_shm_guest.h"
 #include "midix/abi/linux_guest_console.h"
 #include "midix/abi/linux_guest_syscall.h"
 
@@ -78,6 +83,10 @@ struct gpud_buffer {
     uint64_t staging_off;
     uint64_t staging_bytes;
     struct gdrm_dumb dumb;
+    /* Phase M: when non-zero the scanout object is an imported dma-buf over the
+     * shared region, so `dumb` is unused and the present copies nothing. */
+    int imported;
+    uint32_t import_handle;
     uint32_t fb_id;
     /* CRTC state needed to restore scanout when present finds it dropped. */
     uint32_t crtc_id;
@@ -105,6 +114,23 @@ static uint32_t g_output_count;
 static struct gpud_pending g_pending[GPUD_MAX_PENDING];
 static uint32_t g_pending_count;
 static uint32_t g_presents_completed;
+
+/* Phase M import state. The verdict is decided once, by the real
+ * PRIME_FD_TO_HANDLE call, so a present never re-decides and the hot path stays
+ * allocation- and syscall-free. */
+enum gpud_import_verdict {
+    GPUD_IMPORT_UNAVAILABLE = 0, /* no shared-region device / no live region */
+    GPUD_IMPORT_NOT_SHARED,      /* region is not SharedGpu-registered (non-DMA) */
+    GPUD_IMPORT_REJECTED,        /* the DRM device refuses a foreign dma-buf */
+    GPUD_IMPORT_AVAILABLE,       /* imported: the bounded copy can be dropped */
+};
+
+static int g_shm_fd = -1;
+static uint32_t g_import_verdict;
+static struct dango_shm_region g_import_region;
+static unsigned long long g_import_boot_generation;
+static unsigned long g_import_cap_prime;
+static unsigned long g_import_errno;
 
 static int gpud_generation_ok(uint64_t generation) {
     return generation == g_generation;
@@ -198,6 +224,132 @@ static struct gpud_buffer *gpud_buffer_lookup(uint64_t id, uint32_t *slot_out) {
         *slot_out = index - 1;
     }
     return buffer;
+}
+
+/* --- Shared-region import (Phase M) -------------------------------------- */
+
+/* One-line verdict, written once per run so the host can assert the documented
+ * assumption without parsing the whole boot log. When the assumption is stale
+ * the line carries the shared failure vocabulary, which fails the acceptance
+ * rows and flags that zero-copy can now be switched on. */
+static void gpud_import_report(void) {
+    char buf[128];
+    char *p = mx_append_str(buf, "dango-gpud: zero-copy probe cap=");
+    p = mx_append_u32(p, (unsigned int)g_import_cap_prime);
+    p = mx_append_str(p, " verdict=");
+    switch (g_import_verdict) {
+    case GPUD_IMPORT_NOT_SHARED:
+        p = mx_append_str(p, "region-not-sharedgpu copy=retained\n");
+        break;
+    case GPUD_IMPORT_REJECTED:
+        p = mx_append_str(p, "import-rejected errno=");
+        p = mx_append_u32(p, (unsigned int)g_import_errno);
+        p = mx_append_str(p, " copy=retained\n");
+        break;
+    case GPUD_IMPORT_AVAILABLE:
+        /* The documented reason for keeping the copy no longer holds. Fail the
+         * run loudly rather than weakening the assertion; the display still
+         * works, and the zero-copy switch is revisited deliberately. */
+        p = mx_append_str(p, "import-available zero-copy TEST FAILED (stale assumption)\n");
+        break;
+    default:
+        p = mx_append_str(p, "unavailable copy=retained\n");
+        break;
+    }
+    (void)mx_write(1, buf, (unsigned long)(p - buf));
+}
+
+/* Export `region` as a dma-buf and import it as a GEM handle. Returns 0 on
+ * success, else the negative errno that refused it (-MX_EINVAL when the export
+ * itself failed). */
+static long gpud_region_import(const struct dango_shm_region *region,
+                               unsigned long long boot_generation, uint32_t *handle_out) {
+    struct dango_shm_export exp;
+    long rc;
+
+    if (g_shm_fd < 0) {
+        return -MX_EINVAL;
+    }
+    memset(&exp, 0, sizeof(exp));
+    exp.id = region->id;
+    exp.boot_generation = boot_generation;
+    if (mx_ioctl(g_shm_fd, DANGO_SHM_EXPORT_DMABUF, &exp) < 0 || exp.fd < 0) {
+        return -MX_EINVAL;
+    }
+    rc = gdrm_prime_import(&g_card, (int)exp.fd, handle_out);
+    (void)mx_close((int)exp.fd);
+    return rc;
+}
+
+/* Decide, once, whether scanout can read the shared region directly instead of
+ * copying from it. The answer is the real PRIME_FD_TO_HANDLE result: the
+ * DRM_CAP_PRIME bit cannot gate it (since Linux 6.6 every driver advertises
+ * import) and is not consulted here. */
+static void gpud_import_probe(void) {
+    struct dango_shm_query query;
+    uint32_t handle = 0;
+    long rc;
+
+    g_import_verdict = GPUD_IMPORT_UNAVAILABLE;
+    g_import_errno = 0;
+    g_import_cap_prime = 0;
+    if (!g_drm_ready) {
+        gpud_import_report();
+        return;
+    }
+    /* Record the advertised capability for evidence: since Linux 6.6 the kernel
+     * reports import|export for every driver, so it can never gate the import;
+     * only the PRIME_FD_TO_HANDLE call below can. */
+    g_import_cap_prime = (unsigned long)gdrm_get_cap(&g_card, GDRM_CAP_PRIME);
+    if (g_shm_fd < 0) {
+        gpud_import_report();
+        return;
+    }
+    memset(&query, 0, sizeof(query));
+    query.index = 0;
+    if (mx_ioctl(g_shm_fd, DANGO_SHM_QUERY, &query) < 0 || query.count == 0 ||
+        query.region.size == 0) {
+        gpud_import_report();
+        return;
+    }
+    g_import_region = query.region;
+    g_import_boot_generation = query.boot_generation;
+    if (!(query.region.flags & DANGO_SHM_REGION_FLAG_DMA_SHARED_GPU)) {
+        /* Non-DMA by design: the host has not registered it SharedGpu. */
+        g_import_verdict = GPUD_IMPORT_NOT_SHARED;
+        gpud_import_report();
+        return;
+    }
+    rc = gpud_region_import(&query.region, query.boot_generation, &handle);
+    if (rc == 0) {
+        g_import_verdict = GPUD_IMPORT_AVAILABLE;
+        gdrm_gem_close(&g_card, handle); /* capability probe only */
+    } else {
+        /* The documented case: the DRM device refuses a foreign dma-buf. */
+        g_import_verdict = GPUD_IMPORT_REJECTED;
+        g_import_errno = (unsigned long)(-rc);
+    }
+    gpud_import_report();
+}
+
+/* Use an imported scanout object for `buffer` when the request names the probed
+ * region and matches its geometry. Returns 0 when the imported path is taken,
+ * -1 when the caller must fall back to the dumb buffer + bounded copy. */
+static int gpud_buffer_import(struct gpud_buffer *buffer,
+                              const struct MxGpuBufferRegisterRequest *in) {
+    uint32_t handle = 0;
+
+    if (g_import_verdict != GPUD_IMPORT_AVAILABLE || in->shm_id != g_import_region.id ||
+        in->boot_generation != g_import_boot_generation ||
+        (uint64_t)in->stride * in->height != g_import_region.size) {
+        return -1;
+    }
+    if (gpud_region_import(&g_import_region, g_import_boot_generation, &handle) != 0) {
+        return -1;
+    }
+    buffer->imported = 1;
+    buffer->import_handle = handle;
+    return 0;
 }
 
 /* --- Handlers ------------------------------------------------------------- */
@@ -366,11 +518,6 @@ static void gpud_handle_buffer_register(const struct dango_ring_slot *request,
     }
 
     memset(buffer, 0, sizeof(*buffer));
-    if (gdrm_dumb_create(&g_card, in->width, in->height, 32, &buffer->dumb) != 0) {
-        memset(buffer, 0, sizeof(*buffer));
-        gpud_frame_error(reply, request, MX_ERR_FAULT, 0, g_generation, 0);
-        return;
-    }
     buffer->used = 1;
     buffer->id = gpud_object_id(g_generation, MX_GPU_OBJECT_BUFFER, slot + 1);
     buffer->width = in->width;
@@ -380,6 +527,14 @@ static void gpud_handle_buffer_register(const struct dango_ring_slot *request,
     buffer->flags = in->flags;
     buffer->staging_off = in->shm_id;
     buffer->staging_bytes = bytes;
+    /* Phase M: prefer scanout read straight from the imported shared region;
+     * fall back to a dumb buffer + bounded copy when import is unavailable. */
+    if (gpud_buffer_import(buffer, in) != 0 &&
+        gdrm_dumb_create(&g_card, in->width, in->height, 32, &buffer->dumb) != 0) {
+        memset(buffer, 0, sizeof(*buffer));
+        gpud_frame_error(reply, request, MX_ERR_FAULT, 0, g_generation, 0);
+        return;
+    }
 
     memset(&out, 0, sizeof(out));
     out.status = MX_OK;
@@ -428,11 +583,15 @@ static void gpud_handle_buffer_unregister(const struct dango_ring_slot *request,
     if (buffer->fb_id != 0) {
         gdrm_fb_destroy(&g_card, buffer->fb_id);
     }
-    if (buffer->dumb.map) {
-        (void)mx_munmap(buffer->dumb.map, buffer->dumb.map_len);
-    }
-    if (buffer->dumb.handle != 0) {
-        gdrm_dumb_destroy(&g_card, buffer->dumb.handle);
+    if (buffer->imported) {
+        gdrm_gem_close(&g_card, buffer->import_handle);
+    } else {
+        if (buffer->dumb.map) {
+            (void)mx_munmap(buffer->dumb.map, buffer->dumb.map_len);
+        }
+        if (buffer->dumb.handle != 0) {
+            gdrm_dumb_destroy(&g_card, buffer->dumb.handle);
+        }
     }
     memset(buffer, 0, sizeof(*buffer));
 
@@ -488,7 +647,12 @@ static void gpud_handle_set_mode(const struct dango_ring_slot *request,
         return;
     }
     if (buffer->fb_id == 0) {
-        if (gdrm_fb_create(&g_card, &buffer->dumb, &buffer->fb_id) != 0) {
+        int fb_ok = buffer->imported
+                        ? gdrm_fb_create_handle(&g_card, buffer->import_handle, buffer->width,
+                                                buffer->height, buffer->stride, 32, 24,
+                                                &buffer->fb_id)
+                        : gdrm_fb_create(&g_card, &buffer->dumb, &buffer->fb_id);
+        if (fb_ok != 0) {
             gpud_frame_error(reply, request, MX_ERR_FAULT, buffer->id, g_generation, 0);
             return;
         }
@@ -657,8 +821,13 @@ static int gpud_present_finish(const struct gpud_pending *pending) {
     /* The damage feature bit is not advertised, so a present always refreshes
      * the whole framebuffer; the rects above are validated but not clipped. */
     row_bytes = buffer->stride < buffer->dumb.pitch ? buffer->stride : buffer->dumb.pitch;
-    if (row_bytes == 0 || buffer->staging_off + buffer->staging_bytes > g_channel.staging_len ||
-        (uint64_t)buffer->height * row_bytes > buffer->dumb.map_len) {
+    if (buffer->imported) {
+        /* Phase M: the imported object *is* the shared region the host writes,
+         * so scanout reads it directly and no bytes move. The barrier orders
+         * the region writes before the completion the host waits on. */
+        __asm__ volatile("dmb ish" ::: "memory");
+    } else if (row_bytes == 0 || buffer->staging_off + buffer->staging_bytes > g_channel.staging_len ||
+               (uint64_t)buffer->height * row_bytes > buffer->dumb.map_len) {
         status = MX_ERR_FAULT;
     } else {
         source = g_channel.staging + buffer->staging_off;
@@ -669,14 +838,14 @@ static int gpud_present_finish(const struct gpud_pending *pending) {
         }
         /* Order the pixels before the completion the host waits on. */
         __asm__ volatile("dmb ish" ::: "memory");
+    }
 
-        if (buffer->has_mode && buffer->crtc_id != 0) {
-            int scanning = gdrm_crtc_scanning(&g_card, buffer->crtc_id, buffer->fb_id);
-            if (scanning <= 0 &&
-                gdrm_crtc_program(&g_card, buffer->crtc_id, buffer->connector_id, buffer->fb_id,
-                                  &buffer->mode) != 0) {
-                status = MX_ERR_FAULT;
-            }
+    if (status == MX_OK && buffer->has_mode && buffer->crtc_id != 0) {
+        int scanning = gdrm_crtc_scanning(&g_card, buffer->crtc_id, buffer->fb_id);
+        if (scanning <= 0 &&
+            gdrm_crtc_program(&g_card, buffer->crtc_id, buffer->connector_id, buffer->fb_id,
+                              &buffer->mode) != 0) {
+            status = MX_ERR_FAULT;
         }
     }
 
@@ -779,9 +948,15 @@ int dango_gpud_run(void) {
     memset(g_buffers, 0, sizeof(g_buffers));
     g_pending_count = 0;
     g_presents_completed = 0;
+    g_import_verdict = GPUD_IMPORT_UNAVAILABLE;
     if (gpud_drm_init() != 0) {
         mx_puts("dango-gpud: DRM outputs unavailable\n");
     }
+    /* Phase M: decide once whether scanout can read a shared region directly.
+     * Absent device/region is not fatal: the present path falls back to the
+     * bounded copy, which is the only path virtio_gpu supports today. */
+    g_shm_fd = (int)mx_openat(MX_AT_FDCWD, DANGO_DEV_SHM, MX_O_RDWR, 0);
+    gpud_import_probe();
 
     mx_puts("dango-gpud: ready\n");
     gpud_serve();
@@ -790,6 +965,10 @@ int dango_gpud_run(void) {
      * presented framebuffer stays on the CRTC, and close the channel so the
      * boot-time self-tests can open it. Both happen whether the loop ended by a
      * completed session or by a terminal transport error. */
+    if (g_shm_fd >= 0) {
+        (void)mx_close(g_shm_fd);
+        g_shm_fd = -1;
+    }
     gdrm_card_release_master(&g_card);
     gpud_channel_close(&g_channel);
     return g_presents_completed != 0 ? 0 : -1;

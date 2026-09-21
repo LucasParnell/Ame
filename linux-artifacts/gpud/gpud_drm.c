@@ -262,18 +262,28 @@ void gdrm_dumb_destroy(struct gdrm_card *card, uint32_t handle) {
 }
 
 int gdrm_fb_create(struct gdrm_card *card, const struct gdrm_dumb *dumb, uint32_t *fb_id_out) {
+    if (!dumb) {
+        return -1;
+    }
+    return gdrm_fb_create_handle(card, dumb->handle, dumb->width, dumb->height, dumb->pitch,
+                                 dumb->bpp, 24 /* XRGB8888 scans out as 24-bit colour plus padding */,
+                                 fb_id_out);
+}
+
+int gdrm_fb_create_handle(struct gdrm_card *card, uint32_t handle, uint32_t width, uint32_t height,
+                          uint32_t pitch, uint32_t bpp, uint32_t depth, uint32_t *fb_id_out) {
     struct drm_mode_fb_cmd fb;
 
-    if (!card || card->fd < 0 || !dumb) {
+    if (!card || card->fd < 0 || handle == 0 || width == 0 || height == 0 || pitch == 0) {
         return -1;
     }
     memset(&fb, 0, sizeof(fb));
-    fb.width = dumb->width;
-    fb.height = dumb->height;
-    fb.pitch = dumb->pitch;
-    fb.bpp = dumb->bpp;
-    fb.depth = 24; /* XRGB8888 scans out as 24-bit colour plus padding */
-    fb.handle = dumb->handle;
+    fb.width = width;
+    fb.height = height;
+    fb.pitch = pitch;
+    fb.bpp = bpp;
+    fb.depth = depth;
+    fb.handle = handle;
     if (mx_ioctl(card->fd, DRM_IOCTL_MODE_ADDFB, &fb) < 0 || fb.fb_id == 0) {
         return -1;
     }
@@ -288,6 +298,53 @@ void gdrm_fb_destroy(struct gdrm_card *card, uint32_t fb_id) {
         return;
     }
     (void)mx_ioctl(card->fd, GDRM_IOCTL_MODE_RMFB, &fb_id);
+}
+
+long gdrm_get_cap(struct gdrm_card *card, uint64_t capability) {
+    struct drm_get_cap cap;
+
+    if (!card || card->fd < 0) {
+        return -1;
+    }
+    memset(&cap, 0, sizeof(cap));
+    cap.capability = capability;
+    if (mx_ioctl(card->fd, DRM_IOCTL_GET_CAP, &cap) < 0) {
+        return -1;
+    }
+    return (long)cap.value;
+}
+
+long gdrm_prime_import(struct gdrm_card *card, int fd, uint32_t *handle_out) {
+    struct gdrm_prime_handle prime;
+    long rc;
+
+    if (!card || card->fd < 0 || fd < 0) {
+        return -MX_EINVAL;
+    }
+    memset(&prime, 0, sizeof(prime));
+    prime.fd = fd;
+    rc = mx_ioctl(card->fd, GDRM_IOCTL_PRIME_FD_TO_HANDLE, &prime);
+    if (rc < 0) {
+        return rc; /* negative errno: -MX_ENODEV when the device cannot import */
+    }
+    if (prime.handle == 0) {
+        return -MX_EINVAL;
+    }
+    if (handle_out) {
+        *handle_out = prime.handle;
+    }
+    return 0;
+}
+
+void gdrm_gem_close(struct gdrm_card *card, uint32_t handle) {
+    struct gdrm_gem_close close;
+
+    if (!card || card->fd < 0 || handle == 0) {
+        return;
+    }
+    memset(&close, 0, sizeof(close));
+    close.handle = handle;
+    (void)mx_ioctl(card->fd, GDRM_IOCTL_GEM_CLOSE, &close);
 }
 
 int gdrm_crtc_program(struct gdrm_card *card, uint32_t crtc_id, uint32_t connector_id,

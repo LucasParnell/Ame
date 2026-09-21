@@ -194,3 +194,27 @@ capability/VM isolation and mapped-channel reclamation. See
   container/chroot and a standalone Linux boot.
 - Native N/O completion is still open: appliance RAM/load layout, session arena
   bridge and real graphics/scanout acceptance. See `GPU_APPLIANCE_REMAINING.md`.
+
+### Appliance bring-up fixes (2026-09-22)
+
+- **Entry-thread stack.** The initial user thread was mapped a single 4 KiB page;
+  `msh` had already worked around overflowing it and the appliance manager then
+  overflowed it too (EL0 fault, sp just past `USER_STACK_TOP - PAGE_SIZE`).
+  `kernel/init/boot_caps.cc` now maps 16 KiB for the entry thread and starts later
+  per-thread stacks below it.
+- **Midix userland C++ runtime.** Mochi services link `-nostdlib`, so function-local
+  statics with a non-constant initialiser had no `__cxa_guard_*`.
+  `userland/lib/runtime/cxx_guard.cc` implements the Itanium guards over an atomic
+  guard word, linked into every service as `mochi_runtime`.
+- **Shared-arena window mapped.** The GPU DTS declares `dango-shm@4a000000` and the
+  guest `dango_shm` driver reads it, but nothing mapped that IPA into stage 2, so
+  the guest took a stage-2 translation fault while probing and the VM runner
+  stopped before the agent ran. `map_channel` now maps the window read-only as one
+  zeroed page repeated across it, owned by the VM.
+- **C-compatibility of the ABI headers.** `abi/types.h`, `abi/status.h` and
+  `protocols/gpu.h` compile as C and C++ (the guest `dango-gpud` build); a C++
+  digit separator inside an `#if __cplusplus` block broke the GCC build and was
+  replaced with plain hex.
+- **Dead MSI route.** `add_or_update_msi_route` refuses by name (`E_NOTIMPL`,
+  phase P–Q) when no host MSI line was reserved, instead of creating a route that
+  can never be delivered.

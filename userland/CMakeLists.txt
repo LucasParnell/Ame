@@ -9,6 +9,12 @@ set(MOCHI_INCLUDES
     ${CMAKE_SOURCE_DIR}/lib/include           # freestanding cstdint/cstddef/cstdarg
 )
 
+# Midix userland C++ runtime: the compiler-emitted hooks that would normally
+# come from compiler-rt/libsupc++ (absent under -nostdlib). Currently the Itanium
+# __cxa_guard_* for function-local statics; see lib/runtime/cxx_guard.cc.
+add_library(mochi_runtime STATIC lib/runtime/cxx_guard.cc)
+target_include_directories(mochi_runtime PRIVATE ${MOCHI_INCLUDES})
+
 function(mochi_service name src load_base)
     set(USER_LOAD_BASE ${load_base})
     set(LINKER_SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/${name}.ld)
@@ -20,7 +26,7 @@ function(mochi_service name src load_base)
 
     add_executable(${name} ${src} ${ARGN})
     target_include_directories(${name} PRIVATE ${MOCHI_INCLUDES})
-    target_link_libraries(${name} PRIVATE freestanding_memory ame_format)
+    target_link_libraries(${name} PRIVATE freestanding_memory ame_format mochi_runtime)
     target_link_options(${name} PRIVATE
         -nostdlib -static -fno-pie
         -T ${LINKER_SCRIPT}

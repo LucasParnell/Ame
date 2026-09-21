@@ -1437,15 +1437,21 @@ extern "C" [[noreturn]] void _start() {
     // keeps its original idle behaviour and the client keeps its local display.
     if (gpu_requests && gpu_replies && fb_window && gpu_staging != kNullCap &&
         gpu_ids.buffer_id != 0) {
+        // Service state lives in .bss, off the entry thread's small stack.
+        // Function-local statics are safe because mochi_runtime provides the
+        // Itanium __cxa_guard_* (userland/lib/runtime/cxx_guard.cc).
         static drv::gpu::linux::Server gpu_server;
-        const drv::gpu::linux::Endpoint gpu_endpoint{
+        static drv::gpu::linux::Endpoint gpu_endpoint;
+        static drv::gpu::linux::ServerConfig gpu_config;
+        static GpuPresentContext present_ctx;
+        gpu_endpoint = drv::gpu::linux::Endpoint{
             gpu_requests,
             gpu_replies,
             gpu_order,
             gpu_req_db,
             gpu_reply_db,
         };
-        drv::gpu::linux::ServerConfig gpu_config{};
+        gpu_config = drv::gpu::linux::ServerConfig{};
         gpu_config.width = kGpuScanoutWidth;
         gpu_config.height = kGpuScanoutHeight;
         gpu_config.stride = kGpuScanoutStride;
@@ -1461,8 +1467,8 @@ extern "C" [[noreturn]] void _start() {
         // client keeps its local path instead of stalling. Swapping in the real
         // backend is the only change Phase N.5 needs.
         gpu_server.init_vulkan(drv::gpu::linux::VulkanBackend{}, 0);
-        GpuPresentContext present_ctx{channel, channel_tx, channel_rx, h2g_db, g2h_db,
-                                      gpu_staging, fb_window, gpu_ids};
+        present_ctx = GpuPresentContext{channel, channel_tx, channel_rx, h2g_db, g2h_db,
+                                        gpu_staging, fb_window, gpu_ids};
         console_log("gpu service: serving\n");
         console_log("gpu service: vulkan sessions brokered\n");
         for (;;) {

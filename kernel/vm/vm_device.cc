@@ -569,7 +569,26 @@ static SysError step_assign_bars(VmDeviceAssignment* a) {
     if (!g_hw.has_pci_mmio || g_hw.pci_mmio_size == 0) {
         return E_NOTFOUND;
     }
+    // Never alias a BAR another function already owns.  Native devices (the xHCI)
+    // keep firmware/native-assigned BARs inside the same window, so start the
+    // allocator above the highest one the inventory reports.
     u64 cursor = 0;
+    {
+        static pci::PciFunctionInfo others[pci::kMaxFunctions];
+        const u32 count = pci::enumerate(g_hw.ecam_base, others, pci::kMaxFunctions);
+        for (u32 i = 0; i < count; ++i) {
+            for (u32 b = 0; b < pci::kMaxBars; ++b) {
+                const pci::PciBar& other = others[i].bars[b];
+                if (other.size == 0 || other.base < g_hw.pci_mmio_base) {
+                    continue;
+                }
+                const u64 end = (other.base - g_hw.pci_mmio_base) + other.size;
+                if (end > cursor) {
+                    cursor = end;
+                }
+            }
+        }
+    }
     for (u32 i = 0; i < a->fn_count; ++i) {
         if (!pci::assign_bars(&a->fns[i].info, g_hw.pci_mmio_base, g_hw.pci_mmio_size, &cursor)) {
             return E_INVALID;

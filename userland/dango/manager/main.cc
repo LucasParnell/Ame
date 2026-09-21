@@ -26,7 +26,11 @@ constexpr uint32_t kLinuxRunnerHomeCpu = 1;
 // own stats/yield loop remains the only latency runnable and strict band order
 // keeps picking it ahead of the lower VM_LATENCY queue forever. Put the bootstrap
 // runner in the latency band; SCHED_CTX_VM_RUNNER still marks it as VM time.
-constexpr uint32_t kLinuxRunnerSchedBand = dango::SCHED_BAND_LATENCY;
+// The Linux vCPU runner is a *VM-class* workload: the kernel has dedicated VM
+// bands precisely so a guest cannot outrank native services.  Spec §7: sustained
+// rendering work stays budgeted, and the latency hint belongs to the completion
+// notification path, not the runner.  SCHED_BAND_VM_FAIR is the budgeted VM band.
+constexpr uint32_t kLinuxRunnerSchedBand = dango::SCHED_BAND_VM_FAIR;
 constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
 constexpr uint64_t kVaBootInitrd = 0x2400'0000ull;
 constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;

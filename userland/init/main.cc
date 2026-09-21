@@ -1069,6 +1069,11 @@ static bool await_ready(ServiceSpec& svc) {
         sys_yield();
     }
     console_log("service readiness timeout\n");
+    // Guard: name the service that missed its deadline.  An unnamed timeout is
+    // very expensive to debug (which service starved?), and this path is cold.
+    sys_debug_puts("init: not ready: ", 16);
+    sys_debug_puts(svc.name, slen(svc.name));
+    sys_debug_puts("\n", 1);
     return false;
 }
 

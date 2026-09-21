@@ -23,10 +23,13 @@ namespace {
 constexpr u32 kCellW = midix::font::kVga8x16Width;
 constexpr u32 kCellH = midix::font::kVga8x16Height;
 constexpr u32 kQuietModules = 4;   // QR quiet zone, in modules
+constexpr u32 kSmallCellW = kCellW / 2u;   // half-size caption font
+constexpr u32 kSmallCellH = kCellH / 2u;
+constexpr u32 kCaptionGap = 3;             // leading between caption lines
 constexpr u32 kMargin = 8;
 constexpr u32 kTitleScale = 2;
 constexpr u32 kCaptionScale = 1;
-constexpr u32 kMaxCaptionLines = 12;
+constexpr u32 kMaxCaptionLines = 64;
 
 // XRGB8888 palette.
 constexpr u32 kBg = 0x00060E;        // near-black blue
@@ -147,22 +150,53 @@ u32 draw_qr(const anko::qr::Code& code, u32 x0, u32 y0, u32 module) {
     return side;
 }
 
-// Draw up to `max_lines` newline-separated lines of `text`, left-aligned and
-// clipped to `max_chars` characters so a column never runs into its neighbour.
-void draw_block(u32 x, u32 y, u32 scale, u32 fg, const char* text, u32 max_lines,
-                u32 max_chars) {
-    if (!text) return;
+// Half-size glyph: 2x2 blocks are OR-ed so thin strokes stay visible when the
+// 8x16 font is halved to 4x8 for the report block.
+void draw_glyph_small(u32 x, u32 y, u32 fg, char ch) {
+    const u8* rows = midix::font::vga8x16_glyph(static_cast<u8>(ch));
+    for (u32 gy = 0; gy < kSmallCellH; ++gy) {
+        const u32 sy = gy * 2u;
+        for (u32 gx = 0; gx < kSmallCellW; ++gx) {
+            const u32 sx = gx * 2u;
+            const u32 bits = ((rows[sy] >> (6u - sx)) & 3u) |
+                             (((rows[sy + 1u] >> (6u - sx)) & 3u) << 2u);
+            if (bits != 0u) put(x + gx, y + gy, fg);
+        }
+    }
+}
+
+// Draw text wrapped to `cols` characters per line, honouring explicit newlines
+// (which also give the blank separator lines), with `line_px` between baselines.
+void draw_wrapped(u32 x, u32 y, u32 max_lines, u32 cols, u32 line_px, u32 fg,
+                  const char* text) {
+    if (!text || cols == 0u) return;
     u32 line = 0;
     const char* p = text;
     while (*p && line < max_lines) {
-        const char* end = p;
-        while (*end && *end != '\n') ++end;
-        const u32 width = static_cast<u32>(end - p);
-        draw_text(x, y, scale, fg, p, width < max_chars ? width : max_chars);
-        ++line;
-        y += kCellH * scale;
-        if (!*end) break;
-        p = end + 1;
+        if (*p == '\n') {
+            ++line;
+            y += line_px;
+            ++p;
+            continue;
+        }
+        u32 run = 0;
+        while (p[run] && p[run] != '\n' && run < cols) ++run;
+        if (p[run] && p[run] != '\n') {
+            // Prefer breaking at a space so values are not split mid-field.
+            u32 brk = run;
+            while (brk > 0u && p[brk - 1u] != ' ') --brk;
+            if (brk > 0u) run = brk;
+        }
+        for (u32 i = 0; i < run; ++i) {
+            const char ch = (p[i] >= 32 && p[i] <= 126) ? p[i] : '?';
+            draw_glyph_small(x + i * kSmallCellW, y, fg, ch);
+        }
+        p += run;
+        if (run != 0u) {
+            ++line;
+            y += line_px;
+        }
+        if (*p == ' ') ++p;
     }
 }
 
@@ -238,15 +272,18 @@ bool show(const char* title, const char* reason, const char* caption,
         }
     }
 
-    // --- key data under the QR, confined to the QR column ------------------
+    // --- report block under the QR, half-size and wrapped ------------------
     const u32 caption_x = kMargin;
     u32 caption_y = kMargin + qr_height + (qr_height ? kMargin : 0);
     const u32 band_h = kCellH * kTitleScale + kCellH + 2u * kMargin;
     const u32 caption_limit = g_h > band_h + kCellH ? g_h - band_h - kCellH : caption_y;
-    const u32 caption_lines = caption_limit > caption_y ? (caption_limit - caption_y) / kCellH : 0;
-    const u32 caption_cols = (qr_width ? qr_width : g_w - 2u * kMargin) / (kCellW * kCaptionScale);
-    draw_block(caption_x, caption_y, kCaptionScale, kCaptionFg, caption,
-               smaller(caption_lines, kMaxCaptionLines), caption_cols);
+    const u32 caption_line_px = kSmallCellH + kCaptionGap;
+    const u32 caption_cols =
+        (qr_width ? qr_width : g_w - 2u * kMargin) / kSmallCellW;
+    const u32 caption_lines =
+        caption_limit > caption_y ? (caption_limit - caption_y) / caption_line_px : 0;
+    draw_wrapped(caption_x, caption_y, smaller(caption_lines, kMaxCaptionLines),
+                 caption_cols, caption_line_px, kCaptionFg, caption);
 
     // --- logo, in the space to the right of the QR -------------------------
     const u32 art_x0 = kMargin + qr_width + (qr_width ? kMargin : 0);

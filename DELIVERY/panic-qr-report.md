@@ -15,7 +15,7 @@ halts waiting for a machine reset instead of spinning silently.
 | LZMA1 encoder | `kernel/lzma.{h,cc}` | Minimal raw LZMA1 (lc=3, lp=0, pb=2, dict=4096): binary range coder, literal coder including the matched-literal path, length coder, distance coder (position slots, spec-pos tree, direct + align bits), greedy matching. Static state, allocation-free, no end marker (the bundle carries the length). |
 | Bundle + URL | `kernel/panic_report.cc` | Packs the record into a compact binary body, compresses it with LZMA when that wins, and wraps it as `https://<host>/p#<base64url>`; falls back to an uncompressed bundle otherwise. The layout is documented in `panic_report.h`. |
 | Panic report record | `kernel/panic_report.{h,cc}` | One fixed-capacity record: trap, ESR/FAR/ELR/SPSR/SP, x0–x30, bounded backtrace, hardware/PCI facts, capability denials, build id. Three renderers from the same data: readable caption, machine URL, full serial dump. |
-| Screen layout | `kernel/panic_screen.cc` | QR top-left (`module = box/(modules+quiet)`, box = min(w/3, h/2)), the readable summary under it, logo drawn proportionally in the remaining space, title + reason bottom-left. |
+| Screen layout | `kernel/panic_screen.cc` | QR top-left (`module = box/(modules+quiet)`, box = min(w/3, h/2)), the report drawn under it at **half size** (4x8 glyphs, wrapped to the column, blank-line section breaks, keys padded so values align), logo drawn proportionally in the remaining space, title + reason bottom-left. |
 | Panic path | `kernel/panic.cc` | Captures the report, dumps it to the UART via `log::panic_dump`, paints the screen, then halts this CPU (`wfi`) awaiting reset. A first-writer flag parks any second CPU so it cannot clobber the report. |
 | Direct UART dump | `kernel/log/log.cc` | `panic_dump()` writes the report raw, bypassing rings/prefixes — a panic must reach the wire even when io.console is not draining yet. |
 | Capability denials | `kernel/cap/cap_table.cc` | `cap::denial_count()` counts rejected capability lookups (invalid/revoked handle, type mismatch) for the report. |
@@ -55,8 +55,9 @@ ratio across a grid of box sizes.
   every field (core, reason, registers, trace, hardware, PCI, denials, build) decodes exactly, that
   the bundle is compressed, and that the URL stays under 400 characters.
 - **Layout.** `tests/panic_screen_probe.cc` (host) checks 1024×768, 1280×720, 1920×1080, 640×480 and
-  400×300: QR anchored top-left and bounded, key data present, logo present, title in the lower half
-  and left-aligned, no writes outside the framebuffer, byte-identical re-render.
+  400×300: QR anchored top-left and bounded, report block present, logo present and proportional,
+  title in the lower half and left-aligned, no caption pixel in the logo column, no writes outside
+  the framebuffer, byte-identical re-render.
 - **Gate.** `AME_VERIFY_IOMMU=1 AME_VERIFY_ASSIGN=1 AME_VERIFY_CHANNEL=1 AME_VERIFY_GPU=1
   AME_VERIFY_KMS=1 AME_VERIFY_PANIC=1 scripts/verify.sh` → all rows green.
 

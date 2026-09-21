@@ -25,7 +25,7 @@
 // live on the stack of a faulting thread.
 static anko::panic_report::Report g_report;
 static char g_serial_text[anko::panic_report::kMaxSerialText];
-static char g_caption[anko::panic_report::kMaxQrPayload];
+static char g_caption[anko::panic_report::kMaxCaptionText];
 static char g_qr_payload[anko::panic_report::kUrlMax];
 
 // First CPU to panic publishes the report and paints the screen; any other CPU
@@ -139,7 +139,7 @@ static void claim_or_park() {
     if (truncated) anko::log::panic_dump("(serial report truncated)\n");
 
     bool caption_truncated = false;
-    const u32 caption_len = anko::panic_report::format_qr(
+    const u32 caption_len = anko::panic_report::format_caption(
         g_report, g_caption, sizeof(g_caption), &caption_truncated);
     (void)caption_len;
     bool url_truncated = false;

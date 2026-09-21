@@ -12,15 +12,16 @@
 namespace anko::panic_report {
 
 constexpr u32 kMaxBacktrace = 16;
-constexpr u32 kMaxQrPayload = 1536;   // bytes handed to the QR encoder
+constexpr u32 kMaxQrPayload = 1536;   // bytes of caption text budgeted for the screen
 constexpr u32 kMaxSerialText = 4096;
+constexpr u32 kMaxCaptionText = 2048; // formatted on-screen report text
 
 // What the QR code carries. The code has to stay small enough to sit in a
 // corner at a scannable module size, so it holds the identifying subset (trap,
 // the exception registers, the call/argument registers and a short trace); the
 // serial dump carries the complete register file and the full trace.
-constexpr u32 kQrRegisterCount = 8;   // x0..x7
-constexpr u32 kQrBacktrace = 8;
+constexpr u32 kQrRegisterCount = 8;   // x0..x7 in the bundle
+constexpr u32 kQrBacktrace = 8;       // trace frames in the bundle
 
 // Where the QR URL points. The fragment carries the whole payload, so the host
 // is a placeholder for a decoder page and can be changed freely at build time.
@@ -72,10 +73,10 @@ void capture_registers(Report& report, const u64* x, u64 sp, u64 elr, u64 spsr,
 // never dereferences an attacker-shaped or stale frame pointer.
 void capture_backtrace(Report& report, u64 fp, u64 lo, u64 hi);
 
-// Compact line-oriented form for the QR code's caption: labelled, ASCII,
-// positional, no `0x` prefixes, and bounded to the fields listed above. Returns
-// bytes written (excluding the NUL) and sets *truncated when it did not fit.
-u32 format_qr(const Report& report, char* out, u32 cap, bool* truncated);
+// On-screen caption: the readable report drawn under the QR. Multi-line, one
+// field group per block (exception registers, general registers, trace,
+// hardware), keys padded so values line up. The renderer wraps and spaces it.
+u32 format_caption(const Report& report, char* out, u32 cap, bool* truncated);
 
 // Machine-readable form for the QR code itself: a base64url URL whose fragment
 // is an LZMA-compressed binary bundle of the whole record (falling back to an

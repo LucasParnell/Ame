@@ -70,6 +70,17 @@ void label(Out& out, const char* name) {
     out.ch('=');
 }
 
+// Write a key padded to a fixed width so values line up in a column.
+void pad_key(Out& out, const char* name) {
+    out.str(name);
+    u32 n = 0;
+    while (name && name[n]) ++n;
+    while (n < 6u) {
+        out.ch(' ');
+        ++n;
+    }
+}
+
 // Register names stay positional (x0..x30) so a photo can be read in order.
 void write_register(Out& out, u32 index, u64 value) {
     out.ch('x');
@@ -104,77 +115,87 @@ void capture_backtrace(Report& report, u64 fp, u64 lo, u64 hi) {
     }
 }
 
-u32 format_qr(const Report& report, char* out, u32 cap, bool* truncated) {
+u32 format_caption(const Report& report, char* out, u32 cap, bool* truncated) {
     Out o{out, cap};
-    // Compact, positional, `0x`-free: the same field order every time so a scan
-    // can be read without a schema. The full register file and trace are on the
-    // serial line; see panic_report.h for the split.
-    o.str("AMEQR1 core=");
+    // Readable on-screen form: field groups separated by blank lines, values in
+    // a column so they line up. The bundle in the QR carries the machine form.
+    o.str(report.title ? report.title : "KERNEL PANIC");
+    o.ch('\n');
+    o.str("core=");
     o.dec(report.core);
-    o.str(" build=");
+    o.ch('\n');
+    o.str("build=");
     o.str(report.build ? report.build : "unknown");
     o.ch('\n');
-
     o.str("reason=");
     o.str(report.reason ? report.reason : "unknown");
     o.ch('\n');
 
-    o.str("esr=");
-    o.hex16_bare(report.regs.esr);
-    o.str(" far=");
-    o.hex16_bare(report.regs.far);
-    o.str(" elr=");
-    o.hex16_bare(report.regs.elr);
     o.ch('\n');
+    struct Field {
+        const char* name;
+        u64 value;
+    };
+    const Field exception_fields[] = {
+        {"esr", report.regs.esr},  {"far", report.regs.far}, {"elr", report.regs.elr},
+        {"spsr", report.regs.spsr}, {"sp", report.regs.sp},  {"fp", report.regs.x[29]},
+        {"lr", report.regs.x[30]},
+    };
+    for (const Field& field : exception_fields) {
+        pad_key(o, field.name);
+        o.hex16_bare(field.value);
+        o.ch('\n');
+    }
 
-    o.str("spsr=");
-    o.hex16_bare(report.regs.spsr);
-    o.str(" sp=");
-    o.hex16_bare(report.regs.sp);
-    o.str(" fp=");
-    o.hex16_bare(report.regs.x[29]);
-    o.str(" lr=");
-    o.hex16_bare(report.regs.x[30]);
     o.ch('\n');
-
-    for (u32 i = 0; i < kQrRegisterCount; ++i) {
+    for (u32 i = 0; i < 31; ++i) {
         o.ch('x');
         o.dec(i);
         o.ch('=');
         o.hex16_bare(report.regs.x[i]);
-        o.ch(i + 1u == kQrRegisterCount ? '\n' : ' ');
+        // Two per line keeps the block compact without crowding.
+        o.ch((i % 2u == 1u) ? '\n' : ' ');
     }
+    if (31u % 2u != 0u) o.ch('\n');
 
-    o.str("bt=");
+    o.ch('\n');
+    o.str("trace ");
     o.dec(report.trace_count);
-    for (u32 i = 0; i < report.trace_count && i < kQrBacktrace; ++i) {
+    o.str(" frames\n");
+    for (u32 i = 0; i < report.trace_count; ++i) {
+        o.ch('#');
+        o.dec(i);
         o.ch(' ');
         o.hex16_bare(report.trace[i]);
+        o.ch((i % 2u == 1u) ? '\n' : ' ');
     }
-    o.ch('\n');
+    if (report.trace_count % 2u != 0u) o.ch('\n');
 
-    if (report.hw.present) {
-        o.str("hw=");
-        o.str(flag(report.hw.has_pcie));
-        o.str(flag(report.hw.has_pci_mmio));
-        o.str(flag(report.hw.has_smmu));
-        o.str(" virtio=");
-        o.dec(report.hw.virtio_count);
-        o.str(" el=");
-        o.dec(report.hw.boot_el);
-        o.ch('\n');
-        o.str("pci=");
-        o.hex16_bare(report.hw.pci_mmio_base);
-        o.ch('+');
-        o.hex16_bare(report.hw.pci_mmio_size);
-        o.str(" ram=");
-        o.hex16_bare(report.hw.ram_base);
-        o.ch('+');
-        o.hex16_bare(report.hw.ram_size);
-        o.ch('\n');
-    }
-    o.str("cap=");
+    o.ch('\n');
+    o.str("hardware\n");
+    o.str("pcie=");
+    o.str(flag(report.hw.has_pcie));
+    o.str(" mmio=");
+    o.str(flag(report.hw.has_pci_mmio));
+    o.str(" smmu=");
+    o.str(flag(report.hw.has_smmu));
+    o.ch('\n');
+    o.str("virtio=");
+    o.dec(report.hw.virtio_count);
+    o.str(" boot_el=");
+    o.dec(report.hw.boot_el);
+    o.str(" cap_denied=");
     o.dec(report.cap_denials);
+    o.ch('\n');
+    o.str("pci ");
+    o.hex16_bare(report.hw.pci_mmio_base);
+    o.ch('+');
+    o.hex16_bare(report.hw.pci_mmio_size);
+    o.ch('\n');
+    o.str("ram ");
+    o.hex16_bare(report.hw.ram_base);
+    o.ch('+');
+    o.hex16_bare(report.hw.ram_size);
     o.ch('\n');
 
     o.finish();

@@ -31,13 +31,10 @@ BARS = ((0.125, (255, 0, 0)), (0.375, (0, 255, 0)),
         (0.625, (0, 0, 255)), (0.875, (255, 255, 255)))
 TOLERANCE = 24
 
-# The one mode this row asserts, in both the emulated EDID and the capture.
-EXPECT_MODE = (1024, 768)
-
-# edid=on + xres/yres gives the headless QEMU console an EDID with a known
-# preferred mode; id=gpu0 lets screendump target this device rather than ramfb.
-GPU_DEVICE = ('virtio-gpu-pci,iommu_platform=on,id=gpu0,edid=on,'
-              f'xres={EXPECT_MODE[0]},yres={EXPECT_MODE[1]}')
+# The one mode this row asserts, and the GPU device string, come from the shared
+# harness constants so every appliance row boots the same device.
+EXPECT_MODE = ef.GPU_MODE
+GPU_DEVICE = ef.GPU_DEVICE
 
 
 def read_ppm(path):

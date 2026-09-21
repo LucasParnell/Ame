@@ -47,6 +47,15 @@
             reg = <0x0 @DANGO_CH_GUEST_BASE@ 0x0 @DANGO_CH_GUEST_SIZE@>;
             no-map;
         };
+
+        // Shared staging window (Phase H/I): the fixed buffer `drv.gpu.linux`
+        // renders into and registers with the GPU appliance. `no-map` keeps the
+        // kernel out of it; the guest maps it through the channel. The window
+        // sits outside guest RAM, between it and the GPU MMIO aperture.
+        dango_gpu_staging: dango-gpu-staging@@DANGO_GPU_STAGING_BASE_UA@ {
+            reg = <0x0 @DANGO_GPU_STAGING_BASE@ 0x0 @DANGO_GPU_STAGING_SIZE@>;
+            no-map;
+        };
     };
 
     channel@@DANGO_CH_GUEST_BASE_UA@ {

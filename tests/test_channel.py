@@ -42,9 +42,14 @@ class Channel(unittest.TestCase):
         self.assertFalse(all(checks.values()))
         checks, _ = proof.evidence('channel proof: faults=1 quarantines=0 routes=1 injected=2 smmu=1')
         self.assertFalse(checks['contained_dma'])
-        checks, _ = proof.evidence('channel.h2g=5120\nchannel.g2h=5140\n')
+        checks, _ = proof.evidence('channel.h2g=10\nchannel.g2h=11\n')
         self.assertFalse(checks['h2g_count'])
         self.assertFalse(checks['g2h_count'])
+        # Counters are cumulative (the bootstrap GPU exchange shares the channel),
+        # so the row asserts a floor, not an exact total.
+        checks, _ = proof.evidence('channel.h2g=512\nchannel.g2h=514\n')
+        self.assertTrue(checks['h2g_count'])
+        self.assertTrue(checks['g2h_count'])
 
     def test_notify_arm_races_and_hvc_authority(self):
         with tempfile.TemporaryDirectory(prefix='ame-channel-') as work:

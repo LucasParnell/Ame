@@ -38,10 +38,58 @@ constexpr uint64_t kGpuBar4Size = DANGO_GPU_BAR4_SIZE;
 // binding header and the interrupt-map in dango-linux-gpu.dts.in).
 constexpr uint32_t kGpuIntxIrq = DANGO_GIC_SPI_BASE + DANGO_GPU_INTX_SPI;
 
+// GPU shared staging window (spec §11.2/§12.2): the fixed guest-visible buffer
+// `drv.gpu.linux` renders into and registers with the appliance. Like the
+// channel binding above it is aliased from the shared ABI header rather than
+// retyped, so the manager, the DTS generator and the Linux driver agree.
+constexpr uint64_t kStagingGuestIpa = DANGO_GPU_STAGING_BASE;
+constexpr uint64_t kStagingSize = DANGO_GPU_STAGING_SIZE;
+
+constexpr uint32_t kGpuModeWidth = DANGO_GPU_MODE_WIDTH;
+constexpr uint32_t kGpuModeHeight = DANGO_GPU_MODE_HEIGHT;
+constexpr uint32_t kGpuModeBytesPerPixel = DANGO_GPU_MODE_BYTES_PER_PIXEL;
+
 // Host-side VAs the manager maps the two channel rings at. These are in the
 // manager's own address space, distinct from the guest binding above.
 constexpr uint64_t kChannelHostTxVa = 0x3000'0000ull;
 constexpr uint64_t kChannelHostRxVa = 0x3001'0000ull;
+// Host-side VA reserved for the staging window, alongside the ring VAs above.
+// The manager fills the staging buffer through sys_vm_memory_write (a
+// CAP_VM_MEMORY cannot be mapped into a process), so this slot stays unmapped
+// today; it is named here so the manager's host window map is stated in one
+// place, and the asserts below keep it disjoint from the ring mappings.
+constexpr uint64_t kStagingHostVa = 0x3002'0000ull;
+
+// Windows are disjoint when neither contains the start of the other. Every
+// constant here is small enough that base + size cannot wrap.
+constexpr bool windows_disjoint(uint64_t a_base, uint64_t a_size,
+                                uint64_t b_base, uint64_t b_size) {
+    return a_base + a_size <= b_base || b_base + b_size <= a_base;
+}
+
+// The GPU-profile apertures are distinct stage-2 mappings with different
+// cacheability and DMA ownership: the guest MMIO window (GIC/UART), the
+// assigned function's BAR4 aperture, the shared staging buffer and the guest
+// RAM must never overlap. A collision would otherwise surface late, as a
+// stage-2 mapping error at bring-up.
+static_assert(windows_disjoint(kMmioBase, kMmioSize, kGpuBar4Ipa, kGpuBar4Size),
+              "guest MMIO window overlaps the GPU BAR4 aperture");
+static_assert(windows_disjoint(kMmioBase, kMmioSize, kStagingGuestIpa, kStagingSize),
+              "guest MMIO window overlaps the GPU staging window");
+static_assert(windows_disjoint(kGpuBar4Ipa, kGpuBar4Size, kStagingGuestIpa, kStagingSize),
+              "GPU BAR4 aperture overlaps the GPU staging window");
+static_assert(windows_disjoint(kRamBase, kRamSize, kStagingGuestIpa, kStagingSize),
+              "GPU staging window must live outside guest RAM");
+static_assert(windows_disjoint(kChannelGuestBase, kChannelGuestSize,
+                               kStagingGuestIpa, kStagingSize),
+              "GPU staging window overlaps the channel window");
+
+// The manager's own window VAs must not collide either, or one mapping would
+// silently shadow another.
+static_assert(windows_disjoint(kChannelHostTxVa, kPageSize, kChannelHostRxVa, kPageSize) &&
+                  windows_disjoint(kChannelHostTxVa, kPageSize, kStagingHostVa, kPageSize) &&
+                  windows_disjoint(kChannelHostRxVa, kPageSize, kStagingHostVa, kPageSize),
+              "manager host-side window VAs must not overlap");
 
 struct VmLayout {
     uint64_t ram_base;

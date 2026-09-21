@@ -32,8 +32,8 @@ def evidence(logs):
         'guest_channel': ef.MARKERS['channel_test_passed'] in logs,
         # H2G is one counter per round trip; G2H carries the two extra control
         # publishes (ring-ready + ring-publish) the host injects.
-        'h2g_count': bool(re.search(rf'channel\.h2g={ef.GPU_CHANNEL_TEST_ROUNDS}\b', logs)),
-        'g2h_count': bool(re.search(rf'channel\.g2h={ef.GPU_CHANNEL_TEST_ROUNDS + 2}\b', logs)),
+        'h2g_count': (ef.parse_counter(logs, 'channel.h2g') or -1) >= ef.GPU_CHANNEL_TEST_ROUNDS,
+        'g2h_count': (ef.parse_counter(logs, 'channel.g2h') or -1) >= ef.GPU_CHANNEL_TEST_ROUNDS + 2,
         'guest_probe': ef.MARKERS['gpu_probe'] in logs,
         'no_failures': not any(word in logs for word in ef.FAILURE_WORDS),
         'contained_dma': bool(counters) and counters['faults'] == 0 and
@@ -51,7 +51,7 @@ def main():
     parser.add_argument('--output')
     args = parser.parse_args()
     work = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix='ame-channel-'))
-    env = dict(os.environ, AME_QEMU_IOMMU='1', AME_QEMU_TESTDEV='0')
+    env = dict(os.environ, AME_QEMU_IOMMU='1', AME_QEMU_TESTDEV='0', AME_QEMU_GPU_DEVICE=ef.GPU_DEVICE)
     command = [sys.executable, str(ROOT / 'scripts/test/boot.py'), '--build', args.build,
                '--cpus', str(args.cpus), '--timeout', str(args.timeout), '--output', str(work),
                '--marker', ef.MARKERS['boot_ready'], '--marker', ef.MARKERS['channel_proof'],

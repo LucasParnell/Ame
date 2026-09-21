@@ -10,6 +10,7 @@
 #include "midix/abi/image.h"
 #include "midix/abi/dango_channel_guest.h"
 #include "midix/abi/dango_channel_test.h"
+#include "midix/abi/protocols/gpu.h"
 
 // The channel ring order is a guest-visible wire property; the manager must
 // agree with the driver and the DTS generator, so take it from the shared ABI.
@@ -558,6 +559,266 @@ static bool install_linux_trampoline(CapHandle memory,
                                idx * sizeof(uint32_t)) == 0;
 }
 
+// --- Phase H/I: bootstrap GPU client (`drv.gpu.linux`) ----------------------
+//
+// The manager is the host half of the Midix GPU control plane: it owns the
+// shared staging window, drives the bootstrap opcodes over the Dango channel
+// rings, and renders the frame the appliance scans out. Every wire structure
+// and opcode comes from midix/abi/protocols/gpu.h -- nothing is restated here.
+
+// Bootstrap scanout geometry: one full XRGB8888 frame in the staging window.
+// The mode and the window size are a single fact (the shared Dango binding), so
+// this does not restate them.
+constexpr uint32_t kGpuScanoutWidth = dango::kGpuModeWidth;
+constexpr uint32_t kGpuScanoutHeight = dango::kGpuModeHeight;
+constexpr uint32_t kGpuBytesPerPixel = dango::kGpuModeBytesPerPixel;
+constexpr uint32_t kGpuScanoutStride = kGpuScanoutWidth * kGpuBytesPerPixel;
+static_assert(static_cast<uint64_t>(kGpuScanoutStride) * kGpuScanoutHeight == dango::kStagingSize,
+              "the bootstrap frame must fill the staging window exactly");
+
+// XRGB8888 bar colours, left to right: red, green, blue, white. Byte order is
+// chosen by the fill below. The Phase F kms_test draws the same bars, so one
+// host capture assertion covers both the DRM and the protocol path.
+constexpr uint8_t kGpuBarRgb[][3] = {
+    {255, 0, 0},
+    {0, 255, 0},
+    {0, 0, 255},
+    {255, 255, 255},
+};
+constexpr uint32_t kGpuBarCount = sizeof(kGpuBarRgb) / sizeof(kGpuBarRgb[0]);
+
+// The acceptance markers below are literal strings, so pin the values they
+// advertise to the same constants the client negotiates and renders with.
+static_assert(MX_GPU_VERSION_MAJOR == 1 && MX_GPU_VERSION_MINOR == 0,
+              "the 'gpu control: hello major=1 minor=0' marker must match the ABI version");
+static_assert(kGpuScanoutWidth == 1024 && kGpuScanoutHeight == 768,
+              "the 'gpu control: mode 1024x768' marker must match the bootstrap mode");
+// The frozen staging window is exactly one bootstrap frame; dango/layout.h
+// keeps it disjoint from BAR4, the MMIO window and guest RAM.
+static_assert(static_cast<uint64_t>(kGpuScanoutStride) * kGpuScanoutHeight ==
+                  dango::kStagingSize,
+              "the shared staging window must hold exactly one bootstrap frame");
+static_assert(kGpuScanoutWidth % kGpuBarCount == 0, "the bar pattern must tile the scanout");
+
+// One bootstrap request/reply. `ring_try_push` stamps the slot with the
+// producer's ring index, which is the correlation token the appliance echoes
+// back (protocols/gpu.h: "`seq` is the correlation field"), so the client reads
+// it here and requires the reply to carry it. `request_seq` is written before
+// the push because the caller (GPU_PRESENT) also matches the later asynchronous
+// completion against the same token.
+static bool gpu_request(RingPage* tx, RingPage* rx, CapHandle h2g_db, CapHandle g2h_db,
+                        CapHandle channel, uint32_t opcode, const void* request,
+                        uint32_t length, uint64_t* request_seq, RingSlot* reply) {
+    if (request_seq) *request_seq = __atomic_load_n(&tx->head.v, __ATOMIC_RELAXED);
+    if (!ring_try_push(tx, DANGO_CH_DEFAULT_RING_ORDER, opcode, request, length, h2g_db)) {
+        return false;
+    }
+    if (sys_vm_channel_notify(channel) != 0) return false;
+    if (!ring_wait_pop(rx, DANGO_CH_DEFAULT_RING_ORDER, reply, g2h_db)) return false;
+    return reply->type == opcode && (!request_seq || reply->seq == *request_seq);
+}
+
+// Wait for an unsolicited frame of a given opcode (the asynchronous completion).
+static bool gpu_wait(RingPage* rx, CapHandle g2h_db, uint32_t opcode, RingSlot* reply) {
+    return ring_wait_pop(rx, DANGO_CH_DEFAULT_RING_ORDER, reply, g2h_db) &&
+           reply->type == opcode;
+}
+
+// Decode one reply payload. The payload is 8-byte aligned inside the slot (it
+// starts at offset 16 of a 64-byte slot) and every MxGpu* struct is at most the
+// 48-byte inline budget, so the struct can be read in place.
+template <typename T>
+static bool gpu_reply(const RingSlot& slot, T* out) {
+    static_assert(sizeof(T) <= 48, "GPU reply must fit one ring payload");
+    if (slot.length < sizeof(T)) return false;
+    *out = *reinterpret_cast<const T*>(slot.payload);
+    return true;
+}
+
+// Fill the staging window with the bootstrap bar pattern, one scanout row per
+// syscall. The row lives in .bss: a service thread gets a small stack, and the
+// pixel layout is then computed once instead of per row.
+static bool gpu_fill_bars(CapHandle staging) {
+    static uint8_t row[kGpuScanoutStride];
+    const uint32_t bar_pixels = kGpuScanoutWidth / kGpuBarCount;
+    for (uint32_t bar = 0; bar < kGpuBarCount; ++bar) {
+        for (uint32_t x = 0; x < bar_pixels; ++x) {
+            uint8_t* px = row + (bar * bar_pixels + x) * kGpuBytesPerPixel;
+            // XRGB8888 is little-endian in memory: B, G, R, then the unused X.
+            px[0] = kGpuBarRgb[bar][2];
+            px[1] = kGpuBarRgb[bar][1];
+            px[2] = kGpuBarRgb[bar][0];
+            px[3] = 0;
+        }
+    }
+    for (uint32_t y = 0; y < kGpuScanoutHeight; ++y) {
+        if (sys_vm_memory_write(staging, static_cast<uint64_t>(y) * kGpuScanoutStride,
+                                row, kGpuScanoutStride) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Create, publish and fill the shared staging window. It runs before the vCPU
+// is resumed, so the channel descriptor always describes the window by the time
+// the guest can open the channel (the same ordering discipline the GPU
+// assignment above follows). The window is declared to the channel *before* the
+// stage-2 mapping exists: vm::stage_channel() validates the IPA against free
+// stage-2 space, so declaring it after sys_vm_memory_map() would be rejected as
+// an overlap with the mapping it just created.
+static void gpu_staging_publish(CapHandle vm, CapHandle channel) {
+    const CapHandle staging = as_cap(
+        sys_vm_memory_create(vm, dango::kStagingSize, MX_VM_MEMORY_FLAG_SHARED_STAGING));
+    if (staging == kNullCap) fail("gpu client FAILED: staging create\n");
+    if (sys_vm_channel_stage(channel, dango::kStagingGuestIpa, dango::kStagingSize) != 0) {
+        fail("gpu client FAILED: staging declare\n");
+    }
+    if (sys_vm_memory_map(vm, staging, dango::kStagingGuestIpa, dango::kStagingSize,
+                          dango::RIGHT_READ | dango::RIGHT_WRITE) != 0) {
+        fail("gpu client FAILED: staging map\n");
+    }
+    if (!gpu_fill_bars(staging)) fail("gpu client FAILED: staging fill\n");
+    dango_counter("gpu.staging.ipa", dango::kStagingGuestIpa);
+    dango_counter("gpu.staging.size", dango::kStagingSize);
+}
+
+// Drive GPU_HELLO -> ... -> GPU_PRESENT_COMPLETE. Each marker is printed only
+// after the stage it names succeeded, so a partial exchange never looks green.
+static void gpu_bootstrap_client(CapHandle channel, RingPage* tx, RingPage* rx,
+                                 CapHandle h2g_db, CapHandle g2h_db) {
+    RingSlot slot{};
+    // The pushed slot's seq, i.e. the token every reply must echo. GPU_PRESENT
+    // leaves it set for the asynchronous completion match below.
+    uint64_t seq = 0;
+
+    // 1. GPU_HELLO: negotiate the bootstrap version and require the staging
+    //    buffer path this client depends on.
+    MxGpuHello hello{};
+    hello.major = MX_GPU_VERSION_MAJOR;
+    hello.minor = MX_GPU_VERSION_MINOR;
+    hello.flags = MX_GPU_HELLO_FLAG_NONE;
+    hello.feature_bits = 0;
+    hello.boot_generation = 0; // unknown until the appliance answers
+    MxGpuHelloReply hello_reply{};
+    if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_HELLO, &hello, sizeof(hello), &seq,
+                     &slot) ||
+        !gpu_reply(slot, &hello_reply) || hello_reply.status != MX_OK) {
+        fail("gpu client FAILED: hello\n");
+    }
+    if (hello_reply.major != MX_GPU_VERSION_MAJOR ||
+        hello_reply.minor != MX_GPU_VERSION_MINOR ||
+        (hello_reply.feature_bits & MX_GPU_FEATURE_STAGING_BUFFER) == 0) {
+        dango_counter("gpu.hello.major", hello_reply.major);
+        dango_counter("gpu.hello.minor", hello_reply.minor);
+        fail("gpu client FAILED: hello rejected\n");
+    }
+    dango_counter("gpu.boot_generation", hello_reply.boot_generation);
+    console_log("gpu control: hello major=1 minor=0\n");
+
+    // 2. GPU_ENUM_OUTPUTS: the bootstrap appliance exposes exactly one output.
+    //    Device-object ids are minted by the appliance, so the first
+    //    device-level enumeration goes out with the null id.
+    MxGpuEnumOutputsRequest outputs{};
+    outputs.device_id = 0;
+    outputs.boot_generation = hello_reply.boot_generation;
+    outputs.index = 0;
+    outputs.flags = 0;
+    MxGpuEnumOutputsReply outputs_reply{};
+    if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_ENUM_OUTPUTS, &outputs,
+                     sizeof(outputs), &seq, &slot) ||
+        !gpu_reply(slot, &outputs_reply) || outputs_reply.status != MX_OK ||
+        outputs_reply.output_count != 1) {
+        dango_counter("gpu.outputs.count", outputs_reply.output_count);
+        fail("gpu client FAILED: outputs\n");
+    }
+    console_log("gpu control: outputs=1\n");
+
+    // 3. GPU_GET_MODES: the single bootstrap mode the host row asserts.
+    MxGpuGetModesRequest modes{};
+    modes.output_id = outputs_reply.output_id;
+    modes.boot_generation = hello_reply.boot_generation;
+    modes.index = 0;
+    modes.flags = 0;
+    MxGpuGetModesReply modes_reply{};
+    if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_GET_MODES, &modes,
+                     sizeof(modes), &seq, &slot) ||
+        !gpu_reply(slot, &modes_reply) || modes_reply.status != MX_OK) {
+        fail("gpu client FAILED: modes\n");
+    }
+    if (modes_reply.width != kGpuScanoutWidth || modes_reply.height != kGpuScanoutHeight ||
+        modes_reply.pixel_format != MX_GPU_PIXFMT_XRGB8888) {
+        dango_counter("gpu.mode.width", modes_reply.width);
+        dango_counter("gpu.mode.height", modes_reply.height);
+        fail("gpu client FAILED: modes rejected\n");
+    }
+    console_log("gpu control: mode 1024x768\n");
+
+    // 4. GPU_BUFFER_REGISTER: hand the appliance the staged scanout buffer.
+    //    `shm_id` is the buffer's byte offset within the shared staging window
+    //    (0 = the whole frame just rendered at the window start), so the
+    //    registered buffer *is* what gpu_fill_bars() wrote.
+    MxGpuBufferRegisterRequest buffer{};
+    buffer.shm_id = 0;
+    buffer.boot_generation = hello_reply.boot_generation;
+    buffer.width = kGpuScanoutWidth;
+    buffer.height = kGpuScanoutHeight;
+    buffer.stride = kGpuScanoutStride;
+    buffer.pixel_format = MX_GPU_PIXFMT_XRGB8888;
+    buffer.flags = MX_GPU_BUFFER_FLAG_STAGING;
+    buffer.reserved0 = 0;
+    MxGpuBufferRegisterReply buffer_reply{};
+    if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_BUFFER_REGISTER, &buffer,
+                     sizeof(buffer), &seq, &slot) ||
+        !gpu_reply(slot, &buffer_reply) || buffer_reply.status != MX_OK ||
+        buffer_reply.buffer_id == 0) {
+        fail("gpu client FAILED: buffer register\n");
+    }
+    console_log("gpu staging: registered\n");
+
+    // 5. GPU_SET_MODE: bind output + mode + buffer into one framebuffer.
+    MxGpuSetModeRequest set_mode{};
+    set_mode.output_id = outputs_reply.output_id;
+    set_mode.mode_id = modes_reply.mode_id;
+    set_mode.buffer_id = buffer_reply.buffer_id;
+    set_mode.boot_generation = buffer_reply.boot_generation;
+    set_mode.flags = 0;
+    set_mode.reserved0 = 0;
+    MxGpuSetModeReply set_mode_reply{};
+    if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_SET_MODE, &set_mode,
+                     sizeof(set_mode), &seq, &slot) ||
+        !gpu_reply(slot, &set_mode_reply) || set_mode_reply.status != MX_OK) {
+        fail("gpu client FAILED: set mode\n");
+    }
+
+    // 6. GPU_PRESENT: enqueue the whole frame, then wait for the asynchronous
+    //    completion that says it reached the scanout.
+    MxGpuPresentRequest present{};
+    present.buffer_id = buffer_reply.buffer_id;
+    present.framebuffer_id = set_mode_reply.framebuffer_id;
+    present.boot_generation = set_mode_reply.boot_generation;
+    present.flags = MX_GPU_PRESENT_FLAG_FULL_FRAME;
+    present.damage_count = 0; // whole framebuffer; no damage list
+    MxGpuPresentReply present_reply{};
+    if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_PRESENT, &present,
+                     sizeof(present), &seq, &slot) ||
+        !gpu_reply(slot, &present_reply) || present_reply.status != MX_OK) {
+        fail("gpu client FAILED: present enqueue\n");
+    }
+    // The completion notification is a separate, unsolicited frame: it carries
+    // no request of its own, so its `seq` is the GPU_PRESENT token it completes.
+    MxGpuPresentComplete complete{};
+    if (!gpu_wait(rx, g2h_db, GPU_PRESENT_COMPLETE, &slot) || slot.seq != seq ||
+        !gpu_reply(slot, &complete) || complete.status != MX_OK ||
+        complete.buffer_id != buffer_reply.buffer_id) {
+        dango_counter("gpu.present.status", status_magnitude(complete.status));
+        fail("gpu client FAILED: present complete\n");
+    }
+    dango_counter("gpu.buffer.id", buffer_reply.buffer_id);
+    dango_counter("gpu.framebuffer.id", set_mode_reply.framebuffer_id);
+    console_log("gpu present: complete\n");
+}
+
 static void runner_entry(uint64_t vcpu_arg) {
     const CapHandle vcpu = static_cast<CapHandle>(vcpu_arg);
     dango_log("vm runner thread entered\n");
@@ -925,6 +1186,10 @@ extern "C" [[noreturn]] void _start() {
                 fail("channel native probe FAILED\n");
         }
         console_log("channel native probe passed\n");
+        // Phase H/I: publish and fill the shared staging window while the guest
+        // is still stopped, so the channel descriptor describes it the moment
+        // the guest can open the channel.
+        gpu_staging_publish(vm, channel);
     }
     console_log("channel ready\n");
     console_log("layout ready\n");
@@ -973,18 +1238,33 @@ extern "C" [[noreturn]] void _start() {
     console_log("service ready\n");
     (void)sys_notify(kDoneDoorbell);
 
+    // Phase H/I: drive the bootstrap GPU control plane and present path first.
+    // The guest owns exactly one channel endpoint (the driver's open() is
+    // exclusive) and its agent runs dango-gpud before the transport self-test,
+    // so this exchange must complete before the guest ping/pong probe below,
+    // which then reuses the same channel.
     if (channel_tx && channel_rx) {
+        gpu_bootstrap_client(channel, channel_tx, channel_rx, h2g_db, g2h_db);
+    }
+
+    if (channel_tx && channel_rx) {
+        // The GPU client above already used this channel, so the transport
+        // self-test's ring sequence and counters are relative to its start.
+        dango::VmChannelInfo probe_before{};
+        if (sys_vm_channel_inspect(channel, &probe_before, sizeof(probe_before)) != 0)
+            fail("channel guest probe FAILED: counters\n");
         RingSlot message{};
         if (!ring_wait_pop(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, &message, g2h_db) ||
             message.type != DANGO_CH_TEST_READY || message.length != 0)
             fail("channel guest probe FAILED: ready\n");
+        const uint64_t ready_seq = message.seq;
         for (uint64_t n = 0; n < DANGO_CH_TEST_ROUNDS; ++n) {
             if (!ring_try_push(channel_tx, DANGO_CH_DEFAULT_RING_ORDER, DANGO_CH_TEST_PING, &n,
                                sizeof(n), h2g_db) ||
                 sys_vm_channel_notify(channel) != 0 ||
                 !ring_wait_pop(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, &message, g2h_db) ||
                 message.type != DANGO_CH_TEST_PONG || message.length != sizeof(n) ||
-                message.seq != 257 + n ||
+                message.seq != ready_seq + 1 + n ||
                 *reinterpret_cast<const uint64_t*>(message.payload) != n)
                 fail("channel guest probe FAILED: order\n");
         }
@@ -993,8 +1273,10 @@ extern "C" [[noreturn]] void _start() {
             *reinterpret_cast<const uint64_t*>(message.payload) == 0)
             fail("channel guest probe FAILED: IRQ\n");
         if (sys_vm_channel_inspect(channel, &channel_info, sizeof(channel_info)) != 0 ||
-            channel_info.messages_host_to_guest != DANGO_CH_TEST_ROUNDS ||
-            channel_info.messages_guest_to_host < DANGO_CH_TEST_ROUNDS + 2)
+            channel_info.messages_host_to_guest - probe_before.messages_host_to_guest !=
+                DANGO_CH_TEST_ROUNDS ||
+            channel_info.messages_guest_to_host - probe_before.messages_guest_to_host <
+                DANGO_CH_TEST_ROUNDS + 2)
             fail("channel guest probe FAILED: counters\n");
         dango_counter("channel.h2g", channel_info.messages_host_to_guest);
         dango_counter("channel.g2h", channel_info.messages_guest_to_host);

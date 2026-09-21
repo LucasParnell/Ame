@@ -18,6 +18,7 @@
 #   AME_VERIFY_GPU=1 scripts/verify.sh                 # + Phase E Linux virtio-gpu
 #   AME_VERIFY_CHANNEL=1 scripts/verify.sh             # + Phase G channel row
 #   AME_VERIFY_KMS=1 scripts/verify.sh                 # + Phase F KMS display row
+#   AME_VERIFY_GPUD=1 scripts/verify.sh                # + Phase H/I GPU control row
 #   AME_VERIFY_PANIC=1 scripts/verify.sh                # + panic screen capture
 #
 # Exit status is 0 only when every check passes.
@@ -171,6 +172,16 @@ do_kms() {
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> KMS {} display={} {}".format(d["reason"], d.get("pattern", {}).get("size"), d["counters"])); sys.exit(0 if d["success"] else 1)'
 }
 
+# Phase H/I: the bootstrap host GPU control plane (spec §13) and present path,
+# asserted from the host.  Opt-in like the Phase E/F rows, which it shares the
+# appliance tree with; the default gate is unchanged unless AME_VERIFY_GPUD=1.
+do_gpud() {
+    local tree
+    tree="$(gpu_tree)" || fail "gpu build tree"
+    python3 scripts/test/gpud.py --build "$tree" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> GPUD {} display={} {}".format(d["reason"], d.get("pattern", {}).get("size"), d["counters"])); sys.exit(0 if d["success"] else 1)'
+}
+
 # Panic screen: a dev-only kernel (ANKO_PANIC_SCREEN_DEMO) panics as soon as the
 # framebuffer is bound; the host captures the screen and asserts the logo art and
 # headline.  Opt-in, and it builds its own kernel.
@@ -216,6 +227,11 @@ fi
 # Opt-in Phase F row.
 if [[ "${AME_VERIFY_KMS:-0}" == "1" ]]; then
     CHECKS+=("kms-display:do_kms")
+fi
+
+# Opt-in Phase H/I row.
+if [[ "${AME_VERIFY_GPUD:-0}" == "1" ]]; then
+    CHECKS+=("gpud:do_gpud")
 fi
 
 # Opt-in panic-screen row.

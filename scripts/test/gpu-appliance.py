@@ -43,7 +43,7 @@ def main():
     parser.add_argument('--output')
     args = parser.parse_args()
     work = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix='ame-gpu-'))
-    env = dict(os.environ, AME_QEMU_IOMMU='1', AME_QEMU_TESTDEV='0')
+    env = dict(os.environ, AME_QEMU_IOMMU='1', AME_QEMU_TESTDEV='0', AME_QEMU_GPU_DEVICE=ef.GPU_DEVICE)
     command = [sys.executable, str(ROOT / 'scripts/test/boot.py'), '--build', args.build,
                '--cpus', str(args.cpus), '--timeout', str(args.timeout), '--output', str(work),
                '--marker', ef.MARKERS['boot_ready'], '--marker', ef.MARKERS['gpu_proof']]

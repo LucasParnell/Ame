@@ -71,6 +71,8 @@ mmio_size="$(macro_dec DANGO_GPU_MMIO_SIZE)"
 intx_spi="$(macro_dec DANGO_GPU_INTX_SPI)"
 bar4_ipa="$(macro_dec DANGO_GPU_BAR4_IPA)"
 bar4_size="$(macro_dec DANGO_GPU_BAR4_SIZE)"
+stg_base="$(macro_dec DANGO_GPU_STAGING_BASE)"
+stg_size="$(macro_dec DANGO_GPU_STAGING_SIZE)"
 
 # The channel DTS `interrupts` cell carries the SPI number, not the vGIC hwirq
 # (32 + SPI). Derive it from the header rather than restating it.
@@ -86,9 +88,22 @@ if (( bar4_ipa < mmio_base || bar4_ipa + bar4_size > mmio_base + mmio_size )); t
     exit 1
 fi
 
-# Suffixed placeholders first: they are strict supersets of the plain names.
+# The staging window is a device-side IPA range above RAM; it must not overlap
+# the channel window or the Assigned MMIO window.
+if (( stg_base < ch_base + ch_size )); then
+    echo "error: DANGO_GPU_STAGING_BASE overlaps the channel window" >&2
+    exit 1
+fi
+if (( stg_base < mmio_base + mmio_size && stg_base + stg_size > mmio_base )); then
+    echo "error: DANGO_GPU_STAGING window overlaps the MMIO window" >&2
+    exit 1
+fi
+
+# Placeholders are emitted longest-name-first so a plain name (e.g. BASE) can
+# never be substituted inside a longer one (e.g. BASE_UA).
 emit DANGO_CH_GUEST_BASE_UA  '%08x'   "${ch_base}"
 emit DANGO_GPU_ECAM_BASE_UA  '%08x'   "${ecam_base}"
+emit DANGO_GPU_STAGING_BASE_UA '%08x' "${stg_base}"
 emit DANGO_GPU_INTX_SPI_1    '0x%02x' "$(( intx_spi + 1 ))"
 emit DANGO_GPU_INTX_SPI_2    '0x%02x' "$(( intx_spi + 2 ))"
 emit DANGO_GPU_INTX_SPI_3    '0x%02x' "$(( intx_spi + 3 ))"
@@ -100,4 +115,6 @@ emit DANGO_GPU_ECAM_BASE     '0x%08x' "${ecam_base}"
 emit DANGO_GPU_ECAM_SIZE     '0x%08x' "${ecam_size}"
 emit DANGO_GPU_MMIO_BASE     '0x%08x' "${mmio_base}"
 emit DANGO_GPU_MMIO_SIZE     '0x%08x' "${mmio_size}"
+emit DANGO_GPU_STAGING_BASE  '0x%08x' "${stg_base}"
+emit DANGO_GPU_STAGING_SIZE  '0x%08x' "${stg_size}"
 emit DANGO_GPU_INTX_SPI      '0x%02x' "${intx_spi}"

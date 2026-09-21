@@ -76,30 +76,70 @@ add_link_options(
 # ---------------------------------------------------------------------------
 set(AME_SIGNING_KEY "" CACHE FILEPATH "Ed25519 PKCS8 private signing key (release packaging only)")
 set(AME_TRUSTED_KEY_FILES "" CACHE STRING "Semicolon-separated Ed25519 public key files")
-set(AME_TRUST_ARGS --output ${CMAKE_BINARY_DIR}/generated/manifest_trust.h)
-if(ANKO_BUILD_DEV)
-    list(APPEND AME_TRUST_ARGS --development)
-endif()
-if(AME_SIGNING_KEY)
-    if(EXISTS "${AME_SIGNING_KEY}")
-        list(APPEND AME_TRUST_ARGS --signing-key ${AME_SIGNING_KEY})
-    elseif(ANKO_BUILD_DEV)
-        # A dev build signs with the development key, so a path left over in a
-        # cached build tree must not stop the configure.
-        message(WARNING
-            "AME_SIGNING_KEY '${AME_SIGNING_KEY}' does not exist; using the development key")
-    else()
-        message(FATAL_ERROR
-            "AME_SIGNING_KEY does not exist: '${AME_SIGNING_KEY}'\n"
-            "  Point it at an Ed25519 PKCS8 private key (scripts/make-release-key.sh writes\n"
-            "  one), clear it with -U AME_SIGNING_KEY, or build with -DANKO_BUILD_DEV=ON to\n"
-            "  sign with the development key.")
+
+# The private key and the trust store are a pair: the signer refuses a key that the
+# trust store does not contain. Build the signer arguments from the current values,
+# run the signer, and report failures without a Python traceback.
+function(ame_signing_args out)
+    set(args --output ${CMAKE_BINARY_DIR}/generated/manifest_trust.h)
+    if(ANKO_BUILD_DEV)
+        list(APPEND args --development)
     endif()
+    if(AME_SIGNING_KEY)
+        list(APPEND args --signing-key ${AME_SIGNING_KEY})
+    endif()
+    list(APPEND args --trusted ${AME_TRUSTED_KEY_FILES})
+    set(${out} ${args} PARENT_SCOPE)
+endfunction()
+
+function(ame_run_signer result_var error_var)
+    ame_signing_args(args)
+    execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/mx/signing.py ${args}
+        RESULT_VARIABLE result ERROR_VARIABLE error)
+    set(${result_var} ${result} PARENT_SCOPE)
+    set(${error_var} ${error} PARENT_SCOPE)
+endfunction()
+
+if(NOT ANKO_BUILD_DEV)
+    # Release packaging is explicit: both halves of the pair must be given and must
+    # exist, so a typo or a stale cache entry is named before the signer runs.
+    if(NOT AME_SIGNING_KEY)
+        message(FATAL_ERROR
+            "Release packaging requires a signing key:\n"
+            "  -DAME_SIGNING_KEY=<Ed25519 PKCS8 .pem>   (scripts/make-release-key.sh writes one)")
+    endif()
+    if(NOT AME_TRUSTED_KEY_FILES)
+        message(FATAL_ERROR
+            "Release packaging requires a trust store:\n"
+            "  -DAME_TRUSTED_KEY_FILES=<public key .pem>")
+    endif()
+    foreach(path ${AME_SIGNING_KEY} ${AME_TRUSTED_KEY_FILES})
+        if(NOT EXISTS "${path}")
+            message(FATAL_ERROR "Signing key file does not exist: '${path}'")
+        endif()
+    endforeach()
 endif()
-list(APPEND AME_TRUST_ARGS --trusted ${AME_TRUSTED_KEY_FILES})
-execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/mx/signing.py ${AME_TRUST_ARGS}
-    RESULT_VARIABLE AME_TRUST_RESULT ERROR_VARIABLE AME_TRUST_ERROR)
+
+ame_run_signer(AME_TRUST_RESULT AME_TRUST_ERROR)
+if(NOT AME_TRUST_RESULT EQUAL 0 AND ANKO_BUILD_DEV AND (AME_SIGNING_KEY OR AME_TRUSTED_KEY_FILES))
+    # A development build signs with the development key, so key material cached
+    # from another mode (a release key, a release trust store, a path that has
+    # since moved) cannot be honoured. Clear the pair so the tree converges on
+    # development signing instead of failing on every configure from here on.
+    message(STATUS "signing: clearing stale AME_SIGNING_KEY / AME_TRUSTED_KEY_FILES; "
+                   "a dev build signs with the development key")
+    unset(AME_SIGNING_KEY CACHE)
+    unset(AME_TRUSTED_KEY_FILES CACHE)
+    set(AME_SIGNING_KEY "")
+    set(AME_TRUSTED_KEY_FILES "")
+    ame_run_signer(AME_TRUST_RESULT AME_TRUST_ERROR)
+endif()
 if(NOT AME_TRUST_RESULT EQUAL 0)
+    string(STRIP "${AME_TRUST_ERROR}" AME_TRUST_ERROR)
+    # Lead with the signer's own reason: a traceback is noise in a configure log.
+    if(AME_TRUST_ERROR MATCHES "ValueError: ([^\n]*)")
+        set(AME_TRUST_ERROR "${CMAKE_MATCH_1}")
+    endif()
     message(FATAL_ERROR "Signing configuration failed: ${AME_TRUST_ERROR}")
 endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS

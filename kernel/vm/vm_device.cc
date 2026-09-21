@@ -180,10 +180,10 @@ SysError map_one_bar_page(VmDeviceAssignment* a, u64 ipa, PhysAddr pa, u32 right
 // coalesce its backing pages into maximal physically-contiguous runs, each with
 // IOVA == the run's guest physical address. Capacity is fixed (kMaxAssignRam),
 // so an unusually fragmented VM logs and truncates rather than overflowing.
-void collect_vm_ram(VmDeviceAssignment* a) {
+SysError collect_vm_ram(VmDeviceAssignment* a) {
     Vm* v = a->owner_vm;
     if (!v) {
-        return;
+        return E_INVALID;
     }
     for (u32 i = 0; i < v->memory_count; ++i) {
         VmMemory* mem = v->memory_objects[i];
@@ -205,13 +205,12 @@ void collect_vm_ram(VmDeviceAssignment* a) {
             }
             const u64 iova = mem->guest_pa_base + p * PAGE_SIZE;
             if (device_authorize_ram(a, start, len, iova) != E_OK) {
-                ANKO_LOG_WARN("kernel/vm",
-                              "assign: RAM range capacity reached; aperture truncated");
-                return;
+                return E_OVERFLOW;
             }
             p = q;
         }
     }
+    return a->ram_count ? E_OK : E_INVALID;
 }
 
 } // namespace
@@ -590,6 +589,8 @@ static SysError step_assign_bars(VmDeviceAssignment* a) {
         }
     }
     for (u32 i = 0; i < a->fn_count; ++i) {
+        const auto& fn = a->fns[i].info;
+        pci::set_memory_enable(fn.bus, fn.device, fn.function, false);
         if (!pci::assign_bars(&a->fns[i].info, g_hw.pci_mmio_base, g_hw.pci_mmio_size, &cursor)) {
             return E_INVALID;
         }
@@ -607,12 +608,8 @@ SysError device_attach(VmDeviceAssignment* a, const DeviceAssignSpec& spec) {
         return E_INVALID;
     }
     SysError rc = step_claim(a, spec);
-    if (rc == E_OK) {
-        rc = step_assign_bars(a);
-    }
-    if (rc == E_OK) {
-        rc = step_contain(a);
-    }
+    if (rc == E_OK) rc = step_contain(a);
+    if (rc == E_OK) rc = step_assign_bars(a);
     if (rc == E_OK) {
         rc = step_quiesce(a);
     }
@@ -786,11 +783,23 @@ SysError device_secure_attach(Process& caller, CapHandle vm_cap, const pci::Host
         return rc;
     }
 
+    if (!iommu::smmuv3_ready()) return E_NOTIMPL;
+    if (flags & ~kAssignFlagAssignBars) return E_INVALID;
+
     // Derive the isolation group from the inventory and require the named
     // function to be in it; assign the whole group or reject (§6.3).
     pci::PciIsolationGroup group{};
     if (!pci::isolation_group_of(g_hw.ecam_base, host_fn.info.bus, host_fn.info.device, &group)) {
         return E_NOTFOUND;
+    }
+    // CallGuard serializes claims; reject a live owner before touching host state.
+    for (const auto& existing : g_pool.slots) {
+        if (!existing.lifetime || existing.state == VM_DEV_REVOKED) continue;
+        for (u32 i = 0; i < existing.fn_count; ++i) {
+            const auto& fn = existing.fns[i].info;
+            if (pci::isolation_group_id(fn.segment, fn.bus, fn.device) == group.group_id)
+                return E_BUSY;
+        }
     }
     DeviceAssignSpec spec{};
     spec.group_id = group.group_id;
@@ -820,8 +829,8 @@ SysError device_secure_attach(Process& caller, CapHandle vm_cap, const pci::Host
     }
     // Policy input for the attach machine: authorise the VM's mapped RAM as the
     // appliance DMA aperture before the domain is populated (§8.2, §8.5).
-    collect_vm_ram(a);
-    rc = device_attach(a, spec);
+    rc = collect_vm_ram(a);
+    if (rc == E_OK) rc = device_attach(a, spec);
     if (rc != E_OK) {
         object::release(a->lifetime);
         return rc;
@@ -957,8 +966,8 @@ SysError device_route_irq(Process& caller, CapHandle assign_cap, CapHandle irq_c
     if (flags != 0) {
         return E_INVALID;
     }
-    if (guest_irq >= kVgicMaxIrqs) {
-        return E_INVALID; // mask into the vGIC range before any table access
+    if (guest_irq < 32 || guest_irq >= kVgicMaxIrqs) {
+        return E_INVALID; // devices may target SPIs, never guest SGIs or timer PPIs
     }
     SysError rc = E_OK;
     auto a = assignment_from_cap(caller, assign_cap, RIGHT_VM_MAP, &rc);

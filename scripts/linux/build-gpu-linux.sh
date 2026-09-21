@@ -66,10 +66,7 @@ trap 'rm -rf "${shim}"' EXIT
 
 mkdir -p "${OUT}" "${KOUT}"
 
-stamp="${KOUT}/.dango-gpu-configured"
-if [[ ! -f "${stamp}" || "${FRAG_GPU}" -nt "${stamp}" || "${FRAG_HELLO}" -nt "${stamp}" ]]; then
-    rm -f "${stamp}"
-    MAKE_ARGS=(ARCH=arm64)
+MAKE_ARGS=(ARCH=arm64)
 if command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1; then
     MAKE_ARGS+=(LLVM=1)
 elif [[ "${CROSS_COMPILE:-}" == "" && "$(uname -m)" != "aarch64" ]]; then
@@ -77,7 +74,10 @@ elif [[ "${CROSS_COMPILE:-}" == "" && "$(uname -m)" != "aarch64" ]]; then
     exit 1
 fi
 
-"${MAKE}" "${MAKE_ARGS[@]}" O="${KOUT}" -C "${DANGO_LINUX_SRC}" defconfig
+stamp="${KOUT}/.dango-gpu-configured"
+if [[ ! -f "${stamp}" || "${FRAG_GPU}" -nt "${stamp}" || "${FRAG_HELLO}" -nt "${stamp}" ]]; then
+    rm -f "${stamp}"
+    "${MAKE}" "${MAKE_ARGS[@]}" O="${KOUT}" -C "${DANGO_LINUX_SRC}" defconfig
     # Kernel-sanctioned fragment merge (-m: write the merged file, no make; the
     # caller runs olddefconfig). It rewrites duplicates rather than appending,
     # which is required because kconfig keeps the first assignment.
@@ -99,7 +99,8 @@ echo "built Linux GPU appliance kernel: ${OUT}/Image"
 
 # --- guest artifacts: agent, initramfs, GPU DTB, manifest --------------------
 export DANGO_LINUX_OUT="${OUT}"
-: "${DANGO_LINUX_BOOTARGS:=console=ttyAMA0,115200n8 earlycon=pl011,0x09000000 loglevel=4 nosmp maxcpus=1 cma=0 coherent_pool=1M cpuidle.off=1 rdinit=/init panic=-1}"
+export DANGO_LINUX_PROFILE=gpu
+export DANGO_LINUX_BOOTARGS="${DANGO_LINUX_BOOTARGS:-console=ttyAMA0,115200n8 earlycon=pl011,0x09000000 loglevel=4 nosmp maxcpus=1 cma=0 coherent_pool=1M cpuidle.off=1 rdinit=/init panic=-1}"
 
 "${AME}/scripts/linux/build-agent.sh"
 "${AME}/scripts/linux/build-initramfs.sh"
@@ -127,6 +128,7 @@ fi
 
 cat > "${OUT}/manifest.toml" <<EOF_MANIFEST
 name = "dango-linux-gpu"
+profile = "gpu"
 arch = "aarch64"
 
 kernel = "Image"

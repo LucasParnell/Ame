@@ -846,6 +846,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         // a0 = vm_cap, a1 = host function cap, a2 = flags
         cap::Ref fn_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PCI_FUNCTION);
         if (!fn_e) return err(E_NOTFOUND);
+        if ((fn_e->rights_mask & RIGHT_WRITE) == 0) return err(E_PERM);
         auto* host_fn = static_cast<pci::HostFunction*>(fn_e->target);
         if (!host_fn) return err(E_NOTFOUND);
         CapHandle out = kNullCap;

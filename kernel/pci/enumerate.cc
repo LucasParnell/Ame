@@ -146,7 +146,7 @@ const char* bar_type_name(BarType type) {
     }
 }
 
-u32 enumerate(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap) {
+static u32 scan_functions(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap) {
     if (ecam_base == 0 || out == nullptr || cap == 0) {
         return 0;
     }
@@ -197,6 +197,39 @@ u32 enumerate(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap) {
         }
     }
     return count;
+}
+
+u32 enumerate(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap) {
+    static PciFunctionInfo inventory[kMaxFunctions];
+    static u32 count;
+    static bool ready;
+    if (!ecam_base || !out || !cap) return 0;
+    // Boot discovers this fixed QEMU topology before any native driver runs.
+    // Re-probing BAR sizes later would temporarily relocate a live native BAR.
+    if (!ready) {
+        count = scan_functions(ecam_base, inventory, kMaxFunctions);
+        ready = true;
+    }
+    const u32 written = count < cap ? count : cap;
+    for (u32 i = 0; i < written; ++i) {
+        auto record = inventory[i];
+        record.command = cfg_read(ecam_base, record.bus, record.device, record.function, kCfgCommand);
+        record.bus_master = (record.command & kCmdBusMaster) != 0;
+        record.memory_enabled = (record.command & kCmdMemoryEnable) != 0;
+        for (u32 b = 0; b < kMaxBars; ++b) {
+            auto& bar = record.bars[b];
+            if (!bar.size) continue;
+            const u32 low = cfg_read(ecam_base, record.bus, record.device, record.function, kCfgBar0 + b * 4);
+            bar.base = low & (bar.type == BarType::Io ? ~3u : ~15u);
+            if (bar.type == BarType::Mmio64 && b + 1 < kMaxBars) {
+                bar.base |= u64(cfg_read(ecam_base, record.bus, record.device, record.function,
+                                        kCfgBar0 + (b + 1) * 4)) << 32;
+                ++b;
+            }
+        }
+        out[i] = record;
+    }
+    return written;
 }
 
 void log_inventory(PhysAddr ecam_base) {

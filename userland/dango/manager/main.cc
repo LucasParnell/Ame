@@ -15,7 +15,6 @@ constexpr uint64_t kLinuxRunPeriodNs = 16666667ull;
 // Linux early boot does a lot of tiny MMIO exits, especially console output.
 // Amortise the user/kernel syscall boundary over more guest exits.
 constexpr uint32_t kLinuxRunMaxExits = 4096;
-constexpr uint32_t kMonitorPollYieldQuantum = 64;
 // Keep the bootstrap runner on the manager CPU.  Init starts dango.manager on
 // CPU1 so the vCPU can own that core without stalling the CPU0 boot path.
 constexpr uint64_t kLinuxRunnerCoreMask = 1ull << 1;
@@ -67,6 +66,7 @@ struct LinuxArtifacts {
     uint64_t dtb_size;
     dango::VmLayout layout;
     uint64_t entry;
+    bool gpu_profile;
 };
 
 static uint32_t slen(const char* s) {
@@ -421,6 +421,11 @@ static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
         return false;
     }
 
+    uint64_t profile_len = 0;
+    const auto* profile = manifest_value(artifacts->manifest, artifacts->manifest_size,
+                                         "profile", &profile_len);
+    artifacts->gpu_profile = profile && token_equals(profile, profile_len, "gpu");
+    if (profile && !artifacts->gpu_profile && !token_equals(profile, profile_len, "hello")) return false;
     artifacts->layout = layout;
     artifacts->entry = entry_pc;
     return true;
@@ -479,6 +484,7 @@ static bool discover_linux_artifacts(const uint8_t* archive, LinuxArtifacts* out
     out->layout.channel_base = artifacts.layout.channel_base;
     out->layout.channel_size = artifacts.layout.channel_size;
     out->entry = artifacts.entry;
+    out->gpu_profile = artifacts.gpu_profile;
     return true;
 }
 
@@ -556,6 +562,7 @@ static void runner_entry(uint64_t vcpu_arg) {
     const CapHandle vcpu = static_cast<CapHandle>(vcpu_arg);
     dango_log("vm runner thread entered\n");
     bool logged_first_return = false;
+    bool logged_hello = false;
     while (true) {
         dango::VcpuRunBudget budget{};
         budget.budget_ns = kLinuxRunBudgetNs;
@@ -601,6 +608,10 @@ static void runner_entry(uint64_t vcpu_arg) {
         if (result.exit_reason == dango::VCPU_EXIT_SHUTDOWN) {
             dango_log("vm runner stopped: guest shutdown\n");
             break;
+        }
+        if (!logged_hello && sys_debug_counter(dango::VM_DEBUG_GUEST_LINUX_HELLO) > 0) {
+            logged_hello = true;
+            dango_log("linux guest responded\n");
         }
         // Spec §7/§8: sustained guest execution stays budgeted.  The runner
         // holds the vCPU on a budget/period sched context, so it must return to
@@ -787,7 +798,8 @@ extern "C" [[noreturn]] void _start() {
     // BARs -> route INTx -> expose ECAM, all before the vCPU is resumed.
     const CapHandle gpu_function = mochi::boot::handle(boot, "gpu.function");
     const CapHandle gpu_irq = mochi::boot::handle(boot, "gpu.irq");
-    if (have_linux && gpu_function != kNullCap) {
+    if (have_linux && linux.gpu_profile) {
+        if (!gpu_function || !gpu_irq) fail("gpu authority missing\n");
         // Opt in to host BAR assignment: direct -kernel boot has no firmware, so
         // the function's BARs read as 0 until we program them from the PCIe MMIO
         // window (spec §6.2.5.1).
@@ -809,7 +821,7 @@ extern "C" [[noreturn]] void _start() {
             fail("gpu bar map failed\n");
         }
         // PCI INTx -> guest SPI 12 (dango-linux-gpu.dts.in interrupt-map).
-        if (gpu_irq != kNullCap && sys_vm_assign_route_irq(assign, gpu_irq, vcpu, 12, 0) != 0) {
+        if (sys_vm_assign_route_irq(assign, gpu_irq, vcpu, 32 + 12, 0) != 0) {
             fail("gpu irq route failed\n");
         }
         // Synthetic ECAM aperture (1 MiB); reads/writes trap through the
@@ -928,79 +940,10 @@ extern "C" [[noreturn]] void _start() {
     console_log("service ready\n");
     (void)sys_notify(kDoneDoorbell);
 
-    bool logged_agent = false;
-    bool logged_hello = false;
-    uint32_t monitor_poll_divider = 0;
-    while (true) {
-        const bool poll_now = ((monitor_poll_divider++ & (kMonitorPollYieldQuantum - 1u)) == 0);
-        if (have_linux && !logged_hello && poll_now) {
-            const int64_t saw_hello = sys_debug_counter(dango::VM_DEBUG_GUEST_LINUX_HELLO);
-            const int64_t saw_agent = sys_debug_counter(dango::VM_DEBUG_GUEST_AGENT_START);
-            if (saw_hello > 0) {
-                dango_log("linux guest responded\n");
-                logged_hello = true;
-            } else if (!logged_agent && saw_agent > 0) {
-                dango_log("linux guest agent started\n");
-                logged_agent = true;
-            }
-        }
-        static uint64_t last_attempts = ~0ull;
-        static uint64_t last_notimpl = ~0ull;
-        static uint64_t last_irq = ~0ull;
-        static uint64_t last_wfx = ~0ull;
-        static uint64_t last_unsup = ~0ull;
-        if (have_linux && poll_now) {
-            const int64_t attempts = sys_debug_counter(dango::VM_DEBUG_VCPU_RUN_ATTEMPTS);
-            const int64_t notimpl = sys_debug_counter(dango::VM_DEBUG_VCPU_RUN_NOTIMPL);
-            const int64_t irq = sys_debug_counter(dango::VM_DEBUG_VCPU_IRQ_EXITS);
-            const int64_t wfx = sys_debug_counter(dango::VM_DEBUG_VCPU_WFX_EXITS);
-            const int64_t unsup = sys_debug_counter(dango::VM_DEBUG_VCPU_UNSUPPORTED_EXITS);
-            if (attempts >= 0) {
-                const uint64_t value = static_cast<uint64_t>(attempts);
-                if (should_log_counter_delta(value, last_attempts)) {
-                    last_attempts = value;
-                    dango_counter("vcpu.run_attempts", value);
-                }
-            }
-            if (notimpl >= 0) {
-                const uint64_t value = static_cast<uint64_t>(notimpl);
-                if (should_log_counter_delta(value, last_notimpl)) {
-                    last_notimpl = value;
-                    dango_counter("vcpu.run_notimpl", value);
-                }
-            }
-            if (irq >= 0) {
-                const uint64_t value = static_cast<uint64_t>(irq);
-                if (should_log_counter_delta(value, last_irq)) {
-                    last_irq = value;
-                    dango_counter("vcpu.irq_exits", value);
-                }
-            }
-            if (wfx >= 0) {
-                const uint64_t value = static_cast<uint64_t>(wfx);
-                if (should_log_counter_delta(value, last_wfx)) {
-                    last_wfx = value;
-                    dango_counter("vcpu.wfx_exits", value);
-                }
-            }
-            if (unsup >= 0) {
-                const uint64_t value = static_cast<uint64_t>(unsup);
-                if (should_log_counter_delta(value, last_unsup)) {
-                    last_unsup = value;
-                    dango_counter("vcpu.unsupported_exits", value);
-                }
-            }
-        }
-        if (logged_hello) {
-            // Diagnostics are useful while bringing the guest up, but after the
-            // agent responds this service thread should stop burning latency-band
-            // quanta.  The runner thread keeps the VM alive.
-            const CapHandle idle_db = as_cap(sys_doorbell_create());
-            if (idle_db != kNullCap) {
-                const uint64_t seen = sys_doorbell_read(idle_db);
-                (void)sys_wait_doorbell(idle_db, seen);
-            }
-        }
-        sys_yield();
-    }
+    // A latency-band monitor that repeatedly yields remains runnable and can
+    // starve the budgeted VM runner. The runner reports its own transitions;
+    // the manager sleeps until a future control-plane request is implemented.
+    const CapHandle idle = as_cap(sys_doorbell_create());
+    if (!idle) fail("manager idle doorbell failed\n");
+    for (;;) (void)sys_wait_doorbell(idle, sys_doorbell_read(idle));
 }

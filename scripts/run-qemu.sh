@@ -26,6 +26,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/scripts/host.sh"
 ame_host_tools
+QEMU_MACHINE=virt,virtualization=on,gic-version=2
+GPU_ARGS=()
+if [[ "${AME_QEMU_IOMMU:-0}" == 1 ]]; then
+    QEMU_MACHINE+=,iommu=smmuv3,default-bus-bypass-iommu=off
+    GPU_ARGS=(-device virtio-gpu-pci,iommu_platform=on)
+fi
 DEFAULT_DISPLAY=sdl
 if [[ "$(uname -s)" == Darwin ]]; then DEFAULT_DISPLAY=cocoa; fi
 case "${AME_BOOT_MODE:-direct}" in
@@ -177,7 +183,7 @@ if [[ "${AME_BOOT_MODE:-direct}" == "direct" ]]; then
     fi
 
     QEMU_ARGS=(
-        -machine virt,virtualization=on,gic-version=2
+        -machine "${QEMU_MACHINE}"
         -cpu cortex-a57
         -smp "${QEMU_SMP:-2}"
         -m "${QEMU_MEM:-512M}"
@@ -223,7 +229,7 @@ else
     fi
 
     QEMU_ARGS=(
-        -machine virt,virtualization=on,gic-version=2
+        -machine "${QEMU_MACHINE}"
         -cpu cortex-a57
         -smp "${QEMU_SMP:-2}"
         -m "${QEMU_MEM:-512M}"
@@ -239,6 +245,8 @@ else
         -bios "${UBOOT}"
     )
 fi
+
+QEMU_ARGS+=("${GPU_ARGS[@]}")
 
 if [[ "${1:-}" == "debug" ]]; then
     QEMU_ARGS+=(-S -gdb tcp::1234)

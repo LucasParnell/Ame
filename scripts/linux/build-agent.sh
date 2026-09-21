@@ -15,6 +15,10 @@ CFLAGS=(
   -Wl,-e,_start
 )
 
+if [[ "${DANGO_LINUX_PROFILE:-hello}" == gpu ]]; then
+    CFLAGS+=(-DDANGO_GPU_PROBE=1)
+fi
+
 SRC="${AME}/linux-artifacts/agent/dango-agent.c"
 DST="${OUT}/dango-agent"
 

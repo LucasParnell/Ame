@@ -124,6 +124,22 @@ do_assign() {
     | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("counters", {}); print("   -> {} active={} bar={} routes={} injected={} deny={} ({:.2f}s)".format(d["reason"], c.get("active"), c.get("bar_mapped"), c.get("irq_routes"), c.get("irq_injected"), c.get("mediated_deny"), d.get("elapsed") or 0)); sys.exit(0 if d["success"] else 1)'
 }
 
+# Linux GPU artifacts are built separately (a Linux container on macOS).
+# Keep this build separate so the default hello/no-payload gate stays intact.
+do_gpu() {
+    local gpu_build="${AME_VERIFY_GPU_BUILD:-${ROOT}/out/qemu-gpu}"
+    local artifacts="${AME_VERIFY_GPU_ARTIFACTS:-${ROOT}/build/dango-linux-gpu}"
+    local args=(-S . -B "$gpu_build" -G Ninja -DCMAKE_BUILD_TYPE=Debug
+                -DANKO_BOARD=qemu-virt -DANKO_BUILD_DEV=ON
+                -DDANGO_BUILD_LINUX_ARTIFACTS=OFF -DDANGO_LINUX_PROFILE=gpu
+                -DDANGO_LINUX_ARTIFACT_DIR="$artifacts")
+    [[ -f "$gpu_build/CMakeCache.txt" ]] || args+=(-DCMAKE_TOOLCHAIN_FILE=scripts/build/toolchain-aarch64.cmake)
+    cmake "${args[@]}" >/dev/null
+    cmake --build "$gpu_build" --target anko mochi_system >/dev/null
+    python3 scripts/test/gpu-appliance.py --build "$gpu_build" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> GPU {} {}".format(d["reason"], d["counters"])); sys.exit(0 if d["success"] else 1)'
+}
+
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
 # bespoke control flow below.
 CHECKS=(
@@ -145,6 +161,10 @@ fi
 # Opt-in Phase D row.  Absent by default so the default gate is unchanged.
 if [[ "${AME_VERIFY_ASSIGN:-0}" == "1" ]]; then
     CHECKS+=("assignment:do_assign")
+fi
+
+if [[ "${AME_VERIFY_GPU:-0}" == "1" ]]; then
+    CHECKS+=("gpu-appliance:do_gpu")
 fi
 
 record_toolchain

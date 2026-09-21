@@ -36,8 +36,8 @@ docker info >/dev/null 2>&1 || {
 mkdir -p "${DANGO_LINUX_OUT}"
 
 # The tree is arm64, so an aarch64 container builds ARCH=arm64 natively — no
-# cross toolchain required. All generated objects stay in the container's /tmp;
-# only the final artifacts are written to the mounted output dir.
+# cross toolchain required. Sources are read-only; generated objects persist in
+# Ame's build directory for incremental builds, and final artifacts go to /out.
 exec docker run --rm \
     --platform linux/arm64 \
     -e DANGO_LINUX_SRC=/linux \
@@ -45,7 +45,7 @@ exec docker run --rm \
     -e DANGO_LINUX_OUT=/out \
     -e DEBIAN_FRONTEND=noninteractive \
     -v "${AME}:/ame" \
-    -v "${DANGO_LINUX_SRC}:/linux" \
+    -v "${DANGO_LINUX_SRC}:/linux:ro" \
     -v "${DANGO_LINUX_OUT}:/out" \
     "${IMAGE}" \
     bash -lc '

@@ -87,6 +87,11 @@ def main() -> int:
         if is_on(cfg.get(key, "n")):
             problems.append(f"  DENY  CONFIG_{key}={cfg[key]} (must be off for flow '{args.flow}')")
 
+    if args.flow == "gpu":
+        for key in ("DRM_NOUVEAU", "DRM_AMDGPU", "DRM_RADEON"):
+            if is_on(cfg.get(key, "n")):
+                problems.append(f"  DENY  CONFIG_{key} enabled in the virtio-only profile")
+
     warnings = []
     for key, why in KNOWN_FORCED.items():
         if is_on(cfg.get(key, "n")):

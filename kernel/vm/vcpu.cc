@@ -1,4 +1,5 @@
 #include "anko/vm.h"
+#include "anko/smmuv3.h"
 #include "anko/platform.h"
 #include "anko/log.h"
 #include "anko/console.h"
@@ -176,6 +177,15 @@ void note_guest_console_char(char c) {
             metric_inc(VM_DEBUG_GUEST_LINUX_HELLO);
             ANKO_LOG_RAW("guest uart hello\n");
         }
+        if (libk::strcmp(line, "dango: gpu probe passed") == 0) {
+            (void)iommu::smmuv3_drain_events();
+            ANKO_LOGF_INFO("kernel/vm", "gpu proof: faults=%llu quarantines=%llu routes=%llu injected=%llu smmu=%u",
+                static_cast<unsigned long long>(iommu::debug_counter(iommu::IOMMU_FAULTS)),
+                static_cast<unsigned long long>(iommu::debug_counter(iommu::IOMMU_QUARANTINES)),
+                static_cast<unsigned long long>(device_irq_route_count()),
+                static_cast<unsigned long long>(debug_counter(VM_DEBUG_VM_DEVICE_IRQ_INJECTED)),
+                iommu::smmuv3_ready() ? 1u : 0u);
+        }
         len = 0;
         return;
     }
@@ -233,19 +243,19 @@ u32 bitmap_mask(u32 irq) { return 1u << (irq % 32u); }
 bool irq_in_range(u32 irq) { return irq < kVgicMaxIrqs; }
 
 bool vgic_bit_test(const u32* bitmap, u32 irq) {
-    return irq_in_range(irq) && ((bitmap[bitmap_word_index(irq)] & bitmap_mask(irq)) != 0);
+    return irq_in_range(irq) && ((__atomic_load_n(&bitmap[bitmap_word_index(irq)], __ATOMIC_ACQUIRE) & bitmap_mask(irq)) != 0);
 }
 
 void vgic_bit_set(u32* bitmap, u32 irq) {
-    if (irq_in_range(irq)) bitmap[bitmap_word_index(irq)] |= bitmap_mask(irq);
+    if (irq_in_range(irq)) __atomic_fetch_or(&bitmap[bitmap_word_index(irq)], bitmap_mask(irq), __ATOMIC_RELEASE);
 }
 
 void vgic_bit_clear(u32* bitmap, u32 irq) {
-    if (irq_in_range(irq)) bitmap[bitmap_word_index(irq)] &= ~bitmap_mask(irq);
+    if (irq_in_range(irq)) __atomic_fetch_and(&bitmap[bitmap_word_index(irq)], ~bitmap_mask(irq), __ATOMIC_ACQ_REL);
 }
 
 u32 vgic_bitmap_word(const u32* bitmap, u32 word) {
-    return (word < kVgicBitmapWords) ? bitmap[word] : 0;
+    return (word < kVgicBitmapWords) ? __atomic_load_n(&bitmap[word], __ATOMIC_ACQUIRE) : 0;
 }
 
 void vgic_init(VgicState& gic) {
@@ -402,10 +412,10 @@ void gic_dist_write(Vcpu& vcpu, u64 offset, u32 size, u64 value) {
         if (word < kVgicBitmapWords) gic.enabled[word] &= ~bits;
     } else if (offset >= GICD_ISPENDR && offset < GICD_ISPENDR + 0x80) {
         const u32 word = static_cast<u32>((offset - GICD_ISPENDR) / 4);
-        if (word < kVgicBitmapWords) gic.pending[word] |= bits;
+        if (word < kVgicBitmapWords) __atomic_fetch_or(&gic.pending[word], bits, __ATOMIC_RELEASE);
     } else if (offset >= GICD_ICPENDR && offset < GICD_ICPENDR + 0x80) {
         const u32 word = static_cast<u32>((offset - GICD_ICPENDR) / 4);
-        if (word < kVgicBitmapWords) gic.pending[word] &= ~bits;
+        if (word < kVgicBitmapWords) __atomic_fetch_and(&gic.pending[word], ~bits, __ATOMIC_ACQ_REL);
     } else if (offset >= GICD_ISACTIVER && offset < GICD_ISACTIVER + 0x80) {
         const u32 word = static_cast<u32>((offset - GICD_ISACTIVER) / 4);
         if (word < kVgicBitmapWords) gic.active[word] |= bits;

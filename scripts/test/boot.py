@@ -37,7 +37,7 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
             '-device', 'usb-mouse,bus=xhci.0', '-display', 'none', '-monitor', 'none',
             '-serial', f'file:{host}', '-serial', f'file:{guest}']
     if iommu:
-        args += ['-device', 'virtio-gpu-pci']
+        args += ['-device', 'virtio-gpu-pci,iommu_platform=on']
     if testdev:
         args += ['-device', 'iommu-testdev']
     if disk:
@@ -64,7 +64,7 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
         try:
             while time.monotonic() - started < timeout:
                 logs = '\n'.join(p.read_text(errors='replace') if p.exists() else '' for p in [host, guest])
-                if any(s in logs for s in ['KERNEL PANIC', 'spawn failed', 'init: manifest failed', 'TEST FAILED', 'invalid or incompatible BootInfo']):
+                if any(s in logs for s in ['KERNEL PANIC', 'spawn failed', 'init: manifest failed', 'TEST FAILED', 'gpu probe FAILED', 'invalid or incompatible BootInfo']):
                     reason = 'guest failure'; break
                 if all(s in logs for s in markers):
                     success = True; reason = 'ready'; break

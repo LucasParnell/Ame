@@ -152,19 +152,13 @@ void device_irq_inject(Vcpu& vcpu, u32 guest_irq, u32 trigger) {
 }
 
 void device_irq_deliver(u32 host_irq) {
-    VmDeviceAssignment* owner = nullptr;
-    u32 route_index = 0;
-    {
-        kernel::LockGuard guard(g_route_lock);
-        RouteSlot* slot = find_by_host_locked(host_irq, kRouteSlots);
-        if (slot) {
-            owner = slot->owner;
-            route_index = slot->route_index;
-        }
-    }
-    if (!owner || route_index >= owner->irq_count) {
-        return;
-    }
+    // Keep the route and target alive until injection completes. Teardown takes
+    // this same lock before removing a slot and releasing retained objects.
+    kernel::LockGuard guard(g_route_lock);
+    RouteSlot* slot = find_by_host_locked(host_irq, kRouteSlots);
+    if (!slot || !slot->owner || slot->route_index >= slot->owner->irq_count) return;
+    VmDeviceAssignment* owner = slot->owner;
+    const u32 route_index = slot->route_index;
     VmAssignIrq& route = owner->irq[route_index];
     if (!route.target) {
         return;

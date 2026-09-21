@@ -25,7 +25,8 @@
 // live on the stack of a faulting thread.
 static anko::panic_report::Report g_report;
 static char g_serial_text[anko::panic_report::kMaxSerialText];
-static char g_qr_payload[anko::panic_report::kMaxQrPayload];
+static char g_caption[anko::panic_report::kMaxQrPayload];
+static char g_qr_payload[anko::panic_report::kUrlMax];
 
 // First CPU to panic publishes the report and paints the screen; any other CPU
 // that panics parks immediately so it cannot clobber the record mid-render.
@@ -137,12 +138,18 @@ static void claim_or_park() {
     anko::log::panic_dump(g_serial_text);
     if (truncated) anko::log::panic_dump("(serial report truncated)\n");
 
-    bool qr_truncated = false;
-    const u32 qr_len = anko::panic_report::format_qr(g_report, g_qr_payload,
-                                                     sizeof(g_qr_payload), &qr_truncated);
-    (void)qr_len;
-    if (qr_truncated) anko::log::panic_dump("(panic screen: QR payload truncated)\n");
-    if (!anko::panic_screen::show(g_report.title, g_report.reason, g_qr_payload)) {
+    bool caption_truncated = false;
+    const u32 caption_len = anko::panic_report::format_qr(
+        g_report, g_caption, sizeof(g_caption), &caption_truncated);
+    (void)caption_len;
+    bool url_truncated = false;
+    const u32 url_len = anko::panic_report::format_url(
+        g_report, g_qr_payload, sizeof(g_qr_payload), &url_truncated);
+    (void)url_len;
+    if (caption_truncated || url_truncated) {
+        anko::log::panic_dump("(panic screen: report truncated)\n");
+    }
+    if (!anko::panic_screen::show(g_report.title, g_report.reason, g_caption, g_qr_payload)) {
         anko::log::panic_dump(anko::panic_screen::bound()
                                   ? "(panic screen: QR not drawn; report too large or screen too small)\n"
                                   : "(panic screen: no framebuffer bound)\n");

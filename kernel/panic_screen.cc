@@ -22,7 +22,6 @@ namespace {
 
 constexpr u32 kCellW = midix::font::kVga8x16Width;
 constexpr u32 kCellH = midix::font::kVga8x16Height;
-constexpr u32 kMaxScale = 8;
 constexpr u32 kQuietModules = 4;   // QR quiet zone, in modules
 constexpr u32 kMargin = 8;
 constexpr u32 kTitleScale = 2;
@@ -105,13 +104,12 @@ u32 art_color(char ch) {
     }
 }
 
-// Draw the logo centred in the box on a 1:1 grid (see art_grid).
+// Draw the logo centred in the box, proportionally (undistorted).
 void draw_art(u32 x0, u32 y0, u32 x1, u32 y1) {
     if (x1 <= x0 || y1 <= y0) return;
-    const u32 avail = smaller(x1 - x0, y1 - y0);
     u32 out_cols = 0;
     u32 out_rows = 0;
-    art_grid(avail, &out_cols, &out_rows);
+    art_grid(x1 - x0, y1 - y0, &out_cols, &out_rows);
     if (out_cols == 0 || out_rows == 0) return;
     const u32 scale = 1;
 
@@ -172,26 +170,22 @@ void draw_block(u32 x, u32 y, u32 scale, u32 fg, const char* text, u32 max_lines
 
 } // namespace
 
-void art_grid(u32 avail, u32* out_cols, u32* out_rows) {
+void art_grid(u32 avail_w, u32 avail_h, u32* out_cols, u32* out_rows) {
     *out_cols = 0;
     *out_rows = 0;
-    if (avail == 0) return;
-    u32 scale = 1;
-    while (scale < kMaxScale &&
-           anko::art::kPanicArtCols * (scale + 1u) * kCellW <= avail &&
-           anko::art::kPanicArtRows * (scale + 1u) * kCellH <= avail) {
-        ++scale;
+    if (avail_w == 0 || avail_h == 0) return;
+    // Largest proportional fit: walk the row count down and derive the columns
+    // from the source ratio, so the image is never squeezed on one axis.
+    u32 rows = smaller(anko::art::kPanicArtRows, avail_h / kCellH);
+    while (rows > 0) {
+        const u32 cols = (anko::art::kPanicArtCols * rows) / anko::art::kPanicArtRows;
+        if (cols > 0 && cols <= anko::art::kPanicArtCols && cols * kCellW <= avail_w) {
+            *out_cols = cols;
+            *out_rows = rows;
+            return;
+        }
+        --rows;
     }
-    u32 cols = smaller(anko::art::kPanicArtCols, avail / (kCellW * scale));
-    const u32 row_cap = smaller(anko::art::kPanicArtRows, avail / (kCellH * scale));
-    // A glyph cell is 8x16, so two columns and one row cover the same number of
-    // pixels: keep the column count even and derive the rows from it, giving an
-    // exactly square footprint (no letterboxing, no distortion of the ratio).
-    if (cols > row_cap * 2u) cols = row_cap * 2u;
-    cols &= ~1u;
-    if (cols == 0u) return;
-    *out_cols = cols;
-    *out_rows = cols / 2u;
 }
 
 void bind(volatile u32* pixels, u32 width, u32 height) {
@@ -210,7 +204,8 @@ void bind(volatile u32* pixels, u32 width, u32 height) {
 
 bool bound() { return g_pixels != nullptr; }
 
-bool show(const char* title, const char* reason, const char* payload) {
+bool show(const char* title, const char* reason, const char* caption,
+          const char* qr_payload) {
     if (!g_pixels) return false;
 
     const char* head = (title && title[0]) ? title : "KERNEL PANIC";
@@ -226,9 +221,9 @@ bool show(const char* title, const char* reason, const char* payload) {
     // The panel is square by construction (module * modules on both axes); the
     // box only decides how large that square is.
     const u32 box = smaller(g_w / 3u, g_h / 2u);
-    if (payload && payload[0]) {
-        const u8* bytes = reinterpret_cast<const u8*>(payload);
-        const u32 len = slen(payload);
+    if (qr_payload && qr_payload[0]) {
+        const u8* bytes = reinterpret_cast<const u8*>(qr_payload);
+        const u32 len = slen(qr_payload);
         have_qr = anko::qr::encode(bytes, len, anko::qr::Level::M, g_code) ||
                   anko::qr::encode(bytes, len, anko::qr::Level::L, g_code);
     }
@@ -250,7 +245,7 @@ bool show(const char* title, const char* reason, const char* payload) {
     const u32 caption_limit = g_h > band_h + kCellH ? g_h - band_h - kCellH : caption_y;
     const u32 caption_lines = caption_limit > caption_y ? (caption_limit - caption_y) / kCellH : 0;
     const u32 caption_cols = (qr_width ? qr_width : g_w - 2u * kMargin) / (kCellW * kCaptionScale);
-    draw_block(caption_x, caption_y, kCaptionScale, kCaptionFg, payload,
+    draw_block(caption_x, caption_y, kCaptionScale, kCaptionFg, caption,
                smaller(caption_lines, kMaxCaptionLines), caption_cols);
 
     // --- logo, in the space to the right of the QR -------------------------

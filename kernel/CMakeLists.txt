@@ -18,6 +18,7 @@ set(ANKO_SOURCES
     ${CMAKE_SOURCE_DIR}/boards/${ANKO_BOARD}/early_console.cc
     ${CMAKE_SOURCE_DIR}/boards/${ANKO_BOARD}/board_fallback.cc
     log/log.cc
+    lzma.cc
     panic.cc
     panic_report.cc
     panic_screen.cc

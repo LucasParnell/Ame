@@ -22,6 +22,12 @@ constexpr u32 kMaxSerialText = 4096;
 constexpr u32 kQrRegisterCount = 8;   // x0..x7
 constexpr u32 kQrBacktrace = 8;
 
+// Where the QR URL points. The fragment carries the whole payload, so the host
+// is a placeholder for a decoder page and can be changed freely at build time.
+constexpr const char* kQrUrlPrefix = "https://ame.example/p#";
+constexpr u32 kBundleMax = 512;       // packed body budget
+constexpr u32 kUrlMax = 1024;         // URL budget
+
 struct Registers {
     u64 x[31];      // x0..x30 (x29 = fp, x30 = lr)
     u64 sp;
@@ -66,10 +72,30 @@ void capture_registers(Report& report, const u64* x, u64 sp, u64 elr, u64 spsr,
 // never dereferences an attacker-shaped or stale frame pointer.
 void capture_backtrace(Report& report, u64 fp, u64 lo, u64 hi);
 
-// Compact line-oriented form for the QR code: labelled, ASCII, positional, no
-// `0x` prefixes, and bounded to the fields listed above. Returns bytes written
-// (excluding the NUL) and sets *truncated when the record did not fit.
+// Compact line-oriented form for the QR code's caption: labelled, ASCII,
+// positional, no `0x` prefixes, and bounded to the fields listed above. Returns
+// bytes written (excluding the NUL) and sets *truncated when it did not fit.
 u32 format_qr(const Report& report, char* out, u32 cap, bool* truncated);
+
+// Machine-readable form for the QR code itself: a base64url URL whose fragment
+// is an LZMA-compressed binary bundle of the whole record (falling back to an
+// uncompressed bundle when compression would not pay). Bundle layout, so a
+// decoder can be written against it:
+//
+//   bundle := header body_or_stream
+//   header := magic 'A','P' | version u8 (=1) | flags u8 (bit0 compressed)
+//             | raw_len u16 LE (length of the packed body)
+//   body   := core u8 | reason u8_len + bytes
+//             | esr,far,elr,spsr,sp,fp,lr as u64 LE
+//             | reg_count u8 | x0..x{reg_count-1} as u64 LE
+//             | bt_count u8 | bt[] as u64 LE
+//             | hw_flags u8 | virtio u8 | boot_el u8
+//             | pci_base,pci_size,ram_base,ram_size as u64 LE | cap_denials u32 LE
+//             | build u8_len + bytes
+//
+// The stream is raw LZMA1 (lc=3, lp=0, pb=2, dict_size=4096) with no end marker;
+// header.raw_len tells the decoder how much to expect.
+u32 format_url(const Report& report, char* out, u32 cap, bool* truncated);
 
 // Full human-readable form for the serial console. Same truncation contract.
 u32 format_serial(const Report& report, char* out, u32 cap, bool* truncated);

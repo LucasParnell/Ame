@@ -6,6 +6,8 @@
 
 #include "anko/panic_report.h"
 
+#include "anko/lzma.h"
+
 namespace anko::panic_report {
 namespace {
 
@@ -55,6 +57,13 @@ struct Out {
 };
 
 const char* flag(bool value) { return value ? "1" : "0"; }
+
+// Bounded length of a NUL-terminated string (null-safe).
+static u32 slen(const char* s) {
+    u32 n = 0;
+    while (s && s[n]) ++n;
+    return n;
+}
 
 void label(Out& out, const char* name) {
     out.str(name);
@@ -252,6 +261,156 @@ u32 format_serial(const Report& report, char* out, u32 cap, bool* truncated) {
     o.finish();
     if (truncated) *truncated = o.truncated;
     return o.bytes();
+}
+
+// --- machine-readable bundle + URL -----------------------------------------
+
+namespace {
+
+struct ByteWriter {
+    u8* buf;
+    u32 cap;
+    u32 len = 0;
+    bool over = false;
+    void put(u32 value) {
+        if (len < cap) {
+            buf[len] = static_cast<u8>(value);
+        } else {
+            over = true;
+        }
+        ++len;
+    }
+    void u16le(u32 value) {
+        put(value & 0xFFu);
+        put((value >> 8) & 0xFFu);
+    }
+    void u32le(u32 value) {
+        for (int i = 0; i < 4; ++i) put((value >> (8 * i)) & 0xFFu);
+    }
+    void u64le(u64 value) {
+        for (int i = 0; i < 8; ++i) put(static_cast<u32>((value >> (8 * i)) & 0xFFu));
+    }
+    void cstr(const char* s) {
+        for (; s && *s; ++s) put(static_cast<u32>(static_cast<u8>(*s)));
+    }
+};
+
+const char kBase64Url[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+// Base64url, unpadded. Returns characters written.
+u32 base64url(const u8* in, u32 len, char* out, u32 cap) {
+    u32 o = 0;
+    u32 i = 0;
+    while (i + 3u <= len) {
+        const u32 v = (static_cast<u32>(in[i]) << 16) |
+                      (static_cast<u32>(in[i + 1]) << 8) | static_cast<u32>(in[i + 2]);
+        if (o + 4u > cap) break;
+        out[o++] = kBase64Url[(v >> 18) & 0x3F];
+        out[o++] = kBase64Url[(v >> 12) & 0x3F];
+        out[o++] = kBase64Url[(v >> 6) & 0x3F];
+        out[o++] = kBase64Url[v & 0x3F];
+        i += 3;
+    }
+    if (i + 1u == len && o + 2u <= cap) {
+        const u32 v = static_cast<u32>(in[i]) << 16;
+        out[o++] = kBase64Url[(v >> 18) & 0x3F];
+        out[o++] = kBase64Url[(v >> 12) & 0x3F];
+    } else if (i + 2u == len && o + 3u <= cap) {
+        const u32 v = (static_cast<u32>(in[i]) << 16) | (static_cast<u32>(in[i + 1]) << 8);
+        out[o++] = kBase64Url[(v >> 18) & 0x3F];
+        out[o++] = kBase64Url[(v >> 12) & 0x3F];
+        out[o++] = kBase64Url[(v >> 6) & 0x3F];
+    }
+    return o;
+}
+
+// Pack the record into the documented binary body.
+u32 pack_body(const Report& report, u8* out, u32 cap, bool* truncated) {
+    ByteWriter w{out, cap};
+    w.put(report.core);
+    const char* reason = report.reason ? report.reason : "";
+    const u32 reason_len = slen(reason) > 255u ? 255u : slen(reason);
+    w.put(reason_len);
+    for (u32 i = 0; i < reason_len; ++i) w.put(static_cast<u32>(static_cast<u8>(reason[i])));
+
+    w.u64le(report.regs.esr);
+    w.u64le(report.regs.far);
+    w.u64le(report.regs.elr);
+    w.u64le(report.regs.spsr);
+    w.u64le(report.regs.sp);
+    w.u64le(report.regs.x[29]);
+    w.u64le(report.regs.x[30]);
+
+    w.put(kQrRegisterCount);
+    for (u32 i = 0; i < kQrRegisterCount; ++i) w.u64le(report.regs.x[i]);
+
+    const u32 frames =
+        report.trace_count < kQrBacktrace ? report.trace_count : kQrBacktrace;
+    w.put(frames);
+    for (u32 i = 0; i < frames; ++i) w.u64le(report.trace[i]);
+
+    u32 flags = 0;
+    if (report.hw.present) {
+        flags |= report.hw.has_pcie ? 1u : 0u;
+        flags |= report.hw.has_pci_mmio ? 2u : 0u;
+        flags |= report.hw.has_smmu ? 4u : 0u;
+    }
+    w.put(flags);
+    w.put(report.hw.virtio_count & 0xFFu);
+    w.put(report.hw.boot_el);
+    w.u64le(report.hw.pci_mmio_base);
+    w.u64le(report.hw.pci_mmio_size);
+    w.u64le(report.hw.ram_base);
+    w.u64le(report.hw.ram_size);
+    w.u32le(report.cap_denials);
+
+    const char* build = report.build ? report.build : "";
+    const u32 build_len = slen(build) > 255u ? 255u : slen(build);
+    w.put(build_len);
+    for (u32 i = 0; i < build_len; ++i) w.put(static_cast<u32>(static_cast<u8>(build[i])));
+
+    if (truncated) *truncated = w.over;
+    return w.over ? 0 : w.len;
+}
+
+} // namespace
+
+u32 format_url(const Report& report, char* out, u32 cap, bool* truncated) {
+    static u8 body[kBundleMax];
+    static u8 blob[kBundleMax + 8u];
+    static u8 comp[1024];
+
+    bool body_truncated = false;
+    const u32 body_len = pack_body(report, body, sizeof(body), &body_truncated);
+    if (body_len == 0) {
+        if (truncated) *truncated = true;
+        if (cap) out[0] = '\0';
+        return 0;
+    }
+
+    // LZMA only when it actually pays for its header.
+    const u32 comp_len = anko::lzma::compress(body, body_len, comp, sizeof(comp));
+    const bool use_lzma = comp_len > 0 && comp_len + 4u < body_len;
+
+    ByteWriter h{blob, sizeof(blob)};
+    h.put('A');
+    h.put('P');
+    h.put(1);                                  // version
+    h.put(use_lzma ? 1u : 0u);                 // flags: bit0 = LZMA
+    h.u16le(body_len);
+    const u8* payload = use_lzma ? comp : body;
+    const u32 payload_len = use_lzma ? comp_len : body_len;
+    for (u32 i = 0; i < payload_len; ++i) h.put(payload[i]);
+
+    Out o{out, cap};
+    o.str(kQrUrlPrefix);
+    u32 written = o.bytes();
+    const u32 room = cap > written ? cap - written : 0u;
+    written += base64url(blob, h.len, out + written, room);
+    if (written < cap) out[written] = '\0';
+    if (truncated) *truncated = body_truncated || h.over || written >= cap;
+    return written;
 }
 
 } // namespace anko::panic_report

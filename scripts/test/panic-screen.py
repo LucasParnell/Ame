@@ -21,6 +21,7 @@ import logfmt  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 import qr_decode  # noqa: E402
+import panic_bundle  # noqa: E402
 
 # The palette kernel/panic_screen.cc paints with (XRGB8888 -> RGB).",
 BG = (0, 6, 14)
@@ -213,23 +214,35 @@ def main():
             decoded = decode_qr_from_frame(pixels, width, height, tables)
             if decoded is None:
                 checks['qr_decodes'] = False
+                checks['qr_compressed'] = False
             else:
                 text = decoded['payload'].decode('ascii', 'replace')
                 counts['qr_version'] = decoded['version']
                 counts['qr_level'] = decoded['level']
-                counts['qr_text_lines'] = text.count('\n')
-                checks['qr_decodes'] = (text.startswith('AMEQR1')
-                                        and 'reason=' in text and 'x0=' in text
-                                        and 'bt=' in text)
+                counts['qr_text'] = text[:64]
+                try:
+                    bundle = panic_bundle.decode_bundle(text)
+                    counts['bundle'] = {'compressed': bundle['compressed'],
+                                        'bytes': bundle['compressed_len'],
+                                        'raw': bundle['raw_len']}
+                    checks['qr_decodes'] = (len(bundle['x']) == 8 and bundle['reason'] != ''
+                                            and bundle['build'] != '')
+                    checks['qr_compressed'] = bundle['compressed']
+                except (AssertionError, ValueError) as error:
+                    counts['bundle_error'] = str(error)
+                    checks['qr_decodes'] = False
+                    checks['qr_compressed'] = False
         except (OSError, ValueError) as error:
             counts = {'error': str(error)}
             checks.update(qr_code=False, headline=False, reason=False, key_data=False,
                           logo_art=False, full_frame=False, background=False,
-                          qr_decodes=False, qr_square=False, qr_compact=False)
+                          qr_decodes=False, qr_square=False, qr_compact=False,
+                          qr_compressed=False)
     else:
         checks.update(qr_code=False, headline=False, reason=False, key_data=False,
                       logo_art=False, full_frame=False, background=False,
-                      qr_decodes=False, qr_square=False, qr_compact=False)
+                      qr_decodes=False, qr_square=False, qr_compact=False,
+                      qr_compressed=False)
     success = all(checks.values())
     summary = dict(success=success, reason=boot.get('reason'), elapsed=boot.get('elapsed'),
                    logs=str(work), display=str(shot), checks=checks, counts=counts)

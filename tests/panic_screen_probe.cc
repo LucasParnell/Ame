@@ -43,22 +43,25 @@ void check(bool cond, const char* what) {
 bool near(uint32_t a, uint32_t b) { return a == b; }
 
 const char* kPayload =
-    "KERNEL PANIC v1 core=0\n"
+    "AMEQR1 core=0\n"
     "build=ame-2026.09-12-g224b372\n"
     "reason=data abort (EL1)\n"
-    "esr=0x0000000096000045 far=0x0000000000000042 elr=0x00000000100018a4\n"
-    "spsr=0x00000000600003c5 sp=0xffff000000123400 fp=0xffff000000123500 lr=0x0000000010001f20\n"
-    "hw pcie=1 mmio=1 smmu=1 virtio=4 el=2\n"
-    "pci win=0x0000000010000000+0x0000000002eff000 ram=0x0000000040000000+0x0000000020000000\n"
-    "cap_denied=3\n"
-    "x0=0x0000000000000000 x1=0x0000000000000001 x2=0x0000000000000002 x3=0x0000000000000003\n"
-    "bt 0x0000000010001f20 0x0000000010001f60 0x0000000010001fa0 bt_n=3\n";
+    "esr=0000000096000045 far=0000000000000042 elr=00000000100018a4\n"
+    "spsr=00000000600003c5 sp=ffff000000123400 fp=ffff000000123500 lr=0000000010001f20\n"
+    "hw=111 virtio=4 el=2\n"
+    "pci=0000000010000000+0000000002eff000 ram=0000000040000000+0000000020000000\n"
+    "x0=0000000000000000 x1=0000000000000001 x2=0000000000000002 x3=0000000000000003\n"
+    "bt=3 0000000010001f20 0000000010001f60 0000000010001fa0\n";
+
+// The QR encodes the compressed URL; the probe only checks the layout, so a
+// URL-shaped string is enough (the capture harness decodes the real bundle).
+const char* kQrUrl = "https://ame.example/p#QVBAAQH0AQAA";
 
 void run_size(uint32_t w, uint32_t h, const char* label) {
     Frame f(w, h);
     anko::panic_screen::bind(reinterpret_cast<volatile uint32_t*>(f.px.data()), w, h);
     check(anko::panic_screen::bound(), "bound() after a valid bind");
-    anko::panic_screen::show("KERNEL PANIC", "data abort (EL1)", kPayload);
+    anko::panic_screen::show("KERNEL PANIC", "data abort (EL1)", kPayload, kQrUrl);
 
     uint32_t qr_dark = 0, qr_area_ink = 0, title = 0, reason = 0, caption = 0, art = 0;
     for (uint32_t y = 0; y < h; ++y) {
@@ -134,21 +137,27 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
     }
     check(caption_in_logo == 0, "caption stays out of the logo column");
 
-    // Logo aspect ratio is 1:1 by construction: verify the grid maths exactly
-    // (footprint pixels = cols*8 must equal rows*16) across many box sizes.
-    uint32_t art_bad = 0;
-    for (uint32_t avail = 0; avail <= 1600; avail += 3) {
-        uint32_t cols = 0, rows = 0;
-        anko::panic_screen::art_grid(avail, &cols, &rows);
-        if (cols == 0 || rows == 0) continue;
-        if (cols * 8u != rows * 16u) ++art_bad;
+    // The logo must be drawn undistorted: the output column/row ratio has to
+    // track the source art's ratio (within one column of rounding).
+    uint32_t art_wrong = 0;
+    for (uint32_t aw = 0; aw <= 1200; aw += 11) {
+        for (uint32_t ah = 0; ah <= 900; ah += 17) {
+            uint32_t cols = 0, rows = 0;
+            anko::panic_screen::art_grid(aw, ah, &cols, &rows);
+            if (cols == 0 || rows == 0) continue;
+            const long lhs = static_cast<long>(cols) * 51;
+            const long rhs = static_cast<long>(rows) * 139;
+            const long diff = lhs > rhs ? lhs - rhs : rhs - lhs;
+            if (diff > 51) ++art_wrong;
+            if (cols * 8u > aw || rows * 16u > ah) ++art_wrong;
+        }
     }
-    check(art_bad == 0, "logo aspect ratio is 1:1 for every box size");
+    check(art_wrong == 0, "logo is scaled proportionally and fits its box");
 
     // Determinism.
     Frame g(w, h);
     anko::panic_screen::bind(reinterpret_cast<volatile uint32_t*>(g.px.data()), w, h);
-    anko::panic_screen::show("KERNEL PANIC", "data abort (EL1)", kPayload);
+    anko::panic_screen::show("KERNEL PANIC", "data abort (EL1)", kPayload, kQrUrl);
     check(f.px == g.px, "re-render is deterministic");
 }
 
@@ -165,7 +174,7 @@ int main() {
     {
         Frame f(1024, 768);
         anko::panic_screen::bind(reinterpret_cast<volatile uint32_t*>(f.px.data()), 1024, 768);
-        anko::panic_screen::show("KERNEL PANIC", "no payload", nullptr);
+        anko::panic_screen::show("KERNEL PANIC", "no payload", nullptr, nullptr);
         uint32_t uk = 0;
         for (uint32_t c : f.px) {
             if (c != kBg) ++uk;

@@ -115,14 +115,6 @@ static uint64_t status_magnitude(int64_t rc) {
     return rc < 0 ? static_cast<uint64_t>(-rc) : static_cast<uint64_t>(rc);
 }
 
-static bool should_log_counter_delta(uint64_t value, uint64_t last) {
-    if (last == ~0ull) return true;
-    if (value == last) return false;
-    if (value <= 4) return true;
-    if ((value & (value - 1)) == 0) return true;
-    return value >= last + 1024ull;
-}
-
 [[noreturn]] static void fail(const char* msg) {
     // Keep failures visible even if the console service is blocked.
     sys_debug_puts(msg, slen(msg));

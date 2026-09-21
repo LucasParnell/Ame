@@ -598,6 +598,11 @@ static void runner_entry(uint64_t vcpu_arg) {
             dango_log("vm runner stopped: guest shutdown\n");
             break;
         }
+        // Spec §7/§8: sustained guest execution stays budgeted.  The runner
+        // holds the vCPU on a budget/period sched context, so it must return to
+        // the scheduler between runs; otherwise it monopolises a CPU and starves
+        // the native services.  Yield once per budget window.
+        sys_yield();
     }
     sys_thread_exit(0);
 }

@@ -31,7 +31,7 @@ Master reference points: `kernel/iommu/{core,smmuv3,faults}.cc`, `kernel/vm/vm_d
 | D PCI assignment + IRQ virtualization | **Done** (32 checks) |
 | E Linux virtio-gpu-pci probe | **Done** — Dango construction, GPU artifact packaging, INTx→vGIC delivery; Linux binds `virtio_gpu` and creates `/dev/dri/card0` |
 | F standalone Linux KMS | **Done** — guest raw-ioctl KMS self-test; host `screendump` asserts the displayed pattern |
-| G guest-visible Dango channel | Not started (ABI only) |
+| G guest-visible Dango channel | **Done** — non-DMA ring mapping, vIRQ/HVC, Linux driver and ordered ping/pong |
 | H `dango-gpud` control plane | Not started |
 | I shared staging framebuffer | Not started |
 | J framebuffer/TTY migration | Not started |
@@ -204,21 +204,21 @@ Opt-in gate row `AME_VERIFY_KMS=1`.  See [DELIVERY/gpu-appliance-phase-f.md](../
 **Acceptance:** the QEMU display shows the Linux-generated pattern; DMA stays inside the appliance
 domain under sustained redraw.
 
-## Phase G — guest-visible Dango channel — Not started
+## Phase G — guest-visible Dango channel — Done
 
-**Remaining**
-1. Guest ring mapping: map a `VmChannel`'s two rings into the guest at the DTS reserved-memory address;
-   keep `VmDmaClass::None`.
-2. Host→guest notification as a **virtual IRQ** (reuse the Phase D route mechanism); guest→host via a
-   reserved **HVC** range (`HVC_DANGO_CHANNEL_NOTIFY/ARM`) implemented in the EL2 exit path
-   (`kernel/arch/arm64/el2.S`, `kernel/vm/vcpu.cc`) — must not collide with PSCI.
-3. `linux-artifacts/guest-driver/dango_channel.c` → `/dev/dango-channel0` (mmap both rings, blocking
-   read/poll, notify, version/ring-order query). No GPU logic.
-4. DTB: channel node + `no-map` region (drafted in `dango-linux-gpu.dts.in`).
-5. Proof: ordered bidirectional ping/pong — Ame-side first (Mochi ↔ host endpoint, testable without
-   Linux), then Linux ↔ Mochi once E boots.
+`SYS_VM_CHANNEL_MAP` maps a read-only descriptor and two normal-WB, non-executable
+rings outside appliance RAM. The rings stay outside the DMA authorization list
+(`VmDmaClass::None`). `SYS_VM_CHANNEL_NOTIFY` injects virtual IRQ 48; vendor HVC
+NOTIFY/ARM calls notify the host and close the guest sleep race without colliding
+with PSCI. The built-in generic Linux driver exposes `/dev/dango-channel0` with
+bounded mmap, read/poll, notify and version/layout query.
 
-**Acceptance:** a Linux test process and a Mochi test process exchange ordered ping/pong without UART.
+**Acceptance — met:** 256 native endpoint exchanges, followed by 512 ordered
+Linux ↔ Mochi round trips over shared rings, with real virtual IRQ and HVC
+notification and clean post-exchange IOMMU counters. No UART payload transport.
+Opt-in gate: `AME_VERIFY_CHANNEL=1`. See
+[Phase G delivery](../DELIVERY/gpu-appliance-phase-g.md) for authority, layout,
+negative tests, the read-only Linux source overlay and bootstrap limits.
 
 ---
 
@@ -298,7 +298,6 @@ fence transfer, and IOMMU registration lifetimes.
 - **Docs.** Keep `docs/FEATURE_STATUS.md` and `docs/CLEANUP_STATUS.md` current as phases land.
 
 ## Immediate next actions (in order)
-1. Phase G — channel guest mapping + vIRQ/HVC + `/dev/dango-channel0` + ping/pong.
-2. Phase H — `dango-gpud` control plane over the Phase G channel.
-3. Phase I — shared staging framebuffer + async present.
-4. Phase J — framebuffer/TTY migration onto the appliance.
+1. Phase H — `dango-gpud` control plane over the Phase G channel.
+2. Phase I — shared staging framebuffer + async present.
+3. Phase J — framebuffer/TTY migration onto the appliance.

@@ -392,6 +392,11 @@ struct VmChannel {
     u32 flags;
     u64 messages_host_to_guest;
     u64 messages_guest_to_host;
+    PhysAddr descriptor_page;
+    Vcpu* target; // owned by the same VM; accessed only under CallGuard
+    u64 guest_base;
+    u32 guest_irq;
+    bool armed;
     bool dead;
     u8 pad[7];
 };
@@ -551,6 +556,12 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
 CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_kind,
                            u32 rights, SysError* out_error);
 SysError inspect_channel(Process& caller, CapHandle channel_cap, VmChannelInfo* out);
+SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
+                     u64 ipa, u64 reserved_size, u32 guest_irq);
+SysError notify_channel(Process& caller, CapHandle channel_cap);
+bool channel_hvc(Vcpu& vcpu, Vm& owner);
+void channel_publish(VmChannel& channel); // internal, CallGuard held
+
 
 // ===========================================================================
 // Phase D: VM device assignment (§6 device-assignment model, §7 interrupt
@@ -772,6 +783,7 @@ void device_irq_deliver(u32 host_irq);
 void device_irq_on_guest_eoi(Vcpu& vcpu, u32 guest_irq);
 // Number of live routes (diagnostics/tests).
 u64 device_irq_route_count();
+bool device_irq_vector_used(const Vcpu& vcpu, u32 guest_irq);
 // Register / deregister a route for host-IRQ delivery. Called by the §8.11
 // "INSTALL HOST IRQ ROUTES" and §8.12 "remove interrupt routes" steps.
 SysError device_irq_install(VmDeviceAssignment* a, u32 route_index);

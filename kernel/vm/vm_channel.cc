@@ -1,5 +1,6 @@
 #include "anko/vm.h"
 #include "libk/string.h"
+#include "midix/abi/dango_channel_guest.h"
 
 namespace vm {
 
@@ -31,7 +32,11 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
         if (out_error) *out_error = rc;
         return kNullCap;
     }
-    if (v->channel_count >= kMaxVmChannels) {
+    if (flags != 0 || order < 4 || order > 10) {
+        if (out_error) *out_error = E_INVALID;
+        return kNullCap;
+    }
+    if (v->channel_count >= kMaxVmChannels || g_next_channel_id == 0) {
         if (out_error) *out_error = E_OVERFLOW;
         note_error();
         return kNullCap;
@@ -91,11 +96,12 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
 CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_kind,
                            u32 rights, SysError* out_error) {
     u32 needed = RIGHT_VM_CHANNEL_INSPECT;
-    if (endpoint_kind == VM_CHANNEL_HOST_TO_GUEST_RING && (rights & RIGHT_WRITE)) {
+    if (endpoint_kind == VM_CHANNEL_HOST_TO_GUEST_RING || endpoint_kind == VM_CHANNEL_HOST_TO_GUEST_DOORBELL) {
         needed |= RIGHT_VM_CHANNEL_SEND;
-    } else if (endpoint_kind == VM_CHANNEL_GUEST_TO_HOST_RING && (rights & RIGHT_READ)) {
+    } else if (endpoint_kind == VM_CHANNEL_GUEST_TO_HOST_RING || endpoint_kind == VM_CHANNEL_GUEST_TO_HOST_DOORBELL) {
         needed |= RIGHT_VM_CHANNEL_RECV;
-    } else if ((endpoint_kind == VM_CHANNEL_HOST_TO_GUEST_DOORBELL ||
+    }
+    if ((endpoint_kind == VM_CHANNEL_HOST_TO_GUEST_DOORBELL ||
                 endpoint_kind == VM_CHANNEL_GUEST_TO_HOST_DOORBELL) &&
                (rights & RIGHT_NOTIFY)) {
         needed |= RIGHT_VM_CHANNEL_NOTIFY;
@@ -174,8 +180,85 @@ void dispose_channel(void* target) {
     auto* owner = channel->owner_lifetime;
     release_creator(channel->host_to_guest); release_creator(channel->guest_to_host);
     release_creator(channel->host_doorbell); release_creator(channel->guest_doorbell);
+    if (channel->descriptor_page) mm::free_page(channel->descriptor_page);
     mm::slab_free(channel, sizeof(VmChannel), alignof(VmChannel));
     object::release(owner);
 }
+
+// All channel mapping/HVC/notify operations run under CallGuard. No raw
+// channel/vCPU pointer is installed in a doorbell or asynchronous callback.
+// VM teardown destroys stage 2 before releasing these pages and endpoints.
+SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
+                     u64 ipa, u64 reserved_size, u32 guest_irq) {
+    SysError rc = E_OK;
+    auto channel = channel_from_cap(caller, channel_cap,
+        RIGHT_VM_CHANNEL_SEND | RIGHT_VM_CHANNEL_RECV |
+        RIGHT_VM_CHANNEL_NOTIFY | RIGHT_VM_CHANNEL_INSPECT, &rc);
+    if (!channel) return rc;
+    auto cpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
+    if (!cpu) return rc;
+    if (cpu->owner_vm_id != channel->owner_vm_id) return E_PERM;
+    Vm* owner = find_vm_by_id(channel->owner_vm_id);
+    if (!owner || owner->state == VM_DEAD) return E_DEAD;
+    if (channel->target || owner->stage2.active) return E_BUSY;
+    if (!ipa || (ipa & (PAGE_SIZE - 1)) || (reserved_size & (PAGE_SIZE - 1)) ||
+        guest_irq < 32 || guest_irq >= kVgicMaxIrqs) return E_INVALID;
+    if (device_irq_vector_used(*cpu, guest_irq)) return E_BUSY;
+    for (u32 i = 0; i < owner->channel_count; ++i) {
+        const auto* other = owner->channels[i];
+        if (other && other->target == cpu.get() && other->guest_irq == guest_irq) return E_BUSY;
+    }
+    const u64 ring_bytes = (sizeof(RingHeader) + (1ull << channel->order) * sizeof(RingSlot) +
+                            PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    const u64 bytes = PAGE_SIZE + 2 * ring_bytes;
+    if (reserved_size < bytes || ipa >= (1ull << owner->stage2.ipa_bits) ||
+        reserved_size > (1ull << owner->stage2.ipa_bits) - ipa) return E_INVALID;
+    rc = stage2_validate_no_overlap(&owner->stage2, ipa, reserved_size);
+    if (rc != E_OK) return rc;
+    if (bytes / PAGE_SIZE > kMaxStage2Mappings - owner->stage2.mapped_pages) return E_OVERFLOW;
+    const PhysAddr page = mm::alloc_page();
+    if (!page) return E_NOMEM;
+    libk::memset(reinterpret_cast<void*>(page), 0, PAGE_SIZE);
+    auto& layout = *reinterpret_cast<dango_channel_layout*>(page);
+    layout.desc = {DANGO_CH_MAGIC, DANGO_CH_VERSION, 0, channel->order, DANGO_CH_ARM_SUPPORTED,
+                   channel->channel_id, ipa + PAGE_SIZE, ipa + PAGE_SIZE + ring_bytes,
+                   0, 0, guest_irq, 0};
+    layout.channel_id = channel->channel_id;
+    layout.ring_bytes = static_cast<u32>(ring_bytes);
+    layout.mapping_bytes = static_cast<u32>(2 * ring_bytes);
+    u64 off = 0;
+    for (; off < bytes; off += PAGE_SIZE) {
+        PhysAddr pa = page;
+        if (off >= PAGE_SIZE + ring_bytes)
+            pa = channel->guest_to_host->phys_base + off - PAGE_SIZE - ring_bytes;
+        else if (off >= PAGE_SIZE)
+            pa = channel->host_to_guest->phys_base + off - PAGE_SIZE;
+        rc = stage2_map_page(&owner->stage2, ipa + off, pa,
+                            RIGHT_READ | (off ? RIGHT_WRITE : 0));
+        if (rc != E_OK) break;
+    }
+    if (rc != E_OK) {
+        while (off) { off -= PAGE_SIZE; (void)stage2_unmap_page(&owner->stage2, ipa + off); }
+        mm::free_page(page);
+        return rc;
+    }
+    // These pages are deliberately not VmMemory objects: collect_vm_ram()
+    // cannot authorize them for GPU DMA. There is no IOMMU map here.
+    channel->descriptor_page = page;
+    channel->target = cpu.get();
+    channel->guest_base = ipa;
+    channel->guest_irq = guest_irq;
+    return E_OK;
+}
+
+SysError notify_channel(Process& caller, CapHandle channel_cap) {
+    SysError rc = E_OK;
+    auto channel = channel_from_cap(caller, channel_cap, RIGHT_VM_CHANNEL_NOTIFY, &rc);
+    if (!channel) return rc;
+    if (!channel->target) return E_INVALID;
+    channel_publish(*channel);
+    return E_OK;
+}
+
 
 } // namespace vm

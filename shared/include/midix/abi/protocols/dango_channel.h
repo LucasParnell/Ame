@@ -15,6 +15,7 @@
 // correlation field, and `length` bounds the inline payload.
 
 #include "midix/abi/ring.h"
+#include "midix/abi/dango_channel_guest.h"
 #include "midix/abi/status.h"
 #include "midix/abi/types.h"
 
@@ -58,20 +59,7 @@ enum MxDangoChannelNotifyReason : mx_u32_t {
 // Describes both rings and the shared staging window. It lives in the guest
 // DTB / reserved-memory table and in the bridge, so it is a fixed 64-byte
 // structure, not a ring payload.
-struct MxDangoChannelDesc {
-    mx_u32_t magic; // MX_DANGO_CHANNEL_MAGIC
-    mx_u16_t version_major;
-    mx_u16_t version_minor;
-    mx_u32_t ring_order; // log2 slots per ring (Midix ring contract)
-    mx_u32_t flags;      // MxDangoChannelFlags
-    mx_u64_t boot_generation;
-    mx_u64_t host_to_guest_ring_pa; // guest PA of the H2G ring page
-    mx_u64_t guest_to_host_ring_pa; // guest PA of the G2H ring page
-    mx_u64_t shared_staging_pa;     // guest PA of the shared staging window
-    mx_u64_t shared_staging_size;
-    mx_u32_t guest_irq; // virtual IRQ used for H2G notification
-    mx_u32_t reserved0;
-};
+using MxDangoChannelDesc = dango_channel_desc;
 static_assert(sizeof(MxDangoChannelDesc) == 64, "channel descriptor must be 64 bytes");
 
 // --- DANGO_CHANNEL_QUERY: version + ring-order query (spec §11.4) -----------
@@ -136,8 +124,8 @@ constexpr mx_u32_t MX_PSCI_FUNC_LIMIT32 = 0x8400'FFFFu;
 constexpr mx_u32_t MX_PSCI_FUNC_BASE64 = 0xC400'0000u;
 constexpr mx_u32_t MX_PSCI_FUNC_LIMIT64 = 0xC400'FFFFu;
 
-constexpr mx_u32_t HVC_DANGO_CHANNEL_NOTIFY = MX_DANGO_HVC_BASE + 0x0001u;
-constexpr mx_u32_t HVC_DANGO_CHANNEL_ARM = MX_DANGO_HVC_BASE + 0x0002u;
+constexpr mx_u32_t HVC_DANGO_CHANNEL_NOTIFY = DANGO_CH_HVC_NOTIFY;
+constexpr mx_u32_t HVC_DANGO_CHANNEL_ARM = DANGO_CH_HVC_ARM;
 
 constexpr bool mx_dango_hvc_avoid_psci(mx_u32_t fn) {
     const bool in_psci32 = fn >= MX_PSCI_FUNC_BASE32 && fn <= MX_PSCI_FUNC_LIMIT32;

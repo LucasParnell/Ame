@@ -177,9 +177,11 @@ void note_guest_console_char(char c) {
             metric_inc(VM_DEBUG_GUEST_LINUX_HELLO);
             ANKO_LOG_RAW("guest uart hello\n");
         }
-        if (libk::strcmp(line, "dango: gpu probe passed") == 0) {
+        if (libk::strcmp(line, "dango: gpu probe passed") == 0 ||
+            libk::strcmp(line, "dango: channel test passed") == 0) {
             (void)iommu::smmuv3_drain_events();
-            ANKO_LOGF_INFO("kernel/vm", "gpu proof: faults=%llu quarantines=%llu routes=%llu injected=%llu smmu=%u",
+            ANKO_LOGF_INFO("kernel/vm", "%s proof: faults=%llu quarantines=%llu routes=%llu injected=%llu smmu=%u",
+                libk::strcmp(line, "dango: channel test passed") == 0 ? "channel" : "gpu",
                 static_cast<unsigned long long>(iommu::debug_counter(iommu::IOMMU_FAULTS)),
                 static_cast<unsigned long long>(iommu::debug_counter(iommu::IOMMU_QUARANTINES)),
                 static_cast<unsigned long long>(device_irq_route_count()),
@@ -1183,6 +1185,10 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budg
 
         const u64 ec = esr_ec(esr);
 
+        if (ec == kEcHvc64 && channel_hvc(*vcpu, *owner)) {
+            if (run_budget_expired(budget, start_ns, exits + 1)) break;
+            continue;
+        }
         if (ec == kEcHvc64 || ec == kEcSmc64) {
             const PsciAction psci = emulate_psci(*vcpu, *owner, ec);
             if (psci == PsciAction::Continue) {

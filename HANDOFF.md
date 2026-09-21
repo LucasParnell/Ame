@@ -39,7 +39,11 @@ assigned console with a QEMU monitor `screendump` (`scripts/test/kms-display.py`
 pattern. Proves assignment + MMIO + IRQ + DMA + Linux DRM + `virtio_gpu` with no virtio-gpu register
 logic in Ame.
 
-**Remaining:** G (guest-visible Dango channel), H (`dango-gpud` control plane), I (shared staging
+**Phase G is complete:** non-DMA ring mappings, vendor HVC NOTIFY/ARM, virtual IRQ 48,
+`/dev/dango-channel0`, and 512 ordered Linux ↔ Mochi round trips. See
+`DELIVERY/gpu-appliance-phase-g.md`. Rebuild the GPU kernel for its built-in channel driver.
+
+**Remaining:** H (`dango-gpud` control plane), I (shared staging
 framebuffer), J (framebuffer/TTY migration), K–M (lifecycle, dynamic arenas, zero-copy), N–S (Vulkan).
 **Deferred by decision: P/Q/R (physical backend, amdgpu, RADV)** — build the plumbing
 backend-agnostic, no AMD-specific code yet.
@@ -53,6 +57,7 @@ scripts/verify.sh                  # configure/build/host-regressions/provenance
 AME_VERIFY_IOMMU=1   scripts/verify.sh    # + iommu-dma        (SMMUv3 hostile-DMA)
 AME_VERIFY_ASSIGN=1  scripts/verify.sh    # + assignment       (PCI assignment + IRQ)
 AME_VERIFY_GPU=1     scripts/verify.sh    # + gpu-appliance    (Linux virtio-gpu appliance)
+AME_VERIFY_CHANNEL=1 scripts/verify.sh    # + dango-channel (ordered ring traffic)
 AME_VERIFY_KMS=1     scripts/verify.sh    # + kms-display      (KMS modeset + screendump)
 ```
 
@@ -139,7 +144,8 @@ python3 scripts/test/kms-display.py  --build out/qemu-gpu     # Phase F proof (s
 - **BAR guest IPA must be aligned to the BAR size** (asserted at compile time in the manager).
 - **Runner starvation.** The manager's polling loop must not stay runnable ahead of the budgeted vCPU;
   status reporting now lives in the runner and the manager sleeps. The runner uses a budget/period
-  sched context in `SCHED_BAND_LATENCY` (VM bands need per-VM class setup that isn't applied).
+  sched context in `SCHED_BAND_VM_FAIR`, pinned to CPU1 when available. A single-host-CPU
+  boot can still starve behind native polling services.
 - **Guest kernel console is quiet** (`loglevel=4`); use the agent's messages / the `gpu proof:` line
   for evidence, not the Linux console.
 - **Guest and Ame share the host console serial**, and the guest driver writes byte-by-byte, so Ame log
@@ -167,10 +173,13 @@ python3 scripts/test/kms-display.py  --build out/qemu-gpu     # Phase F proof (s
 
 ## Immediate next step
 
-**Phase G** (`docs/GPU_APPLIANCE_TODO.md`): map a `VmChannel`'s two rings into the guest at the DTS
-reserved-memory address (`VmDmaClass::None`); deliver host→guest notification as a virtual IRQ (reuse
-the Phase D route mechanism) and guest→host via a reserved `HVC` range implemented in the EL2 exit path
-(`kernel/arch/arm64/el2.S`, `kernel/vm/vcpu.cc`) that must not collide with PSCI; add
-`linux-artifacts/guest-driver/dango_channel.c` → `/dev/dango-channel0` (mmap both rings, blocking
-read/poll, notify, version/ring-order query) with **no GPU logic**; then prove ordered bidirectional
-ping/pong — Ame-side first (Mochi ↔ host endpoint, testable without Linux), then Linux ↔ Mochi.
+**Phase H** (`docs/GPU_APPLIANCE_TODO.md`): implement `dango-gpud` control-plane
+requests (`GPU_HELLO`, `GPU_ENUM_OUTPUTS`, `GPU_GET_MODES`, `GPU_ERROR`) over the
+Phase G channel, with a Mochi probe enumerating the virtio-gpu output. Replace
+the startup transport test with the service protocol as that phase lands.
+
+Phase G's Linux driver is built in through a shallow source overlay; the original
+Linux sources remain read-only. Native userspace iteration also rebuilds
+`linux-artifacts/channel_test/channel_test.c`. The aperture is outside appliance
+RAM at `0x48000000` and never enters the GPU DMA domain. See the Phase G delivery
+for the exact ABI and the existing single-host-CPU VM-runner starvation limit.

@@ -11,7 +11,7 @@ code or a captured log it is marked **unverified**.
 - **Health gate**: `scripts/verify.sh` — configure → build → host regressions →
   provenance → direct boot → kernel lifecycle matrix → supervision restart.
   All checks green (see [Verification](#verification)).  Opt-in rows extend it for the
-  appliance work: `AME_VERIFY_IOMMU`, `AME_VERIFY_ASSIGN`, `AME_VERIFY_GPU`, `AME_VERIFY_KMS`.
+  appliance work: `AME_VERIFY_IOMMU`, `AME_VERIFY_ASSIGN`, `AME_VERIFY_GPU`, `AME_VERIFY_KMS`, `AME_VERIFY_CHANNEL`.
 - **Boot evidence** below comes from the gate's QEMU runs (`scripts/test/boot.py`).
   The kernel and userland log over the *first* QEMU serial port; that is the
   `host.log` in the runner's output directory. The second serial port
@@ -107,7 +107,7 @@ less complete than it is. Do **not** treat these as status:
 | Stage-2 address space (create / map / unmap / destroy / activate / lookup), table prune | Implemented | `kernel/vm/stage2.cc`: `stage2_create`, `stage2_map_page`, `stage2_unmap_page`, `stage2_destroy`, `stage2_activate`, `stage2_lookup_page`, `prune_tables` | Guest PA window `0x40000000–0x48000000` (`kGuestPhysMin/Max`) |
 | vCPU run loop with WFx / virtual-IRQ / MMIO-batch / unsupported-trap exits, software VGIC, EL2 monitor | Implemented | `kernel/vm/vcpu.cc` (`run_vcpu`, `log_unsupported_exit`, guest-console MMIO emulation); `kernel/arch/arm64/el2.S` (`el2_vectors`); `VcpuExitReason` in `kernel/include/anko/vm.h` | Runs non-VHE; EL1 state is saved/restored explicitly |
 | VM memory objects (backing pages, map/unmap, write) | Implemented | `kernel/vm/vm_memory.cc`: `create_memory`, `map_memory`, `unmap_memory`, `write_memory` | — |
-| Paravirt channels (host↔guest ring + doorbell endpoints) | Implemented | `kernel/vm/vm_channel.cc`: `create_channel`, `channel_endpoint`, `inspect_channel` | — |
+| Paravirt channels (host↔guest ring + doorbell endpoints) | Implemented | `kernel/vm/vm_channel*.cc`; built-in Linux `/dev/dango-channel0`, 512 ordered round trips via vIRQ/HVC (`AME_VERIFY_CHANNEL=1`). [Phase G delivery](../DELIVERY/gpu-appliance-phase-g.md) | Fixed boot-time channel; no dynamic arenas |
 | VM/EL2 bring-up at boot | Implemented | Default boot: `dango.manager: vm.current_el=1`, `dango.manager: vm.el2_available=1`, `dango.manager: vm created`, `dango.manager: vcpu.id=1`, `dango.manager: channel ready`, `dango.manager: layout ready` | — |
 | Guest Linux payload run | **Implemented (opt-in)** | Default build still logs `dango.manager: vcpu stub run skipped: no linux guest payload`; the GPU artifact set (`build/dango-linux-gpu`) is packaged when configured with `-DDANGO_LINUX_PROFILE=gpu -DDANGO_LINUX_ARTIFACT_DIR=…` and booted by the opt-in `gpu-appliance` / `kms-display` rows (Linux binds `virtio_gpu`) | Requires the guest artifacts built separately (Linux container on macOS: `scripts/linux/build-gpu-linux-docker.sh`); not part of the default gate |
 | VM negative-authority probe | Implemented | Default boot: `dango.auth_probe: authority check passed` | Runs as a native probe, not a guest |
@@ -256,6 +256,7 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | SMMUv3 hostile DMA (opt-in) | `AME_VERIFY_IOMMU=1` — `iommu-dma` row (`iommu_dma.py`) | green |
 | PCI assignment + IRQ virtualization (opt-in) | `AME_VERIFY_ASSIGN=1` — `assignment` row (`assignment.py`) | green |
 | Linux virtio-gpu appliance (opt-in) | `AME_VERIFY_GPU=1` — `gpu-appliance` row (`gpu-appliance.py`) | green |
+| Dango channel (opt-in) | `AME_VERIFY_CHANNEL=1` — `dango-channel` row (`channel.py`) | green |
 | Standalone KMS display (opt-in) | `AME_VERIFY_KMS=1` — `kms-display` row (`kms-display.py`) | green |
 
 ### 4.2 Manually-confirmed extras (this pass)
@@ -325,5 +326,5 @@ $ python3 scripts/test/boot.py --build out/verify --mode direct --cpus 4 --marke
 reason= ready  elapsed=1.67
 ```
 
-This document reflects the tree after Phase F (`DELIVERY/gpu-appliance-phase-f.md`); re-run
+This document reflects the tree after Phase G (`DELIVERY/gpu-appliance-phase-g.md`); re-run
 `scripts/verify.sh` after changes and update the matrix where behaviour moves.

@@ -242,7 +242,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     vm::CallGuard vm_call((nr >= SYS_VM_CREATE && nr <= SYS_VM_MEMORY_WRITE) ||
                           (nr >= SYS_VCPU_BIND_SCHED_CONTEXT && nr <= SYS_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER) ||
-                          (nr >= SYS_VM_ASSIGN_DEVICE && nr <= SYS_VM_ASSIGN_EXPOSE_ECAM));
+                          (nr >= SYS_VM_ASSIGN_DEVICE && nr <= SYS_VM_CHANNEL_NOTIFY));
     switch (static_cast<Syscall>(nr)) {
 
     case SYS_YIELD:
@@ -819,6 +819,17 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
                                            static_cast<u32>(a1), static_cast<u32>(a2), &rc);
         if (h == kNullCap) return err(rc);
         return ok(static_cast<long>(h));
+    }
+
+    case SYS_VM_CHANNEL_MAP: {
+        if (a4 > 0xffffffffull) return err(E_INVALID);
+        const auto rc = vm::map_channel(*p, static_cast<CapHandle>(a0),
+                                       static_cast<CapHandle>(a1), a2, a3, static_cast<u32>(a4));
+        return rc == E_OK ? ok(E_OK) : err(rc);
+    }
+    case SYS_VM_CHANNEL_NOTIFY: {
+        const auto rc = vm::notify_channel(*p, static_cast<CapHandle>(a0));
+        return rc == E_OK ? ok(E_OK) : err(rc);
     }
 
     case SYS_VM_CHANNEL_INSPECT: {

@@ -68,6 +68,16 @@ void device_irq_init() {
     ANKO_LOG_INFO("kernel/vm", "device IRQ routes initialised");
 }
 
+bool device_irq_vector_used(const Vcpu& vcpu, u32 guest_irq) {
+    kernel::LockGuard guard(g_route_lock);
+    for (const auto& slot : g_routes) {
+        if (!slot.used) continue;
+        const auto& route = slot.owner->irq[slot.route_index];
+        if (route.target == &vcpu && route.guest_irq == guest_irq) return true;
+    }
+    return false;
+}
+
 SysError device_irq_install(VmDeviceAssignment* a, u32 route_index) {
     if (!a || route_index >= a->irq_count) {
         return E_INVALID;
@@ -83,6 +93,14 @@ SysError device_irq_install(VmDeviceAssignment* a, u32 route_index) {
         ANKO_LOGF_ERROR("kernel/vm", "assign: host irq %u is not a bindable SPI",
                         route.host_irq);
         return E_INVALID;
+    }
+    // A channel owns its edge-triggered vector exclusively. Sharing it with
+    // a physical level route would corrupt EOI/re-arm semantics.
+    if (auto* owner = owner_for_vcpu(route.target)) {
+        for (u32 i = 0; i < owner->channel_count; ++i) {
+            const auto* ch = owner->channels[i];
+            if (ch && ch->target == route.target && ch->guest_irq == route.guest_irq) return E_BUSY;
+        }
     }
 
     kernel::LockGuard guard(g_route_lock);

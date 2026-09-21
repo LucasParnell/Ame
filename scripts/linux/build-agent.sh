@@ -12,6 +12,8 @@ CFLAGS=(
   -fno-stack-protector
   -fno-builtin
   -Os
+  -Wall -Wextra -Werror
+  -I"${AME}/shared/include"
   -Wl,-e,_start
 )
 
@@ -21,7 +23,8 @@ if [[ "${DANGO_LINUX_PROFILE:-hello}" == gpu ]]; then
     CFLAGS+=(-DDANGO_GPU_PROBE=1)
     # Phase F: the KMS self-test is a separate freestanding translation unit
     # (linux-artifacts/kms_test/) linked into the appliance init binary.
-    CFLAGS+=(-DDANGO_GPU_KMS=1)
+    CFLAGS+=(-DDANGO_GPU_KMS=1 -DDANGO_CHANNEL_TEST=1)
+    SRCS+=("${AME}/linux-artifacts/channel_test/channel_test.c")
     SRCS+=("${AME}/linux-artifacts/kms_test/kms_test.c")
 fi
 

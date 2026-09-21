@@ -44,6 +44,13 @@
         };
     };
 
+    channel@48000000 {
+        compatible = "ame,dango-channel-v1";
+        reg = <0x0 0x48000000 0x0 0x20000>;
+        memory-region = <&dango_channel>;
+        interrupts = <0 16 1>; // virtual SPI 48, edge triggered
+    };
+
     psci {
         compatible = "arm,psci-0.2";
         method = "hvc";

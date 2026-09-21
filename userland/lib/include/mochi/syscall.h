@@ -264,3 +264,6 @@ static inline mx_status_t mx_spawn(const void* image, uint64_t image_size, uint3
     if (out_thread) *out_thread = static_cast<mx_handle_t>(p.detail);
     return MX_OK;
 }
+
+static inline int64_t sys_vm_channel_map(CapHandle channel, CapHandle vcpu, uint64_t ipa, uint64_t size, uint32_t irq) { return _svc5(NR_VM_CHANNEL_MAP, channel, vcpu, ipa, size, irq); }
+static inline int64_t sys_vm_channel_notify(CapHandle channel) { return _svc1(NR_VM_CHANNEL_NOTIFY, channel); }

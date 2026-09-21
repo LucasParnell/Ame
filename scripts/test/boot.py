@@ -122,7 +122,7 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
                 # Ame's own log entries can split a guest line; match markers on
                 # the raw stream (Ame markers) plus the de-interleaved guest view.
                 logs = logfmt.marker_stream(raw)
-                if any(s in logs for s in ['KERNEL PANIC', 'spawn failed', 'init: manifest failed', 'TEST FAILED', 'gpu probe FAILED', 'kms test FAILED', 'invalid or incompatible BootInfo']):
+                if any(s in logs for s in ['KERNEL PANIC', 'spawn failed', 'init: manifest failed', 'TEST FAILED', 'gpu probe FAILED', 'kms test FAILED', 'channel test FAILED', 'channel guest probe FAILED', 'channel native probe FAILED', 'invalid or incompatible BootInfo']):
                     reason = 'guest failure'; break
                 if all(s in logs for s in markers):
                     success = True; reason = 'ready'

@@ -198,6 +198,25 @@ static long populate_vm(CapHandle vm, CapHandle* out_endpoint) {
     if (sys_vcpu_set_entry(static_cast<CapHandle>(vcpu), 0x40000000ull, 0, 0) != 0) return -5;
     auto channel = sys_vm_channel_create(vm, 6, 0);
     if (channel <= 0) return -6;
+    // Guest-visible rings must reject overlap/invalid geometry and must be
+    // reclaimed after both explicit VM destruction and owner death below.
+    const auto ch = static_cast<CapHandle>(channel);
+    const auto cpu = static_cast<CapHandle>(vcpu);
+    const auto inspect = sys_cap_dup(ch, RIGHT_VM_CHANNEL_INSPECT);
+    if (inspect <= 0 ||
+        sys_vm_channel_map(inspect, cpu, 0x48000000, 0x20000, 48) >= 0 ||
+        sys_vm_channel_notify(inspect) >= 0 ||
+        sys_vm_channel_endpoint(inspect, 0, RIGHT_READ | RIGHT_MAP) > 0 ||
+        sys_vm_channel_endpoint(inspect, 1, RIGHT_WRITE | RIGHT_MAP) > 0) return -11;
+    sys_cap_revoke(inspect);
+    if (sys_vm_channel_map(ch, cpu, 0x40000000, 0x20000, 48) >= 0 ||
+        sys_vm_channel_map(ch, cpu, 0x48000001, 0x20000, 48) >= 0 ||
+        sys_vm_channel_map(ch, cpu, 0x48000000, 0x1000, 48) >= 0 ||
+        sys_vm_channel_map(ch, cpu, 0x48000000, 0x20000, 16) >= 0 ||
+        sys_vm_channel_notify(ch) >= 0) return -9;
+    if (sys_vm_channel_map(ch, cpu, 0x48000000, 0x20000, 48) != 0 ||
+        sys_vm_channel_map(ch, cpu, 0x49000000, 0x20000, 49) >= 0 ||
+        sys_vm_channel_notify(ch) != 0) return -10;
     auto ring = sys_vm_channel_endpoint(static_cast<CapHandle>(channel), 0,
                                         RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
     if (ring <= 0) return -7;
@@ -291,10 +310,18 @@ static void vm_explicit_destroy(long objects, long pages) {
     const auto vmh = static_cast<CapHandle>(vm);
     CapHandle endpoint = 0;
     check(populate_vm(vmh, &endpoint) == 0, "owner vm populate");
+    const auto foreign_vm = sys_vm_create(root, 0);
+    check(foreign_vm > 0, "channel foreign vm create");
+    const auto foreign_cpu = sys_vcpu_create(foreign_vm, 0);
+    const auto isolated_channel = sys_vm_channel_create(vmh, 6, 0);
+    check(foreign_cpu > 0 && isolated_channel > 0, "channel isolation fixtures");
+    check(sys_vm_channel_map(isolated_channel, foreign_cpu, 0x49000000, 0x20000, 49) < 0,
+          "channel rejects another VM's vCPU");
+    check(!sys_vm_destroy(foreign_vm), "channel foreign vm destroy");
     check(!sys_vm_destroy(vmh), "owner vm destroy");
     settle(objects, pages);
-    check(sys_debug_counter(kCounterVmCreated) == created_before + 1, "explicit vm counted");
-    check(sys_debug_counter(kCounterVmDestroyed) == destroyed_before + 1,
+    check(sys_debug_counter(kCounterVmCreated) == created_before + 2, "explicit vm counted");
+    check(sys_debug_counter(kCounterVmDestroyed) == destroyed_before + 2,
           "explicit vm reclaimed");
     check(sys_cap_identify(vmh) < 0 && sys_cap_identify(endpoint) < 0,
           "destroyed vm and endpoint capabilities are stale");

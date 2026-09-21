@@ -16,6 +16,7 @@
 #   AME_VERIFY_CPUS="2" scripts/verify.sh              # single-CPU matrix
 #   AME_VERIFY_IOMMU=1 scripts/verify.sh               # + Phase C SMMUv3 row
 #   AME_VERIFY_GPU=1 scripts/verify.sh                 # + Phase E Linux virtio-gpu
+#   AME_VERIFY_CHANNEL=1 scripts/verify.sh             # + Phase G channel row
 #   AME_VERIFY_KMS=1 scripts/verify.sh                 # + Phase F KMS display row
 #
 # Exit status is 0 only when every check passes.
@@ -155,6 +156,11 @@ do_kms() {
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> KMS {} display={} {}".format(d["reason"], d.get("pattern", {}).get("size"), d["counters"])); sys.exit(0 if d["success"] else 1)'
 }
 
+do_channel() {
+    python3 scripts/test/channel.py --build "$(build_gpu_tree)" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> channel {} {}".format(d["reason"], d["counters"])); sys.exit(0 if d["success"] else 1)'
+}
+
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
 # bespoke control flow below.
 CHECKS=(
@@ -185,6 +191,10 @@ fi
 # Opt-in Phase F row.
 if [[ "${AME_VERIFY_KMS:-0}" == "1" ]]; then
     CHECKS+=("kms-display:do_kms")
+fi
+
+if [[ "${AME_VERIFY_CHANNEL:-0}" == "1" ]]; then
+    CHECKS+=("dango-channel:do_channel")
 fi
 
 record_toolchain

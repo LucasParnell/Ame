@@ -1,4 +1,4 @@
-// userland/dango/manager/main.cc — Dango VM manager scaffold test.
+// userland/dango/manager/main.cc — Linux appliance construction and channel probe.
 
 #include "mochi/syscall.h"
 #include "mochi/ring.h"
@@ -8,6 +8,7 @@
 #include "dango/channel.h"
 #include "dango/layout.h"
 #include "midix/abi/image.h"
+#include "midix/abi/dango_channel_guest.h"
 
 constexpr uint32_t kRingOrder = 6;
 constexpr uint64_t kLinuxRunBudgetNs = 6ull * 1000ull * 1000ull;
@@ -20,11 +21,6 @@ constexpr uint32_t kLinuxRunMaxExits = 4096;
 constexpr uint64_t kLinuxRunnerCoreMask = 1ull << 1;
 constexpr uint32_t kLinuxRunnerHomeCpu = 1;
 
-// The manager itself is a native service and therefore runs in the latency
-// band. If the VM runner is left in VM_LATENCY during bootstrap, the manager's
-// own stats/yield loop remains the only latency runnable and strict band order
-// keeps picking it ahead of the lower VM_LATENCY queue forever. Put the bootstrap
-// runner in the latency band; SCHED_CTX_VM_RUNNER still marks it as VM time.
 // The Linux vCPU runner is a *VM-class* workload: the kernel has dedicated VM
 // bands precisely so a guest cannot outrank native services.  Spec §7: sustained
 // rendering work stays budgeted, and the latency hint belongs to the completion
@@ -68,6 +64,15 @@ struct LinuxArtifacts {
     uint64_t entry;
     bool gpu_profile;
 };
+
+constexpr uint64_t kChannelGuestBase = 0x48000000ull;
+constexpr uint64_t kChannelReservedSize = 0x20000ull;
+constexpr uint32_t kChannelGuestIrq = 48;
+constexpr uint32_t kChannelReady = 0x47430001u;
+constexpr uint32_t kChannelPing = 0x47430002u;
+constexpr uint32_t kChannelPong = 0x47430003u;
+constexpr uint32_t kChannelDone = 0x47430004u;
+constexpr uint32_t kChannelRounds = 512;
 
 static uint32_t slen(const char* s) {
     uint32_t n = 0;
@@ -164,7 +169,10 @@ static bool validate_layout(const dango::VmLayout& layout) {
     if (!contains(layout.ram_base, layout.ram_size, layout.kernel_load, dango::kPageSize)) return false;
     if (!contains(layout.ram_base, layout.ram_size, layout.initramfs_load, dango::kPageSize)) return false;
     if (!contains(layout.ram_base, layout.ram_size, layout.dtb_base, layout.dtb_size)) return false;
-    if (!contains(layout.ram_base, layout.ram_size, layout.channel_base, layout.channel_size)) return false;
+    // The hello layout reserves space inside RAM; the GPU transport must use
+    // separate, non-DMA pages outside it. Reject a partial overlap in either case.
+    if (overlaps(layout.ram_base, layout.ram_size, layout.channel_base, layout.channel_size) &&
+        !contains(layout.ram_base, layout.ram_size, layout.channel_base, layout.channel_size)) return false;
     if (overlaps(layout.ram_base, layout.ram_size, layout.mmio_base, layout.mmio_size)) return false;
     if (overlaps(layout.dtb_base, layout.dtb_size, layout.mmio_base, layout.mmio_size)) return false;
     if (overlaps(layout.dtb_base, layout.dtb_size, layout.channel_base, layout.channel_size)) return false;
@@ -418,6 +426,10 @@ static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
                                          "profile", &profile_len);
     artifacts->gpu_profile = profile && token_equals(profile, profile_len, "gpu");
     if (profile && !artifacts->gpu_profile && !token_equals(profile, profile_len, "hello")) return false;
+    if (artifacts->gpu_profile) {
+        layout.channel_base = kChannelGuestBase;
+        layout.channel_size = kChannelReservedSize;
+    }
     artifacts->layout = layout;
     artifacts->entry = entry_pc;
     return true;
@@ -885,6 +897,30 @@ extern "C" [[noreturn]] void _start() {
         channel_info.endpoint_present_mask != 0xFull) {
         fail("channel setup failed\n");
     }
+    RingPage* channel_tx = nullptr;
+    RingPage* channel_rx = nullptr;
+    if (have_linux && linux.gpu_profile) {
+        if (sys_vm_channel_map(channel, vcpu, layout.channel_base, layout.channel_size,
+                               kChannelGuestIrq) != 0) fail("channel guest mapping failed\n");
+        if (sys_map_page(h2g_ring, 0x30000000, dango::RIGHT_READ | dango::RIGHT_WRITE) != 0 ||
+            sys_map_page(g2h_ring, 0x30010000, dango::RIGHT_READ | dango::RIGHT_WRITE) != 0)
+            fail("channel host mapping failed\n");
+        channel_tx = reinterpret_cast<RingPage*>(0x30000000);
+        channel_rx = reinterpret_cast<RingPage*>(0x30010000);
+        // Exercise both host endpoints, including wraparound, before Linux can
+        // access them. Leave equal, nonzero counters for the guest to discover.
+        for (uint64_t n = 0; n < 256; ++n) {
+            RingSlot msg{};
+            if (!ring_try_push(channel_tx, kRingOrder, kChannelPing, &n, sizeof(n), h2g_db) ||
+                !ring_pop(channel_tx, kRingOrder, &msg) || msg.seq != n || msg.length != sizeof(n) ||
+                *reinterpret_cast<const uint64_t*>(msg.payload) != n ||
+                !ring_try_push(channel_rx, kRingOrder, kChannelPong, &n, sizeof(n), g2h_db) ||
+                !ring_pop(channel_rx, kRingOrder, &msg) || msg.seq != n || msg.length != sizeof(n) ||
+                *reinterpret_cast<const uint64_t*>(msg.payload) != n)
+                fail("channel native probe FAILED\n");
+        }
+        console_log("channel native probe passed\n");
+    }
     console_log("channel ready\n");
     console_log("layout ready\n");
     mochi::boot::ready(boot);
@@ -931,6 +967,32 @@ extern "C" [[noreturn]] void _start() {
 
     console_log("service ready\n");
     (void)sys_notify(kDoneDoorbell);
+
+    if (channel_tx && channel_rx) {
+        RingSlot message{};
+        if (!ring_wait_pop(channel_rx, kRingOrder, &message, g2h_db) ||
+            message.type != kChannelReady || message.length != 0)
+            fail("channel guest probe FAILED: ready\n");
+        for (uint64_t n = 0; n < kChannelRounds; ++n) {
+            if (!ring_try_push(channel_tx, kRingOrder, kChannelPing, &n, sizeof(n), h2g_db) ||
+                sys_vm_channel_notify(channel) != 0 ||
+                !ring_wait_pop(channel_rx, kRingOrder, &message, g2h_db) ||
+                message.type != kChannelPong || message.length != sizeof(n) ||
+                message.seq != 257 + n || *reinterpret_cast<const uint64_t*>(message.payload) != n)
+                fail("channel guest probe FAILED: order\n");
+        }
+        if (!ring_wait_pop(channel_rx, kRingOrder, &message, g2h_db) ||
+            message.type != kChannelDone || message.length != sizeof(uint64_t) ||
+            *reinterpret_cast<const uint64_t*>(message.payload) == 0)
+            fail("channel guest probe FAILED: IRQ\n");
+        if (sys_vm_channel_inspect(channel, &channel_info, sizeof(channel_info)) != 0 ||
+            channel_info.messages_host_to_guest != kChannelRounds ||
+            channel_info.messages_guest_to_host < kChannelRounds + 2)
+            fail("channel guest probe FAILED: counters\n");
+        dango_counter("channel.h2g", channel_info.messages_host_to_guest);
+        dango_counter("channel.g2h", channel_info.messages_guest_to_host);
+        console_log("channel guest probe passed: 512 ordered round trips\n");
+    }
 
     // A latency-band monitor that repeatedly yields remains runnable and can
     // starve the budgeted VM runner. The runner reports its own transitions;

@@ -168,3 +168,12 @@ Notes:
   `DELIVERY/gpu-appliance-phase-e1.md`.
 
 This file is a progress record, not a completion claim.
+## Phase G — guest-visible channel
+
+The generic Dango transport now maps two non-DMA rings into Linux, uses virtual
+IRQ/HVC notifications, and exposes a bounded, root-only Linux character device.
+The GPU Linux build adds its built-in driver through a read-only source overlay.
+`AME_VERIFY_CHANNEL=1 scripts/verify.sh` checks 512 ordered round trips and clean
+post-exchange IOMMU counters; sanitizer and lifecycle tests cover ARM races,
+capability/VM isolation and mapped-channel reclamation. See
+[Phase G delivery](../DELIVERY/gpu-appliance-phase-g.md).

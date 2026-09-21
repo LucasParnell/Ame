@@ -140,6 +140,14 @@ if(DANGO_BUILD_LINUX_ARTIFACTS)
             ${DANGO_LINUX_BUILDER}
             ${CMAKE_SOURCE_DIR}/scripts/linux/build-gpu-linux.sh
             ${CMAKE_SOURCE_DIR}/scripts/linux/build-agent.sh
+            ${CMAKE_SOURCE_DIR}/scripts/linux/stage-gpu-source.py
+            ${CMAKE_SOURCE_DIR}/scripts/linux/build-manifest.sh
+            ${CMAKE_SOURCE_DIR}/scripts/linux/check-profile.py
+            ${CMAKE_SOURCE_DIR}/scripts/linux/check-minimal-config.py
+            ${CMAKE_SOURCE_DIR}/shared/include/midix/abi/dango_channel_guest.h
+            ${CMAKE_SOURCE_DIR}/linux-artifacts/guest-driver/dango_channel.c
+            ${CMAKE_SOURCE_DIR}/linux-artifacts/channel_test/channel_test.c
+            ${CMAKE_SOURCE_DIR}/linux-artifacts/kms_test/kms_test.c
             ${CMAKE_SOURCE_DIR}/scripts/linux/build-initramfs.sh
             ${CMAKE_SOURCE_DIR}/scripts/linux/build-dtb.sh
             ${CMAKE_SOURCE_DIR}/scripts/linux/mkinitramfs.py

@@ -66,6 +66,11 @@ trap 'rm -rf "${shim}"' EXIT
 
 mkdir -p "${OUT}" "${KOUT}"
 
+# Built-in generic channel driver, with the caller's Linux sources untouched.
+SOURCE_OVERLAY="${KOUT}/.dango-source"
+python3 "${AME}/scripts/linux/stage-gpu-source.py" "${DANGO_LINUX_SRC}" "${SOURCE_OVERLAY}"
+DANGO_LINUX_SRC="${SOURCE_OVERLAY}"
+
 MAKE_ARGS=(ARCH=arm64)
 if command -v clang >/dev/null 2>&1 && command -v ld.lld >/dev/null 2>&1; then
     MAKE_ARGS+=(LLVM=1)

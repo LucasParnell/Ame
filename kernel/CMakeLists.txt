@@ -60,6 +60,7 @@ set(ANKO_SOURCES
     vm/stage2.cc
     vm/vcpu.cc
     vm/vm_channel.cc
+    vm/vm_channel_notify.cc
 
     # ---- Phase D: PCI device assignment + interrupt virtualization --------
     vm/vm_device.cc

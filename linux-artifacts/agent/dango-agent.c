@@ -171,6 +171,10 @@ static int gpu_probe(void) {
 }
 #endif
 
+#ifdef DANGO_CHANNEL_TEST
+int dango_channel_test(void);
+#endif
+
 void _start(void) {
     ensure_stdio_console();
 
@@ -196,6 +200,10 @@ void _start(void) {
     } else {
         message("dango: gpu probe FAILED\n");
     }
+#endif
+
+#ifdef DANGO_CHANNEL_TEST
+    message(dango_channel_test() ? "dango: channel test passed\n" : "dango: channel test FAILED\n");
 #endif
 
     for (;;) {

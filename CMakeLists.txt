@@ -74,14 +74,27 @@ add_link_options(
 # ---------------------------------------------------------------------------
 # Subdirectories
 # ---------------------------------------------------------------------------
-set(AME_SIGNING_KEY "" CACHE FILEPATH "Ed25519 PKCS8 private signing key")
+set(AME_SIGNING_KEY "" CACHE FILEPATH "Ed25519 PKCS8 private signing key (release packaging only)")
 set(AME_TRUSTED_KEY_FILES "" CACHE STRING "Semicolon-separated Ed25519 public key files")
 set(AME_TRUST_ARGS --output ${CMAKE_BINARY_DIR}/generated/manifest_trust.h)
 if(ANKO_BUILD_DEV)
     list(APPEND AME_TRUST_ARGS --development)
 endif()
 if(AME_SIGNING_KEY)
-    list(APPEND AME_TRUST_ARGS --signing-key ${AME_SIGNING_KEY})
+    if(EXISTS "${AME_SIGNING_KEY}")
+        list(APPEND AME_TRUST_ARGS --signing-key ${AME_SIGNING_KEY})
+    elseif(ANKO_BUILD_DEV)
+        # A dev build signs with the development key, so a path left over in a
+        # cached build tree must not stop the configure.
+        message(WARNING
+            "AME_SIGNING_KEY '${AME_SIGNING_KEY}' does not exist; using the development key")
+    else()
+        message(FATAL_ERROR
+            "AME_SIGNING_KEY does not exist: '${AME_SIGNING_KEY}'\n"
+            "  Point it at an Ed25519 PKCS8 private key (scripts/make-release-key.sh writes\n"
+            "  one), clear it with -U AME_SIGNING_KEY, or build with -DANKO_BUILD_DEV=ON to\n"
+            "  sign with the development key.")
+    endif()
 endif()
 list(APPEND AME_TRUST_ARGS --trusted ${AME_TRUSTED_KEY_FILES})
 execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/mx/signing.py ${AME_TRUST_ARGS}

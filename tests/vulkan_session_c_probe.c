@@ -10,7 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "midix/abi/protocols/vulkan_session.h"
+#include "midix/abi/vulkan_commands.h"
 
 _Static_assert(sizeof(struct MxVkSessionOpenRequest) == 32, "open request size");
 _Static_assert(sizeof(struct MxVkSessionOpenReply) == 48, "open reply size");
@@ -36,13 +36,17 @@ int mx_vk_c_translation_unit_is_valid(void) {
     submit.command_bytes = 16;
     submit.flags = MX_VK_SUBMIT_FLAG_SIGNAL;
     mx_vk_slot_encode(&frame, VK_SESSION_SUBMIT, 1, &submit, (mx_u32_t)sizeof(submit));
-    if (frame.type != VK_SESSION_SUBMIT || frame.length != sizeof(submit)) return 0;
+    if (frame.type != VK_SESSION_SUBMIT || frame.length != sizeof(submit)) {
+        return 0;
+    }
 
     struct MxVkSessionSubmitRequest decoded;
     if (mx_vk_slot_decode(&frame, VK_SESSION_SUBMIT, (mx_u32_t)sizeof(decoded), &decoded) != 0) {
         return 0;
     }
-    if (decoded.sync_id != 9 || decoded.command_bytes != 16) return 0;
+    if (decoded.sync_id != 9 || decoded.command_bytes != 16) {
+        return 0;
+    }
 
     /* The id layout round-trips in C exactly as it does in C++. */
     const uint64_t id = mx_vk_object_id_make(0x55, MX_VK_OBJECT_MEMORY, 1, 3);
@@ -50,6 +54,66 @@ int mx_vk_c_translation_unit_is_valid(void) {
     if (mx_vk_object_id_check(id, MX_VK_OBJECT_MEMORY, 0x55, 1, &index) != 0 || index != 3) {
         return 0;
     }
-    if (mx_vk_object_id_check(id, MX_VK_OBJECT_MEMORY, 0x55, 2, &index) == 0) return 0;
+    if (mx_vk_object_id_check(id, MX_VK_OBJECT_MEMORY, 0x55, 2, &index) == 0) {
+        return 0;
+    }
     return 1;
+}
+
+/* Decode unaligned input and reject every truncated prefix without reading
+ * outside it. The host test executes this under ASan/UBSan as well as compiling
+ * the C ABI assertions above. */
+static int commands_are_bounded(void) {
+    MxVkCmdFillBuffer fill = {0};
+    fill.header.opcode = VK_CMD_FILL_BUFFER;
+    fill.header.size = sizeof(fill);
+    fill.dest_arena_offset = MX_VK_COMMAND_REGION_BYTES;
+    fill.size = 4;
+    fill.value = 0x12345678;
+    uint8_t unaligned[sizeof(fill) + 1];
+    const uint8_t* source = (const uint8_t*)&fill;
+    for (unsigned i = 0; i < sizeof(fill); ++i) {
+        unaligned[i + 1] = source[i];
+    }
+    MxVkCommand command;
+    for (unsigned bytes = 0; bytes < sizeof(fill); ++bytes) {
+        if (!mx_vk_command_decode(unaligned + 1, bytes, &command)) {
+            return 0;
+        }
+    }
+    if (mx_vk_command_decode(unaligned + 1, sizeof(fill), &command) ||
+        command.fill.value != fill.value) {
+        return 0;
+    }
+    if (!mx_vk_data_range_valid(fill.dest_arena_offset, fill.size,
+                                MX_VK_SESSION_DEFAULT_ARENA_BYTES) ||
+        mx_vk_data_range_valid(UINT64_MAX, 4, MX_VK_SESSION_DEFAULT_ARENA_BYTES) ||
+        mx_vk_data_range_valid(fill.dest_arena_offset, UINT64_MAX,
+                               MX_VK_SESSION_DEFAULT_ARENA_BYTES) ||
+        mx_vk_data_range_valid(0, 4, MX_VK_SESSION_DEFAULT_ARENA_BYTES)) {
+        return 0;
+    }
+    fill.header.flags = 1;
+    if (!mx_vk_command_decode((const uint8_t*)&fill, sizeof(fill), &command)) {
+        return 0;
+    }
+    fill.header.flags = 0;
+    fill.reserved0 = 1;
+    if (!mx_vk_command_decode((const uint8_t*)&fill, sizeof(fill), &command)) {
+        return 0;
+    }
+    fill.reserved0 = 0;
+    fill.header.size = sizeof(MxVkCommandHeader);
+    if (!mx_vk_command_decode((const uint8_t*)&fill, sizeof(fill), &command)) {
+        return 0;
+    }
+    fill.header.opcode = UINT32_MAX;
+    if (!mx_vk_command_decode((const uint8_t*)&fill, sizeof(fill), &command)) {
+        return 0;
+    }
+    return 1;
+}
+
+int main(void) {
+    return mx_vk_c_translation_unit_is_valid() && commands_are_bounded() ? 0 : 1;
 }

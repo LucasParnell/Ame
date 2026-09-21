@@ -19,16 +19,18 @@ class VulkanSessionAbi(unittest.TestCase):
             result = subprocess.run([probe], capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_c_header_compiles(self):
+    def test_c_header_and_bounded_decoder(self):
         # The guest dango-vkd build consumes the same header as C; prove the C
-        # view still compiles and its static_asserts hold.
+        # view compiles, its static_asserts hold and its decoder rejects bad records.
         with tempfile.TemporaryDirectory(prefix='ame-vksession-c-') as work:
-            obj = str(Path(work) / 'vksession_c.o')
+            probe = str(Path(work) / 'vksession_c')
             subprocess.run(['clang', '-std=c11', '-O1', '-g',
-                '-Wall', '-Wextra', '-Werror', '-c',
+                '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+                '-fno-omit-frame-pointer',
                 '-I'+str(ROOT/'shared/include'),
                 str(ROOT/'tests/vulkan_session_c_probe.c'),
-                '-o', obj], check=True, capture_output=True)
+                '-o', probe], check=True, capture_output=True)
+            subprocess.run([probe], check=True, capture_output=True, timeout=20)
 
 
 if __name__ == '__main__':

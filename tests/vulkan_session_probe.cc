@@ -7,7 +7,7 @@
 // while compiling clean under -Wall -Wextra -Werror, so a size or offset drift,
 // a duplicated opcode or a bad id bit-layout fails the host test.
 
-#include "midix/abi/protocols/vulkan_session.h"
+#include "midix/abi/vulkan_commands.h"
 #include "midix/abi/protocols/gpu_service.h" // for the distinctness check only
 
 #include <cassert>

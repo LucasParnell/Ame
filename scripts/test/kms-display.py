@@ -4,7 +4,8 @@
 Boots Ame with the SMMUv3 enforced and the assigned virtio-gpu-pci function,
 lets the guest appliance userspace drive a standalone KMS modeset (raw DRM
 ioctls, no libdrm -- linux-artifacts/kms_test/), captures the QEMU display with
-a monitor `screendump`, and asserts the four-colour bar pattern the guest drew.
+a monitor `screendump`, and asserts the capture mode and the four-colour bar
+pattern the guest drew.
 
 This proves device assignment + MMIO + IRQ + DMA + Linux DRM + virtio_gpu
 independently of the Midix GPU protocol, with Ame containing no virtio-gpu
@@ -14,13 +15,13 @@ import argparse
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import tempfile
 
 # Loadable by path (host tests) as well as directly; keep the sibling import.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ef_constants as ef  # noqa: E402
 import logfmt  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,9 +31,13 @@ BARS = ((0.125, (255, 0, 0)), (0.375, (0, 255, 0)),
         (0.625, (0, 0, 255)), (0.875, (255, 255, 255)))
 TOLERANCE = 24
 
+# The one mode this row asserts, in both the emulated EDID and the capture.
+EXPECT_MODE = (1024, 768)
+
 # edid=on + xres/yres gives the headless QEMU console an EDID with a known
 # preferred mode; id=gpu0 lets screendump target this device rather than ramfb.
-GPU_DEVICE = 'virtio-gpu-pci,iommu_platform=on,id=gpu0,edid=on,xres=1024,yres=768'
+GPU_DEVICE = ('virtio-gpu-pci,iommu_platform=on,id=gpu0,edid=on,'
+              f'xres={EXPECT_MODE[0]},yres={EXPECT_MODE[1]}')
 
 
 def read_ppm(path):
@@ -58,8 +63,12 @@ def read_ppm(path):
     return int(width), int(height), data[i:]
 
 
-def assert_pattern(path):
+def assert_pattern(path, expect_size=None):
     width, height, pixels = read_ppm(path)
+    if expect_size is not None and (width, height) != tuple(expect_size):
+        return False, {'size': [width, height],
+                       'error': f'capture {width}x{height} != expected '
+                                f'{expect_size[0]}x{expect_size[1]}'}
     if len(pixels) < width * height * 3:
         return False, {'error': 'short pixel buffer'}
     y = height // 2
@@ -76,19 +85,15 @@ def assert_pattern(path):
 
 
 def evidence(logs):
-    match = re.search(r'gpu proof: faults=(\d+) quarantines=(\d+) routes=(\d+) injected=(\d+) smmu=(\d+)', logs)
-    counters = dict(zip(('faults', 'quarantines', 'routes', 'injected', 'smmu'),
-                        map(int, match.groups()))) if match else {}
+    counters = ef.parse_proof(logs, 'gpu')
     checks = {
-        'smmu_ready': 'smmuv3 bring-up rc=0 ready=1' in logs,
-        'assignment_active': 'assign: ACTIVE' in logs,
-        'linux_driver': 'dango: DRM card0 driver=virtio_gpu dumb_buffer=1' in logs,
-        'linux_isr': 'dango: Linux virtio ISR observed' in logs,
-        'kms_displayed': 'dango: kms displayed' in logs,
-        'kms_passed': 'dango: kms test passed' in logs,
-        'no_failures': not any(word in logs for word in (
-            'KERNEL PANIC', 'TEST FAILED', 'gpu probe FAILED', 'kms test FAILED',
-            'iommu/faults:', 'unsupported trap', 'init: service start failed')),
+        'smmu_ready': ef.MARKERS['smmu_ready'] in logs,
+        'assignment_active': ef.MARKERS['assign_active'] in logs,
+        'linux_driver': ef.MARKERS['linux_driver'] in logs,
+        'linux_isr': ef.MARKERS['linux_isr'] in logs,
+        'kms_displayed': ef.MARKERS['kms_displayed'] in logs,
+        'kms_passed': ef.MARKERS['kms_passed'] in logs,
+        'no_failures': not any(word in logs for word in ef.FAILURE_WORDS),
         'contained_dma': bool(counters) and counters['faults'] == 0 and
                          counters['quarantines'] == 0 and counters['smmu'] == 1,
     }
@@ -109,8 +114,8 @@ def main():
     env = dict(os.environ, AME_QEMU_IOMMU='1', AME_QEMU_TESTDEV='0', AME_QEMU_GPU_DEVICE=GPU_DEVICE)
     command = [sys.executable, str(ROOT / 'scripts/test/boot.py'), '--build', args.build,
                '--cpus', str(args.cpus), '--timeout', str(args.timeout), '--output', str(work),
-               '--marker', 'all services ready', '--marker', 'gpu proof:',
-               '--marker', 'dango: kms displayed',
+               '--marker', ef.MARKERS['boot_ready'], '--marker', ef.MARKERS['gpu_proof'],
+               '--marker', ef.MARKERS['kms_displayed'],
                '--monitor-socket', str(monitor), '--screendump', str(shot),
                '--screendump-device', 'gpu0']
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=args.timeout + 60)
@@ -127,7 +132,7 @@ def main():
     pattern = {}
     if checks['screendump']:
         try:
-            ok, pattern = assert_pattern(shot)
+            ok, pattern = assert_pattern(shot, expect_size=EXPECT_MODE)
             checks['kms_pattern'] = ok
         except (OSError, ValueError) as error:
             checks['kms_pattern'] = False

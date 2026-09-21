@@ -144,8 +144,20 @@ build_gpu_tree() {
     printf '%s\n' "$gpu_build"
 }
 
+# Resolve the shared GPU tree without hiding a build failure: `--build
+# "$(build_gpu_tree)"` would swallow the substitution's exit status and run the
+# row with an empty path, reporting a build break as a boot failure.
+gpu_tree() {
+    local tree
+    tree="$(build_gpu_tree)" || fail "gpu build tree"
+    [[ -d "$tree" ]] || fail "gpu build tree"
+    printf '%s\n' "$tree"
+}
+
 do_gpu() {
-    python3 scripts/test/gpu-appliance.py --build "$(build_gpu_tree)" \
+    local tree
+    tree="$(gpu_tree)" || fail "gpu build tree"
+    python3 scripts/test/gpu-appliance.py --build "$tree" \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> GPU {} {}".format(d["reason"], d["counters"])); sys.exit(0 if d["success"] else 1)'
 }
 
@@ -153,7 +165,9 @@ do_gpu() {
 # assigned virtio-gpu console (no Midix GPU protocol involved).  Opt-in like the
 # Phase E row; the default gate is unchanged unless AME_VERIFY_KMS=1 is set.
 do_kms() {
-    python3 scripts/test/kms-display.py --build "$(build_gpu_tree)" \
+    local tree
+    tree="$(gpu_tree)" || fail "gpu build tree"
+    python3 scripts/test/kms-display.py --build "$tree" \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> KMS {} display={} {}".format(d["reason"], d.get("pattern", {}).get("size"), d["counters"])); sys.exit(0 if d["success"] else 1)'
 }
 
@@ -166,7 +180,9 @@ do_panic() {
 }
 
 do_channel() {
-    python3 scripts/test/channel.py --build "$(build_gpu_tree)" \
+    local tree
+    tree="$(gpu_tree)" || fail "gpu build tree"
+    python3 scripts/test/channel.py --build "$tree" \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> channel {} {}".format(d["reason"], d["counters"])); sys.exit(0 if d["success"] else 1)'
 }
 

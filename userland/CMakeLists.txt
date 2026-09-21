@@ -116,10 +116,16 @@ endif()
 if(DANGO_LINUX_ARTIFACT_DIR)
     foreach(name Image initramfs.cpio dango-linux.dtb manifest.toml)
         list(APPEND DANGO_LINUX_ARCHIVE_FILES "${DANGO_LINUX_ARTIFACT_DIR}/${name}")
-        if(NOT DANGO_BUILD_LINUX_ARTIFACTS AND NOT EXISTS "${DANGO_LINUX_ARTIFACT_DIR}/${name}")
-            message(FATAL_ERROR "Missing prebuilt Linux artifact ${name}")
+        if(NOT EXISTS "${DANGO_LINUX_ARTIFACT_DIR}/${name}")
+            list(APPEND _ame_missing_artifacts "${DANGO_LINUX_ARTIFACT_DIR}/${name}")
         endif()
     endforeach()
+    # When the artifacts are prebuilt (not built here) every one must be
+    # present; report the missing file(s) once, clearly, instead of failing deep
+    # inside the content-hash stamp below.
+    if(_ame_missing_artifacts AND NOT DANGO_BUILD_LINUX_ARTIFACTS)
+        message(FATAL_ERROR "Missing prebuilt Linux artifact(s): ${_ame_missing_artifacts}")
+    endif()
 endif()
 
 # ninja decides freshness by mtime, so an artifact directory refreshed with older
@@ -127,25 +133,37 @@ endif()
 # packing edge, and system.mxb would keep its previous payload. Stamp the
 # artifact *contents* instead: the stamp file name carries a content hash, so it
 # changes exactly when the artifacts change, and the bundle depends on it.
+#
+# The hash is computed at configure time, so a reconfigure is what invalidates
+# the stamp; a plain `cmake --build` does not re-run this file and does not
+# re-stamp. Only hash once every artifact is on disk -- a partially populated
+# directory (e.g. mid-build) is left unstamped rather than erroring here.
 set(DANGO_LINUX_STAMP_DEPS)
-if(DANGO_LINUX_ARTIFACT_DIR AND EXISTS "${DANGO_LINUX_ARTIFACT_DIR}/Image")
+if(DANGO_LINUX_ARTIFACT_DIR)
     set(_ame_artifact_hash "")
+    set(_ame_artifacts_present TRUE)
     foreach(name Image initramfs.cpio dango-linux.dtb manifest.toml)
-        file(SHA256 "${DANGO_LINUX_ARTIFACT_DIR}/${name}" _ame_part)
-        string(APPEND _ame_artifact_hash "${_ame_part}")
-    endforeach()
-    string(SHA256 _ame_artifact_hash "${_ame_artifact_hash}")
-    set(_ame_stamp "${CMAKE_BINARY_DIR}/dango-artifacts-${_ame_artifact_hash}.stamp")
-    if(NOT EXISTS "${_ame_stamp}")
-        file(WRITE "${_ame_stamp}" "${_ame_artifact_hash}\n")
-    endif()
-    file(GLOB _ame_old_stamps "${CMAKE_BINARY_DIR}/dango-artifacts-*.stamp")
-    foreach(_ame_old ${_ame_old_stamps})
-        if(NOT _ame_old STREQUAL _ame_stamp)
-            file(REMOVE "${_ame_old}")
+        if(EXISTS "${DANGO_LINUX_ARTIFACT_DIR}/${name}")
+            file(SHA256 "${DANGO_LINUX_ARTIFACT_DIR}/${name}" _ame_part)
+            string(APPEND _ame_artifact_hash "${_ame_part}")
+        else()
+            set(_ame_artifacts_present FALSE)
         endif()
     endforeach()
-    set(DANGO_LINUX_STAMP_DEPS "${_ame_stamp}")
+    if(_ame_artifacts_present)
+        string(SHA256 _ame_artifact_hash "${_ame_artifact_hash}")
+        set(_ame_stamp "${CMAKE_BINARY_DIR}/dango-artifacts-${_ame_artifact_hash}.stamp")
+        if(NOT EXISTS "${_ame_stamp}")
+            file(WRITE "${_ame_stamp}" "${_ame_artifact_hash}\n")
+        endif()
+        file(GLOB _ame_old_stamps "${CMAKE_BINARY_DIR}/dango-artifacts-*.stamp")
+        foreach(_ame_old ${_ame_old_stamps})
+            if(NOT _ame_old STREQUAL _ame_stamp)
+                file(REMOVE "${_ame_old}")
+            endif()
+        endforeach()
+        set(DANGO_LINUX_STAMP_DEPS "${_ame_stamp}")
+    endif()
 endif()
 
 if(DANGO_BUILD_LINUX_ARTIFACTS)

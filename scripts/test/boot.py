@@ -41,7 +41,14 @@ def hmp_screendump(sock_path, out_path, device=None, timeout=10.0):
             conn.recv(4096)  # banner + first prompt
         except (socket.timeout, OSError):
             pass
+        # A leftover capture from a previous run would otherwise satisfy the
+        # size>0 check below; drop it before QEMU can write a fresh one.
+        try:
+            os.unlink(out_path)
+        except FileNotFoundError:
+            pass
         command = f'screendump {out_path}' + (f' {device}' if device else '') + '\n'
+        sent = time.time()
         conn.sendall(command.encode())
         buf = b''
         while time.monotonic() < deadline:
@@ -57,7 +64,10 @@ def hmp_screendump(sock_path, out_path, device=None, timeout=10.0):
     finally:
         conn.close()
     while time.monotonic() < deadline:
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        # Require freshness, not mere existence: the mtime must be at or after
+        # the moment the screendump command was issued.
+        if (os.path.exists(out_path) and os.path.getsize(out_path) > 0
+                and os.path.getmtime(out_path) >= sent):
             return True
         time.sleep(0.05)
     return False

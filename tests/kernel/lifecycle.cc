@@ -398,7 +398,7 @@ static void channel_lifecycle(long objects, long pages) {
     check(c3 > 0, "channel c3 create");
     const auto c3h = static_cast<CapHandle>(c3);
     check(sys_vm_channel_notify(c2h) == MX_ERR_NOT_FOUND, "superseded generation rejected");
-    check(!sys_vm_channel_map(c3h, cpuh, 0x4A000000ull, 0x20000ull, 50), "reset generation map");
+    check(!sys_vm_channel_map(c3h, cpuh, 0x48800000ull, 0x20000ull, 50), "reset generation map");
     check(!sys_vm_channel_notify(c3h), "reset generation notify");
 
     // A ring mapping is a multi-page arena entry; every page must be unmapped

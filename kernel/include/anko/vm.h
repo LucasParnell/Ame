@@ -428,11 +428,6 @@ struct VmChannel {
     // stale (spec §13.3). Published to the guest in the descriptor page.
     u64 boot_generation;
     PhysAddr descriptor_page;
-    // Phase L: the shared-arena descriptor window's backing page. One zeroed page
-    // is mapped read-only across the whole DANGO_SHM_GUEST_* window so the guest
-    // dango_shm driver always reads an empty table instead of faulting on an IPA
-    // the host has not mapped. Zero until map_channel() runs.
-    PhysAddr shm_page;
     Vcpu* target; // owned by the same VM; accessed only under CallGuard
     u64 guest_base;
     u32 guest_irq;
@@ -512,6 +507,10 @@ struct Vm {
     u32 owner_pid;
     VmState state;
     u32 pad0;
+    // Phase L: one zeroed page mapped read-only across the DANGO_SHM_GUEST_*
+    // window (the shared-arena descriptor). Owned by the VM, mapped on the first
+    // channel map and freed with the VM. Zero until then.
+    PhysAddr shm_page;
     VmMemory* memory_objects[kMaxVmMemoryObjects];
     u32 memory_count;
     Vcpu* vcpus[kMaxVcpusPerVm];

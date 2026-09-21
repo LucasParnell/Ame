@@ -206,7 +206,6 @@ void dispose_channel(void* target) {
     release_creator(channel->host_to_guest); release_creator(channel->guest_to_host);
     release_creator(channel->host_doorbell); release_creator(channel->guest_doorbell);
     if (channel->descriptor_page) mm::free_page(channel->descriptor_page);
-    if (channel->shm_page) mm::free_page(channel->shm_page);
     mm::slab_free(channel, sizeof(VmChannel), alignof(VmChannel));
     object::release(owner);
 }
@@ -272,35 +271,44 @@ SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
         mm::free_page(page);
         return rc;
     }
-    // Phase L: the shared-arena descriptor window is always mapped before first
-    // guest entry, read-only, as one zeroed page repeated across the window, so
-    // the guest dango_shm driver always reads an empty table instead of taking a
-    // stage-2 translation fault on an IPA the host has not published.
-    const PhysAddr shm_page = mm::alloc_page();
-    if (!shm_page) {
-        for (u64 u = 0; u < bytes; u += PAGE_SIZE) (void)stage2_unmap_page(&owner->stage2, ipa + u);
-        mm::free_page(page);
-        return E_NOMEM;
-    }
-    libk::memset(reinterpret_cast<void*>(shm_page), 0, PAGE_SIZE);
-    u64 shm_off = 0;
-    for (; shm_off < DANGO_SHM_GUEST_SIZE; shm_off += PAGE_SIZE) {
-        rc = stage2_map_page(&owner->stage2, DANGO_SHM_GUEST_BASE + shm_off, shm_page, RIGHT_READ);
-        if (rc != E_OK) break;
-    }
-    if (rc != E_OK) {
-        while (shm_off) {
-            shm_off -= PAGE_SIZE;
-            (void)stage2_unmap_page(&owner->stage2, DANGO_SHM_GUEST_BASE + shm_off);
+    // Phase L: the shared-arena descriptor window is a fixed, read-only, zeroed
+    // page repeated across the window, mapped ONCE PER VM (not per channel, so a
+    // reconnect that supersedes the channel does not fail on its own existing
+    // mapping). The guest dango_shm driver therefore always reads an empty
+    // region table instead of taking a stage-2 fault on an unpublished IPA. The
+    // page lives until the VM is destroyed, like the stage-2 mappings it backs.
+    if (!owner->shm_page) {
+        const PhysAddr shm_page = mm::alloc_page();
+        if (!shm_page) {
+            for (u64 u = 0; u < bytes; u += PAGE_SIZE) {
+                (void)stage2_unmap_page(&owner->stage2, ipa + u);
+            }
+            mm::free_page(page);
+            return E_NOMEM;
         }
-        mm::free_page(shm_page);
-        for (u64 u = 0; u < bytes; u += PAGE_SIZE) (void)stage2_unmap_page(&owner->stage2, ipa + u);
-        mm::free_page(page);
-        return rc;
+        libk::memset(reinterpret_cast<void*>(shm_page), 0, PAGE_SIZE);
+        u64 shm_off = 0;
+        for (; shm_off < DANGO_SHM_GUEST_SIZE; shm_off += PAGE_SIZE) {
+            rc = stage2_map_page(&owner->stage2, DANGO_SHM_GUEST_BASE + shm_off, shm_page,
+                                 RIGHT_READ);
+            if (rc != E_OK) break;
+        }
+        if (rc != E_OK) {
+            while (shm_off) {
+                shm_off -= PAGE_SIZE;
+                (void)stage2_unmap_page(&owner->stage2, DANGO_SHM_GUEST_BASE + shm_off);
+            }
+            mm::free_page(shm_page);
+            for (u64 u = 0; u < bytes; u += PAGE_SIZE) {
+                (void)stage2_unmap_page(&owner->stage2, ipa + u);
+            }
+            mm::free_page(page);
+            return rc;
+        }
+        owner->shm_page = shm_page;
     }
     // These pages are deliberately not VmMemory objects: collect_vm_ram()
     // cannot authorize them for GPU DMA. There is no IOMMU map here.
-    channel->shm_page = shm_page;
     channel->descriptor_page = page;
     channel->target = cpu.get();
     channel->guest_base = ipa;

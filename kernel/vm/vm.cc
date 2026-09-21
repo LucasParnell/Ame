@@ -19,7 +19,14 @@ CallGuard::~CallGuard() {
     __atomic_store_n(&g_call_lock, 0u, __ATOMIC_RELEASE);
     asm volatile("msr DAIF, %0" :: "r"(irq_) : "memory");
 }
-static void dispose_vm(void* target) { mm::slab_free(target, sizeof(Vm), alignof(Vm)); }
+static void dispose_vm(void* target) {
+    auto* v = static_cast<Vm*>(target);
+    // The shared-arena descriptor page outlives every channel on the VM, so it
+    // is released here rather than in dispose_channel (stage2_destroy has
+    // already dropped the mappings that referenced it by this point).
+    if (v->shm_page) mm::free_page(v->shm_page);
+    mm::slab_free(target, sizeof(Vm), alignof(Vm));
+}
 
 
 namespace {

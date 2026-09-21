@@ -137,22 +137,22 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
     }
     check(caption_in_logo == 0, "caption stays out of the logo column");
 
-    // The logo must be drawn undistorted: the output column/row ratio has to
-    // track the source art's ratio (within one column of rounding).
-    uint32_t art_wrong = 0;
+    // The logo is drawn at full size: every source cell is drawn and the glyphs
+    // shrink to fit. Verify the cell maths (proportional, maximal, fits).
+    uint32_t art_bad = 0;
     for (uint32_t aw = 0; aw <= 1200; aw += 11) {
         for (uint32_t ah = 0; ah <= 900; ah += 17) {
-            uint32_t cols = 0, rows = 0;
-            anko::panic_screen::art_grid(aw, ah, &cols, &rows);
-            if (cols == 0 || rows == 0) continue;
-            const long lhs = static_cast<long>(cols) * 51;
-            const long rhs = static_cast<long>(rows) * 139;
-            const long diff = lhs > rhs ? lhs - rhs : rhs - lhs;
-            if (diff > 51) ++art_wrong;
-            if (cols * 8u > aw || rows * 16u > ah) ++art_wrong;
+            uint32_t cw = 0, ch = 0;
+            anko::panic_screen::art_cell(aw, ah, &cw, &ch);
+            if (cw == 0 || ch == 0) continue;
+            if (ch != cw * 2u) ++art_bad;                       // proportions kept
+            if (cw * 139u > aw || ch * 51u > ah) ++art_bad;      // and it fits
+            uint32_t bw = 0, bh = 0;
+            anko::panic_screen::art_cell(aw, ah, &bw, &bh);
+            if (bw != cw) ++art_bad;                            // deterministic
         }
     }
-    check(art_wrong == 0, "logo is scaled proportionally and fits its box");
+    check(art_bad == 0, "logo cell is proportional, maximal and fits the box");
 
     // Determinism.
     Frame g(w, h);

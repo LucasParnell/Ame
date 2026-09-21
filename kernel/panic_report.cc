@@ -119,12 +119,9 @@ u32 format_caption(const Report& report, char* out, u32 cap, bool* truncated) {
     Out o{out, cap};
     // Readable on-screen form: field groups separated by blank lines, values in
     // a column so they line up. The bundle in the QR carries the machine form.
-    o.str(report.title ? report.title : "KERNEL PANIC");
-    o.ch('\n');
     o.str("core=");
     o.dec(report.core);
-    o.ch('\n');
-    o.str("build=");
+    o.str("  build=");
     o.str(report.build ? report.build : "unknown");
     o.ch('\n');
     o.str("reason=");
@@ -148,7 +145,7 @@ u32 format_caption(const Report& report, char* out, u32 cap, bool* truncated) {
     }
 
     o.ch('\n');
-    for (u32 i = 0; i < 31; ++i) {
+    for (u32 i = 0; i < 8; ++i) {
         o.ch('x');
         o.dec(i);
         o.ch('=');
@@ -156,24 +153,24 @@ u32 format_caption(const Report& report, char* out, u32 cap, bool* truncated) {
         // Two per line keeps the block compact without crowding.
         o.ch((i % 2u == 1u) ? '\n' : ' ');
     }
-    if (31u % 2u != 0u) o.ch('\n');
 
     o.ch('\n');
     o.str("trace ");
     o.dec(report.trace_count);
-    o.str(" frames\n");
-    for (u32 i = 0; i < report.trace_count; ++i) {
+    o.str(" frames (serial has all)\n");
+    for (u32 i = 0; i < report.trace_count && i < kQrBacktrace; ++i) {
         o.ch('#');
         o.dec(i);
         o.ch(' ');
         o.hex16_bare(report.trace[i]);
-        o.ch((i % 2u == 1u) ? '\n' : ' ');
+        o.ch(i % 2u == 1u ? '\n' : ' ');
     }
-    if (report.trace_count % 2u != 0u) o.ch('\n');
+    if ((report.trace_count < kQrBacktrace ? report.trace_count : kQrBacktrace) % 2u != 0u) {
+        o.ch('\n');
+    }
 
     o.ch('\n');
-    o.str("hardware\n");
-    o.str("pcie=");
+    o.str("hardware  pcie=");
     o.str(flag(report.hw.has_pcie));
     o.str(" mmio=");
     o.str(flag(report.hw.has_pci_mmio));

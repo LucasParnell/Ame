@@ -18,11 +18,11 @@ void bind(volatile u32* pixels, u32 width, u32 height);
 // True once a framebuffer has been bound.
 bool bound();
 
-// Grid the logo is drawn on for a box of `avail_w` x `avail_h` pixels. The
-// glyph grid is scaled *proportionally* (out_cols/art_cols is the same fraction
-// as out_rows/art_rows), so the drawn image keeps the source art's aspect ratio
-// and is never stretched. Both outputs are 0 when nothing fits.
-void art_grid(u32 avail_w, u32 avail_h, u32* out_cols, u32* out_rows);
+// Cell size for drawing the logo at full size in a box of `avail_w` x `avail_h`
+// pixels: every source column and row is drawn (no re-sampling), the glyphs just
+// shrink. The cell keeps the source's 8x16 proportions (ch == 2*cw) and is as
+// large as fits; both outputs are 0 when even one column would not fit.
+void art_cell(u32 avail_w, u32 avail_h, u32* out_cw, u32* out_ch);
 
 // Render the panic screen. `caption` is the readable report text drawn under
 // the QR; `qr_payload` is what the QR encodes (the compressed URL from

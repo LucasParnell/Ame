@@ -23,9 +23,10 @@ namespace {
 constexpr u32 kCellW = midix::font::kVga8x16Width;
 constexpr u32 kCellH = midix::font::kVga8x16Height;
 constexpr u32 kQuietModules = 4;   // QR quiet zone, in modules
-constexpr u32 kSmallCellW = kCellW / 2u;   // half-size caption font
-constexpr u32 kSmallCellH = kCellH / 2u;
-constexpr u32 kCaptionGap = 3;             // leading between caption lines
+// Report block: 6x12 glyphs (bigger than the 4x8 first cut, still compact).
+constexpr u32 kCapCellW = 6;
+constexpr u32 kCapCellH = 12;
+constexpr u32 kCaptionGap = 2;     // leading between caption lines
 constexpr u32 kMargin = 8;
 constexpr u32 kTitleScale = 2;
 constexpr u32 kCaptionScale = 1;
@@ -57,6 +58,9 @@ void put(u32 x, u32 y, u32 color) {
     if (x >= g_w || y >= g_h) return;
     g_pixels[static_cast<usize>(y) * g_w + x] = color;
 }
+
+// Defined below; draw_art needs it and the report block uses the same routine.
+void draw_glyph_sized(u32 x, u32 y, u32 cw, u32 ch, u32 fg, char glyph);
 
 void fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color) {
     const u32 x1 = smaller(x + w, g_w);
@@ -108,28 +112,26 @@ u32 art_color(char ch) {
 }
 
 // Draw the logo centred in the box, proportionally (undistorted).
+// Draw the logo at full size (every source cell) centred in the box, with the
+// glyphs scaled down as far as needed to fit.
 void draw_art(u32 x0, u32 y0, u32 x1, u32 y1) {
     if (x1 <= x0 || y1 <= y0) return;
-    u32 out_cols = 0;
-    u32 out_rows = 0;
-    art_grid(x1 - x0, y1 - y0, &out_cols, &out_rows);
-    if (out_cols == 0 || out_rows == 0) return;
-    const u32 scale = 1;
+    u32 cw = 0;
+    u32 ch = 0;
+    art_cell(x1 - x0, y1 - y0, &cw, &ch);
+    if (cw == 0u || ch == 0u) return;
 
-    const u32 art_w = out_cols * kCellW * scale;
-    const u32 art_h = out_rows * kCellH * scale;
+    const u32 art_w = anko::art::kPanicArtCols * cw;
+    const u32 art_h = anko::art::kPanicArtRows * ch;
     const u32 ox = x0 + ((x1 - x0) > art_w ? ((x1 - x0) - art_w) / 2u : 0u);
     const u32 oy = y0 + ((y1 - y0) > art_h ? ((y1 - y0) - art_h) / 2u : 0u);
 
-    for (u32 dy = 0; dy < out_rows; ++dy) {
-        const u32 sy = dy * anko::art::kPanicArtRows / out_rows;
-        const char* row = anko::art::kPanicArt[sy];
-        for (u32 dx = 0; dx < out_cols; ++dx) {
-            const u32 sx = dx * anko::art::kPanicArtCols / out_cols;
-            const char ch = row[sx];
-            if (ch == ' ') continue;
-            draw_glyph(ox + dx * kCellW * scale, oy + dy * kCellH * scale, scale,
-                       art_color(ch), ch);
+    for (u32 ry = 0; ry < anko::art::kPanicArtRows; ++ry) {
+        const char* row = anko::art::kPanicArt[ry];
+        for (u32 rx = 0; rx < anko::art::kPanicArtCols; ++rx) {
+            const char glyph = row[rx];
+            if (glyph == ' ') continue;
+            draw_glyph_sized(ox + rx * cw, oy + ry * ch, cw, ch, art_color(glyph), glyph);
         }
     }
 }
@@ -150,17 +152,31 @@ u32 draw_qr(const anko::qr::Code& code, u32 x0, u32 y0, u32 module) {
     return side;
 }
 
-// Half-size glyph: 2x2 blocks are OR-ed so thin strokes stay visible when the
-// 8x16 font is halved to 4x8 for the report block.
-void draw_glyph_small(u32 x, u32 y, u32 fg, char ch) {
-    const u8* rows = midix::font::vga8x16_glyph(static_cast<u8>(ch));
-    for (u32 gy = 0; gy < kSmallCellH; ++gy) {
-        const u32 sy = gy * 2u;
-        for (u32 gx = 0; gx < kSmallCellW; ++gx) {
-            const u32 sx = gx * 2u;
-            const u32 bits = ((rows[sy] >> (6u - sx)) & 3u) |
-                             (((rows[sy + 1u] >> (6u - sx)) & 3u) << 2u);
-            if (bits != 0u) put(x + gx, y + gy, fg);
+// Draw a glyph scaled into a cw x ch cell by box-filtering the 8x16 source (a
+// lit pixel anywhere in the source block lights the destination pixel), so
+// strokes survive down to a few pixels per glyph.
+void draw_glyph_sized(u32 x, u32 y, u32 cw, u32 ch, u32 fg, char glyph) {
+    const u8* rows = midix::font::vga8x16_glyph(static_cast<u8>(glyph));
+    for (u32 dy = 0; dy < ch; ++dy) {
+        u32 sy0 = dy * kCellH / ch;
+        u32 sy1 = (dy + 1u) * kCellH / ch;
+        if (sy1 <= sy0) sy1 = sy0 + 1u;
+        if (sy1 > kCellH) sy1 = kCellH;
+        for (u32 dx = 0; dx < cw; ++dx) {
+            u32 sx0 = dx * kCellW / cw;
+            u32 sx1 = (dx + 1u) * kCellW / cw;
+            if (sx1 <= sx0) sx1 = sx0 + 1u;
+            if (sx1 > kCellW) sx1 = kCellW;
+            bool on = false;
+            for (u32 sy = sy0; sy < sy1 && !on; ++sy) {
+                for (u32 sx = sx0; sx < sx1; ++sx) {
+                    if (((rows[sy] >> (7u - sx)) & 1u) != 0u) {
+                        on = true;
+                        break;
+                    }
+                }
+            }
+            if (on) put(x + dx, y + dy, fg);
         }
     }
 }
@@ -189,7 +205,7 @@ void draw_wrapped(u32 x, u32 y, u32 max_lines, u32 cols, u32 line_px, u32 fg,
         }
         for (u32 i = 0; i < run; ++i) {
             const char ch = (p[i] >= 32 && p[i] <= 126) ? p[i] : '?';
-            draw_glyph_small(x + i * kSmallCellW, y, fg, ch);
+            draw_glyph_sized(x + i * kCapCellW, y, kCapCellW, kCapCellH, fg, ch);
         }
         p += run;
         if (run != 0u) {
@@ -197,6 +213,8 @@ void draw_wrapped(u32 x, u32 y, u32 max_lines, u32 cols, u32 line_px, u32 fg,
             y += line_px;
         }
         if (*p == ' ') ++p;
+        // Consume the line terminator: the run above already advanced a line.
+        if (*p == '\n') ++p;
     }
 }
 
@@ -204,22 +222,17 @@ void draw_wrapped(u32 x, u32 y, u32 max_lines, u32 cols, u32 line_px, u32 fg,
 
 } // namespace
 
-void art_grid(u32 avail_w, u32 avail_h, u32* out_cols, u32* out_rows) {
-    *out_cols = 0;
-    *out_rows = 0;
-    if (avail_w == 0 || avail_h == 0) return;
-    // Largest proportional fit: walk the row count down and derive the columns
-    // from the source ratio, so the image is never squeezed on one axis.
-    u32 rows = smaller(anko::art::kPanicArtRows, avail_h / kCellH);
-    while (rows > 0) {
-        const u32 cols = (anko::art::kPanicArtCols * rows) / anko::art::kPanicArtRows;
-        if (cols > 0 && cols <= anko::art::kPanicArtCols && cols * kCellW <= avail_w) {
-            *out_cols = cols;
-            *out_rows = rows;
-            return;
-        }
-        --rows;
-    }
+void art_cell(u32 avail_w, u32 avail_h, u32* out_cw, u32* out_ch) {
+    *out_cw = 0;
+    *out_ch = 0;
+    // The source cell is 8 wide by 16 tall, so keep ch == 2*cw to preserve the
+    // art's proportions while shrinking the glyphs.
+    const u32 by_width = avail_w / anko::art::kPanicArtCols;
+    const u32 by_height = avail_h / (2u * anko::art::kPanicArtRows);
+    const u32 cell = smaller(by_width, by_height);
+    if (cell == 0u) return;
+    *out_cw = cell;
+    *out_ch = cell * 2u;
 }
 
 void bind(volatile u32* pixels, u32 width, u32 height) {
@@ -276,10 +289,11 @@ bool show(const char* title, const char* reason, const char* caption,
     const u32 caption_x = kMargin;
     u32 caption_y = kMargin + qr_height + (qr_height ? kMargin : 0);
     const u32 band_h = kCellH * kTitleScale + kCellH + 2u * kMargin;
-    const u32 caption_limit = g_h > band_h + kCellH ? g_h - band_h - kCellH : caption_y;
-    const u32 caption_line_px = kSmallCellH + kCaptionGap;
+    const u32 caption_limit =
+        g_h > band_h + 4u ? g_h - band_h - 4u : caption_y;
+    const u32 caption_line_px = kCapCellH + kCaptionGap;
     const u32 caption_cols =
-        (qr_width ? qr_width : g_w - 2u * kMargin) / kSmallCellW;
+        (qr_width ? qr_width : g_w - 2u * kMargin) / kCapCellW;
     const u32 caption_lines =
         caption_limit > caption_y ? (caption_limit - caption_y) / caption_line_px : 0;
     draw_wrapped(caption_x, caption_y, smaller(caption_lines, kMaxCaptionLines),

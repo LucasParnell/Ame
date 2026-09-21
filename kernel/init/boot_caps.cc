@@ -421,22 +421,34 @@ Process* spawn_image(const void* elf_data, usize elf_size, PrincipalClass princi
         return nullptr;
     }
 
-    const PhysAddr stack = mm::alloc_page_for(p->pid);
-    if (!stack) {
+    // The initial user thread needs more than a single 4 KiB page: both msh and
+    // the appliance manager blew a one-page stack (see the note in
+    // userland/msh/main.cc). Give the entry thread a few pages and start later
+    // per-thread stacks below them, so a service cannot fault on stack depth.
+    constexpr u32 kInitialStackPages = 4;
+    const VirtAddr stack_base = USER_STACK_TOP - kInitialStackPages * PAGE_SIZE;
+    u32 mapped = 0;
+    for (; mapped < kInitialStackPages; ++mapped) {
+        const PhysAddr stack = mm::alloc_page_for(p->pid);
+        if (!stack) break;
+        libk::memset(reinterpret_cast<void*>(stack), 0, PAGE_SIZE);
+        if (!mm::vm_map_owned(space, stack_base + static_cast<VirtAddr>(mapped) * PAGE_SIZE,
+                              stack, RIGHT_READ | RIGHT_WRITE)) {
+            mm::free_page_for(p->pid, stack);
+            break;
+        }
+    }
+    if (mapped != kInitialStackPages) {
+        for (u32 i = 0; i < mapped; ++i) {
+            mm::vm_unmap_owned_range(space, stack_base + static_cast<VirtAddr>(i) * PAGE_SIZE,
+                                     PAGE_SIZE);
+        }
         ANKO_LOG_ERROR("kernel/loader", "stack allocation failed");
         sched::process_destroy(p);
         return nullptr;
     }
-    libk::memset(reinterpret_cast<void*>(stack), 0, PAGE_SIZE);
-    const VirtAddr stack_base = USER_STACK_TOP - PAGE_SIZE;
-    if (!mm::vm_map_owned(space, stack_base, stack, RIGHT_READ | RIGHT_WRITE)) {
-        ANKO_LOG_ERROR("kernel/loader", "stack mapping failed");
-        mm::free_page_for(p->pid, stack);
-        sched::process_destroy(p);
-        return nullptr;
-    }
     const VirtAddr sp_top = USER_STACK_TOP - 16;
-    p->next_stack_slot = 1;
+    p->next_stack_slot = kInitialStackPages;
 
     const u32 thread_flags = (flags & SPAWN_SUSPENDED) ? THREAD_SUSPENDED : 0;
     Thread* t = sched::thread_create(p->pid, entry, sp_top, PRIO_SERVICE, 0, thread_flags);

@@ -5,6 +5,10 @@ the Phase E build pipeline). Status legend: **Done** · **Partial** · **Not sta
 
 ## Scope (current decision)
 
+> **Status (2026-09-21):** Phases **A–O** have landed (see the table below). What is left, excluding the
+> amdgpu phases, is tracked in [`GPU_APPLIANCE_REMAINING.md`](GPU_APPLIANCE_REMAINING.md) — read that for
+> the current remaining-work list; the per-phase narratives below are the historical record.
+
 **Target now: the Linux `virtio-gpu` driver appliance** — Phases **E–J**. A real Linux VM owns an assigned
 QEMU `virtio-gpu-pci` function behind an Ame SMMUv3 domain, is driven over Dango rings/shared memory, and
 is presented through a native Midix GPU service. **The plumbing stays backend-agnostic**: the Midix GPU
@@ -32,14 +36,14 @@ Master reference points: `kernel/iommu/{core,smmuv3,faults}.cc`, `kernel/vm/vm_d
 | E Linux virtio-gpu-pci probe | **Done** — Dango construction, GPU artifact packaging, INTx→vGIC delivery; Linux binds `virtio_gpu` and creates `/dev/dri/card0` |
 | F standalone Linux KMS | **Done** — guest raw-ioctl KMS self-test; host `screendump` asserts the displayed pattern |
 | G guest-visible Dango channel | **Done** — non-DMA ring mapping, vIRQ/HVC, Linux driver and ordered ping/pong |
-| H `dango-gpud` control plane | Not started |
-| I shared staging framebuffer | Not started |
-| J framebuffer/TTY migration | Not started |
-| K lifecycle hardening | Not started |
-| L dynamic shared arenas | Not started |
-| M zero-copy/import | Not started |
-| N remote Vulkan session transport | Not started (ABI only) |
-| O Vulkan WSI bootstrap | Not started |
+| H `dango-gpud` control plane | **Done** — guest GPU protocol server (`linux-artifacts/gpud/`); a native Mochi probe enumerates the output over the channel |
+| I shared staging framebuffer | **Done** — fixed non-DMA staging window, `GPU_BUFFER_REGISTER` + async `GPU_PRESENT`; host screendump asserts the frame |
+| J framebuffer/TTY migration | **Done (bootstrap)** — `drv.gpu.linux` service + `io.framebuffer` GPU backend with ramfb fallback; tty.fb0 reaches the shell through the appliance. Mirror copy remains (see REM docs) |
+| K lifecycle hardening | **Done** — real channel `boot_generation` + stale-handle rejection, ring back-pressure, DMA-safe faulting teardown + IOMMU quarantine, tests |
+| L dynamic shared arenas | **Done** — `SYS_VM_SHARED_MEMORY_ATTACH` + explicit `SharedGpu` registration; guest `dango_shm` |
+| M zero-copy/import | **Done (verdict: keep the copy)** — dma-buf export + import path implemented; import proven impossible for `virtio_gpu` (`docs/GPU_ZEROCOPY_IMPORT.md`) |
+| N remote Vulkan session transport | **Done (transport)** — wire ABI + per-client brokerage + native client; verified vs a same-wire reference backend. Real lavapipe needs a libc guest rootfs |
+| O Vulkan WSI bootstrap | **Done (transport)** — bounded copy into a Dango shared buffer; same lavapipe caveat |
 | P physical GPU backend | Deferred (by decision — virtio appliance only) |
 | Q amdgpu appliance | Deferred (by decision — virtio appliance only) |
 | R RADV backend | Deferred (by decision — virtio appliance only) |

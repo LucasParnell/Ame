@@ -2,6 +2,7 @@
 set -euo pipefail
 
 AME="$(cd "$(dirname "$0")/../.." && pwd)"
+source "${AME}/scripts/linux/dango-load.env"
 : "${DANGO_LINUX_SRC:=$HOME/Code/linux}"
 : "${DANGO_LINUX_TAG:=v6.12}"
 export PATH="${AME}/scripts/linux/toolbin:${PATH}"
@@ -104,8 +105,8 @@ memory_base = "0x40000000"
 memory_size = "0x08000000"
 
 kernel_load = "${KERNEL_LOAD}"
-initramfs_load = "0x46000000"
-dtb_load = "0x47000000"
+initramfs_load = "${DANGO_INITRAMFS_LOAD}"
+dtb_load = "${DANGO_DTB_LOAD}"
 
 entry = "kernel_load"
 bootargs = "${DANGO_LINUX_BOOTARGS}"

@@ -20,15 +20,21 @@
 #include "midix/abi/types.h"
 
 constexpr mx_u32_t MX_PROTOCOL_DANGO_CHANNEL = 0x4443'4800u; // 'DCH\0'
-constexpr mx_u32_t MX_DANGO_CHANNEL_MAGIC = 0x4443'484Eu;    // 'DCHN'
 
-constexpr mx_u16_t MX_DANGO_CHANNEL_VERSION_MAJOR = 1;
-constexpr mx_u16_t MX_DANGO_CHANNEL_VERSION_MINOR = 0;
+// Wire identity is owned by the guest ABI header (midix/abi/dango_channel_guest.h),
+// which the Linux driver, the manager and the DTS generator all consume. Alias
+// rather than retype so the numeric values cannot drift apart.
+constexpr mx_u32_t MX_DANGO_CHANNEL_MAGIC = DANGO_CH_MAGIC; // 'DCHN'
+
+constexpr mx_u16_t MX_DANGO_CHANNEL_VERSION_MAJOR = DANGO_CH_VERSION;
+constexpr mx_u16_t MX_DANGO_CHANNEL_VERSION_MINOR = DANGO_CH_VER_MINOR;
 
 // The rings follow the Midix ring contract: one ring page header plus a
 // power-of-two slot count fixed by MX_DEFAULT_RING_ORDER.
-constexpr mx_u32_t MX_DANGO_CHANNEL_RING_ORDER_DEFAULT = MX_DEFAULT_RING_ORDER;
-constexpr mx_u32_t MX_DANGO_CHANNEL_SLOTS = 1u << MX_DANGO_CHANNEL_RING_ORDER_DEFAULT;
+constexpr mx_u32_t MX_DANGO_CHANNEL_RING_ORDER_DEFAULT = DANGO_CH_DEFAULT_RING_ORDER;
+constexpr mx_u32_t MX_DANGO_CHANNEL_SLOTS = DANGO_RING_SLOTS(MX_DANGO_CHANNEL_RING_ORDER_DEFAULT);
+static_assert(MX_DANGO_CHANNEL_RING_ORDER_DEFAULT == MX_DEFAULT_RING_ORDER,
+              "channel ring order must match the Midix ring default");
 
 enum MxDangoChannelOpcode : mx_u32_t {
     DANGO_CHANNEL_QUERY = 0x4443'4801u,
@@ -45,7 +51,7 @@ enum MxDangoChannelDirection : mx_u32_t {
 enum MxDangoChannelFlags : mx_u32_t {
     MX_DANGO_CHANNEL_FLAG_NONE = 0,
     MX_DANGO_CHANNEL_FLAG_SHARED_STAGING = 1u << 0,
-    MX_DANGO_CHANNEL_FLAG_ARM_SUPPORTED = 1u << 1,
+    MX_DANGO_CHANNEL_FLAG_ARM_SUPPORTED = DANGO_CH_ARM_SUPPORTED,
 };
 
 // Reason carried by GPU/appliance-level notifications over this channel.

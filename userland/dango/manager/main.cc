@@ -9,8 +9,13 @@
 #include "dango/layout.h"
 #include "midix/abi/image.h"
 #include "midix/abi/dango_channel_guest.h"
+#include "midix/abi/dango_channel_test.h"
 
-constexpr uint32_t kRingOrder = 6;
+// The channel ring order is a guest-visible wire property; the manager must
+// agree with the driver and the DTS generator, so take it from the shared ABI.
+static_assert(DANGO_CH_DEFAULT_RING_ORDER == MX_DEFAULT_RING_ORDER,
+              "channel ring order must match the Midix ring default");
+
 constexpr uint64_t kLinuxRunBudgetNs = 6ull * 1000ull * 1000ull;
 constexpr uint64_t kLinuxRunPeriodNs = 16666667ull;
 // Linux early boot does a lot of tiny MMIO exits, especially console output.
@@ -64,15 +69,6 @@ struct LinuxArtifacts {
     uint64_t entry;
     bool gpu_profile;
 };
-
-constexpr uint64_t kChannelGuestBase = 0x48000000ull;
-constexpr uint64_t kChannelReservedSize = 0x20000ull;
-constexpr uint32_t kChannelGuestIrq = 48;
-constexpr uint32_t kChannelReady = 0x47430001u;
-constexpr uint32_t kChannelPing = 0x47430002u;
-constexpr uint32_t kChannelPong = 0x47430003u;
-constexpr uint32_t kChannelDone = 0x47430004u;
-constexpr uint32_t kChannelRounds = 512;
 
 static uint32_t slen(const char* s) {
     uint32_t n = 0;
@@ -427,8 +423,8 @@ static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
     artifacts->gpu_profile = profile && token_equals(profile, profile_len, "gpu");
     if (profile && !artifacts->gpu_profile && !token_equals(profile, profile_len, "hello")) return false;
     if (artifacts->gpu_profile) {
-        layout.channel_base = kChannelGuestBase;
-        layout.channel_size = kChannelReservedSize;
+        layout.channel_base = dango::kChannelGuestBase;
+        layout.channel_size = dango::kChannelGuestSize;
     }
     artifacts->layout = layout;
     artifacts->entry = entry_pc;
@@ -640,7 +636,7 @@ extern "C" [[noreturn]] void _start() {
                                         kVaConsoleRing,
                                         dango::RIGHT_READ | dango::RIGHT_WRITE);
     wait_cap(kConsoleDoorbell, dango::CAP_DOORBELL);
-    mochi::log_set_sink(log_ring, kRingOrder, kConsoleDoorbell, "dango.manager");
+    mochi::log_set_sink(log_ring, DANGO_CH_DEFAULT_RING_ORDER, kConsoleDoorbell, "dango.manager");
     wait_cap(kVmRoot, dango::CAP_VM_ROOT);
     wait_cap(kDoneDoorbell, dango::CAP_DOORBELL);
     wait_cap(kAuthGateDoorbell, dango::CAP_DOORBELL);
@@ -818,19 +814,21 @@ extern "C" [[noreturn]] void _start() {
         const uint32_t bar_rights = dango::RIGHT_READ | dango::RIGHT_WRITE;
         // A BAR's guest IPA must be aligned to its aperture size (the kernel
         // rejects otherwise); BAR4 is 16 KiB.  Assert it at compile time.
-        static_assert((0x5000'0000ull % 0x4000ull) == 0, "BAR4 guest IPA must be 16 KiB aligned");
-        const int64_t bar4_rc = sys_vm_assign_map_mmio(assign, 4, 0x5000'0000ull, 0x4000, bar_rights, 0);
+        static_assert((dango::kGpuBar4Ipa % dango::kGpuBar4Size) == 0,
+                      "BAR4 guest IPA must be aligned to its aperture size");
+        const int64_t bar4_rc = sys_vm_assign_map_mmio(assign, 4, dango::kGpuBar4Ipa,
+                                                       dango::kGpuBar4Size, bar_rights, 0);
         if (bar4_rc != 0) {
             dango_counter("gpu.bar4_rc", static_cast<uint64_t>(bar4_rc));
             fail("gpu bar map failed\n");
         }
-        // PCI INTx -> guest SPI 12 (dango-linux-gpu.dts.in interrupt-map).
-        if (sys_vm_assign_route_irq(assign, gpu_irq, vcpu, 32 + 12, 0) != 0) {
+        // PCI INTx -> guest SPI (dango-linux-gpu.dts.in interrupt-map).
+        if (sys_vm_assign_route_irq(assign, gpu_irq, vcpu, dango::kGpuIntxIrq, 0) != 0) {
             fail("gpu irq route failed\n");
         }
         // Synthetic ECAM aperture (1 MiB); reads/writes trap through the
         // stage-2 handler in kernel/pci/ecam.cc.
-        if (sys_vm_assign_expose_ecam(assign, 0x3f00'0000ull, 0x10'0000ull) != 0) {
+        if (sys_vm_assign_expose_ecam(assign, dango::kGpuEcamBase, dango::kGpuEcamSize) != 0) {
             fail("gpu ecam expose failed\n");
         }
         dango_log("gpu appliance ready\n");
@@ -870,7 +868,7 @@ extern "C" [[noreturn]] void _start() {
         dango_log("vcpu stub run skipped: no linux guest payload\n");
     }
 
-    const CapHandle channel = as_cap(sys_vm_channel_create(vm, kRingOrder, 0));
+    const CapHandle channel = as_cap(sys_vm_channel_create(vm, DANGO_CH_DEFAULT_RING_ORDER, 0));
     if (channel == kNullCap) fail("channel setup failed\n");
     const CapHandle h2g_ring = as_cap(sys_vm_channel_endpoint(
         channel, dango::VM_CHANNEL_HOST_TO_GUEST_RING,
@@ -901,21 +899,28 @@ extern "C" [[noreturn]] void _start() {
     RingPage* channel_rx = nullptr;
     if (have_linux && linux.gpu_profile) {
         if (sys_vm_channel_map(channel, vcpu, layout.channel_base, layout.channel_size,
-                               kChannelGuestIrq) != 0) fail("channel guest mapping failed\n");
-        if (sys_map_page(h2g_ring, 0x30000000, dango::RIGHT_READ | dango::RIGHT_WRITE) != 0 ||
-            sys_map_page(g2h_ring, 0x30010000, dango::RIGHT_READ | dango::RIGHT_WRITE) != 0)
+                               dango::kChannelGuestIrq) != 0)
+            fail("channel guest mapping failed\n");
+        if (sys_map_page(h2g_ring, dango::kChannelHostTxVa,
+                         dango::RIGHT_READ | dango::RIGHT_WRITE) != 0 ||
+            sys_map_page(g2h_ring, dango::kChannelHostRxVa,
+                         dango::RIGHT_READ | dango::RIGHT_WRITE) != 0)
             fail("channel host mapping failed\n");
-        channel_tx = reinterpret_cast<RingPage*>(0x30000000);
-        channel_rx = reinterpret_cast<RingPage*>(0x30010000);
+        channel_tx = reinterpret_cast<RingPage*>(dango::kChannelHostTxVa);
+        channel_rx = reinterpret_cast<RingPage*>(dango::kChannelHostRxVa);
         // Exercise both host endpoints, including wraparound, before Linux can
         // access them. Leave equal, nonzero counters for the guest to discover.
         for (uint64_t n = 0; n < 256; ++n) {
             RingSlot msg{};
-            if (!ring_try_push(channel_tx, kRingOrder, kChannelPing, &n, sizeof(n), h2g_db) ||
-                !ring_pop(channel_tx, kRingOrder, &msg) || msg.seq != n || msg.length != sizeof(n) ||
+            if (!ring_try_push(channel_tx, DANGO_CH_DEFAULT_RING_ORDER, DANGO_CH_TEST_PING, &n,
+                               sizeof(n), h2g_db) ||
+                !ring_pop(channel_tx, DANGO_CH_DEFAULT_RING_ORDER, &msg) || msg.seq != n ||
+                msg.length != sizeof(n) ||
                 *reinterpret_cast<const uint64_t*>(msg.payload) != n ||
-                !ring_try_push(channel_rx, kRingOrder, kChannelPong, &n, sizeof(n), g2h_db) ||
-                !ring_pop(channel_rx, kRingOrder, &msg) || msg.seq != n || msg.length != sizeof(n) ||
+                !ring_try_push(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, DANGO_CH_TEST_PONG, &n,
+                               sizeof(n), g2h_db) ||
+                !ring_pop(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, &msg) || msg.seq != n ||
+                msg.length != sizeof(n) ||
                 *reinterpret_cast<const uint64_t*>(msg.payload) != n)
                 fail("channel native probe FAILED\n");
         }
@@ -970,28 +975,31 @@ extern "C" [[noreturn]] void _start() {
 
     if (channel_tx && channel_rx) {
         RingSlot message{};
-        if (!ring_wait_pop(channel_rx, kRingOrder, &message, g2h_db) ||
-            message.type != kChannelReady || message.length != 0)
+        if (!ring_wait_pop(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, &message, g2h_db) ||
+            message.type != DANGO_CH_TEST_READY || message.length != 0)
             fail("channel guest probe FAILED: ready\n");
-        for (uint64_t n = 0; n < kChannelRounds; ++n) {
-            if (!ring_try_push(channel_tx, kRingOrder, kChannelPing, &n, sizeof(n), h2g_db) ||
+        for (uint64_t n = 0; n < DANGO_CH_TEST_ROUNDS; ++n) {
+            if (!ring_try_push(channel_tx, DANGO_CH_DEFAULT_RING_ORDER, DANGO_CH_TEST_PING, &n,
+                               sizeof(n), h2g_db) ||
                 sys_vm_channel_notify(channel) != 0 ||
-                !ring_wait_pop(channel_rx, kRingOrder, &message, g2h_db) ||
-                message.type != kChannelPong || message.length != sizeof(n) ||
-                message.seq != 257 + n || *reinterpret_cast<const uint64_t*>(message.payload) != n)
+                !ring_wait_pop(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, &message, g2h_db) ||
+                message.type != DANGO_CH_TEST_PONG || message.length != sizeof(n) ||
+                message.seq != 257 + n ||
+                *reinterpret_cast<const uint64_t*>(message.payload) != n)
                 fail("channel guest probe FAILED: order\n");
         }
-        if (!ring_wait_pop(channel_rx, kRingOrder, &message, g2h_db) ||
-            message.type != kChannelDone || message.length != sizeof(uint64_t) ||
+        if (!ring_wait_pop(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, &message, g2h_db) ||
+            message.type != DANGO_CH_TEST_DONE || message.length != sizeof(uint64_t) ||
             *reinterpret_cast<const uint64_t*>(message.payload) == 0)
             fail("channel guest probe FAILED: IRQ\n");
         if (sys_vm_channel_inspect(channel, &channel_info, sizeof(channel_info)) != 0 ||
-            channel_info.messages_host_to_guest != kChannelRounds ||
-            channel_info.messages_guest_to_host < kChannelRounds + 2)
+            channel_info.messages_host_to_guest != DANGO_CH_TEST_ROUNDS ||
+            channel_info.messages_guest_to_host < DANGO_CH_TEST_ROUNDS + 2)
             fail("channel guest probe FAILED: counters\n");
         dango_counter("channel.h2g", channel_info.messages_host_to_guest);
         dango_counter("channel.g2h", channel_info.messages_guest_to_host);
-        console_log("channel guest probe passed: 512 ordered round trips\n");
+        console_log("channel guest probe passed: " DANGO_STRINGIFY(DANGO_CH_TEST_ROUNDS)
+                    " ordered round trips\n");
     }
 
     // A latency-band monitor that repeatedly yields remains runnable and can

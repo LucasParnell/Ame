@@ -2,6 +2,11 @@
 
 // Dango GPU appliance guest hardware description (Phase E).
 //
+// All DANGO_* placeholders (spelled NAME between at-signs) are substituted by
+// scripts/linux/build-dtb.sh from the single-source guest binding in
+// shared/include/midix/abi/dango_channel_guest.h (see
+// scripts/linux/gen-dango-binding.sh); never retype one of those numbers here.
+//
 // Same minimal platform as dango-linux-minimal.dts.in, plus:
 //  - a generic PCI host bridge whose ECAM is the *synthetic* config view Dango
 //    exposes (only the assigned virtio-gpu-pci function is present);
@@ -38,17 +43,19 @@
         ranges;
 
         // Host<->guest Dango channel rings (mapped by the VM loader, pinned).
-        dango_channel: dango-channel@48000000 {
-            reg = <0x0 0x48000000 0x0 0x20000>;
+        dango_channel: dango-channel@@DANGO_CH_GUEST_BASE_UA@ {
+            reg = <0x0 @DANGO_CH_GUEST_BASE@ 0x0 @DANGO_CH_GUEST_SIZE@>;
             no-map;
         };
     };
 
-    channel@48000000 {
+    channel@@DANGO_CH_GUEST_BASE_UA@ {
         compatible = "ame,dango-channel-v1";
-        reg = <0x0 0x48000000 0x0 0x20000>;
+        reg = <0x0 @DANGO_CH_GUEST_BASE@ 0x0 @DANGO_CH_GUEST_SIZE@>;
         memory-region = <&dango_channel>;
-        interrupts = <0 16 1>; // virtual SPI 48, edge triggered
+        // Guest SPI @DANGO_CH_GUEST_SPI@; vGIC hwirq = @DANGO_CH_GUEST_IRQ@
+        // (32 + SPI), edge triggered.
+        interrupts = <0 @DANGO_CH_GUEST_SPI@ 1>;
     };
 
     psci {
@@ -93,24 +100,24 @@
         status = "okay";
     };
 
-    // Synthetic PCIe root complex. ECAM at 0x3f000000 holds only the assigned
-    // function; Dango fills and mediates it. The MMIO window is where the
-    // function's BARs appear to the guest (appliance IPAs).
-    pcie: pci@3f000000 {
+    // Synthetic PCIe root complex. The ECAM aperture below holds only the
+    // assigned function; Dango fills and mediates it. The MMIO window is where
+    // the function's BARs appear to the guest (appliance IPAs).
+    pcie: pci@@DANGO_GPU_ECAM_BASE_UA@ {
         compatible = "pci-host-ecam-generic";
         device_type = "pci";
         #address-cells = <3>;
         #size-cells = <2>;
         #interrupt-cells = <1>;
-        reg = <0x0 0x3f000000 0x0 0x00100000>;      // one bus, 1 MiB ECAM
+        reg = <0x0 @DANGO_GPU_ECAM_BASE@ 0x0 @DANGO_GPU_ECAM_SIZE@>; // one bus, 1 MiB ECAM
         bus-range = <0x00 0x00>;
-        ranges = <0x02000000 0x0 0x50000000 0x0 0x50000000 0x0 0x10000000>; // MMIO32, outside RAM
+        ranges = <0x02000000 0x0 @DANGO_GPU_MMIO_BASE@ 0x0 @DANGO_GPU_MMIO_BASE@ 0x0 @DANGO_GPU_MMIO_SIZE@>; // MMIO32, outside RAM
         dma-coherent;
         interrupt-map-mask = <0xf800 0x0 0x0 0x7>;
-        interrupt-map = <0x0800 0x0 0x0 0x1 &intc 0x0 0x0c 0x4>,
-                        <0x0800 0x0 0x0 0x2 &intc 0x0 0x0d 0x4>,
-                        <0x0800 0x0 0x0 0x3 &intc 0x0 0x0e 0x4>,
-                        <0x0800 0x0 0x0 0x4 &intc 0x0 0x0f 0x4>;
+        interrupt-map = <0x0800 0x0 0x0 0x1 &intc 0x0 @DANGO_GPU_INTX_SPI@ 0x4>,
+                        <0x0800 0x0 0x0 0x2 &intc 0x0 @DANGO_GPU_INTX_SPI_1@ 0x4>,
+                        <0x0800 0x0 0x0 0x3 &intc 0x0 @DANGO_GPU_INTX_SPI_2@ 0x4>,
+                        <0x0800 0x0 0x0 0x4 &intc 0x0 @DANGO_GPU_INTX_SPI_3@ 0x4>;
     };
 
     aliases {

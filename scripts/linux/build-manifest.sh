@@ -17,6 +17,7 @@
 set -euo pipefail
 
 AME="$(cd "$(dirname "$0")/../.." && pwd)"
+source "${AME}/scripts/linux/dango-load.env"
 OUT="${DANGO_LINUX_OUT:-${AME}/build/dango-linux}"
 PROFILE="${DANGO_LINUX_PROFILE:-hello}"
 NAME="${DANGO_MANIFEST_NAME:-dango-linux-${PROFILE}}"
@@ -26,6 +27,13 @@ filesize() { python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$1
 image_size=$(filesize "${OUT}/Image")
 initramfs_size=$(filesize "${OUT}/initramfs.cpio")
 dtb_size=$(filesize "${OUT}/dango-linux.dtb")
+
+initramfs_load=$((DANGO_INITRAMFS_LOAD))
+dtb_load=$((DANGO_DTB_LOAD))
+if (( initramfs_load + initramfs_size > dtb_load )); then
+    echo "error: initramfs overlaps the DTB load address" >&2
+    exit 1
+fi
 
 # Modern arm64 Images report text_offset=0 and require 2 MiB-aligned placement;
 # the tiny Dango diagnostic trampoline keeps the first 2 MiB of guest RAM, so
@@ -63,8 +71,8 @@ memory_base = "0x40000000"
 memory_size = "0x08000000"
 
 kernel_load = "${KERNEL_LOAD}"
-initramfs_load = "0x46000000"
-dtb_load = "0x47000000"
+initramfs_load = "${initramfs_load}"
+dtb_load = "${dtb_load}"
 
 entry = "kernel_load"
 bootargs = "${DANGO_LINUX_BOOTARGS}"

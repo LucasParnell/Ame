@@ -4,12 +4,14 @@ set -euo pipefail
 AME="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${AME}/scripts/host.sh"
 ame_host_tools
+source "${AME}/scripts/linux/dango-load.env"
 OUT="${DANGO_LINUX_OUT:-${AME}/build/dango-linux}"
 TEMPLATE="${DANGO_DTS_TEMPLATE:-${AME}/linux-artifacts/dts/dango-linux-minimal.dts.in}"
 GENERATED="${OUT}/$(basename "${TEMPLATE}" .dts.in).generated.dts"
 DTB="${OUT}/${DANGO_DTB_NAME:-dango-linux.dtb}"
+DANGO_BINDING_SED="${OUT}/dango-binding.sed"
 INITRD="${OUT}/initramfs.cpio"
-INITRD_LOAD=$((0x46000000))
+INITRD_LOAD=$((DANGO_INITRAMFS_LOAD))
 : "${DANGO_LINUX_BOOTARGS:=console=ttyAMA0,115200n8 earlycon=pl011,0x09000000 loglevel=4 nosmp maxcpus=1 cma=0 coherent_pool=1M cpuidle.off=1 rdinit=/init panic=-1}"
 
 mkdir -p "${OUT}"
@@ -39,13 +41,25 @@ end_lo=$(( initrd_end & 0xffffffff ))
 
 bootargs_escaped=$(escape_sed_replacement "${DANGO_LINUX_BOOTARGS}")
 
+# Guest binding substitutions (@DANGO_*@): read the current values out of the
+# shared ABI header so the device tree cannot drift from the driver/manager.
+# Templates without any @DANGO_*@ placeholder (the minimal profile) are
+# unaffected: the sed program simply matches nothing.
+"${AME}/scripts/linux/gen-dango-binding.sh" > "${DANGO_BINDING_SED}"
+
 sed \
   -e "s/@BOOTARGS@/${bootargs_escaped}/g" \
   -e "s/@INITRD_START_HI@/$(fmt32 "${start_hi}")/g" \
   -e "s/@INITRD_START_LO@/$(fmt32 "${start_lo}")/g" \
   -e "s/@INITRD_END_HI@/$(fmt32 "${end_hi}")/g" \
   -e "s/@INITRD_END_LO@/$(fmt32 "${end_lo}")/g" \
+  -f "${DANGO_BINDING_SED}" \
   "${TEMPLATE}" > "${GENERATED}"
+
+if grep -q '@DANGO_' "${GENERATED}"; then
+    echo "error: unsubstituted DTS placeholder in ${GENERATED}" >&2
+    exit 1
+fi
 
 if command -v dtc >/dev/null 2>&1; then
     dtc -I dts -O dtb -o "${DTB}" "${GENERATED}"

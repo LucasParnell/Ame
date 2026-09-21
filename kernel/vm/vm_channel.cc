@@ -14,6 +14,18 @@ void release_creator(void* target) {
 
 u32 g_next_channel_id = 1;
 
+// Monotonic appliance channel boot generation. Every create_channel() is a
+// fresh channel rendezvous, so the value advances and every reference captured
+// under the previous generation is stale (spec §13.3). Never zero: the guest
+// treats a zero descriptor field as "no generation yet".
+u64 g_channel_boot_generation = 0;
+
+u64 next_boot_generation() {
+    u64 g = __atomic_add_fetch(&g_channel_boot_generation, 1ull, __ATOMIC_RELAXED);
+    if (g == 0) g = __atomic_add_fetch(&g_channel_boot_generation, 1ull, __ATOMIC_RELAXED);
+    return g;
+}
+
 bool ring_rights_valid(u32 rights) {
     return rights != 0 && (rights & ~(RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP)) == 0;
 }
@@ -70,6 +82,11 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
     channel->guest_doorbell = guest_db;
     channel->order = order;
     channel->flags = flags;
+    // (Re)establishing the appliance's channel advances its boot generation;
+    // any reference the peer captured under the previous generation is now
+    // stale and is rejected by the generation check in map/stage/notify.
+    channel->boot_generation = next_boot_generation();
+    v->channel_generation = channel->boot_generation;
 
     channel->owner_lifetime = v->lifetime; object::retain(channel->owner_lifetime);
     channel->lifetime = object::create(channel, dispose_channel);
@@ -111,6 +128,14 @@ CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_
     auto channel = channel_from_cap(caller, channel_cap, needed, &rc);
     if (!channel) {
         if (out_error) *out_error = rc;
+        return kNullCap;
+    }
+    // A stale generation hands out nothing: the endpoint would name an object
+    // the appliance has already invalidated.
+    if (Vm* owner = find_vm_by_id(channel->owner_vm_id);
+        !owner || !channel_generation_current(*owner, *channel)) {
+        if (out_error) *out_error = E_NOTFOUND;
+        note_error();
         return kNullCap;
     }
 
@@ -200,6 +225,9 @@ SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
     if (cpu->owner_vm_id != channel->owner_vm_id) return E_PERM;
     Vm* owner = find_vm_by_id(channel->owner_vm_id);
     if (!owner || owner->state == VM_DEAD) return E_DEAD;
+    // Stale generation: the peer is holding a descriptor from a previous
+    // appliance boot. Reject before mutating anything.
+    if (!channel_generation_current(*owner, *channel)) return E_NOTFOUND;
     if (channel->target || owner->stage2.active) return E_BUSY;
     if (!ipa || (ipa & (PAGE_SIZE - 1)) || (reserved_size & (PAGE_SIZE - 1)) ||
         guest_irq < 32 || guest_irq >= kVgicMaxIrqs) return E_INVALID;
@@ -221,7 +249,7 @@ SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
     libk::memset(reinterpret_cast<void*>(page), 0, PAGE_SIZE);
     auto& layout = *reinterpret_cast<dango_channel_layout*>(page);
     layout.desc = {DANGO_CH_MAGIC, DANGO_CH_VERSION, 0, channel->order, DANGO_CH_ARM_SUPPORTED,
-                   channel->channel_id, ipa + PAGE_SIZE, ipa + PAGE_SIZE + ring_bytes,
+                   channel->boot_generation, ipa + PAGE_SIZE, ipa + PAGE_SIZE + ring_bytes,
                    0, 0, guest_irq, 0};
     layout.channel_id = channel->channel_id;
     layout.ring_bytes = static_cast<u32>(ring_bytes);
@@ -266,6 +294,7 @@ SysError stage_channel(Process& caller, CapHandle channel_cap, u64 ipa, u64 size
     if (!channel->descriptor_page) return E_INVALID;
     Vm* owner = find_vm_by_id(channel->owner_vm_id);
     if (!owner || owner->state == VM_DEAD) return E_DEAD;
+    if (!channel_generation_current(*owner, *channel)) return E_NOTFOUND;
     if (ipa == 0 || size == 0) return E_INVALID;
     if ((ipa & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0) return E_INVALID;
     if (ipa != kStagingWindowBase || size != kStagingWindowSize) return E_INVALID;
@@ -297,9 +326,32 @@ SysError notify_channel(Process& caller, CapHandle channel_cap) {
     SysError rc = E_OK;
     auto channel = channel_from_cap(caller, channel_cap, RIGHT_VM_CHANNEL_NOTIFY, &rc);
     if (!channel) return rc;
+    Vm* owner = find_vm_by_id(channel->owner_vm_id);
+    if (!owner || owner->state == VM_DEAD) return E_DEAD;
+    if (!channel_generation_current(*owner, *channel)) return E_NOTFOUND;
     if (!channel->target) return E_INVALID;
+    // Back-pressure, never a silent drop or a spin: a full host->guest ring
+    // means the guest has not drained, so there is nothing to publish into and
+    // the caller gets a distinct status it can retry on.
+    if (channel->host_to_guest && channel_ring_full(*channel->host_to_guest)) return E_BUSY;
     channel_publish(*channel);
     return E_OK;
+}
+
+// Appliance-death propagation. Called when a vCPU is destroyed (VM retire,
+// owner-process death) before its storage is released: detach every channel
+// whose target is this vCPU and clear the guest vector so no publication can
+// reach a freed vCPU and no stale vGIC pending bit survives the teardown.
+void channel_detach_vcpu(Vcpu& cpu) {
+    Vm* owner = find_vm_by_id(cpu.owner_vm_id);
+    if (!owner) return;
+    for (u32 i = 0; i < owner->channel_count; ++i) {
+        VmChannel* channel = owner->channels[i];
+        if (!channel || channel->target != &cpu) continue;
+        vgic_pending_clear(cpu, channel->guest_irq);
+        channel->armed = false;
+        channel->target = nullptr;
+    }
 }
 
 

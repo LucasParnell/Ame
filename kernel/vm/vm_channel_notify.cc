@@ -25,10 +25,18 @@ bool channel_hvc(Vcpu& cpu, Vm& owner) {
             candidate->channel_id == cpu.el2.regs[1]) { channel = candidate; break; }
     }
     i64 result = E_NOTFOUND;
+    // A channel from a previous appliance boot is stale: its captured
+    // generation no longer matches the appliance's live one, so HVC has no
+    // authority over it (spec §13.3).
+    if (channel && !channel_generation_current(owner, *channel)) channel = nullptr;
     if (channel) {
         if (fn == DANGO_CH_HVC_NOTIFY) {
             if (cpu.el2.regs[2] != 2) result = E_INVALID; // RING_PUBLISH
-            else {
+            else if (channel->guest_to_host && channel_ring_full(*channel->guest_to_host)) {
+                // Guest->host ring is full: back-pressure the guest instead of
+                // counting a publish the host has nowhere to drain.
+                result = E_BUSY;
+            } else {
                 ++channel->messages_guest_to_host;
                 result = ipc::notify_object(channel->guest_doorbell);
             }

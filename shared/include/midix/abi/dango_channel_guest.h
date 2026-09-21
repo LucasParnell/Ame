@@ -16,6 +16,12 @@ struct dango_channel_desc {
     unsigned int magic;
     unsigned short version_major, version_minor;
     unsigned int ring_order, flags;
+    /* Appliance boot generation (spec §13.3). Non-zero and monotonic: the
+     * kernel advances it every time the appliance (re)establishes its channel,
+     * so a guest that reconnects after a clean reset observes a fresh value and
+     * every remote object that names the previous boot is invalid. Read it from
+     * the descriptor after map; never cache it across a reset. Consumers must
+     * treat a change as "all previously held remote objects are gone". */
     unsigned long long boot_generation;
     unsigned long long host_to_guest_ring_pa, guest_to_host_ring_pa;
     unsigned long long shared_staging_pa, shared_staging_size;

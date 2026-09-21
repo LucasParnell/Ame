@@ -420,6 +420,11 @@ struct VmChannel {
     u32 flags;
     u64 messages_host_to_guest;
     u64 messages_guest_to_host;
+    // Appliance channel boot generation captured at create_channel(). Every
+    // remote object the guest sees is scoped to this value; when the appliance
+    // (re)connects it advances and every previously captured reference is
+    // stale (spec §13.3). Published to the guest in the descriptor page.
+    u64 boot_generation;
     PhysAddr descriptor_page;
     Vcpu* target; // owned by the same VM; accessed only under CallGuard
     u64 guest_base;
@@ -452,6 +457,10 @@ struct Vm {
     u64 mapped_regions;
     u64 flags;
     u64 created_ticks;
+    // Current appliance channel boot generation. Advances every time the
+    // appliance (re)establishes its channel; channels captured under an older
+    // value are stale and rejected (see channel_generation_current).
+    u64 channel_generation;
 };
 
 struct VmInfo {
@@ -600,6 +609,29 @@ SysError stage_channel(Process& caller, CapHandle channel_cap, u64 ipa, u64 size
 SysError notify_channel(Process& caller, CapHandle channel_cap);
 bool channel_hvc(Vcpu& vcpu, Vm& owner);
 void channel_publish(VmChannel& channel); // internal, CallGuard held
+
+// A channel reference is current only while it still carries the appliance's
+// live boot generation. Both fields are zero for a not-yet-created channel, so
+// the host self-test fixture (which builds objects by hand) stays current.
+inline bool channel_generation_current(const Vm& owner, const VmChannel& channel) {
+    return owner.channel_generation == channel.boot_generation;
+}
+
+// SPSC ring back-pressure: a full producer ring must never be spammed or
+// silently dropped. head is producer-owned (release-published) and tail is
+// consumer-owned; both are free-running counters, so occupancy is their
+// difference and capacity is 2^order slots. Callers must pass a non-null ring.
+inline bool channel_ring_full(const Ring& ring) {
+    const auto* header = reinterpret_cast<const RingHeader*>(ring.phys_base);
+    const u64 head = __atomic_load_n(&header->head.head, __ATOMIC_ACQUIRE);
+    const u64 tail = __atomic_load_n(&header->tail.tail, __ATOMIC_RELAXED);
+    return (head - tail) >= (1ull << ring.order);
+}
+
+// Appliance-death propagation: detach every channel bound to a dying vCPU
+// before its storage is released, and clear the guest vector's vGIC pending
+// bit. CallGuard held by the caller. Safe to call for a vCPU with no owner VM.
+void channel_detach_vcpu(Vcpu& vcpu);
 
 
 // ===========================================================================
@@ -800,6 +832,12 @@ SysError device_attach(VmDeviceAssignment* a, const DeviceAssignSpec& spec);
 // Run the full §8.12 revoke state machine and release the assignment body.
 SysError device_revoke(VmDeviceAssignment* a);
 
+// §8.12 revoke for an unclean appliance death (vCPU destroyed / VM killed /
+// owner process died). Requesters are always detached into the faulting
+// (quarantine) context and the domain is left quarantined with its pages pinned
+// rather than destroyed, because DMA stoppage cannot be proven on this path.
+SysError device_revoke_faulting(VmDeviceAssignment* a);
+
 // Mediate a guest config-space write through the §6.3 policy. Returns E_PERM
 // when the write is rejected, E_OK otherwise.
 SysError device_mediate_config_write(VmDeviceAssignment* a, u32 fn_index, u32 offset, u64 value,
@@ -839,6 +877,7 @@ void device_irq_inject(Vcpu& vcpu, u32 guest_irq, u32 trigger);
 
 // --- vGIC pending-bit accessors (vcpu.cc) ----------------------------------
 void vgic_pending_set(Vcpu& vcpu, u32 irq);
+void vgic_pending_clear(Vcpu& vcpu, u32 irq);
 bool vgic_pending_test(const Vcpu& vcpu, u32 irq);
 // Wake a vCPU's runner because a virtual IRQ was made pending.
 void vcpu_wake_irq(Vcpu& vcpu);

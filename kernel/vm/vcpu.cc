@@ -1283,6 +1283,9 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budg
 void dispose_vcpu(void* target) {
     auto* cpu = static_cast<Vcpu*>(target);
     auto* owner = cpu->owner_lifetime;
+    // Appliance-death propagation: a dying vCPU must not leave any channel
+    // pointing at its storage (or a stale vGIC pending bit) behind.
+    channel_detach_vcpu(*cpu);
     object::release(cpu->sched.context_lifetime);
     mm::slab_free(cpu, sizeof(Vcpu), alignof(Vcpu));
     object::release(owner);
@@ -1290,6 +1293,10 @@ void dispose_vcpu(void* target) {
 
 void vgic_pending_set(Vcpu& vcpu, u32 irq) {
     vgic_bit_set(vcpu.vgic.pending, irq);
+}
+
+void vgic_pending_clear(Vcpu& vcpu, u32 irq) {
+    vgic_bit_clear(vcpu.vgic.pending, irq);
 }
 
 bool vgic_pending_test(const Vcpu& vcpu, u32 irq) {

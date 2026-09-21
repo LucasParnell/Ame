@@ -853,8 +853,11 @@ SysError device_secure_attach(Process& caller, CapHandle vm_cap, const pci::Host
         cap::alloc(*caller.cap_table, CAP_VM_DEVICE, a,
                    RIGHT_VM_CONTROL | RIGHT_VM_MAP | RIGHT_VM_INSPECT | RIGHT_DUP);
     if (cap_h == kNullCap) {
-        (void)device_revoke(a);
-        object::release(a->lifetime);
+        // Only drop the body on a clean revoke; a quarantined assignment keeps
+        // its domain (and pinned pages) alive for a later provable teardown.
+        if (device_revoke(a) == E_OK) {
+            object::release(a->lifetime);
+        }
         return E_OVERFLOW;
     }
     *out_cap = cap_h;
@@ -1070,7 +1073,7 @@ bool device_emulate_ecam(Vm& owner, u64 ipa, u32 size, bool write, u64* value) {
 // §8.12 DMA-safe revoke
 // ---------------------------------------------------------------------------
 
-SysError device_revoke(VmDeviceAssignment* a) {
+static SysError device_revoke_impl(VmDeviceAssignment* a, bool faulting) {
     if (!a) {
         return E_INVALID;
     }
@@ -1125,7 +1128,11 @@ SysError device_revoke(VmDeviceAssignment* a) {
     // REMOVE IOMMU MAPPINGS, then INVALIDATE + SYNC AGAIN. unmap_batch only
     // releases a page after the backend proves the range invalidated; a failure
     // quarantines the domain and the pages stay pinned (§8.12).
-    bool quarantine = detach_failed;
+    // Appliance death (unclean): we cannot prove the requester stopped, so the
+    // domain is quarantined below (pages pinned, never reused) even if the
+    // unmap itself reported success. This is the "detach into a faulting domain
+    // before any page is returned" ordering of §8.12.
+    bool quarantine = detach_failed || (faulting && a->dma_domain != nullptr);
     if (a->dma_domain) {
         for (u32 i = 0; i < a->ram_count; ++i) {
             VmAssignRam& r = a->ram[i];
@@ -1187,6 +1194,14 @@ SysError device_revoke(VmDeviceAssignment* a) {
     return E_OK;
 }
 
+SysError device_revoke(VmDeviceAssignment* a) {
+    return device_revoke_impl(a, /*faulting=*/false);
+}
+
+SysError device_revoke_faulting(VmDeviceAssignment* a) {
+    return device_revoke_impl(a, /*faulting=*/true);
+}
+
 SysError device_destroy(Process& caller, CapHandle assign_cap) {
     SysError rc = E_OK;
     auto a = assignment_from_cap(caller, assign_cap, RIGHT_VM_CONTROL, &rc);
@@ -1213,8 +1228,13 @@ void device_release_for_vm(Vm* v) {
         if (!a->lifetime || a->owner_vm != v) {
             continue;
         }
-        (void)device_revoke(a);
-        release_body_once(a);
+        // VM kill/retire is unclean: force the faulting (quarantine) teardown.
+        // Only a clean revoke drops the creator reference; a quarantined body
+        // keeps the domain (and its pinned pages) alive exactly as a failed
+        // §8.12 revoke requires.
+        if (device_revoke_faulting(a) == E_OK) {
+            release_body_once(a);
+        }
     }
 }
 
@@ -1227,8 +1247,10 @@ void device_owner_died(u64 identity) {
         if (!a->lifetime || a->owner_identity != identity) {
             continue;
         }
-        (void)device_revoke(a);
-        release_body_once(a);
+        // Owner-process death is unclean: quarantine rather than reuse pages.
+        if (device_revoke_faulting(a) == E_OK) {
+            release_body_once(a);
+        }
     }
 }
 

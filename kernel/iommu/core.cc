@@ -678,7 +678,11 @@ SysError domain_create(u64 authorized_object, const IommuOwnerOps& owner,
     ensure_initialised();
     LockGuard guard(g_stream_lock);
     for (u32 i = 0; i < kMaxIommuDomains; ++i) {
-        if (i == kQuarantineIndex || g_domains[i].in_use_) {
+        // A quarantined slot is never handed out again: even if a teardown
+        // released in_use_, the faults that put it here must not be able to
+        // reuse it. This is belt-and-braces on top of the in_use_ check.
+        if (i == kQuarantineIndex || g_domains[i].in_use_ ||
+            domain_state(g_domains[i]) == DomainState::Quarantined) {
             continue;
         }
         IommuDomain& domain = g_domains[i];

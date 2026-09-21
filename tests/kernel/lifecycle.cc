@@ -328,6 +328,118 @@ static void vm_explicit_destroy(long objects, long pages) {
     print("explicit vm destroy: reclaimed once\n");
 }
 
+// (3) Appliance channel lifecycle (Phase K): a real boot generation is
+// published and a stale generation is rejected; a full ring back-pressures
+// with a distinct status instead of spinning or dropping; and a clean channel
+// reset accepts a fresh generation. All of this runs with no hot-path
+// allocation and no vCPU ever entering the guest.
+static constexpr uint64_t kChannelRingOrder = 6;
+static constexpr uint64_t kChannelRingSlots = 1ull << kChannelRingOrder;
+static constexpr uint64_t kChannelRingVa = 0x30040000ull;
+
+static void channel_lifecycle(long objects, long pages) {
+    const CapHandle root = mochi::boot::require_handle(boot_info, "vm.root");
+    const long created_before = sys_debug_counter(kCounterVmCreated);
+    const long destroyed_before = sys_debug_counter(kCounterVmDestroyed);
+
+    auto vm = sys_vm_create(root, 0);
+    check(vm > 0, "channel vm create");
+    const auto vmh = static_cast<CapHandle>(vm);
+    auto memory = sys_vm_memory_create(vmh, 64 * 1024, 0);
+    check(memory > 0 &&
+              !sys_vm_memory_map(vmh, static_cast<CapHandle>(memory), 0x40000000ull, 64 * 1024,
+                                 RIGHT_READ | RIGHT_WRITE),
+          "channel vm memory");
+    auto vcpu = sys_vcpu_create(vmh, 0);
+    check(vcpu > 0 && !sys_vcpu_set_entry(static_cast<CapHandle>(vcpu), 0x40000000ull, 0, 0),
+          "channel vm vcpu");
+    const auto cpuh = static_cast<CapHandle>(vcpu);
+
+    // Generation 1: the appliance establishes its channel and maps it.
+    auto c1 = sys_vm_channel_create(vmh, kChannelRingOrder, 0);
+    check(c1 > 0, "channel c1 create");
+    const auto c1h = static_cast<CapHandle>(c1);
+    check(!sys_vm_channel_map(c1h, cpuh, 0x48000000ull, 0x20000ull, 48), "channel c1 map");
+    check(!sys_vm_channel_notify(c1h), "channel c1 notify");
+
+    // Reconnect: a second channel advances the appliance generation, so every
+    // reference captured against the first channel is now stale.
+    auto c2 = sys_vm_channel_create(vmh, kChannelRingOrder, 0);
+    check(c2 > 0, "channel c2 create");
+    const auto c2h = static_cast<CapHandle>(c2);
+    check(sys_vm_channel_notify(c1h) == MX_ERR_NOT_FOUND, "stale generation rejected (notify)");
+    check(sys_vm_channel_map(c1h, cpuh, 0x49000000ull, 0x20000ull, 49) == MX_ERR_NOT_FOUND,
+          "stale generation rejected (map)");
+    check(sys_vm_channel_endpoint(c1h, 0, RIGHT_READ | RIGHT_MAP) < 0,
+          "stale generation rejects a new endpoint");
+
+    // The fresh generation is accepted, including the guest-visible rings.
+    check(!sys_vm_channel_map(c2h, cpuh, 0x49000000ull, 0x20000ull, 49), "fresh generation map");
+    check(!sys_vm_channel_notify(c2h), "fresh generation notify");
+
+    // Ring back-pressure: fill the host->guest ring through its mapped endpoint
+    // and prove notify returns a distinct status the peer can act on (never a
+    // silent drop or a kernel spin).
+    auto ring = sys_vm_channel_endpoint(c2h, 0, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
+    check(ring > 0, "channel ring endpoint");
+    check(!sys_map_page(static_cast<CapHandle>(ring), kChannelRingVa, RIGHT_READ | RIGHT_WRITE),
+          "channel ring map");
+    auto* ring_head = reinterpret_cast<volatile uint64_t*>(kChannelRingVa);
+    auto* ring_tail = reinterpret_cast<volatile uint64_t*>(kChannelRingVa + 0x40);
+    *ring_tail = 0;
+    *ring_head = kChannelRingSlots; // head - tail == capacity -> full
+    check(sys_vm_channel_notify(c2h) == MX_ERR_BUSY, "full ring back-pressures");
+    *ring_tail = kChannelRingSlots; // consumer drains: not full any more
+    check(!sys_vm_channel_notify(c2h), "drained ring accepts a publish");
+
+    // A clean reset accepts a fresh generation again; the previous channel is
+    // now the stale one.
+    auto c3 = sys_vm_channel_create(vmh, kChannelRingOrder, 0);
+    check(c3 > 0, "channel c3 create");
+    const auto c3h = static_cast<CapHandle>(c3);
+    check(sys_vm_channel_notify(c2h) == MX_ERR_NOT_FOUND, "superseded generation rejected");
+    check(!sys_vm_channel_map(c3h, cpuh, 0x4A000000ull, 0x20000ull, 50), "reset generation map");
+    check(!sys_vm_channel_notify(c3h), "reset generation notify");
+
+    // A ring mapping is a multi-page arena entry; every page must be unmapped
+    // before the retained backing object is released (mm::arena_unmap_page
+    // only unregisters when the whole entry is unmapped).
+    sys_unmap_page(kChannelRingVa);
+    sys_unmap_page(kChannelRingVa + 4096);
+    sys_cap_revoke(static_cast<CapHandle>(ring));
+    check(!sys_vm_destroy(vmh), "channel vm destroy");
+    settle(objects, pages);
+    check(sys_debug_counter(kCounterVmCreated) == created_before + 1, "channel vm created once");
+    check(sys_debug_counter(kCounterVmDestroyed) == destroyed_before + 1,
+          "channel vm reclaimed once");
+    check(sys_cap_identify(c1h) < 0 && sys_cap_identify(c2h) < 0 && sys_cap_identify(c3h) < 0,
+          "channel capabilities stale after teardown");
+
+    // A full appliance restart (destroy + create) mints a fresh generation that
+    // a brand-new channel accepts — the GPU service reconnect path.
+    auto vm2 = sys_vm_create(root, 0);
+    check(vm2 > 0, "restart vm create");
+    const auto vm2h = static_cast<CapHandle>(vm2);
+    auto mem2 = sys_vm_memory_create(vm2h, 64 * 1024, 0);
+    check(mem2 > 0 && !sys_vm_memory_map(vm2h, static_cast<CapHandle>(mem2), 0x40000000ull,
+                                         64 * 1024, RIGHT_READ | RIGHT_WRITE),
+          "restart vm memory");
+    auto cpu2 = sys_vcpu_create(vm2h, 0);
+    check(cpu2 > 0 && !sys_vcpu_set_entry(static_cast<CapHandle>(cpu2), 0x40000000ull, 0, 0),
+          "restart vm vcpu");
+    auto rc1 = sys_vm_channel_create(vm2h, kChannelRingOrder, 0);
+    check(rc1 > 0, "restart channel create");
+    check(!sys_vm_channel_map(static_cast<CapHandle>(rc1), static_cast<CapHandle>(cpu2),
+                              0x48000000ull, 0x20000ull, 48),
+          "restart channel map");
+    check(!sys_vm_channel_notify(static_cast<CapHandle>(rc1)), "restart channel notify");
+    check(!sys_vm_destroy(vm2h), "restart vm destroy");
+    settle(objects, pages);
+    check(sys_debug_counter(kCounterVmCreated) == created_before + 2, "restart counted");
+    check(sys_debug_counter(kCounterVmDestroyed) == destroyed_before + 2, "restart reclaimed");
+    print("channel boot generation: stale rejected, full ring back-pressures, reset accepted\n");
+}
+
 // Child behaviour: build a VM with memory, a vCPU and a channel, publish one
 // channel endpoint capability into the live parent, then exit so the owning
 // process dies with live VM objects.
@@ -492,6 +604,7 @@ extern "C" [[noreturn]] void _start() {
     page_table_failure_mid_map(objects, pages);
     vm_owner_death(objects, pages);
     vm_explicit_destroy(objects, pages);
+    channel_lifecycle(objects, pages);
     print("lifecycle regression passed\n");
     while (true) {
         sys_yield();

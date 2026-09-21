@@ -19,6 +19,7 @@
 #   AME_VERIFY_CHANNEL=1 scripts/verify.sh             # + Phase G channel row
 #   AME_VERIFY_KMS=1 scripts/verify.sh                 # + Phase F KMS display row
 #   AME_VERIFY_GPUD=1 scripts/verify.sh                # + Phase H/I GPU control row
+#   AME_VERIFY_LIFECYCLE=1 scripts/verify.sh           # + Phase K IOMMU quarantine lifecycle
 #   AME_VERIFY_PANIC=1 scripts/verify.sh                # + panic screen capture
 #
 # Exit status is 0 only when every check passes.
@@ -197,6 +198,14 @@ do_channel() {
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> channel {} {}".format(d["reason"], d["counters"])); sys.exit(0 if d["success"] else 1)'
 }
 
+# Phase K: the IOMMU domain-quarantine lifecycle an appliance death relies on
+# (faulted domains are never reused until provably quiesced). Host-only, so it
+# needs no topology; opt-in so the default gate is unchanged.
+do_lifecycle_host() {
+    python3 scripts/test/lifecycle.py \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> {} ({:.2f}s)".format(d["reason"], d.get("elapsed") or 0)); sys.exit(0 if d["success"] else 1)'
+}
+
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
 # bespoke control flow below.
 CHECKS=(
@@ -241,6 +250,10 @@ fi
 
 if [[ "${AME_VERIFY_CHANNEL:-0}" == "1" ]]; then
     CHECKS+=("dango-channel:do_channel")
+fi
+
+if [[ "${AME_VERIFY_LIFECYCLE:-0}" == "1" ]]; then
+    CHECKS+=("lifecycle-host:do_lifecycle_host")
 fi
 
 record_toolchain

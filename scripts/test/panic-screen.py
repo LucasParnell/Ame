@@ -114,13 +114,18 @@ def analyze(path):
         return {'error': 'short pixel buffer'}
     counts = {'bg': 0, 'qr_dark': 0, 'qr_light': 0, 'headline': 0, 'reason': 0,
               'caption': 0, 'art': 0}
+    qr_x = []
+    qr_y = []
     for idx in range(total):
         o = idx * 3
         px = (pixels[o], pixels[o + 1], pixels[o + 2])
+        x, y = idx % width, idx // width
         if near(px, BG):
             counts['bg'] += 1
         elif near(px, QR_DARK):
             counts['qr_dark'] += 1
+            qr_x.append(x)
+            qr_y.append(y)
         elif near(px, QR_LIGHT):
             counts['qr_light'] += 1
         elif near(px, HEADLINE):
@@ -134,6 +139,8 @@ def analyze(path):
     counts['size'] = [width, height]
     counts['total'] = total
     counts['painted'] = total - counts['bg']
+    if qr_x:
+        counts['qr_box'] = [max(qr_x) - min(qr_x) + 1, max(qr_y) - min(qr_y) + 1]
     return counts
 
 
@@ -195,6 +202,10 @@ def main():
             checks['logo_art'] = counts.get('art', 0) > 5000
             checks['full_frame'] = counts.get('size') == [1024, 768]
             checks['background'] = counts.get('painted', 0) > 0
+            counts['qr_box'] = counts.get('qr_box')
+            box = counts.get('qr_box') or [0, 0]
+            checks['qr_square'] = box[0] > 0 and box[0] == box[1]
+            checks['qr_compact'] = 0 < box[0] <= 1024 // 3
             # The strongest check: the QR on screen really decodes, and carries
             # the report text.
             width, height, pixels = read_ppm(shot)
@@ -207,18 +218,18 @@ def main():
                 counts['qr_version'] = decoded['version']
                 counts['qr_level'] = decoded['level']
                 counts['qr_text_lines'] = text.count('\n')
-                checks['qr_decodes'] = (text.startswith('KERNEL PANIC')
+                checks['qr_decodes'] = (text.startswith('AMEQR1')
                                         and 'reason=' in text and 'x0=' in text
-                                        and 'bt_n=' in text)
+                                        and 'bt=' in text)
         except (OSError, ValueError) as error:
             counts = {'error': str(error)}
             checks.update(qr_code=False, headline=False, reason=False, key_data=False,
                           logo_art=False, full_frame=False, background=False,
-                          qr_decodes=False)
+                          qr_decodes=False, qr_square=False, qr_compact=False)
     else:
         checks.update(qr_code=False, headline=False, reason=False, key_data=False,
                       logo_art=False, full_frame=False, background=False,
-                      qr_decodes=False)
+                      qr_decodes=False, qr_square=False, qr_compact=False)
     success = all(checks.values())
     summary = dict(success=success, reason=boot.get('reason'), elapsed=boot.get('elapsed'),
                    logs=str(work), display=str(shot), checks=checks, counts=counts)

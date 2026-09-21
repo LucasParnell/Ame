@@ -90,14 +90,15 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
     check(art > 500, "logo drawn in the remaining space");
 
     // Geometry: the QR lives in the top-left box, the title in the bottom-left.
-    uint32_t qr_x_min = w, qr_x_max = 0, qr_y_max = 0;
+    uint32_t qr_x_min = w, qr_x_max = 0, qr_y_min = h, qr_y_max = 0;
     uint32_t title_y_min = h, title_x_max = 0;
     for (uint32_t y = 0; y < h; ++y) {
         for (uint32_t x = 0; x < w; ++x) {
             const uint32_t c = f.px[static_cast<size_t>(y) * w + x];
-            if (near(c, kQrModule)) {
+            if (near(c, kQrModule) || near(c, kQrPanel)) {
                 if (x < qr_x_min) qr_x_min = x;
                 if (x > qr_x_max) qr_x_max = x;
+                if (y < qr_y_min) qr_y_min = y;
                 if (y > qr_y_max) qr_y_max = y;
             }
             if (near(c, kTitle)) {
@@ -108,6 +109,10 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
     }
     check(qr_x_min <= w / 8 && qr_y_max <= h * 3 / 4, "QR anchored top-left");
     check(qr_x_max - qr_x_min <= w / 2, "QR box bounded");
+    // Aspect ratio: the drawn panel (modules + quiet zone) must be exactly square.
+    check((qr_x_max - qr_x_min + 1) == (qr_y_max - qr_y_min + 1), "QR aspect ratio is 1:1");
+    // Smaller than a third of the screen, so it stays a corner element.
+    check((qr_x_max - qr_x_min + 1) <= w / 3, "QR panel compact");
     check(title_y_min > h / 2, "title in the lower half");
     check(title_x_max < w / 2, "title left-aligned");
 
@@ -128,6 +133,17 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
         }
     }
     check(caption_in_logo == 0, "caption stays out of the logo column");
+
+    // Logo aspect ratio is 1:1 by construction: verify the grid maths exactly
+    // (footprint pixels = cols*8 must equal rows*16) across many box sizes.
+    uint32_t art_bad = 0;
+    for (uint32_t avail = 0; avail <= 1600; avail += 3) {
+        uint32_t cols = 0, rows = 0;
+        anko::panic_screen::art_grid(avail, &cols, &rows);
+        if (cols == 0 || rows == 0) continue;
+        if (cols * 8u != rows * 16u) ++art_bad;
+    }
+    check(art_bad == 0, "logo aspect ratio is 1:1 for every box size");
 
     // Determinism.
     Frame g(w, h);

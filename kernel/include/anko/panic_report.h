@@ -15,6 +15,13 @@ constexpr u32 kMaxBacktrace = 16;
 constexpr u32 kMaxQrPayload = 1536;   // bytes handed to the QR encoder
 constexpr u32 kMaxSerialText = 4096;
 
+// What the QR code carries. The code has to stay small enough to sit in a
+// corner at a scannable module size, so it holds the identifying subset (trap,
+// the exception registers, the call/argument registers and a short trace); the
+// serial dump carries the complete register file and the full trace.
+constexpr u32 kQrRegisterCount = 8;   // x0..x7
+constexpr u32 kQrBacktrace = 8;
+
 struct Registers {
     u64 x[31];      // x0..x30 (x29 = fp, x30 = lr)
     u64 sp;
@@ -59,8 +66,9 @@ void capture_registers(Report& report, const u64* x, u64 sp, u64 elr, u64 spsr,
 // never dereferences an attacker-shaped or stale frame pointer.
 void capture_backtrace(Report& report, u64 fp, u64 lo, u64 hi);
 
-// Compact line-oriented form for the QR code. Returns bytes written (excluding
-// the NUL) and sets *truncated when the record did not fit.
+// Compact line-oriented form for the QR code: labelled, ASCII, positional, no
+// `0x` prefixes, and bounded to the fields listed above. Returns bytes written
+// (excluding the NUL) and sets *truncated when the record did not fit.
 u32 format_qr(const Report& report, char* out, u32 cap, bool* truncated);
 
 // Full human-readable form for the serial console. Same truncation contract.

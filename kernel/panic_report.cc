@@ -33,6 +33,12 @@ struct Out {
             ch(digits[(value >> shift) & 0xF]);
         }
     }
+    void hex16_bare(u64 value) {
+        static const char* digits = "0123456789abcdef";
+        for (int shift = 60; shift >= 0; shift -= 4) {
+            ch(digits[(value >> shift) & 0xF]);
+        }
+    }
     void dec(u32 value) {
         char tmp[10];
         u32 n = 0;
@@ -91,85 +97,75 @@ void capture_backtrace(Report& report, u64 fp, u64 lo, u64 hi) {
 
 u32 format_qr(const Report& report, char* out, u32 cap, bool* truncated) {
     Out o{out, cap};
-    o.str(report.title ? report.title : "KERNEL PANIC");
-    o.ch(' ');
-    o.str("v1 core=");
+    // Compact, positional, `0x`-free: the same field order every time so a scan
+    // can be read without a schema. The full register file and trace are on the
+    // serial line; see panic_report.h for the split.
+    o.str("AMEQR1 core=");
     o.dec(report.core);
-    o.ch('\n');
-
-    label(o, "build");
+    o.str(" build=");
     o.str(report.build ? report.build : "unknown");
     o.ch('\n');
 
-    label(o, "reason");
+    o.str("reason=");
     o.str(report.reason ? report.reason : "unknown");
     o.ch('\n');
 
-    label(o, "esr");
-    o.hex16(report.regs.esr);
-    o.ch(' ');
-    label(o, "far");
-    o.hex16(report.regs.far);
-    o.ch(' ');
-    label(o, "elr");
-    o.hex16(report.regs.elr);
+    o.str("esr=");
+    o.hex16_bare(report.regs.esr);
+    o.str(" far=");
+    o.hex16_bare(report.regs.far);
+    o.str(" elr=");
+    o.hex16_bare(report.regs.elr);
     o.ch('\n');
 
-    label(o, "spsr");
-    o.hex16(report.regs.spsr);
-    o.ch(' ');
-    label(o, "sp");
-    o.hex16(report.regs.sp);
-    o.ch(' ');
-    label(o, "fp");
-    o.hex16(report.regs.x[29]);
-    o.ch(' ');
-    label(o, "lr");
-    o.hex16(report.regs.x[30]);
+    o.str("spsr=");
+    o.hex16_bare(report.regs.spsr);
+    o.str(" sp=");
+    o.hex16_bare(report.regs.sp);
+    o.str(" fp=");
+    o.hex16_bare(report.regs.x[29]);
+    o.str(" lr=");
+    o.hex16_bare(report.regs.x[30]);
+    o.ch('\n');
+
+    for (u32 i = 0; i < kQrRegisterCount; ++i) {
+        o.ch('x');
+        o.dec(i);
+        o.ch('=');
+        o.hex16_bare(report.regs.x[i]);
+        o.ch(i + 1u == kQrRegisterCount ? '\n' : ' ');
+    }
+
+    o.str("bt=");
+    o.dec(report.trace_count);
+    for (u32 i = 0; i < report.trace_count && i < kQrBacktrace; ++i) {
+        o.ch(' ');
+        o.hex16_bare(report.trace[i]);
+    }
     o.ch('\n');
 
     if (report.hw.present) {
-        o.str("hw pcie=");
+        o.str("hw=");
         o.str(flag(report.hw.has_pcie));
-        o.str(" mmio=");
         o.str(flag(report.hw.has_pci_mmio));
-        o.str(" smmu=");
         o.str(flag(report.hw.has_smmu));
         o.str(" virtio=");
         o.dec(report.hw.virtio_count);
         o.str(" el=");
         o.dec(report.hw.boot_el);
         o.ch('\n');
-        o.str("pci win=");
-        o.hex16(report.hw.pci_mmio_base);
+        o.str("pci=");
+        o.hex16_bare(report.hw.pci_mmio_base);
         o.ch('+');
-        o.hex16(report.hw.pci_mmio_size);
+        o.hex16_bare(report.hw.pci_mmio_size);
         o.str(" ram=");
-        o.hex16(report.hw.ram_base);
+        o.hex16_bare(report.hw.ram_base);
         o.ch('+');
-        o.hex16(report.hw.ram_size);
+        o.hex16_bare(report.hw.ram_size);
         o.ch('\n');
     }
-    o.str("cap_denied=");
+    o.str("cap=");
     o.dec(report.cap_denials);
-    o.ch('\n');
-
-    for (u32 i = 0; i < 31; i += 4) {
-        for (u32 j = 0; j < 4 && i + j < 31; ++j) {
-            if (j) o.ch(' ');
-            write_register(o, i + j, report.regs.x[i + j]);
-        }
-        o.ch('\n');
-    }
-
-    o.str("bt");
-    for (u32 i = 0; i < report.trace_count; ++i) {
-        o.ch(' ');
-        o.hex16(report.trace[i]);
-    }
-    o.ch('\n');
-    o.str("bt_n=");
-    o.dec(report.trace_count);
     o.ch('\n');
 
     o.finish();

@@ -105,21 +105,15 @@ u32 art_color(char ch) {
     }
 }
 
-// Draw the logo into the box [x0,x1) x [y0,y1), scaled to fit.
+// Draw the logo centred in the box on a 1:1 grid (see art_grid).
 void draw_art(u32 x0, u32 y0, u32 x1, u32 y1) {
     if (x1 <= x0 || y1 <= y0) return;
-    const u32 avail_cols = (x1 - x0) / kCellW;
-    const u32 avail_rows = (y1 - y0) / kCellH;
-    if (avail_cols == 0 || avail_rows == 0) return;
-
-    u32 scale = 1;
-    while (scale < kMaxScale && anko::art::kPanicArtCols * (scale + 1u) <= avail_cols &&
-           anko::art::kPanicArtRows * (scale + 1u) <= avail_rows) {
-        ++scale;
-    }
-    const u32 out_cols = smaller(anko::art::kPanicArtCols, avail_cols / scale);
-    const u32 out_rows = smaller(anko::art::kPanicArtRows, avail_rows / scale);
+    const u32 avail = smaller(x1 - x0, y1 - y0);
+    u32 out_cols = 0;
+    u32 out_rows = 0;
+    art_grid(avail, &out_cols, &out_rows);
     if (out_cols == 0 || out_rows == 0) return;
+    const u32 scale = 1;
 
     const u32 art_w = out_cols * kCellW * scale;
     const u32 art_h = out_rows * kCellH * scale;
@@ -178,6 +172,28 @@ void draw_block(u32 x, u32 y, u32 scale, u32 fg, const char* text, u32 max_lines
 
 } // namespace
 
+void art_grid(u32 avail, u32* out_cols, u32* out_rows) {
+    *out_cols = 0;
+    *out_rows = 0;
+    if (avail == 0) return;
+    u32 scale = 1;
+    while (scale < kMaxScale &&
+           anko::art::kPanicArtCols * (scale + 1u) * kCellW <= avail &&
+           anko::art::kPanicArtRows * (scale + 1u) * kCellH <= avail) {
+        ++scale;
+    }
+    u32 cols = smaller(anko::art::kPanicArtCols, avail / (kCellW * scale));
+    const u32 row_cap = smaller(anko::art::kPanicArtRows, avail / (kCellH * scale));
+    // A glyph cell is 8x16, so two columns and one row cover the same number of
+    // pixels: keep the column count even and derive the rows from it, giving an
+    // exactly square footprint (no letterboxing, no distortion of the ratio).
+    if (cols > row_cap * 2u) cols = row_cap * 2u;
+    cols &= ~1u;
+    if (cols == 0u) return;
+    *out_cols = cols;
+    *out_rows = cols / 2u;
+}
+
 void bind(volatile u32* pixels, u32 width, u32 height) {
     // Reject a framebuffer too small to show even one glyph row; an invalid bind
     // leaves nothing bound rather than a half-usable screen.
@@ -207,7 +223,9 @@ bool show(const char* title, const char* reason, const char* payload) {
     u32 qr_width = 0;
     u32 qr_height = 0;
     bool have_qr = false;
-    const u32 box = smaller(g_w / 2u, (g_h * 3u) / 5u);
+    // The panel is square by construction (module * modules on both axes); the
+    // box only decides how large that square is.
+    const u32 box = smaller(g_w / 3u, g_h / 2u);
     if (payload && payload[0]) {
         const u8* bytes = reinterpret_cast<const u8*>(payload);
         const u32 len = slen(payload);

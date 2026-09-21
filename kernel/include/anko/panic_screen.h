@@ -18,6 +18,12 @@ void bind(volatile u32* pixels, u32 width, u32 height);
 // True once a framebuffer has been bound.
 bool bound();
 
+// Grid the logo is drawn on for a square bounding box of `avail` pixels. The
+// drawn footprint is exactly square (out_cols * glyph_width == out_rows *
+// glyph_height); both outputs are 0 when nothing fits. Exposed so the aspect
+// guarantee is testable without inspecting pixels.
+void art_grid(u32 avail, u32* out_cols, u32* out_rows);
+
 // Render the panic screen. `payload` is the QR report text (already rendered by
 // panic_report::format_qr); its leading lines are also drawn under the QR as
 // plain text. Null/empty payloads render the screen without a QR code. Returns

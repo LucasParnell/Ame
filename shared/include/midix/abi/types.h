@@ -28,7 +28,7 @@ typedef uint32_t mx_rights_t;
 #if defined(__cplusplus)
 
 constexpr mx_u32_t mx_handle_index(mx_handle_t h) {
-    return static_cast<mx_u32_t>(h & 0xFFFF'FFFFull);
+    return static_cast<mx_u32_t>(h & 0xFFFFFFFFull);
 }
 
 constexpr mx_u32_t mx_handle_generation(mx_handle_t h) {

@@ -242,7 +242,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     vm::CallGuard vm_call((nr >= SYS_VM_CREATE && nr <= SYS_VM_MEMORY_WRITE) ||
                           (nr >= SYS_VCPU_BIND_SCHED_CONTEXT && nr <= SYS_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER) ||
-                          (nr >= SYS_VM_ASSIGN_DEVICE && nr <= SYS_VM_CHANNEL_NOTIFY));
+                          (nr >= SYS_VM_ASSIGN_DEVICE && nr <= SYS_VM_CHANNEL_STAGE));
     switch (static_cast<Syscall>(nr)) {
 
     case SYS_YIELD:
@@ -829,6 +829,13 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     }
     case SYS_VM_CHANNEL_NOTIFY: {
         const auto rc = vm::notify_channel(*p, static_cast<CapHandle>(a0));
+        return rc == E_OK ? ok(E_OK) : err(rc);
+    }
+
+    case SYS_VM_CHANNEL_STAGE: {
+        // a0 = channel_cap, a1 = guest IPA, a2 = size (both page-aligned).
+        if (a1 == 0 || a2 == 0) return err(E_INVALID);
+        const auto rc = vm::stage_channel(*p, static_cast<CapHandle>(a0), a1, a2);
         return rc == E_OK ? ok(E_OK) : err(rc);
     }
 

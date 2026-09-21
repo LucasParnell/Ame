@@ -251,6 +251,48 @@ SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
     return E_OK;
 }
 
+// Publish the VM's shared staging window (guest IPA + size) into the channel
+// descriptor. Staging pages are host-writable and guest-mappable but never
+// DMA-authorizable; the window is validated against free stage-2 IPA space so
+// the guest can map exactly those pages. Runs under CallGuard like the other
+// channel operations, and is a no-op-safe failure until map_channel() has
+// installed the descriptor page.
+SysError stage_channel(Process& caller, CapHandle channel_cap, u64 ipa, u64 size) {
+    SysError rc = E_OK;
+    auto channel = channel_from_cap(caller, channel_cap,
+        RIGHT_VM_CHANNEL_INSPECT | RIGHT_VM_CHANNEL_SEND | RIGHT_VM_CHANNEL_RECV, &rc);
+    if (!channel) return rc;
+    // No descriptor page yet: map_channel() has not run. Fail safe, do nothing.
+    if (!channel->descriptor_page) return E_INVALID;
+    Vm* owner = find_vm_by_id(channel->owner_vm_id);
+    if (!owner || owner->state == VM_DEAD) return E_DEAD;
+    if (ipa == 0 || size == 0) return E_INVALID;
+    if ((ipa & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0) return E_INVALID;
+    if (ipa != kStagingWindowBase || size != kStagingWindowSize) return E_INVALID;
+    if (ipa >= (1ull << owner->stage2.ipa_bits) ||
+        size > (1ull << owner->stage2.ipa_bits) - ipa) {
+        return E_INVALID;
+    }
+
+    // The window must exactly describe the VM's shared staging object.
+    VmMemory* staging = nullptr;
+    for (u32 i = 0; i < owner->memory_count; ++i) {
+        VmMemory* mem = owner->memory_objects[i];
+        if (mem && !mem->dead && mem->shared_staging) { staging = mem; break; }
+    }
+    if (!staging || staging->size != size) return E_INVALID;
+
+    rc = stage2_validate_no_overlap(&owner->stage2, ipa, size);
+    if (rc != E_OK) return rc;
+
+    auto& layout = *reinterpret_cast<dango_channel_layout*>(channel->descriptor_page);
+    layout.desc.shared_staging_pa = ipa;
+    layout.desc.shared_staging_size = size;
+    channel->staging_base = ipa;
+    channel->staging_size = size;
+    return E_OK;
+}
+
 SysError notify_channel(Process& caller, CapHandle channel_cap) {
     SysError rc = E_OK;
     auto channel = channel_from_cap(caller, channel_cap, RIGHT_VM_CHANNEL_NOTIFY, &rc);

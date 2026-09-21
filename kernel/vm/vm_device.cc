@@ -196,6 +196,7 @@ SysError collect_vm_ram(VmDeviceAssignment* a) {
         if (!mem || mem->dead || !mem->mapped_stage2 || !mem->pages) {
             continue;
         }
+        if (mem->shared_staging) continue; // staging pages are never DMA-authorizable
         u64 p = 0;
         while (p < mem->page_count) {
             const PhysAddr start = mem->pages[p];

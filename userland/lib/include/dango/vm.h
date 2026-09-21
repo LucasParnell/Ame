@@ -146,6 +146,8 @@ struct VmMemoryInfo {
     uint64_t guest_pa_base;
     uint64_t mapped_size;
     uint64_t mapped_stage2;
+    bool shared_staging; // MX_VM_MEMORY_FLAG_SHARED_STAGING object
+    uint8_t pad[7];
 };
 
 struct VcpuInfo {

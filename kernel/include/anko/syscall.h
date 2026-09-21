@@ -106,7 +106,10 @@ enum Syscall : unsigned {
     SYS_CLOCK_NS = MX_NR_CLOCK_NS,
     SYS_VM_CHANNEL_MAP = MX_NR_VM_CHANNEL_MAP,
     SYS_VM_CHANNEL_NOTIFY = MX_NR_VM_CHANNEL_NOTIFY,
-    SYS_COUNT = MX_NR_VM_CHANNEL_NOTIFY + 1,
+    // (channel_cap, ipa, size) -> E_OK. Records the VM's shared staging window
+    // in the channel descriptor; fails E_INVALID until SYS_VM_CHANNEL_MAP has run.
+    SYS_VM_CHANNEL_STAGE = MX_NR_VM_CHANNEL_STAGE,
+    SYS_COUNT = MX_NR_VM_CHANNEL_STAGE + 1,
 };
 
 static_assert(static_cast<unsigned>(SYS_YIELD) == static_cast<unsigned>(MX_NR_YIELD), "syscall number drift: YIELD");

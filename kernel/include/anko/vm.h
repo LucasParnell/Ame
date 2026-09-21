@@ -10,6 +10,7 @@
 #include "anko/iommu.h"
 #include "anko/mm.h"
 #include "anko/pci.h"
+#include "midix/abi/dango_channel_guest.h"
 #include "anko/sched.h"
 #include "anko/syscall.h"
 
@@ -41,6 +42,21 @@ constexpr u32 kVmIpaBits = 39;
 constexpr u64 kMinDeviceGuestIpa = 0x10000000ull;
 // Page count of the appliance's RAM, used to size the stage-2 table below.
 constexpr u64 kDangoRamPages = kDangoRamSize / PAGE_SIZE;
+
+// Shared staging window (SYS_VM_MEMORY_CREATE with MX_VM_MEMORY_FLAG_SHARED_STAGING).
+// The staging object is host-writable and guest-mappable, but its pages are
+// deliberately kept out of every DMA domain (see vm::collect_vm_ram) until a
+// device assignment registers them explicitly. The window is a device-side guest
+// IPA range above RAM, single-sourced from the shared Dango binding so the
+// kernel, the guest DTS and the Linux driver cannot disagree.
+constexpr u64 kStagingWindowBase = DANGO_GPU_STAGING_BASE;
+constexpr u64 kStagingWindowSize = DANGO_GPU_STAGING_SIZE;
+static_assert(kStagingWindowBase >= kDangoRamBase + kDangoRamSize,
+              "staging window must sit above guest RAM");
+static_assert(kStagingWindowBase % PAGE_SIZE == 0 && kStagingWindowSize % PAGE_SIZE == 0,
+              "staging window must be page aligned");
+static_assert(kStagingWindowSize != 0 && kStagingWindowSize <= 16ull * 1024ull * 1024ull,
+              "staging window must be bounded");
 
 enum VmState : u32 {
     VM_EMPTY = 0,
@@ -203,7 +219,11 @@ struct VmMemory {
     u32 flags;
     bool mapped_stage2;
     bool dead;
-    u8 pad[6];
+    // Set from MX_VM_MEMORY_FLAG_SHARED_STAGING. Staging pages are host-writable
+    // and guest-mappable but must never become DMA-authorizable; collect_vm_ram()
+    // skips any VmMemory with this set.
+    bool shared_staging;
+    u8 pad[5];
 };
 
 struct El2RunState {
@@ -406,7 +426,12 @@ struct VmChannel {
     u32 guest_irq;
     bool armed;
     bool dead;
-    u8 pad[7];
+    u8 pad[2];
+    // Shared staging window recorded by stage_channel() and published in the
+    // descriptor page. staging_base is the guest IPA; both are zero until the
+    // channel is staged.
+    PhysAddr staging_base;
+    u64 staging_size;
 };
 
 struct Vm {
@@ -456,6 +481,8 @@ struct VmMemoryInfo {
     u64 guest_pa_base;
     u64 mapped_size;
     u64 mapped_stage2;
+    bool shared_staging;
+    u8 pad[7];
 };
 
 struct VcpuInfo {
@@ -566,6 +593,10 @@ CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_
 SysError inspect_channel(Process& caller, CapHandle channel_cap, VmChannelInfo* out);
 SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
                      u64 ipa, u64 reserved_size, u32 guest_irq);
+// Record the VM's shared staging window (guest IPA + size) in the channel
+// descriptor. Validates alignment, size (against the VM's staging memory) and
+// non-overlap; no-op-safe E_INVALID until map_channel() has run.
+SysError stage_channel(Process& caller, CapHandle channel_cap, u64 ipa, u64 size);
 SysError notify_channel(Process& caller, CapHandle channel_cap);
 bool channel_hvc(Vcpu& vcpu, Vm& owner);
 void channel_publish(VmChannel& channel); // internal, CallGuard held

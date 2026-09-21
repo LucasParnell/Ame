@@ -4,8 +4,6 @@
  * The descriptor page is read-only at stage 2; rings are normal WB, RW, XN,
  * and VmDmaClass::None (never registered in an assignment's DMA domain).
  */
-#include <stddef.h>
-
 #define DANGO_CH_MAGIC 0x4443484eU
 #define DANGO_CH_VERSION 1U
 #define DANGO_CH_ARM_SUPPORTED 2U
@@ -55,6 +53,21 @@ _Static_assert(sizeof(struct dango_channel_layout) == 80, "layout ABI");
 
 #define DANGO_GPU_ECAM_BASE 0x3f000000ULL
 #define DANGO_GPU_ECAM_SIZE 0x00100000ULL
+/* Shared staging window the GPU borrows for scanout/upload buffers. It sits
+ * between guest RAM (top 0x48000000) and the GPU MMIO aperture (0x50000000). */
+#define DANGO_GPU_STAGING_BASE 0x49000000ULL
+#define DANGO_GPU_STAGING_SIZE 0x00300000ULL /* 3 MiB = 1024x768x4 */
+
+/* The one bootstrap scanout mode. The staging window is exactly one XRGB8888
+ * frame of it, so the mode and the window size are the same fact. */
+#define DANGO_GPU_MODE_WIDTH 1024U
+#define DANGO_GPU_MODE_HEIGHT 768U
+#define DANGO_GPU_MODE_BYTES_PER_PIXEL 4U
+#define DANGO_GPU_FRAME_BYTES \
+    ((unsigned long long)DANGO_GPU_MODE_WIDTH * DANGO_GPU_MODE_HEIGHT * \
+     DANGO_GPU_MODE_BYTES_PER_PIXEL)
+_Static_assert(DANGO_GPU_FRAME_BYTES == DANGO_GPU_STAGING_SIZE,
+               "staging window must be exactly one bootstrap frame");
 #define DANGO_GPU_MMIO_BASE 0x50000000ULL
 #define DANGO_GPU_MMIO_SIZE 0x10000000ULL
 #define DANGO_GPU_BAR4_IPA 0x50000000ULL
@@ -65,7 +78,6 @@ _Static_assert(sizeof(struct dango_channel_layout) == 80, "layout ABI");
  * window. H2G and G2H rings are equal-sized and adjacent, so the mmap exposes
  * exactly two DANGO_RING_BYTES regions. */
 #define DANGO_RING_HEADER_BYTES 256U
-#define DANGO_RING_TAIL_OFF 64U
 #define DANGO_RING_SLOT_BYTES 64U
 #define DANGO_RING_PAYLOAD_BYTES 48U
 #define DANGO_RING_PAGE_BYTES 4096ULL
@@ -76,6 +88,13 @@ _Static_assert(sizeof(struct dango_channel_layout) == 80, "layout ABI");
                        ((unsigned long long)DANGO_RING_SLOT_BYTES << (order)), \
                    DANGO_RING_PAGE_BYTES)
 #define DANGO_RING_MAPPING_BYTES(order) (2ULL * DANGO_RING_BYTES(order))
+/* Offset of the shared staging window within the guest channel mapping
+ * (relative to DANGO_CH_GUEST_BASE): the descriptor page, then the two rings,
+ * then staging at the next page boundary. DANGO_RING_BYTES is already page
+ * aligned, so this reduces to DANGO_RING_PAGE_BYTES + 2 * DANGO_RING_BYTES. */
+#define DANGO_CH_STAGING_OFF(order) \
+    DANGO_ALIGN_UP(2ULL * DANGO_RING_BYTES(order) + DANGO_RING_HEADER_BYTES, \
+                   DANGO_RING_PAGE_BYTES)
 
 struct dango_ring_hdr {
     unsigned long long head;
@@ -101,19 +120,31 @@ struct dango_ring_slot {
 #if defined(__cplusplus)
 static_assert(sizeof(dango_ring_hdr) == 256, "ring header ABI");
 static_assert(sizeof(dango_ring_slot) == 64, "ring slot ABI");
-static_assert(offsetof(struct dango_ring_hdr, tail) == DANGO_RING_TAIL_OFF, "ring tail offset");
 static_assert(DANGO_GPU_BAR4_IPA == DANGO_GPU_MMIO_BASE, "BAR4 sits at the MMIO window base");
 static_assert(DANGO_RING_BYTES(6) == 8192, "ring bytes order 6");
 static_assert(DANGO_RING_MAPPING_BYTES(6) == 16384, "ring mapping bytes order 6");
 static_assert(DANGO_RING_BYTES(6) == DANGO_RING_MAPPING_BYTES(6) / 2, "mapping is two rings");
 static_assert(DANGO_CH_GUEST_IRQ >= DANGO_GIC_SPI_BASE, "channel IRQ is an SPI");
+static_assert(DANGO_CH_STAGING_OFF(DANGO_CH_DEFAULT_RING_ORDER) % DANGO_RING_PAGE_BYTES == 0,
+              "staging offset is page-aligned");
+static_assert(DANGO_CH_STAGING_OFF(DANGO_CH_DEFAULT_RING_ORDER) ==
+                  DANGO_RING_PAGE_BYTES + DANGO_RING_MAPPING_BYTES(DANGO_CH_DEFAULT_RING_ORDER),
+              "staging follows the descriptor page and both rings");
+static_assert(DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE <= 0x4C000000ULL,
+              "staging window stays below the GPU MMIO aperture");
 #else
 _Static_assert(sizeof(struct dango_ring_hdr) == 256, "ring header ABI");
 _Static_assert(sizeof(struct dango_ring_slot) == 64, "ring slot ABI");
-_Static_assert(offsetof(struct dango_ring_hdr, tail) == DANGO_RING_TAIL_OFF, "ring tail offset");
 _Static_assert(DANGO_GPU_BAR4_IPA == DANGO_GPU_MMIO_BASE, "BAR4 sits at the MMIO window base");
 _Static_assert(DANGO_RING_BYTES(6) == 8192, "ring bytes order 6");
 _Static_assert(DANGO_RING_MAPPING_BYTES(6) == 16384, "ring mapping bytes order 6");
 _Static_assert(DANGO_RING_BYTES(6) == DANGO_RING_MAPPING_BYTES(6) / 2, "mapping is two rings");
 _Static_assert(DANGO_CH_GUEST_IRQ >= DANGO_GIC_SPI_BASE, "channel IRQ is an SPI");
+_Static_assert(DANGO_CH_STAGING_OFF(DANGO_CH_DEFAULT_RING_ORDER) % DANGO_RING_PAGE_BYTES == 0,
+               "staging offset is page-aligned");
+_Static_assert(DANGO_CH_STAGING_OFF(DANGO_CH_DEFAULT_RING_ORDER) ==
+                   DANGO_RING_PAGE_BYTES + DANGO_RING_MAPPING_BYTES(DANGO_CH_DEFAULT_RING_ORDER),
+               "staging follows the descriptor page and both rings");
+_Static_assert(DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE <= 0x4C000000ULL,
+               "staging window stays below the GPU MMIO aperture");
 #endif

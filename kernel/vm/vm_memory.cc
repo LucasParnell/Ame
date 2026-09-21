@@ -1,5 +1,6 @@
 #include "anko/vm.h"
 #include "anko/log.h"
+#include "anko/panic.h"
 #include "libk/string.h"
 #include "libk/printf.h"
 
@@ -88,6 +89,16 @@ bool guest_range_valid(u64 guest_pa, u64 size) {
     return guest_pa >= kGuestPhysMin && end <= kGuestPhysMax;
 }
 
+// A shared staging object maps only inside the device-side staging window, never
+// in the RAM window (and stays out of every DMA domain).
+bool staging_range_valid(u64 guest_pa, u64 size) {
+    if (size == 0) return false;
+    if ((guest_pa & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0) return false;
+    u64 end = 0;
+    if (__builtin_add_overflow(guest_pa, size, &end)) return false;
+    return guest_pa >= kStagingWindowBase && end <= kStagingWindowBase + kStagingWindowSize;
+}
+
 } // namespace
 
 CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
@@ -106,6 +117,20 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
         return kNullCap;
     }
     if (size == 0 || size > 256ull * 1024 * 1024 || (size & (PAGE_SIZE - 1)) != 0) {
+        if (out_error) *out_error = E_INVALID;
+        note_error();
+        return kNullCap;
+    }
+    // The shared-staging flag is only meaningful here; unknown bits are rejected
+    // so no other create path can silently inherit staging semantics. A staging
+    // window is bounded so a runaway request cannot consume the VM's budget.
+    const bool shared_staging = (flags & MX_VM_MEMORY_FLAG_SHARED_STAGING) != 0;
+    if ((flags & ~static_cast<u64>(MX_VM_MEMORY_FLAG_SHARED_STAGING)) != 0) {
+        if (out_error) *out_error = E_INVALID;
+        note_error();
+        return kNullCap;
+    }
+    if (shared_staging && size != kStagingWindowSize) {
         if (out_error) *out_error = E_INVALID;
         note_error();
         return kNullCap;
@@ -142,6 +167,12 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
     mem->page_count = pages;
     mem->size = size;
     mem->flags = static_cast<u32>(flags);
+    mem->shared_staging = shared_staging;
+    // Invariant: staging pages are host-writable and guest-mappable but must
+    // never become DMA-authorizable. collect_vm_ram() (vm_device.cc) skips every
+    // VmMemory with shared_staging set, so these pages are absent from each DMA
+    // domain until a device assignment registers them explicitly.
+    ANKO_ASSERT(!mem->shared_staging || mem->size == kStagingWindowSize);
 
     mem->owner_lifetime = v->lifetime; object::retain(mem->owner_lifetime);
     mem->lifetime = object::create(mem, dispose_memory);
@@ -178,7 +209,8 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
         note_error();
         return E_PERM;
     }
-    if (!guest_range_valid(guest_pa, size)) {
+    if (mem->shared_staging ? !staging_range_valid(guest_pa, size)
+                            : !guest_range_valid(guest_pa, size)) {
         note_error();
         return E_INVALID;
     }
@@ -246,7 +278,7 @@ SysError unmap_memory(Process& caller, CapHandle vm_cap, u64 guest_pa, u64 size)
     SysError rc = E_OK;
     auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_MAP, &rc);
     if (!v) return rc;
-    if (!guest_range_valid(guest_pa, size)) {
+    if (!guest_range_valid(guest_pa, size) && !staging_range_valid(guest_pa, size)) {
         note_error();
         return E_INVALID;
     }
@@ -299,6 +331,7 @@ SysError inspect_memory(Process& caller, CapHandle memory_cap, VmMemoryInfo* out
     info.guest_pa_base = mem->guest_pa_base;
     info.mapped_size = mem->mapped_size;
     info.mapped_stage2 = mem->mapped_stage2 ? 1 : 0;
+    info.shared_staging = mem->shared_staging;
     *out = info;
     return E_OK;
 }

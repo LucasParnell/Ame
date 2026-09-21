@@ -71,10 +71,23 @@ enum MxSyscall : mx_u64_t {
     MX_NR_VM_ASSIGN_EXPOSE_ECAM = 60, // (assign_cap, guest_ipa, size) -> E_OK
     MX_NR_VM_CHANNEL_MAP = 61, // (channel, vcpu, guest_ipa, reserved_size, irq)
     MX_NR_VM_CHANNEL_NOTIFY = 62, // (channel): publish H2G wake
+    // (channel, ipa, size): record the VM's shared staging window in the
+    // channel descriptor. The window names host<->guest shared staging pages
+    // (host-writable, guest-mappable, never DMA-authorizable until explicitly
+    // registered through a device assignment). No-op-safe failure until
+    // SYS_VM_CHANNEL_MAP has published the descriptor page.
+    MX_NR_VM_CHANNEL_STAGE = 63,
 };
 
 constexpr mx_u32_t MX_SPAWN_SUSPENDED = 1u << 0;
 constexpr mx_u32_t MX_THREAD_SUSPENDED = 1u << 0;
+
+// SYS_VM_MEMORY_CREATE flags (a2). MX_VM_MEMORY_FLAG_SHARED_STAGING marks the
+// object as the VM's shared staging window: its pages stay out of every DMA
+// domain (see vm::collect_vm_ram) until the device-assignment path registers
+// them explicitly. No other create path accepts this flag.
+constexpr mx_u32_t MX_VM_MEMORY_FLAG_NONE = 0u;
+constexpr mx_u32_t MX_VM_MEMORY_FLAG_SHARED_STAGING = 1u << 0;
 
 // Compatibility names for existing V0 code.
 constexpr mx_u64_t NR_YIELD = MX_NR_YIELD;
@@ -140,3 +153,4 @@ constexpr mx_u64_t NR_VM_ASSIGN_EXPOSE_ECAM = MX_NR_VM_ASSIGN_EXPOSE_ECAM;
 
 constexpr mx_u64_t NR_VM_CHANNEL_MAP = MX_NR_VM_CHANNEL_MAP;
 constexpr mx_u64_t NR_VM_CHANNEL_NOTIFY = MX_NR_VM_CHANNEL_NOTIFY;
+constexpr mx_u64_t NR_VM_CHANNEL_STAGE = MX_NR_VM_CHANNEL_STAGE;

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate the tiny Dango initramfs without relying on host cpio quirks."""
 from __future__ import annotations
+import gzip
 import stat
 import sys
 from pathlib import Path
@@ -16,6 +17,8 @@ REQUIRED = {
 
 def parse_newc(path: Path):
     data = path.read_bytes()
+    if data[:2] == b"\x1f\x8b":
+        data = gzip.decompress(data)
     off = 0
     out = {}
     while True:
@@ -30,7 +33,12 @@ def parse_newc(path: Path):
         off += 110
         if off + namesize > len(data):
             raise SystemExit("error: truncated newc filename")
-        name = data[off:off + namesize].rstrip(b"\0").decode("utf-8")
+        raw_name = data[off:off + namesize]
+        if not raw_name or raw_name[-1:] != b"\0" or b"\0" in raw_name[:-1]:
+            raise SystemExit("error: invalid newc filename")
+        name = raw_name[:-1].decode("utf-8")
+        if not name or name.startswith("/") or ".." in name.split("/") or name in out:
+            raise SystemExit(f"error: unsafe or duplicate newc filename: {name!r}")
         off += namesize
         off = (off + 3) & ~3
         if off + filesize > len(data):

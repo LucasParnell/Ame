@@ -10,7 +10,10 @@ developer machines.
 
 from __future__ import annotations
 
+import argparse
+import gzip
 import os
+import shutil
 import stat
 import sys
 from dataclasses import dataclass
@@ -62,7 +65,7 @@ def _file_entry(name: str, source: Path, mode: Optional[int] = None) -> Entry:
         mode = stat.S_IMODE(source.stat().st_mode)
     return Entry(name=name, mode=S_IFREG | mode, data=data)
 
-def build(agent: Path, output: Path) -> None:
+def build(agent: Path, output: Path, rootfs: Optional[Path] = None) -> None:
     if not agent.is_file():
         raise SystemExit(f"error: missing agent executable: {agent}")
     entries = [
@@ -76,19 +79,45 @@ def build(agent: Path, output: Path) -> None:
         Entry("tmp", S_IFDIR | 0o1777, nlink=2),
         _file_entry("init", agent, 0o755),
     ]
+    if rootfs is not None:
+        if not rootfs.is_dir() or rootfs.is_symlink():
+            raise ValueError(f"invalid rootfs directory: {rootfs}")
+        reserved = {entry.name for entry in entries}
+        for source in sorted(rootfs.rglob("*")):
+            name = source.relative_to(rootfs).as_posix()
+            mode = source.lstat().st_mode
+            if name in reserved:
+                if stat.S_ISDIR(mode) and name != "init":
+                    continue
+                raise ValueError(f"rootfs overwrites reserved entry: {name}")
+            if stat.S_ISDIR(mode):
+                entries.append(Entry(name, S_IFDIR | stat.S_IMODE(mode), nlink=2))
+            elif stat.S_ISREG(mode):
+                entries.append(_file_entry(name, source))
+            else:
+                raise ValueError(f"unsupported rootfs entry type: {name}")
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_suffix(output.suffix + ".tmp")
     with tmp.open("wb") as out:
         for ino, entry in enumerate(entries, start=1):
             _write_entry(out, entry, ino)
         _write_entry(out, Entry(TRAILER, S_IFREG | 0o644, nlink=1), len(entries) + 1)
+    if output.suffix == ".gz":
+        compressed = output.with_suffix(output.suffix + ".gz.tmp")
+        with tmp.open("rb") as src, compressed.open("wb") as dst:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=dst, mtime=0) as out:
+                shutil.copyfileobj(src, out)
+        tmp.unlink()
+        tmp = compressed
     os.replace(tmp, output)
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print(f"usage: {argv[0]} DANGO-AGENT OUTPUT_CPIO", file=sys.stderr)
-        return 2
-    build(Path(argv[1]), Path(argv[2]))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("agent", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--rootfs", type=Path)
+    args = parser.parse_args(argv[1:])
+    build(args.agent, args.output, args.rootfs)
     return 0
 
 if __name__ == "__main__":

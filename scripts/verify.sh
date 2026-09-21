@@ -18,6 +18,7 @@
 #   AME_VERIFY_GPU=1 scripts/verify.sh                 # + Phase E Linux virtio-gpu
 #   AME_VERIFY_CHANNEL=1 scripts/verify.sh             # + Phase G channel row
 #   AME_VERIFY_KMS=1 scripts/verify.sh                 # + Phase F KMS display row
+#   AME_VERIFY_PANIC=1 scripts/verify.sh                # + panic screen capture
 #
 # Exit status is 0 only when every check passes.
 set -euo pipefail
@@ -156,6 +157,14 @@ do_kms() {
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> KMS {} display={} {}".format(d["reason"], d.get("pattern", {}).get("size"), d["counters"])); sys.exit(0 if d["success"] else 1)'
 }
 
+# Panic screen: a dev-only kernel (ANKO_PANIC_SCREEN_DEMO) panics as soon as the
+# framebuffer is bound; the host captures the screen and asserts the logo art and
+# headline.  Opt-in, and it builds its own kernel.
+do_panic() {
+    python3 scripts/test/panic-screen.py --build "${AME_VERIFY_PANIC_BUILD:-${ROOT}/out/qemu-panic}" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("counts", {}); print("   -> panic {} frame={} painted={}".format(d["reason"], c.get("size"), c.get("painted"))); sys.exit(0 if d["success"] else 1)'
+}
+
 do_channel() {
     python3 scripts/test/channel.py --build "$(build_gpu_tree)" \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> channel {} {}".format(d["reason"], d["counters"])); sys.exit(0 if d["success"] else 1)'
@@ -191,6 +200,11 @@ fi
 # Opt-in Phase F row.
 if [[ "${AME_VERIFY_KMS:-0}" == "1" ]]; then
     CHECKS+=("kms-display:do_kms")
+fi
+
+# Opt-in panic-screen row.
+if [[ "${AME_VERIFY_PANIC:-0}" == "1" ]]; then
+    CHECKS+=("panic-screen:do_panic")
 fi
 
 if [[ "${AME_VERIFY_CHANNEL:-0}" == "1" ]]; then

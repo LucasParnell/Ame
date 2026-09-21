@@ -25,6 +25,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(ANKO_BUILD_DEV "Allow the development bundle signing key" ON)
+option(ANKO_PANIC_SCREEN_DEMO
+    "Dev only: raise a panic right after the framebuffer is bound so the panic screen can be captured"
+    OFF)
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()

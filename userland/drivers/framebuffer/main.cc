@@ -12,7 +12,7 @@
 #include "mochi/boot.h"
 #include "mochi/boot_log.h"
 #include "mochi/framebuffer.h"
-#include "mochi/font/vga8x16.h"
+#include "midix/font/vga8x16.h"
 #include "midix/abi/ring.h"
 
 // Virtual address layout for io.framebuffer.
@@ -158,18 +158,18 @@ static void fb_draw_text(volatile uint32_t* pixels, const FbDrawTextCmd& cmd) {
 
     for (uint32_t i = 0; i < count; ++i) {
         const uint8_t code = static_cast<uint8_t>(cmd.text[i]);
-        const uint8_t* rows = mochi::font::vga8x16_glyph(code);
+        const uint8_t* rows = midix::font::vga8x16_glyph(code);
 
         FbDrawGlyphCmd glyph{};
-        glyph.x = cmd.x + (i * mochi::font::kVga8x16Width * scale_x);
+        glyph.x = cmd.x + (i * midix::font::kVga8x16Width * scale_x);
         glyph.y = cmd.y;
         glyph.fg = cmd.fg;
         glyph.bg = cmd.bg;
-        glyph.width = static_cast<uint8_t>(mochi::font::kVga8x16Width);
-        glyph.height = static_cast<uint8_t>(mochi::font::kVga8x16Height);
+        glyph.width = static_cast<uint8_t>(midix::font::kVga8x16Width);
+        glyph.height = static_cast<uint8_t>(midix::font::kVga8x16Height);
         glyph.scale_x = static_cast<uint8_t>(scale_x);
         glyph.scale_y = static_cast<uint8_t>(scale_y);
-        for (uint32_t r = 0; r < mochi::font::kVga8x16Height; ++r) {
+        for (uint32_t r = 0; r < midix::font::kVga8x16Height; ++r) {
             glyph.rows[r] = rows[r];
         }
         fb_draw_glyph(pixels, glyph);

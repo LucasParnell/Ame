@@ -39,6 +39,13 @@ assigned console with a QEMU monitor `screendump` (`scripts/test/kms-display.py`
 pattern. Proves assignment + MMIO + IRQ + DMA + Linux DRM + `virtio_gpu` with no virtio-gpu register
 logic in Ame.
 
+**Panic screen:** the kernel paints a graphical panic screen — the project logo (an ASCII art asset,
+not a hardcoded blob), a `KERNEL PANIC` headline and a detail line — onto the framebuffer it owns
+before init runs. The logo is rendered through the shared 8x16 console font with integer scaling that
+fits any framebuffer and re-samples the art when scale 1 would overflow. See
+`kernel/panic_screen.cc`, `kernel/assets/panic_art.txt`, `scripts/mk-ascii-header.py`; captured by
+`AME_VERIFY_PANIC=1`.
+
 **Phase G is complete:** non-DMA ring mappings, vendor HVC NOTIFY/ARM, virtual IRQ 48,
 `/dev/dango-channel0`, and 512 ordered Linux ↔ Mochi round trips. See
 `DELIVERY/gpu-appliance-phase-g.md`. Rebuild the GPU kernel for its built-in channel driver.
@@ -59,6 +66,7 @@ AME_VERIFY_ASSIGN=1  scripts/verify.sh    # + assignment       (PCI assignment +
 AME_VERIFY_GPU=1     scripts/verify.sh    # + gpu-appliance    (Linux virtio-gpu appliance)
 AME_VERIFY_CHANNEL=1 scripts/verify.sh    # + dango-channel (ordered ring traffic)
 AME_VERIFY_KMS=1     scripts/verify.sh    # + kms-display      (KMS modeset + screendump)
+AME_VERIFY_PANIC=1   scripts/verify.sh    # + panic-screen     (logo/headline capture)
 ```
 
 All rows currently pass. The GPU/KMS rows need the guest artifacts built (below). Rows are opt-in so
@@ -129,6 +137,10 @@ python3 scripts/test/kms-display.py  --build out/qemu-gpu     # Phase F proof (s
 | Guest DTS / profile / build | `linux-artifacts/dts/dango-linux-gpu.dts.in`, `linux-artifacts/config/dango_gpu_arm64.fragment`, `scripts/linux/build-gpu-linux.sh`, `scripts/linux/build-manifest.sh` |
 | Tests | `scripts/test/{iommu_dma,assignment,gpu-appliance,kms-display}.py`, `tests/*` |
 | Log de-interleaver (guest vs Ame console) | `scripts/test/logfmt.py` |
+| Panic screen renderer | `kernel/panic_screen.cc`, `kernel/include/anko/panic_screen.h` |
+| Panic screen logo (data asset) | `kernel/assets/panic_art.txt` + `scripts/mk-ascii-header.py` |
+| Shared 8x16 console font | `shared/include/midix/font/vga8x16.h` |
+| Panic screen host test / capture | `tests/test_panic_screen.py`, `tests/panic_screen_probe.cc`, `scripts/test/panic-screen.py` |
 
 ## Pitfalls already hit (don't rediscover these)
 
@@ -159,6 +171,11 @@ python3 scripts/test/kms-display.py  --build out/qemu-gpu     # Phase F proof (s
   `id=` so `screendump` targets the assigned device rather than `ramfb`.
 - **macOS:** BSD `readlink`/`sed`/`cp` lack GNU options (`merge_config.sh` needs GNU tools — the build
   script shims them); `/usr/bin/make` is too old.
+- **Host C++ probes must not add `-I lib/include`.** That freestanding `cstdint` shadows the system
+  one and breaks libc++ headers; compile probes with `-I kernel/include -I shared/include` only.
+- **To capture the panic screen** build with `-DANKO_PANIC_SCREEN_DEMO=ON` (dev only): the kernel
+  panics right after the framebuffer is bound, before any userland can repaint, and
+  `scripts/test/panic-screen.py` captures it via the QEMU monitor.
 
 ## Conventions / quality bar
 

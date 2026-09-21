@@ -65,7 +65,7 @@ def hmp_screendump(sock_path, out_path, device=None, timeout=10.0):
 
 def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, output=None,
         bundle=None, snapshot=True, monitor_socket=None, screendump=None,
-        screendump_device=None, screendump_delay=0.5):
+        screendump_device=None, screendump_delay=0.5, allow_kernel_panic=False):
     build = pathlib.Path(build).resolve()
     output = pathlib.Path(output) if output else pathlib.Path(tempfile.mkdtemp(prefix='ame-boot-'))
     output.mkdir(parents=True, exist_ok=True)
@@ -106,6 +106,11 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
             raise ValueError('disk boot requires --firmware and --disk')
         args += ['-bios', str(pathlib.Path(firmware).resolve())]
     markers = markers or ['system ready']
+    failures = ['spawn failed', 'init: manifest failed', 'TEST FAILED', 'gpu probe FAILED',
+                'kms test FAILED', 'channel test FAILED', 'channel guest probe FAILED',
+                'channel native probe FAILED', 'invalid or incompatible BootInfo']
+    if not allow_kernel_panic:
+        failures.append('KERNEL PANIC')
     success = False
     reason = 'timeout'
     screen_ok = None
@@ -122,7 +127,7 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
                 # Ame's own log entries can split a guest line; match markers on
                 # the raw stream (Ame markers) plus the de-interleaved guest view.
                 logs = logfmt.marker_stream(raw)
-                if any(s in logs for s in ['KERNEL PANIC', 'spawn failed', 'init: manifest failed', 'TEST FAILED', 'gpu probe FAILED', 'kms test FAILED', 'channel test FAILED', 'channel guest probe FAILED', 'channel native probe FAILED', 'invalid or incompatible BootInfo']):
+                if any(s in logs for s in failures):
                     reason = 'guest failure'; break
                 if all(s in logs for s in markers):
                     success = True; reason = 'ready'
@@ -158,6 +163,8 @@ def main():
     parser.add_argument('--firmware')
     parser.add_argument('--output')
     parser.add_argument('--marker', action='append', dest='markers')
+    parser.add_argument('--allow-kernel-panic', action='store_true',
+                        help='a kernel panic is the expected outcome (panic-screen capture)')
     parser.add_argument('--monitor-socket',
                         help='attach a HMP monitor on this unix socket (enables screendump)')
     parser.add_argument('--screendump', help='capture the display to this PPM once markers match')

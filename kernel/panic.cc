@@ -4,6 +4,7 @@
 // panic()/panicf() calls.  Forces UART output regardless of ring state.
 
 #include "anko/panic.h"
+#include "anko/panic_screen.h"
 #include "anko/log.h"
 #include "anko/types.h"
 #include "anko/arm64_esr.h"
@@ -52,13 +53,15 @@ static void walk_frames(u64 fp) {
 }
 
 // ---------------------------------------------------------------------------
-// Shared epilogue: walk frames then halt forever.
+// Shared epilogue: walk frames, paint the panic screen, then halt forever.
 // ---------------------------------------------------------------------------
 
-[[noreturn]] static void do_halt(u64 fp) {
+[[noreturn]] static void do_halt(u64 fp, const char* detail) {
     walk_frames(fp);
     anko::log::write(anko::log::Level::Fatal, "panic",
                      "--- KERNEL PANIC: system halted ---");
+    // Visible even when the serial console is not attached.
+    anko::panic_screen::show("KERNEL PANIC", detail);
     for (;;) asm volatile("wfe" ::: "memory");
 }
 
@@ -115,7 +118,7 @@ extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* fram
     anko::log::writef(anko::log::Level::Fatal, "panic",
                       "panic: %s", ec_name(ec));
     dump_frame(frame, esr, far);
-    do_halt(frame->x[29]); // walk from saved FP of the trapped context
+    do_halt(frame->x[29], ec_name(ec)); // walk from saved FP of the trapped context
 }
 
 // ---------------------------------------------------------------------------
@@ -126,15 +129,20 @@ extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* fram
     anko::log::writef(anko::log::Level::Fatal, "panic", "\npanic: %s", msg);
     u64 fp = 0;
     asm volatile("mov %0, x29" : "=r"(fp));
-    do_halt(fp);
+    do_halt(fp, msg);
 }
 
 [[noreturn]] void panicf(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
+    va_list ap_screen;
+    va_copy(ap_screen, ap);
     anko::log::vrawf(fmt, ap);
+    char detail[160];
+    anko::log::vformat_to(detail, sizeof(detail), fmt, ap_screen);
+    va_end(ap_screen);
     va_end(ap);
     u64 fp = 0;
     asm volatile("mov %0, x29" : "=r"(fp));
-    do_halt(fp);
+    do_halt(fp, detail);
 }

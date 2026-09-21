@@ -15,6 +15,7 @@
 #include "anko/ipc.h"
 #include "anko/log.h"
 #include "anko/panic.h"
+#include "anko/panic_screen.h"
 #include "midix/abi/boot.h"
 #include "libk/printf.h"
 #include "libk/string.h"
@@ -170,6 +171,9 @@ void issue_boot_caps(Process& init_proc,
         } else {
             ANKO_LOG_WARN("kernel/init", "T210 fb_range alloc failed");
         }
+        // Give the panic path a screen to paint before init owns the framebuffer.
+        anko::panic_screen::bind(reinterpret_cast<volatile u32*>(g_hw.t210_dc_fb_phys),
+                                 g_hw.t210_dc_fb_width, g_hw.t210_dc_fb_height);
     } else if (g_hw.has_fwcfg) {
         // QEMU ramfb path.
         constexpr u32 kFbWidth  = 1024;
@@ -195,10 +199,20 @@ void issue_boot_caps(Process& init_proc,
                 grant("fb.memory", CAP_MMIO, fb_range,
                            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
             }
+            // Give the panic path a screen to paint before init owns the framebuffer.
+            anko::panic_screen::bind(reinterpret_cast<volatile u32*>(fb_phys),
+                                     kFbWidth, kFbHeight);
         } else {
             ANKO_LOG_WARN("kernel/init", "framebuffer RAM alloc failed");
         }
     }
+
+#ifdef ANKO_PANIC_SCREEN_DEMO
+    // Dev-only capture hook: raise a real panic once the framebuffer exists so
+    // scripts/test/panic-screen.py can assert the whole panic-screen path end to
+    // end (no userland has run yet, so nothing repaints over it).
+    panic("panic screen demo (ANKO_PANIC_SCREEN_DEMO)");
+#endif
 
     // 12..14) xHCI host controller.  Two paths:
     //   T210: T210 XUSB at 0x70090000 (xHCI-compatible, FALCON pre-loaded).

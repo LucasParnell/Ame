@@ -452,6 +452,11 @@ void rawf(const char* fmt, ...) {
     va_end(ap);
 }
 
+void vformat_to(char* out, usize cap, const char* fmt, va_list ap) {
+    bool truncated = false;
+    (void)vformat(out, cap, fmt, ap, &truncated);
+}
+
 u64 dropped_count() {
     u64 total = 0;
     for (u32 i = 0; i < kMaxCpus; ++i) {

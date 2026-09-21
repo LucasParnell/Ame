@@ -34,6 +34,11 @@ void raw(const char* msg);
 void rawf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void vrawf(const char* fmt, va_list ap);
 
+// Format into a caller-supplied buffer (NUL-terminated, always bounded). Used by
+// the panic screen to render a formatted detail line without going through the
+// log ring.
+void vformat_to(char* out, usize cap, const char* fmt, va_list ap);
+
 u64 dropped_count();
 u64 truncated_count();
 

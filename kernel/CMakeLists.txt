@@ -19,6 +19,7 @@ set(ANKO_SOURCES
     ${CMAKE_SOURCE_DIR}/boards/${ANKO_BOARD}/board_fallback.cc
     log/log.cc
     panic.cc
+    panic_screen.cc
     smp.cc
     kernel_main.cc
 
@@ -91,6 +92,20 @@ set(ANKO_SOURCES
 
 add_executable(anko ${ANKO_SOURCES})
 
+# The panic-screen logo is a data asset, never hand-copied into a source file:
+# scripts/mk-ascii-header.py turns kernel/assets/panic_art.txt into a header.
+set(PANIC_ART_SRC ${CMAKE_SOURCE_DIR}/kernel/assets/panic_art.txt)
+set(PANIC_ART_HDR ${CMAKE_BINARY_DIR}/generated/panic_art.h)
+add_custom_command(OUTPUT ${PANIC_ART_HDR}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/mk-ascii-header.py
+            ${PANIC_ART_SRC} ${PANIC_ART_HDR} anko::art kPanicArt
+    DEPENDS ${PANIC_ART_SRC} ${CMAKE_SOURCE_DIR}/scripts/mk-ascii-header.py
+    COMMENT "Generating panic_art.h from kernel/assets/panic_art.txt"
+    VERBATIM)
+add_custom_target(panic_art_header DEPENDS ${PANIC_ART_HDR})
+add_dependencies(anko panic_art_header)
+target_sources(anko PRIVATE ${PANIC_ART_HDR})
+
 target_include_directories(anko PRIVATE
     include                            # anko/*.h
     ${CMAKE_SOURCE_DIR}/shared/include  # midix/abi/*.h
@@ -111,6 +126,7 @@ target_compile_options(anko PRIVATE
 
 target_compile_definitions(anko PRIVATE
     $<$<BOOL:${ANKO_BUILD_DEV}>:ANKO_BUILD_DEV=1>
+    $<$<BOOL:${ANKO_PANIC_SCREEN_DEMO}>:ANKO_PANIC_SCREEN_DEMO=1>
     ANKO_IMAGE_TEXT_OFFSET=${ANKO_IMAGE_TEXT_OFFSET}
 )
 

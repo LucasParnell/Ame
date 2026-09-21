@@ -558,11 +558,36 @@ void abort_attach(VmDeviceAssignment* a) {
 
 } // namespace
 
+// Direct -kernel boot has no firmware, so the assigned function's BARs read as 0
+// and must be programmed from the PCIe MMIO window before anything can map them
+// (Phase E.3).  This is the host-side BAR assignment the ECAM model then reports
+// to the guest.
+static SysError step_assign_bars(VmDeviceAssignment* a) {
+    if (!g_hw.has_pci_mmio || g_hw.pci_mmio_size == 0) {
+        return E_NOTFOUND;
+    }
+    u64 cursor = 0;
+    for (u32 i = 0; i < a->fn_count; ++i) {
+        if (!pci::assign_bars(&a->fns[i].info, g_hw.pci_mmio_base, g_hw.pci_mmio_size, &cursor)) {
+            return E_INVALID;
+        }
+    }
+    ANKO_LOGF_INFO("kernel/vm", "assign: bars window=0x%lx size=0x%lx bar1=0x%lx bar4=0x%lx",
+                   static_cast<unsigned long>(g_hw.pci_mmio_base),
+                   static_cast<unsigned long>(g_hw.pci_mmio_size),
+                   static_cast<unsigned long>(a->fns[0].info.bars[1].base),
+                   static_cast<unsigned long>(a->fns[0].info.bars[4].base));
+    return E_OK;
+}
+
 SysError device_attach(VmDeviceAssignment* a, const DeviceAssignSpec& spec) {
     if (!a) {
         return E_INVALID;
     }
     SysError rc = step_claim(a, spec);
+    if (rc == E_OK) {
+        rc = step_assign_bars(a);
+    }
     if (rc == E_OK) {
         rc = step_contain(a);
     }
@@ -787,7 +812,12 @@ SysError device_map_bar_internal(VmDeviceAssignment* a, u32 bar_index, u32 bar_o
     if (!a || !a->owner_vm || bar_index >= pci::kMaxBars || a->fn_count == 0) {
         return E_INVALID;
     }
-    if (!a->active || a->state != VM_DEV_ACTIVE || a->ecam_size) return E_BUSY;
+    if (!a->active || a->state != VM_DEV_ACTIVE || a->ecam_size) {
+        ANKO_LOGF_INFO("kernel/vm", "assign: map_bar busy active=%u state=%u ecam=0x%lx",
+                       a->active ? 1u : 0u, static_cast<unsigned>(a->state),
+                       static_cast<unsigned long>(a->ecam_size));
+        return E_BUSY;
+    }
     if (size == 0 || (size & (PAGE_SIZE - 1)) != 0 || (guest_ipa & (PAGE_SIZE - 1)) != 0) {
         return E_INVALID;
     }

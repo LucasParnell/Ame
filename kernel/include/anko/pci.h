@@ -142,6 +142,15 @@ bool find_function(PhysAddr ecam_base, u8 bus, u8 device, u8 function, PciFuncti
 // publish the appliance's assignable function as capability authority (§6.1).
 bool find_by_id(PhysAddr ecam_base, u16 vendor_id, u16 device_id, PciFunctionInfo* out);
 
+// Program the function's implemented MMIO BARs from the host PCIe MMIO window.
+// Direct -kernel boot has no firmware, so BARs read as 0; each BAR's address
+// register is written while preserving its read-only low type bits, and the
+// cached `info` bases are updated.  `cursor_inout` is the next free window
+// offset, shared across the functions of one assignment.  Returns false when the
+// window cannot satisfy a BAR.
+bool assign_bars(PciFunctionInfo* info, PhysAddr window_base, u64 window_size,
+                 u64* cursor_inout);
+
 // Read the host PCI command register for a BDF.
 u16 read_command(u8 bus, u8 device, u8 function);
 // Read a single config byte / the 16-bit status+command word for a BDF.

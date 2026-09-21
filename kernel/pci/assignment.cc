@@ -41,6 +41,14 @@ u32 cfg_read(PhysAddr base, u8 bus, u8 dev, u8 fn, u32 off) {
     return *ecam_reg(base, bus, dev, fn, off);
 }
 
+void cfg_write(PhysAddr base, u8 bus, u8 dev, u8 fn, u32 off, u32 val) {
+    if (base == 0) {
+        return;
+    }
+    *ecam_reg(base, bus, dev, fn, off) = val;
+    asm volatile("dsb sy" ::: "memory");
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -118,6 +126,42 @@ bool find_function(PhysAddr ecam_base, u8 bus, u8 device, u8 function, PciFuncti
         }
     }
     return false;
+}
+
+bool assign_bars(PciFunctionInfo* info, PhysAddr window_base, u64 window_size,
+                 u64* cursor_inout) {
+    if (!info || !cursor_inout || window_size == 0 || g_hw.ecam_base == 0) {
+        return false;
+    }
+    u64 offset = *cursor_inout;
+    for (u32 i = 0; i < kMaxBars; ++i) {
+        PciBar& bar = info->bars[i];
+        if (bar.size == 0) {
+            continue;
+        }
+        if (bar.type != BarType::Mmio32 && bar.type != BarType::Mmio64) {
+            continue;
+        }
+        offset = (offset + bar.size - 1) & ~(bar.size - 1);
+        if (offset > window_size || bar.size > window_size - offset) {
+            return false;
+        }
+        const PhysAddr base = window_base + offset;
+        const u32 reg = kRegBar0 + 4u * i;
+        // Only the address bits are writable; preserve the read-only type bits.
+        const u32 low = cfg_read(g_hw.ecam_base, info->bus, info->device, info->function, reg);
+        cfg_write(g_hw.ecam_base, info->bus, info->device, info->function, reg,
+                  (static_cast<u32>(base) & ~0xFu) | (low & 0xFu));
+        if (bar.type == BarType::Mmio64) {
+            cfg_write(g_hw.ecam_base, info->bus, info->device, info->function, reg + 4,
+                      static_cast<u32>(base >> 32));
+            ++i; // the upper half occupies the next BAR slot
+        }
+        bar.base = base;
+        offset += bar.size;
+    }
+    *cursor_inout = offset;
+    return true;
 }
 
 bool find_by_id(PhysAddr ecam_base, u16 vendor_id, u16 device_id, PciFunctionInfo* out) {

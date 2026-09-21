@@ -74,11 +74,15 @@ constexpr u8 kPCIe = 7;
 constexpr u8 kSimpleFb = 8;
 constexpr u8 kSMMU = 9;
 
+constexpr u32 kRangesMax = 128; // PCI ranges: 3 windows * 7 cells * 4 B
+
 struct NodeSlot {
     u8 kind;
     bool status_ok; // false if status property was "disabled"
     alignas(4) u8 reg[kRegMax];
     u32 reg_len;
+    alignas(4) u8 ranges[kRangesMax]; // PCIe MMIO window description
+    u32 ranges_len;
     u32 fb_width;  // kSimpleFb: width in pixels
     u32 fb_height; // kSimpleFb: height in lines
     char path[256];
@@ -101,6 +105,7 @@ static bool probe_begin(void* v, const char* name, u32 depth) {
     s.kind = starts_with(name, "memory") ? kMemory : kNone;
     s.status_ok = true;
     s.reg_len = 0;
+    s.ranges_len = 0;
     s.fb_width = 0;
     s.fb_height = 0;
     u32 pos = 0;
@@ -199,6 +204,26 @@ static void probe_end(void* v, u32 depth) {
             hw.has_pcie = true;
             hw.ecam_base = read_phys_be(s.reg, s.reg_len);
         }
+        // The "ranges" property gives the PCIe MMIO window (child_addr[3],
+        // parent_addr[2], size[2] per entry, big-endian).  Take the first
+        // non-config window: it is where the attach path allocates BARs.
+        for (u32 i = 0; i + 7 <= s.ranges_len / 4; i += 7) {
+            const u8* e = s.ranges + 4 * i;
+            const u32 space = libk::be32(e);
+            const u32 kind = (space >> 24) & 0x3u; // 1 = IO, 2 = MMIO32, 3 = MMIO64
+            if (kind != 2 && kind != 3) {
+                continue;
+            }
+            const u64 base = (static_cast<u64>(libk::be32(e + 12)) << 32) | libk::be32(e + 16);
+            const u64 size = (static_cast<u64>(libk::be32(e + 20)) << 32) | libk::be32(e + 24);
+            if (size == 0) {
+                continue;
+            }
+            hw.has_pci_mmio = true;
+            hw.pci_mmio_base = base;
+            hw.pci_mmio_size = size;
+            break;
+        }
         break;
     case kSimpleFb:
         // DTB simple-framebuffer: reg=[base size], width, height properties.
@@ -255,6 +280,10 @@ static void probe_prop(void* v, const char* name, const u8* data, u32 len, u32 d
         u32 copy = len < kRegMax ? len : kRegMax;
         libk::memcpy(s.reg, data, copy);
         s.reg_len = copy;
+    } else if (libk::strcmp(name, "ranges") == 0) {
+        u32 copy = len < kRangesMax ? len : kRangesMax;
+        libk::memcpy(s.ranges, data, copy);
+        s.ranges_len = copy;
     } else if (libk::strcmp(name, "width") == 0 && len >= 4) {
         s.fb_width = libk::be32(data);
     } else if (libk::strcmp(name, "height") == 0 && len >= 4) {

@@ -782,11 +782,14 @@ extern "C" [[noreturn]] void _start() {
         const CapHandle assign = as_cap(sys_vm_assign_device(vm, gpu_function, 0));
         if (assign == kNullCap) fail("gpu assign failed\n");
 
-        // BAR1 (mmio32, 4 KiB) and BAR4 (mmio64, 16 KiB) inside the DTB MMIO
-        // window at 0x4000_0000; the ECAM reports these IPAs as the BAR bases.
+        // Map BAR4 (the virtio modern common/notify/ISR window) into the DTB MMIO
+        // window at an IPA aligned to the BAR size. BAR1 is deliberately NOT
+        // mapped: it carries the MSI-X table/PBA, which the assignment layer
+        // refuses to expose (the appliance uses INTx, not MSI-X).
         const uint32_t bar_rights = dango::RIGHT_READ | dango::RIGHT_WRITE;
-        if (sys_vm_assign_map_mmio(assign, 1, 0x4000'0000ull, 0x1000, bar_rights, 0) != 0 ||
-            sys_vm_assign_map_mmio(assign, 4, 0x4000'1000ull, 0x4000, bar_rights, 0) != 0) {
+        const int64_t bar4_rc = sys_vm_assign_map_mmio(assign, 4, 0x5000'0000ull, 0x4000, bar_rights, 0);
+        if (bar4_rc != 0) {
+            dango_counter("gpu.bar4_rc", static_cast<uint64_t>(bar4_rc));
             fail("gpu bar map failed\n");
         }
         // PCI INTx -> guest SPI 12 (dango-linux-gpu.dts.in interrupt-map).

@@ -19,7 +19,10 @@ constexpr u32 kMaxVms = 4;
 constexpr u32 kMaxVcpusPerVm = 4;
 constexpr u32 kMaxVmMemoryObjects = 32;
 constexpr u32 kMaxVmChannels = 16;
-constexpr u32 kMaxStage2Mappings = 32768;
+// Guest RAM is mapped page-granular, so the table must hold it plus headroom for
+// device/BAR mappings the assignment layer adds (Phase E).  A 128 MiB guest is
+// 32768 pages on its own.
+constexpr u32 kMaxStage2Mappings = 40960;
 constexpr u32 kVgicMaxIrqs = 64;
 constexpr u32 kVgicBitmapWords = kVgicMaxIrqs / 32;
 

@@ -33,6 +33,13 @@ struct HwInfo {
     PhysAddr virtio_base;
     PhysAddr ecam_base;
 
+    // PCIe MMIO window (pci-host-ecam-generic "ranges").  Direct -kernel boot has
+    // no firmware, so BARs read as 0 and the attach path allocates them here
+    // (Phase E).
+    bool     has_pci_mmio = false;
+    PhysAddr pci_mmio_base = 0;
+    u64      pci_mmio_size = 0;
+
     // T210 display controller (TegraDC0).  Populated by probe() when
     // console_kind == Tegra16550 by reading DC0 window-A registers directly.
     bool     has_t210_dc;

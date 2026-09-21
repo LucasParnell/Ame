@@ -18,9 +18,15 @@ halts waiting for a machine reset instead of spinning silently.
 | Capability denials | `kernel/cap/cap_table.cc` | `cap::denial_count()` counts rejected capability lookups (invalid/revoked handle, type mismatch) for the report. |
 | Build fix | `userland/CMakeLists.txt` | Content-hash stamp for the staged Linux artifacts (see below). |
 
-The QR carries: build id, core, reason, ESR/FAR/ELR/SPSR/SP/FP/LR, the hardware and PCI summary,
-the capability-denial count, all 31 general registers, and the backtrace. The serial dump carries the
-same fields in a wider, human-readable form plus the frame-by-frame call trace.
+The QR carries the identifying subset: build id, core, reason, ESR/FAR/ELR/SPSR/SP/FP/LR, x0-x7, an
+8-frame trace, the hardware/PCI summary, the capability-denial count. The serial dump carries all of
+that **plus the complete x0-x30 register file and the full 16-frame trace** — a code large enough to
+hold every register at a scannable module size would dominate the screen, which the layout avoids.
+
+Layout is 1:1 on purpose: the logo is drawn on a grid whose pixel footprint is exactly square
+(`art_grid()`; an 8x16 glyph cell means two columns equal one row), and the QR panel is square by
+construction. On the 1024x768 ramfb the QR is version 20 (97 modules) in a 291x291 px panel — down
+from version 31 / 411 px before the payload was compacted — leaving the logo a 688x688 square.
 
 ## Verification
 

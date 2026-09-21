@@ -21,7 +21,7 @@ no build step required.
 from pathlib import Path
 import os
 import re
-import sys
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 _GUEST_HEADER = ROOT / 'shared/include/midix/abi/dango_channel_guest.h'
@@ -198,9 +198,23 @@ GPU_RENDER = os.environ.get('AME_GPU_RENDER', GPU_RENDER_SOFTWARE)
 if GPU_RENDER not in (GPU_RENDER_SOFTWARE, GPU_RENDER_VIRTIO_GL):
     raise SystemExit(f'AME_GPU_RENDER must be {GPU_RENDER_SOFTWARE!r} or {GPU_RENDER_VIRTIO_GL!r}, '
                      f'got {GPU_RENDER!r}')
-if GPU_RENDER == GPU_RENDER_VIRTIO_GL and sys.platform != 'linux':
-    raise SystemExit('AME_GPU_RENDER=virtio-gl needs a Linux host with virglrenderer and a DRM render '
-                     'node; macOS cannot instantiate virtio-gpu-gl (use the default software renderer)')
+if GPU_RENDER == GPU_RENDER_VIRTIO_GL:
+    # Probe the actual capability instead of guessing from the platform: the
+    # device model is only compiled into a QEMU built with virglrenderer/OpenGL,
+    # and `-device help` is the authoritative answer. (Homebrew's macOS build
+    # does not ship it at all, so the platform check alone was too coarse.)
+    _qemu = os.environ.get('AME_QEMU', 'qemu-system-aarch64')
+    try:
+        _help = subprocess.run([_qemu, '-device', 'help'], capture_output=True, text=True,
+                               timeout=30, check=False).stdout
+    except OSError as _error:
+        raise SystemExit(f'AME_GPU_RENDER=virtio-gl: cannot run {_qemu!r} to check for the '
+                         f'virtio-gpu-gl device ({_error})') from None
+    if 'virtio-gpu-gl-pci' not in _help:
+        raise SystemExit(
+            f'AME_GPU_RENDER=virtio-gl: {_qemu} has no virtio-gpu-gl-pci device model (it is '
+            'compiled only into a QEMU built with virglrenderer/OpenGL, and needs a host GL/DRM '
+            'render node -- unavailable on macOS). Use the default software renderer.')
 
 _GPU_QDEV = 'virtio-gpu-gl-pci' if GPU_RENDER == GPU_RENDER_VIRTIO_GL else 'virtio-gpu-pci'
 # venus=on exports a Vulkan device to the guest; only meaningful for -gl.

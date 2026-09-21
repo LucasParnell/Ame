@@ -15,6 +15,8 @@
 #   AME_VERIFY_BUILD=out/qemu-dev scripts/verify.sh    # reuse an existing tree
 #   AME_VERIFY_CPUS="2" scripts/verify.sh              # single-CPU matrix
 #   AME_VERIFY_IOMMU=1 scripts/verify.sh               # + Phase C SMMUv3 row
+#   AME_VERIFY_GPU=1 scripts/verify.sh                 # + Phase E Linux virtio-gpu
+#   AME_VERIFY_KMS=1 scripts/verify.sh                 # + Phase F KMS display row
 #
 # Exit status is 0 only when every check passes.
 set -euo pipefail
@@ -126,7 +128,8 @@ do_assign() {
 
 # Linux GPU artifacts are built separately (a Linux container on macOS).
 # Keep this build separate so the default hello/no-payload gate stays intact.
-do_gpu() {
+# Both GPU rows (Phase E and Phase F) share the same appliance tree.
+build_gpu_tree() {
     local gpu_build="${AME_VERIFY_GPU_BUILD:-${ROOT}/out/qemu-gpu}"
     local artifacts="${AME_VERIFY_GPU_ARTIFACTS:-${ROOT}/build/dango-linux-gpu}"
     local args=(-S . -B "$gpu_build" -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -136,8 +139,20 @@ do_gpu() {
     [[ -f "$gpu_build/CMakeCache.txt" ]] || args+=(-DCMAKE_TOOLCHAIN_FILE=scripts/build/toolchain-aarch64.cmake)
     cmake "${args[@]}" >/dev/null
     cmake --build "$gpu_build" --target anko mochi_system >/dev/null
-    python3 scripts/test/gpu-appliance.py --build "$gpu_build" \
+    printf '%s\n' "$gpu_build"
+}
+
+do_gpu() {
+    python3 scripts/test/gpu-appliance.py --build "$(build_gpu_tree)" \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> GPU {} {}".format(d["reason"], d["counters"])); sys.exit(0 if d["success"] else 1)'
+}
+
+# Phase F: a standalone Linux KMS modeset asserted from a host screendump of the
+# assigned virtio-gpu console (no Midix GPU protocol involved).  Opt-in like the
+# Phase E row; the default gate is unchanged unless AME_VERIFY_KMS=1 is set.
+do_kms() {
+    python3 scripts/test/kms-display.py --build "$(build_gpu_tree)" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> KMS {} display={} {}".format(d["reason"], d.get("pattern", {}).get("size"), d["counters"])); sys.exit(0 if d["success"] else 1)'
 }
 
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
@@ -165,6 +180,11 @@ fi
 
 if [[ "${AME_VERIFY_GPU:-0}" == "1" ]]; then
     CHECKS+=("gpu-appliance:do_gpu")
+fi
+
+# Opt-in Phase F row.
+if [[ "${AME_VERIFY_KMS:-0}" == "1" ]]; then
+    CHECKS+=("kms-display:do_kms")
 fi
 
 record_toolchain

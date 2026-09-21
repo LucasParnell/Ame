@@ -158,10 +158,23 @@ unchanged).  Guards added for the bugs found: BAR size power-of-two assert, BAR-
 `static_assert`, and a stage-2 headroom check after RAM mapping (`kMaxStage2Mappings` raised to 40960 =
 128 MiB of guest RAM plus device headroom).
 
-**Next blocker:** `gpu irq route failed`.  `device_route_irq` now passes cap/vCPU checks and reaches
-`device_irq_install`; the install step is what fails (the host INTx line created in `boot_caps` is not yet
-wired to a live GIC SPI / vGIC route).  Remaining E work: make the INTx line real (SPI enable + bind), then
-the Linux-side `virtio_gpu` / `/dev/dri/card0` assertions for Phase E.5.
+**Milestone reached: the Linux GPU appliance boots under Ame.**  Fixing the INTx derivation (the host specifier is
+`<type number flags>` and for `arm,gic` the SPI INTID is `32 + number`, so the appliance slot is
+`32 + 3 + (device % 4)` = 38) made the route install and completed the full secure-attach:
+
+```
+kernel/init: gpu: function bus=0 dev=3 fn=0 vendor=1af4 device=1050 group=3 intx=38
+kernel/vm:   assign: bar4 mapped ipa=0x50000000 host=0x10004000 size=0x4000
+dango.manager: gpu appliance ready
+Linux version 6.12.0 ... Machine model: midix,dango-linux-gpu
+dango-agent: started / guest agent started / guest uart hello
+dango.manager: linux guest responded
+```
+
+**Remaining for Phase E:** (1) let the guest finish booting so the Linux PCI scan binds `virtio_gpu` and
+creates `/dev/dri/card0` — the current capture window ends during early boot; (2) the manager keeps running the
+vCPU, so `init` reports a service readiness timeout — it should signal ready once the appliance is up (or the
+fixture should treat the running appliance as ready).  Then the explicit E.5 assertions.
 
 **Acceptance:** Linux binds `virtio_gpu`, creates a DRM primary device, no unexpected IOMMU faults, no
 global-bypass mapping.

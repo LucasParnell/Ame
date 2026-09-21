@@ -15,14 +15,22 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import logfmt  # noqa: E402
 
-# The palette kernel/panic_screen.cc paints with (XRGB8888 -> RGB).
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tests'))
+import qr_decode  # noqa: E402
+
+# The palette kernel/panic_screen.cc paints with (XRGB8888 -> RGB).",
 BG = (0, 6, 14)
 HEADLINE = (255, 107, 107)
+REASON = (255, 217, 160)
+CAPTION = (200, 214, 232)
 ART_DIM = (143, 166, 196)
 ART_BRIGHT = (234, 241, 255)
-TOLERANCE = 24
+QR_DARK = (242, 246, 255)
+QR_LIGHT = (10, 18, 32)
 
 
 def read_ppm(path):
@@ -48,7 +56,55 @@ def read_ppm(path):
 
 
 def near(px, color):
-    return all(abs(a - b) <= TOLERANCE for a, b in zip(px, color))
+    # Exact match: the renderer writes palette colours directly, and two palette
+    # entries are close enough that a tolerance would conflate them.
+    return px == color
+
+
+def decode_qr_from_frame(pixels, width, height, tables):
+    """Sample the on-screen QR out of the captured frame and decode it."""
+    xs, ys = [], []
+    for y in range(height):
+        for x in range(width):
+            o = (y * width + x) * 3
+            if (pixels[o], pixels[o + 1], pixels[o + 2]) == QR_DARK:
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return None
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    span = x1 - x0 + 1
+    for size in range(21, 178, 4):
+        if span % size:
+            continue
+        module = span // size
+        if module < 1:
+            continue
+        rows = []
+        ok = True
+        for my in range(size):
+            row = []
+            for mx in range(size):
+                o = ((y0 + my * module + module // 2) * width
+                     + (x0 + mx * module + module // 2)) * 3
+                px = (pixels[o], pixels[o + 1], pixels[o + 2])
+                if px == QR_DARK:
+                    row.append('1')
+                elif px == QR_LIGHT:
+                    row.append('0')
+                else:
+                    ok = False
+                    break
+            if not ok:
+                break
+            rows.append(''.join(row))
+        if not ok:
+            continue
+        try:
+            return qr_decode.decode(rows, tables)
+        except AssertionError:
+            continue
+    return None
 
 
 def analyze(path):
@@ -56,18 +112,25 @@ def analyze(path):
     total = width * height
     if len(pixels) < total * 3:
         return {'error': 'short pixel buffer'}
-    counts = {'bg': 0, 'headline': 0, 'art_dim': 0, 'art_bright': 0}
+    counts = {'bg': 0, 'qr_dark': 0, 'qr_light': 0, 'headline': 0, 'reason': 0,
+              'caption': 0, 'art': 0}
     for idx in range(total):
         o = idx * 3
         px = (pixels[o], pixels[o + 1], pixels[o + 2])
         if near(px, BG):
             counts['bg'] += 1
+        elif near(px, QR_DARK):
+            counts['qr_dark'] += 1
+        elif near(px, QR_LIGHT):
+            counts['qr_light'] += 1
         elif near(px, HEADLINE):
             counts['headline'] += 1
-        elif near(px, ART_BRIGHT):
-            counts['art_bright'] += 1
-        elif near(px, ART_DIM):
-            counts['art_dim'] += 1
+        elif near(px, REASON):
+            counts['reason'] += 1
+        elif near(px, CAPTION):
+            counts['caption'] += 1
+        elif near(px, ART_DIM) or near(px, ART_BRIGHT):
+            counts['art'] += 1
     counts['size'] = [width, height]
     counts['total'] = total
     counts['painted'] = total - counts['bg']
@@ -102,7 +165,7 @@ def main():
 
     command = [sys.executable, str(ROOT / 'scripts/test/boot.py'), '--build', str(build),
                '--cpus', str(args.cpus), '--timeout', str(args.timeout), '--output', str(work),
-               '--marker', 'KERNEL PANIC: system halted', '--allow-kernel-panic',
+               '--marker', 'system halted', '--allow-kernel-panic',
                '--monitor-socket', str(monitor), '--screendump', str(shot)]
     result = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout + 90)
     try:
@@ -112,7 +175,8 @@ def main():
     logs = ''.join((work / name).read_text(errors='replace') for name in ('host.log', 'guest.log')
                    if (work / name).exists())
     checks = {
-        'panic_raised': 'panic: panic screen demo' in logs and 'KERNEL PANIC: system halted' in logs,
+        'panic_raised': 'panic screen demo' in logs and 'system halted' in logs,
+        'serial_report': 'esr_el1=' in logs and 'call trace (' in logs and 'capability denials=' in logs,
         'boot_ready': result.returncode == 0 and bool(boot.get('success', False)),
         'screendump': boot.get('screendump_ok') is True and shot.exists(),
     }
@@ -120,15 +184,37 @@ def main():
     if checks['screendump']:
         try:
             counts = analyze(shot)
+            checks['qr_code'] = counts.get('qr_dark', 0) > 200
             checks['headline'] = counts.get('headline', 0) > 200
-            checks['logo_art'] = counts.get('art_dim', 0) + counts.get('art_bright', 0) > 5000
+            checks['reason'] = counts.get('reason', 0) > 50
+            checks['key_data'] = counts.get('caption', 0) > 1000
+            checks['logo_art'] = counts.get('art', 0) > 5000
             checks['full_frame'] = counts.get('size') == [1024, 768]
             checks['background'] = counts.get('painted', 0) > 0
+            # The strongest check: the QR on screen really decodes, and carries
+            # the report text.
+            width, height, pixels = read_ppm(shot)
+            tables = qr_decode.load_tables(ROOT / 'kernel/assets/qr_tables.json')
+            decoded = decode_qr_from_frame(pixels, width, height, tables)
+            if decoded is None:
+                checks['qr_decodes'] = False
+            else:
+                text = decoded['payload'].decode('ascii', 'replace')
+                counts['qr_version'] = decoded['version']
+                counts['qr_level'] = decoded['level']
+                counts['qr_text_lines'] = text.count('\n')
+                checks['qr_decodes'] = (text.startswith('KERNEL PANIC')
+                                        and 'reason=' in text and 'x0=' in text
+                                        and 'bt_n=' in text)
         except (OSError, ValueError) as error:
             counts = {'error': str(error)}
-            checks.update(headline=False, logo_art=False, full_frame=False, background=False)
+            checks.update(qr_code=False, headline=False, reason=False, key_data=False,
+                          logo_art=False, full_frame=False, background=False,
+                          qr_decodes=False)
     else:
-        checks.update(headline=False, logo_art=False, full_frame=False, background=False)
+        checks.update(qr_code=False, headline=False, reason=False, key_data=False,
+                      logo_art=False, full_frame=False, background=False,
+                      qr_decodes=False)
     success = all(checks.values())
     summary = dict(success=success, reason=boot.get('reason'), elapsed=boot.get('elapsed'),
                    logs=str(work), display=str(shot), checks=checks, counts=counts)

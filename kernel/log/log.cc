@@ -457,6 +457,11 @@ void vformat_to(char* out, usize cap, const char* fmt, va_list ap) {
     (void)vformat(out, cap, fmt, ap, &truncated);
 }
 
+void panic_dump(const char* text) {
+    if (!text) return;
+    for (usize i = 0; text[i]; ++i) drivers::uart::putchar(text[i]);
+}
+
 u64 dropped_count() {
     u64 total = 0;
     for (u32 i = 0; i < kMaxCpus; ++i) {

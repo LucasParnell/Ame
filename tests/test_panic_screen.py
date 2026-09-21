@@ -8,16 +8,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PanicScreen(unittest.TestCase):
-    """The panic-screen logo is a build-generated data asset, and the renderer
-    must scale it to fit arbitrary framebuffers without writing out of bounds."""
+    """The panic screen: QR top-left with data under it, smaller logo, and the
+    title/reason left-aligned at the bottom. The logo art and the QR spec tables
+    are build-generated data assets, never hardcoded."""
 
     def _generate(self, work: Path) -> Path:
-        out = work / 'panic_art.h'
+        include = work / 'generated'
+        include.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [sys.executable, str(ROOT / 'scripts/mk-ascii-header.py'),
-             str(ROOT / 'kernel/assets/panic_art.txt'), str(out), 'anko::art', 'kPanicArt'],
+             str(ROOT / 'kernel/assets/panic_art.txt'), str(include / 'panic_art.h'),
+             'anko::art', 'kPanicArt'], check=True, capture_output=True)
+        subprocess.run(
+            [sys.executable, str(ROOT / 'scripts/gen-qr-tables.py'),
+             str(ROOT / 'kernel/assets/qr_tables.json'), str(include / 'qr_tables.h')],
             check=True, capture_output=True)
-        return out
+        return include
 
     def test_art_is_a_generated_asset_not_hardcoded(self):
         art = ROOT / 'kernel/assets/panic_art.txt'
@@ -36,28 +42,27 @@ class PanicScreen(unittest.TestCase):
                              f'{src} embeds the logo instead of using the generated header')
 
         with tempfile.TemporaryDirectory(prefix='ame-panic-art-') as tmp:
-            header = self._generate(Path(tmp))
-            text = header.read_text()
+            include = self._generate(Path(tmp))
+            text = (include / 'panic_art.h').read_text()
             self.assertIn(f'kPanicArtRows = {rows};', text)
             self.assertIn(f'kPanicArtCols = {cols};', text)
 
-    def test_renderer_scales_and_stays_in_bounds(self):
+    def test_layout_scales_and_stays_in_bounds(self):
         with tempfile.TemporaryDirectory(prefix='ame-panic-probe-') as tmp:
             work = Path(tmp)
-            header_dir = work / 'generated'
-            header_dir.mkdir()
-            self._generate(header_dir)
+            include = self._generate(work)
             probe = work / 'panic_screen_probe'
             subprocess.run([
-                'clang++', '-std=c++23', '-DANKO_HOST_TEST', '-O1', '-g',
+                'clang++', '-std=c++23', '-O1', '-g',
                 '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I' + str(ROOT / 'kernel/include'),
                 '-I' + str(ROOT / 'shared/include'),
-                '-I' + str(header_dir),
+                '-I' + str(include),
                 str(ROOT / 'tests/panic_screen_probe.cc'),
                 str(ROOT / 'kernel/panic_screen.cc'),
+                str(ROOT / 'kernel/qr.cc'),
                 '-o', str(probe)], check=True, capture_output=True)
-            result = subprocess.run([str(probe)], capture_output=True, text=True, timeout=120)
+            result = subprocess.run([str(probe)], capture_output=True, text=True, timeout=300)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('panic screen probe passed', result.stdout)
 

@@ -235,6 +235,10 @@ void init();
 CapHandle alloc(CapTable& table, CapType type, void* target, u32 rights);
 Ref lookup(CapTable& table, CapHandle handle, CapType expected_type);
 Ref lookup_any(CapTable& table, CapHandle handle);
+
+// Count of capability operations rejected so far (invalid/revoked handles and
+// type mismatches). Reported by the panic screen; never reset to zero.
+u64 denial_count();
 void revoke(CapTable& table, CapHandle handle);
 void clear(CapTable& table);
 void revoke_target(CapTable& table, void* target);

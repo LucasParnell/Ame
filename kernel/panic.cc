@@ -1,15 +1,35 @@
 // kernel/panic.cc — kernel panic / bugcheck handler.
 //
 // Fires on EL1 synchronous faults (via vec_kernel_sync) and explicit
-// panic()/panicf() calls.  Forces UART output regardless of ring state.
+// panic()/panicf() calls. Builds one report record, dumps the full report to the
+// UART, paints the panic screen (QR code + logo + title), then halts this CPU
+// and waits for a machine reset (Ctrl-Alt-Del / power). The other CPUs keep
+// running: a panic is a stop for the faulting core, not a silent spin.
 
 #include "anko/panic.h"
 #include "anko/panic_screen.h"
+#include "anko/panic_report.h"
+#include "anko/cap.h"
+#include "anko/hw_info.h"
 #include "anko/log.h"
 #include "anko/types.h"
 #include "anko/arm64_esr.h"
 
 #include <cstdarg>
+
+#ifndef ANKO_BUILD_DESCRIBE
+#define ANKO_BUILD_DESCRIBE "unknown"
+#endif
+
+// Static storage: the report, the rendered text and the QR payload must never
+// live on the stack of a faulting thread.
+static anko::panic_report::Report g_report;
+static char g_serial_text[anko::panic_report::kMaxSerialText];
+static char g_qr_payload[anko::panic_report::kMaxQrPayload];
+
+// First CPU to panic publishes the report and paints the screen; any other CPU
+// that panics parks immediately so it cannot clobber the record mid-render.
+static u32 g_panic_owner = 0;
 
 // ---------------------------------------------------------------------------
 // EC decoder
@@ -28,85 +48,90 @@ static const char* ec_name(u32 ec) {
 }
 
 // ---------------------------------------------------------------------------
-// FP chain walk
+// Report capture
 // ---------------------------------------------------------------------------
 
-static void walk_frames(u64 fp) {
-    anko::log::write(anko::log::Level::Fatal, "panic", "Call trace:");
+static void capture_hardware() {
+    g_report.hw.present     = true;
+    g_report.hw.has_pcie    = g_hw.has_pcie;
+    g_report.hw.has_pci_mmio = g_hw.has_pci_mmio;
+    g_report.hw.has_smmu    = g_hw.has_smmu;
+    g_report.hw.virtio_count = g_hw.virtio_count;
+    g_report.hw.pci_mmio_base = g_hw.pci_mmio_base;
+    g_report.hw.pci_mmio_size = g_hw.pci_mmio_size;
+    g_report.hw.ram_base    = g_hw.ram_base;
+    g_report.hw.ram_size    = g_hw.ram_size;
+    g_report.hw.boot_el     = g_hw.boot_el;
+    g_report.cap_denials    = static_cast<u32>(cap::denial_count());
+    g_report.build          = ANKO_BUILD_DESCRIBE;
+}
 
-    constexpr u64 kKernelVaBase = 0xffff000000000000ull;
-
-    for (int i = 0; i < 16; ++i) {
-        if (fp == 0) break;
-        if (fp & 7u) break;
-        if (fp < kKernelVaBase) break;
-
-        // AArch64 frame record: [fp+0] = prev_fp, [fp+8] = lr
-        const u64* record = reinterpret_cast<const u64*>(fp);
-        const u64 lr = record[1];
-
-        anko::log::writef(anko::log::Level::Fatal, "panic",
-                          "  #%d  0x%llx", i, static_cast<unsigned long long>(lr));
-
-        fp = record[0];
-    }
+static void capture_current_registers() {
+    // Snapshot x0..x30 with paired stores so the register file is captured as a
+    // block rather than one hand-picked value at a time.
+    u64 regs[31] = {};
+    asm volatile(
+        "stp x0,  x1,  [%0]\n"
+        "stp x2,  x3,  [%0, #16]\n"
+        "stp x4,  x5,  [%0, #32]\n"
+        "stp x6,  x7,  [%0, #48]\n"
+        "stp x8,  x9,  [%0, #64]\n"
+        "stp x10, x11, [%0, #80]\n"
+        "stp x12, x13, [%0, #96]\n"
+        "stp x14, x15, [%0, #112]\n"
+        "stp x16, x17, [%0, #128]\n"
+        "stp x18, x19, [%0, #144]\n"
+        "stp x20, x21, [%0, #160]\n"
+        "stp x22, x23, [%0, #176]\n"
+        "stp x24, x25, [%0, #192]\n"
+        "stp x26, x27, [%0, #208]\n"
+        "stp x28, x29, [%0, #224]\n"
+        "str x30, [%0, #240]\n"
+        :
+        : "r"(regs)
+        : "memory");
+    u64 sp = 0;
+    asm volatile("mov %0, sp" : "=r"(sp));
+    anko::panic_report::capture_registers(g_report, regs, sp, regs[30], 0, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
-// Shared epilogue: walk frames, paint the panic screen, then halt forever.
+// Shared epilogue: publish the report, paint the screen, halt this CPU.
 // ---------------------------------------------------------------------------
 
-[[noreturn]] static void do_halt(u64 fp, const char* detail) {
-    walk_frames(fp);
+[[noreturn]] static void halt_with(const char* reason, u64 fp) {
+    if (__atomic_exchange_n(&g_panic_owner, 1u, __ATOMIC_ACQ_REL) != 0u) {
+        for (;;) asm volatile("wfi" ::: "memory");
+    }
+    g_report.title  = "KERNEL PANIC";
+    g_report.reason = reason ? reason : "unknown";
+    g_report.core   = 0; // TPIDR_EL1 holds the boot CPU id
+    {
+        u64 core = 0;
+        asm volatile("mrs %0, TPIDR_EL1" : "=r"(core));
+        g_report.core = static_cast<u32>(core);
+    }
+    capture_hardware();
+    anko::panic_report::capture_backtrace(g_report, fp);
+
+    bool truncated = false;
+    (void)anko::panic_report::format_serial(g_report, g_serial_text,
+                                            sizeof(g_serial_text), &truncated);
+    anko::log::panic_dump(g_serial_text);
+    if (truncated) {
+        anko::log::write(anko::log::Level::Fatal, "panic", "(serial report truncated)");
+    }
+
+    bool qr_truncated = false;
+    (void)anko::panic_report::format_qr(g_report, g_qr_payload,
+                                        sizeof(g_qr_payload), &qr_truncated);
+    anko::panic_screen::show(g_report.title, g_report.reason, g_qr_payload);
+
     anko::log::write(anko::log::Level::Fatal, "panic",
-                     "--- KERNEL PANIC: system halted ---");
-    // Visible even when the serial console is not attached.
-    anko::panic_screen::show("KERNEL PANIC", detail);
-    for (;;) asm volatile("wfe" ::: "memory");
-}
-
-// ---------------------------------------------------------------------------
-// dump_frame — full register dump
-// ---------------------------------------------------------------------------
-
-static void dump_frame(TrapFrame* tf, u64 esr, u64 far) {
-    const u32 ec  = static_cast<u32>(arm64::esr_ec(esr));
-    const u32 iss = static_cast<u32>(arm64::esr_iss(esr));
-    const char* name = ec_name(ec);
-
-    anko::log::writef(anko::log::Level::Fatal, "panic",
-                      "Fatal trap 0x%x: %s, ISS=0x%x", ec, name, iss);
-    anko::log::writef(anko::log::Level::Fatal, "panic",
-                      "ESR_EL1=0x%llx  FAR_EL1=0x%llx",
-                      static_cast<unsigned long long>(esr),
-                      static_cast<unsigned long long>(far));
-    anko::log::writef(anko::log::Level::Fatal, "panic",
-                      "ELR_EL1=0x%llx  SPSR_EL1=0x%llx",
-                      static_cast<unsigned long long>(tf->elr),
-                      static_cast<unsigned long long>(tf->spsr));
-
-    // General-purpose registers in groups of 4
-    for (int row = 0; row < 7; ++row) {
-        int base = row * 4;
-        anko::log::writef(anko::log::Level::Fatal, "panic",
-                          " x%d=0x%llx  x%d=0x%llx  x%d=0x%llx  x%d=0x%llx",
-                          base,   static_cast<unsigned long long>(tf->x[base]),
-                          base+1, static_cast<unsigned long long>(tf->x[base+1]),
-                          base+2, static_cast<unsigned long long>(tf->x[base+2]),
-                          base+3, static_cast<unsigned long long>(tf->x[base+3]));
-    }
-
-    // x28, fp(x29), lr(x30)
-    anko::log::writef(anko::log::Level::Fatal, "panic",
-                      "x28=0x%llx  fp=0x%llx  lr=0x%llx",
-                      static_cast<unsigned long long>(tf->x[28]),
-                      static_cast<unsigned long long>(tf->x[29]),
-                      static_cast<unsigned long long>(tf->x[30]));
-
-    // sp_el0 slot holds pre-fault SP_EL1 in kernel fault context
-    anko::log::writef(anko::log::Level::Fatal, "panic",
-                      "sp=0x%llx",
-                      static_cast<unsigned long long>(tf->sp_el0));
+                     "--- system halted: reset (Ctrl-Alt-Del / system_reset) to reboot ---");
+    // Halt only this core. Interrupts stay masked so the report is never
+    // clobbered; recovery is a machine reset, which is an external event.
+    for (;;) asm volatile("wfi" ::: "memory");
 }
 
 // ---------------------------------------------------------------------------
@@ -115,10 +140,10 @@ static void dump_frame(TrapFrame* tf, u64 esr, u64 far) {
 
 extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* frame) {
     const u32 ec = static_cast<u32>(arm64::esr_ec(esr));
-    anko::log::writef(anko::log::Level::Fatal, "panic",
-                      "panic: %s", ec_name(ec));
-    dump_frame(frame, esr, far);
-    do_halt(frame->x[29], ec_name(ec)); // walk from saved FP of the trapped context
+    const char* reason = ec_name(ec);
+    anko::panic_report::capture_registers(g_report, frame->x, frame->sp_el0,
+                                          frame->elr, frame->spsr, esr, far);
+    halt_with(reason, frame->x[29]);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,23 +151,20 @@ extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* fram
 // ---------------------------------------------------------------------------
 
 [[noreturn]] void panic(const char* msg) {
-    anko::log::writef(anko::log::Level::Fatal, "panic", "\npanic: %s", msg);
-    u64 fp = 0;
-    asm volatile("mov %0, x29" : "=r"(fp));
-    do_halt(fp, msg);
+    capture_current_registers();
+    halt_with(msg ? msg : "panic", g_report.regs.x[29]);
 }
 
 [[noreturn]] void panicf(const char* fmt, ...) {
+    static char message[anko::panic_report::kMaxSerialText];
     va_list ap;
     va_start(ap, fmt);
     va_list ap_screen;
     va_copy(ap_screen, ap);
     anko::log::vrawf(fmt, ap);
-    char detail[160];
-    anko::log::vformat_to(detail, sizeof(detail), fmt, ap_screen);
+    anko::log::vformat_to(message, sizeof(message), fmt, ap_screen);
     va_end(ap_screen);
     va_end(ap);
-    u64 fp = 0;
-    asm volatile("mov %0, x29" : "=r"(fp));
-    do_halt(fp, detail);
+    capture_current_registers();
+    halt_with(message, g_report.regs.x[29]);
 }

@@ -1,18 +1,19 @@
 // kernel/panic_screen.cc — graphical panic screen.
 //
-// Paints the project logo and panic information onto the framebuffer the kernel
-// owns before init runs. The logo is an ASCII art asset compiled in from
-// kernel/assets/panic_art.txt (generated header); nothing about the image is
-// hardcoded here. The art is rendered through the shared 8x16 console font,
-// scaled to fit the screen and re-sampled when even scale 1 would overflow, so
-// the screen adapts to any framebuffer size (QEMU 1024x768, T210 1280x720, ...).
+// Layout (any framebuffer size):
+//   top-left      QR code carrying the panic report, key data drawn beneath it
+//   right / middle the project logo, scaled down to the space that is left
+//   bottom-left   "KERNEL PANIC" title and the reason line, left-aligned
 //
-// This file has no kernel-only dependencies: it is exercised by a host test
-// (tests/test_panic_screen.py) against a synthetic framebuffer as well as by the
-// real panic path.
+// The logo is a data asset compiled in from kernel/assets/panic_art.txt, the QR
+// spec tables come from kernel/assets/qr_tables.json, and the report text is
+// rendered by panic_report::format_qr — nothing here hardcodes content. This
+// file has no kernel-only dependencies: tests/panic_screen_probe.cc exercises it
+// against a synthetic framebuffer.
 
 #include "anko/panic_screen.h"
 
+#include "anko/qr.h"
 #include "midix/font/vga8x16.h"
 #include "panic_art.h" // generated from kernel/assets/panic_art.txt
 
@@ -22,13 +23,21 @@ namespace {
 constexpr u32 kCellW = midix::font::kVga8x16Width;
 constexpr u32 kCellH = midix::font::kVga8x16Height;
 constexpr u32 kMaxScale = 8;
+constexpr u32 kQuietModules = 4;   // QR quiet zone, in modules
+constexpr u32 kMargin = 8;
+constexpr u32 kTitleScale = 2;
+constexpr u32 kCaptionScale = 1;
+constexpr u32 kMaxCaptionLines = 12;
 
 // XRGB8888 palette.
-constexpr u32 kBg = 0x00060E;       // near-black blue
-constexpr u32 kArtDim = 0x8FA6C4;   // light glyphs
-constexpr u32 kArtBright = 0xEAF1FF;// dense glyphs
-constexpr u32 kHeadFg = 0xFF6B6B;   // panic red
-constexpr u32 kDetailFg = 0xFFE6B8; // warm white
+constexpr u32 kBg = 0x00060E;        // near-black blue
+constexpr u32 kArtDim = 0x8FA6C4;
+constexpr u32 kArtBright = 0xEAF1FF;
+constexpr u32 kHeadFg = 0xFF6B6B;    // panic red
+constexpr u32 kReasonFg = 0xFFD9A0;  // warm amber
+constexpr u32 kCaptionFg = 0xC8D6E8;
+constexpr u32 kQrDark = 0xF2F6FF;    // QR foreground (light on dark)
+constexpr u32 kQrLight = 0x0A1220;   // QR background / quiet zone
 
 volatile u32* g_pixels = nullptr;
 u32 g_w = 0;
@@ -47,26 +56,22 @@ void put(u32 x, u32 y, u32 color) {
     g_pixels[static_cast<usize>(y) * g_w + x] = color;
 }
 
+void fill_rect(u32 x, u32 y, u32 w, u32 h, u32 color) {
+    const u32 x1 = smaller(x + w, g_w);
+    const u32 y1 = smaller(y + h, g_h);
+    for (u32 py = y; py < y1; ++py) {
+        for (u32 px = x; px < x1; ++px) g_pixels[static_cast<usize>(py) * g_w + px] = color;
+    }
+}
+
 void fill_background() {
     const u32 total = g_w * g_h;
     const u64 pair = static_cast<u64>(kBg) | (static_cast<u64>(kBg) << 32);
     volatile u64* wide = reinterpret_cast<volatile u64*>(g_pixels);
-    const u32 pairs = total / 2u;
-    for (u32 i = 0; i < pairs; ++i) wide[i] = pair;
+    for (u32 i = 0; i < total / 2u; ++i) wide[i] = pair;
     if (total & 1u) g_pixels[total - 1u] = kBg;
 }
 
-// Dense glyphs of the art are drawn brighter than the sparse ones so the logo
-// keeps some of the tonal ramp it was authored with.
-u32 art_color(char ch) {
-    switch (ch) {
-    case '@': case '%': case '#': return kArtBright;
-    default: return kArtDim;
-    }
-}
-
-// Draw one glyph with integer `scale`; only lit pixels are written (the
-// background was already filled).
 void draw_glyph(u32 x, u32 y, u32 scale, u32 fg, char ch) {
     const u8* rows = midix::font::vga8x16_glyph(static_cast<u8>(ch));
     for (u32 gy = 0; gy < kCellH; ++gy) {
@@ -76,43 +81,37 @@ void draw_glyph(u32 x, u32 y, u32 scale, u32 fg, char ch) {
             if ((bits & (0x80u >> gx)) == 0) continue;
             for (u32 sy = 0; sy < scale; ++sy) {
                 const u32 py = y + gy * scale + sy;
-                for (u32 sx = 0; sx < scale; ++sx) {
-                    put(x + gx * scale + sx, py, fg);
-                }
+                for (u32 sx = 0; sx < scale; ++sx) put(x + gx * scale + sx, py, fg);
             }
         }
     }
 }
 
-// Draw a NUL-terminated string; returns the width consumed.
-u32 draw_text(u32 x, u32 y, u32 scale, u32 fg, const char* s) {
-    while (s && *s) {
-        draw_glyph(x, y, scale, fg, *s);
+// Draw a NUL-terminated run of printable characters; returns the width used.
+u32 draw_text(u32 x, u32 y, u32 scale, u32 fg, const char* s, u32 max_chars) {
+    u32 drawn = 0;
+    for (; s && *s && drawn < max_chars; ++s, ++drawn) {
+        const char ch = (*s >= 32 && *s <= 126) ? *s : '?';
+        draw_glyph(x, y, scale, fg, ch);
         x += kCellW * scale;
-        ++s;
     }
-    return x;
+    return drawn * kCellW * scale;
 }
 
-u32 text_width(u32 scale, const char* s) { return slen(s) * kCellW * scale; }
-
-void draw_centered(u32 y, u32 scale, u32 fg, const char* s) {
-    const u32 width = text_width(scale, s);
-    const u32 x = width < g_w ? (g_w - width) / 2u : 0u;
-    (void)draw_text(x, y, scale, fg, s);
+u32 art_color(char ch) {
+    switch (ch) {
+    case '@': case '%': case '#': return kArtBright;
+    default: return kArtDim;
+    }
 }
 
-// Render the logo into [top, bottom) pixels, centred, scaled to fit.
-void draw_art(u32 top, u32 bottom) {
-    if (bottom <= top) return;
-    const u32 avail_w = g_w;
-    const u32 avail_h = bottom - top;
-    const u32 avail_cols = avail_w / kCellW;
-    const u32 avail_rows = avail_h / kCellH;
+// Draw the logo into the box [x0,x1) x [y0,y1), scaled to fit.
+void draw_art(u32 x0, u32 y0, u32 x1, u32 y1) {
+    if (x1 <= x0 || y1 <= y0) return;
+    const u32 avail_cols = (x1 - x0) / kCellW;
+    const u32 avail_rows = (y1 - y0) / kCellH;
     if (avail_cols == 0 || avail_rows == 0) return;
 
-    // Largest integer font scale that still fits the whole art, then fall back
-    // to re-sampling the art grid when even scale 1 overflows.
     u32 scale = 1;
     while (scale < kMaxScale && anko::art::kPanicArtCols * (scale + 1u) <= avail_cols &&
            anko::art::kPanicArtRows * (scale + 1u) <= avail_rows) {
@@ -124,8 +123,8 @@ void draw_art(u32 top, u32 bottom) {
 
     const u32 art_w = out_cols * kCellW * scale;
     const u32 art_h = out_rows * kCellH * scale;
-    const u32 x0 = art_w < g_w ? (g_w - art_w) / 2u : 0u;
-    const u32 y0 = top + (avail_h > art_h ? (avail_h - art_h) / 2u : 0u);
+    const u32 ox = x0 + ((x1 - x0) > art_w ? ((x1 - x0) - art_w) / 2u : 0u);
+    const u32 oy = y0 + ((y1 - y0) > art_h ? ((y1 - y0) - art_h) / 2u : 0u);
 
     for (u32 dy = 0; dy < out_rows; ++dy) {
         const u32 sy = dy * anko::art::kPanicArtRows / out_rows;
@@ -134,11 +133,45 @@ void draw_art(u32 top, u32 bottom) {
             const u32 sx = dx * anko::art::kPanicArtCols / out_cols;
             const char ch = row[sx];
             if (ch == ' ') continue;
-            draw_glyph(x0 + dx * kCellW * scale, y0 + dy * kCellH * scale, scale,
+            draw_glyph(ox + dx * kCellW * scale, oy + dy * kCellH * scale, scale,
                        art_color(ch), ch);
         }
     }
 }
+
+// Draw a QR code whose modules are `module` pixels, including the quiet zone.
+// Returns the drawn width in pixels (0 when nothing was drawn).
+u32 draw_qr(const anko::qr::Code& code, u32 x0, u32 y0, u32 module) {
+    if (module == 0) return 0;
+    const u32 side = (code.size + 2u * kQuietModules) * module;
+    fill_rect(x0, y0, side, side, kQrLight);
+    for (u32 my = 0; my < code.size; ++my) {
+        for (u32 mx = 0; mx < code.size; ++mx) {
+            if (!anko::qr::dark(code, mx, my)) continue;
+            fill_rect(x0 + (mx + kQuietModules) * module, y0 + (my + kQuietModules) * module,
+                      module, module, kQrDark);
+        }
+    }
+    return side;
+}
+
+// Draw up to `max_lines` newline-separated lines of `text`, left-aligned.
+void draw_block(u32 x, u32 y, u32 scale, u32 fg, const char* text, u32 max_lines) {
+    if (!text) return;
+    u32 line = 0;
+    const char* p = text;
+    while (*p && line < max_lines) {
+        const char* end = p;
+        while (*end && *end != '\n') ++end;
+        draw_text(x, y, scale, fg, p, (end - p) > 0 ? static_cast<u32>(end - p) : 0);
+        ++line;
+        y += kCellH * scale;
+        if (!*end) break;
+        p = end + 1;
+    }
+}
+
+[[maybe_unused]] anko::qr::Code g_code; // static: never on a faulting stack
 
 } // namespace
 
@@ -158,27 +191,47 @@ void bind(volatile u32* pixels, u32 width, u32 height) {
 
 bool bound() { return g_pixels != nullptr; }
 
-void show(const char* headline, const char* detail) {
+void show(const char* title, const char* reason, const char* payload) {
     if (!g_pixels) return;
 
-    const char* head = (headline && headline[0]) ? headline : "KERNEL PANIC";
-    const u32 head_scale = 2;
-    const u32 head_h = kCellH * head_scale;
-    const u32 detail_h = kCellH;
+    const char* head = (title && title[0]) ? title : "KERNEL PANIC";
+    const char* why = (reason && reason[0]) ? reason : "unknown";
 
     fill_background();
 
-    // Headline band, reserving symmetric margins for the art.
-    const u32 margin = 8;
-    draw_centered(margin, head_scale, kHeadFg, head);
-
-    const u32 art_top = margin + head_h + margin;
-    const u32 art_bottom = g_h > (detail_h + 2u * margin) ? g_h - (detail_h + 2u * margin) : art_top;
-    draw_art(art_top, art_bottom);
-
-    if (detail && detail[0]) {
-        draw_centered(g_h - detail_h - margin, 1, kDetailFg, detail);
+    // --- QR block, top-left ------------------------------------------------
+    u32 qr_width = 0;
+    u32 qr_height = 0;
+    const u32 box = smaller(g_w / 2u, (g_h * 3u) / 5u);
+    if (payload && payload[0] && anko::qr::encode(reinterpret_cast<const u8*>(payload),
+                                                  slen(payload), anko::qr::Level::M, g_code)) {
+        const u32 modules = g_code.size + 2u * kQuietModules;
+        const u32 module = box / modules;
+        if (module >= 1) {
+            qr_width = draw_qr(g_code, kMargin, kMargin, module);
+            qr_height = qr_width;
+        }
     }
+
+    // --- key data under the QR --------------------------------------------
+    const u32 caption_x = kMargin;
+    u32 caption_y = kMargin + qr_height + (qr_height ? kMargin : 0);
+    const u32 band_h = kCellH * kTitleScale + kCellH + 2u * kMargin;
+    const u32 caption_limit = g_h > band_h + kCellH ? g_h - band_h - kCellH : caption_y;
+    const u32 caption_lines = caption_limit > caption_y ? (caption_limit - caption_y) / kCellH : 0;
+    draw_block(caption_x, caption_y, kCaptionScale, kCaptionFg, payload,
+               smaller(caption_lines, kMaxCaptionLines));
+
+    // --- logo, in the space to the right of the QR -------------------------
+    const u32 art_x0 = kMargin + qr_width + (qr_width ? kMargin : 0);
+    const u32 band_top = g_h > band_h ? g_h - band_h : 0;
+    draw_art(art_x0, kMargin, g_w - kMargin, band_top);
+
+    // --- title and reason, bottom-left -------------------------------------
+    u32 title_y = band_top + kMargin;
+    draw_text(kMargin, title_y, kTitleScale, kHeadFg, head, g_w / (kCellW * kTitleScale));
+    title_y += kCellH * kTitleScale;
+    draw_text(kMargin, title_y, kCaptionScale, kReasonFg, why, g_w / kCellW);
 
 #if defined(__aarch64__)
     asm volatile("dsb sy" ::: "memory");

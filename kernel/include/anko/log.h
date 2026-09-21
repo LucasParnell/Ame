@@ -39,6 +39,11 @@ void vrawf(const char* fmt, va_list ap);
 // log ring.
 void vformat_to(char* out, usize cap, const char* fmt, va_list ap);
 
+// Write text straight to the UART, bypassing rings, prefixes and level filters.
+// The panic path needs the full report on the wire even when the console service
+// is not draining the log ring yet.
+void panic_dump(const char* text);
+
 u64 dropped_count();
 u64 truncated_count();
 

@@ -39,12 +39,13 @@ assigned console with a QEMU monitor `screendump` (`scripts/test/kms-display.py`
 pattern. Proves assignment + MMIO + IRQ + DMA + Linux DRM + `virtio_gpu` with no virtio-gpu register
 logic in Ame.
 
-**Panic screen:** the kernel paints a graphical panic screen — the project logo (an ASCII art asset,
-not a hardcoded blob), a `KERNEL PANIC` headline and a detail line — onto the framebuffer it owns
-before init runs. The logo is rendered through the shared 8x16 console font with integer scaling that
-fits any framebuffer and re-samples the art when scale 1 would overflow. See
-`kernel/panic_screen.cc`, `kernel/assets/panic_art.txt`, `scripts/mk-ascii-header.py`; captured by
-`AME_VERIFY_PANIC=1`.
+**Panic screen:** the kernel paints a graphical panic screen — a QR code carrying the panic report
+(top-left, with the key data under it), the project logo (smaller, in the remaining space) and the
+`KERNEL PANIC` title/reason left-aligned along the bottom. The QR is produced by an in-kernel
+byte-mode Model-2 encoder (`kernel/qr.cc`) whose spec tables come from
+`kernel/assets/qr_tables.json`; the report record, the full serial dump and the halt semantics live
+in `kernel/panic_report.cc` / `kernel/panic.cc`. Captured and decoded end-to-end by
+`AME_VERIFY_PANIC=1`. See `DELIVERY/panic-qr-report.md`.
 
 **Phase G is complete:** non-DMA ring mappings, vendor HVC NOTIFY/ARM, virtual IRQ 48,
 `/dev/dango-channel0`, and 512 ordered Linux ↔ Mochi round trips. See
@@ -138,9 +139,12 @@ python3 scripts/test/kms-display.py  --build out/qemu-gpu     # Phase F proof (s
 | Tests | `scripts/test/{iommu_dma,assignment,gpu-appliance,kms-display}.py`, `tests/*` |
 | Log de-interleaver (guest vs Ame console) | `scripts/test/logfmt.py` |
 | Panic screen renderer | `kernel/panic_screen.cc`, `kernel/include/anko/panic_screen.h` |
+| Panic report record + renderers | `kernel/panic_report.{h,cc}` |
+| QR encoder | `kernel/qr.{h,cc}` |
+| QR spec data (asset + generator) | `kernel/assets/qr_tables.json`, `scripts/gen-qr-tables.py` |
 | Panic screen logo (data asset) | `kernel/assets/panic_art.txt` + `scripts/mk-ascii-header.py` |
 | Shared 8x16 console font | `shared/include/midix/font/vga8x16.h` |
-| Panic screen host test / capture | `tests/test_panic_screen.py`, `tests/panic_screen_probe.cc`, `scripts/test/panic-screen.py` |
+| Panic/QR tests | `tests/test_qr.py`, `tests/qr_decode.py`, `tests/test_panic_screen.py`, `tests/panic_screen_probe.cc`, `scripts/test/panic-screen.py` |
 
 ## Pitfalls already hit (don't rediscover these)
 
@@ -176,6 +180,15 @@ python3 scripts/test/kms-display.py  --build out/qemu-gpu     # Phase F proof (s
 - **To capture the panic screen** build with `-DANKO_PANIC_SCREEN_DEMO=ON` (dev only): the kernel
   panics right after the framebuffer is bound, before any userland can repaint, and
   `scripts/test/panic-screen.py` captures it via the QEMU monitor.
+- **Panic text must bypass the log ring.** `log::write()` at Info level goes to the per-CPU ring, which
+  nothing drains during early boot, so a panic dump silently vanishes. Use `log::panic_dump()`.
+- **Don't verify a QR encoder by matrix equality.** Reference encoders differ in legal padding (segno
+  emits an extra zero byte when the message is already byte-aligned); `tests/qr_decode.py` decodes the
+  symbol instead, which is both stricter and encoder-agnostic.
+- **The staged Linux artifacts are stamped by content hash.** Ninja judges freshness by mtime, so an
+  artifact dir refreshed with older timestamps (`rsync -a`) used to be skipped and `system.mxb` kept a
+  stale payload. `userland/CMakeLists.txt` now depends on a content-hash stamp; if you copy artifacts
+  around, keep that stamp logic intact.
 
 ## Conventions / quality bar
 

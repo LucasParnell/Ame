@@ -19,7 +19,9 @@ set(ANKO_SOURCES
     ${CMAKE_SOURCE_DIR}/boards/${ANKO_BOARD}/board_fallback.cc
     log/log.cc
     panic.cc
+    panic_report.cc
     panic_screen.cc
+    qr.cc
     smp.cc
     kernel_main.cc
 
@@ -106,6 +108,28 @@ add_custom_target(panic_art_header DEPENDS ${PANIC_ART_HDR})
 add_dependencies(anko panic_art_header)
 target_sources(anko PRIVATE ${PANIC_ART_HDR})
 
+# QR spec tables are a data asset too: scripts/gen-qr-tables.py turns
+# kernel/assets/qr_tables.json into a constexpr header at build time.
+set(QR_TABLES_JSON ${CMAKE_SOURCE_DIR}/kernel/assets/qr_tables.json)
+set(QR_TABLES_HDR ${CMAKE_BINARY_DIR}/generated/qr_tables.h)
+add_custom_command(OUTPUT ${QR_TABLES_HDR}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-qr-tables.py
+            ${QR_TABLES_JSON} ${QR_TABLES_HDR}
+    DEPENDS ${QR_TABLES_JSON} ${CMAKE_SOURCE_DIR}/scripts/gen-qr-tables.py
+    COMMENT "Generating qr_tables.h from kernel/assets/qr_tables.json"
+    VERBATIM)
+add_custom_target(qr_tables_header DEPENDS ${QR_TABLES_HDR})
+add_dependencies(anko qr_tables_header)
+target_sources(anko PRIVATE ${QR_TABLES_HDR})
+
+# Build identifier shown on the panic screen (git describe, or "unknown").
+execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} describe --tags --always --dirty
+    OUTPUT_VARIABLE ANKO_BUILD_DESCRIBE OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT ANKO_BUILD_DESCRIBE)
+    set(ANKO_BUILD_DESCRIBE "unknown")
+endif()
+
 target_include_directories(anko PRIVATE
     include                            # anko/*.h
     ${CMAKE_SOURCE_DIR}/shared/include  # midix/abi/*.h
@@ -127,6 +151,7 @@ target_compile_options(anko PRIVATE
 target_compile_definitions(anko PRIVATE
     $<$<BOOL:${ANKO_BUILD_DEV}>:ANKO_BUILD_DEV=1>
     $<$<BOOL:${ANKO_PANIC_SCREEN_DEMO}>:ANKO_PANIC_SCREEN_DEMO=1>
+    ANKO_BUILD_DESCRIBE="${ANKO_BUILD_DESCRIBE}"
     ANKO_IMAGE_TEXT_OFFSET=${ANKO_IMAGE_TEXT_OFFSET}
 )
 

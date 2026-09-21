@@ -121,6 +121,33 @@ if(DANGO_LINUX_ARTIFACT_DIR)
         endif()
     endforeach()
 endif()
+
+# ninja decides freshness by mtime, so an artifact directory refreshed with older
+# timestamps (rsync -a, restored backup) would not re-trigger the staging and
+# packing edge, and system.mxb would keep its previous payload. Stamp the
+# artifact *contents* instead: the stamp file name carries a content hash, so it
+# changes exactly when the artifacts change, and the bundle depends on it.
+set(DANGO_LINUX_STAMP_DEPS)
+if(DANGO_LINUX_ARTIFACT_DIR AND EXISTS "${DANGO_LINUX_ARTIFACT_DIR}/Image")
+    set(_ame_artifact_hash "")
+    foreach(name Image initramfs.cpio dango-linux.dtb manifest.toml)
+        file(SHA256 "${DANGO_LINUX_ARTIFACT_DIR}/${name}" _ame_part)
+        string(APPEND _ame_artifact_hash "${_ame_part}")
+    endforeach()
+    string(SHA256 _ame_artifact_hash "${_ame_artifact_hash}")
+    set(_ame_stamp "${CMAKE_BINARY_DIR}/dango-artifacts-${_ame_artifact_hash}.stamp")
+    if(NOT EXISTS "${_ame_stamp}")
+        file(WRITE "${_ame_stamp}" "${_ame_artifact_hash}\n")
+    endif()
+    file(GLOB _ame_old_stamps "${CMAKE_BINARY_DIR}/dango-artifacts-*.stamp")
+    foreach(_ame_old ${_ame_old_stamps})
+        if(NOT _ame_old STREQUAL _ame_stamp)
+            file(REMOVE "${_ame_old}")
+        endif()
+    endforeach()
+    set(DANGO_LINUX_STAMP_DEPS "${_ame_stamp}")
+endif()
+
 if(DANGO_BUILD_LINUX_ARTIFACTS)
     set(DANGO_LINUX_BUILDER "${CMAKE_SOURCE_DIR}/scripts/linux/build-min-linux.sh")
     if(DANGO_LINUX_PROFILE STREQUAL "gpu")
@@ -214,6 +241,7 @@ add_custom_command(
             ${CMAKE_SOURCE_DIR}/scripts/mx/signing.py
             ${AME_SIGNING_KEY}
             ${DANGO_LINUX_ARCHIVE_FILES}
+            ${DANGO_LINUX_STAMP_DEPS}
     COMMENT "Packing Ame signed system bundle (MXB1 + manifest.json)"
     VERBATIM
 )

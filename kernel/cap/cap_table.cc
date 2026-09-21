@@ -17,6 +17,14 @@
 
 namespace cap {
 
+// Capability operations rejected so far (invalid/revoked handles, type
+// mismatches). Monotonic; surfaced by the panic report.
+static u64 g_denials = 0;
+
+static void note_denial() { __atomic_add_fetch(&g_denials, 1ull, __ATOMIC_RELAXED); }
+
+u64 denial_count() { return __atomic_load_n(&g_denials, __ATOMIC_RELAXED); }
+
 static u32 sanitize_rights(CapType type, u32 rights) {
     if ((rights & RIGHT_MAP) && (rights & RIGHT_WRITE) && (rights & RIGHT_EXEC)) {
         return 0;
@@ -96,6 +104,7 @@ CapHandle alloc(CapTable& table, CapType type, void* target, u32 rights) {
 Ref lookup(CapTable& table, CapHandle handle, CapType expected_type) {
     Ref e = lookup_any(table, handle);
     if (!e || e->type_tag != expected_type) {
+        note_denial();
         return nullptr;
     }
     return e;
@@ -105,10 +114,12 @@ Ref lookup_any(CapTable& table, CapHandle handle) {
     kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
     const u32 idx = cap_index(handle);
     if (idx >= kCapTableSize) {
+        note_denial();
         return nullptr;
     }
     const CapEntry& e = table.entries[nospec_index(idx, kCapTableSize)];
     if (e.type_tag == CAP_NULL || !e.generation || e.generation != cap_generation(handle)) {
+        note_denial();
         return nullptr;
     }
     ANKO_ASSERT(e.target && e.object);

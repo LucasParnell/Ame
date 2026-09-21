@@ -15,23 +15,28 @@ CFLAGS=(
   -Wl,-e,_start
 )
 
+SRCS=("${AME}/linux-artifacts/agent/dango-agent.c")
+
 if [[ "${DANGO_LINUX_PROFILE:-hello}" == gpu ]]; then
     CFLAGS+=(-DDANGO_GPU_PROBE=1)
+    # Phase F: the KMS self-test is a separate freestanding translation unit
+    # (linux-artifacts/kms_test/) linked into the appliance init binary.
+    CFLAGS+=(-DDANGO_GPU_KMS=1)
+    SRCS+=("${AME}/linux-artifacts/kms_test/kms_test.c")
 fi
 
-SRC="${AME}/linux-artifacts/agent/dango-agent.c"
 DST="${OUT}/dango-agent"
 
 if [[ -n "${CROSS_COMPILE:-}" ]] && command -v "${CROSS_COMPILE}gcc" >/dev/null 2>&1; then
-    "${CROSS_COMPILE}gcc" "${CFLAGS[@]}" -o "${DST}" "${SRC}"
+    "${CROSS_COMPILE}gcc" "${CFLAGS[@]}" -o "${DST}" "${SRCS[@]}"
 elif command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
-    aarch64-linux-gnu-gcc "${CFLAGS[@]}" -o "${DST}" "${SRC}"
+    aarch64-linux-gnu-gcc "${CFLAGS[@]}" -o "${DST}" "${SRCS[@]}"
 elif command -v gcc >/dev/null 2>&1 && [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "aarch64" ]]; then
     # Native aarch64 Linux host (e.g. the build container): plain gcc targets
     # aarch64-linux directly.
-    gcc "${CFLAGS[@]}" -o "${DST}" "${SRC}"
+    gcc "${CFLAGS[@]}" -o "${DST}" "${SRCS[@]}"
 elif command -v clang >/dev/null 2>&1; then
-    clang --target=aarch64-linux-gnu -fuse-ld=lld "${CFLAGS[@]}" -o "${DST}" "${SRC}"
+    clang --target=aarch64-linux-gnu -fuse-ld=lld "${CFLAGS[@]}" -o "${DST}" "${SRCS[@]}"
 else
     echo "error: no AArch64 Linux compiler found" >&2
     echo "Set CROSS_COMPILE=aarch64-linux-gnu- or install clang/lld." >&2

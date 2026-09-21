@@ -84,6 +84,10 @@ static void ensure_stdio_console(void) {
     }
 }
 
+#ifdef DANGO_GPU_KMS
+extern int dango_kms_test(void);
+#endif
+
 #ifdef DANGO_GPU_PROBE
 // Linux aarch64 UAPI. The probe uses only mount/read/ioctl; no DRM or virtio
 // implementation is duplicated in the host or in this appliance userspace.
@@ -179,7 +183,19 @@ void _start(void) {
     }
 
 #ifdef DANGO_GPU_PROBE
-    message(gpu_probe() ? "dango: gpu probe passed\n" : "dango: gpu probe FAILED\n");
+    if (gpu_probe()) {
+        message("dango: gpu probe passed\n");
+#ifdef DANGO_GPU_KMS
+        // Phase F: drive a real KMS modeset so the host can assert the
+        // displayed pattern (scripts/test/kms-display.py). Raw DRM ioctls live
+        // in linux-artifacts/kms_test/kms_test.c.
+        if (dango_kms_test()) {
+            message("dango: kms test passed\n");
+        }
+#endif
+    } else {
+        message("dango: gpu probe FAILED\n");
+    }
 #endif
 
     for (;;) {

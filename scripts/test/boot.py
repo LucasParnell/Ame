@@ -10,13 +10,62 @@ import argparse
 import json
 import os
 import pathlib
+import socket
 import subprocess
+import sys
 import tempfile
 import time
 
+# The host tests load this file by path from the repo root, so the scripts/test
+# directory is not on sys.path automatically; add it for the sibling import.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import logfmt  # noqa: E402
+
+
+def hmp_screendump(sock_path, out_path, device=None, timeout=10.0):
+    """Capture the QEMU display to a PPM through the HMP monitor socket.
+
+    The monitor is attached with `-monitor unix:<path>,server,nowait`, so no
+    host display is required; QEMU's graphic console still exists under
+    `-display none`. `device` selects the console by qdev id when several
+    display devices are attached (e.g. ramfb plus an assigned virtio-gpu).
+    """
+    deadline = time.monotonic() + timeout
+    while not os.path.exists(sock_path) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.settimeout(timeout)
+    try:
+        conn.connect(sock_path)
+        try:
+            conn.recv(4096)  # banner + first prompt
+        except (socket.timeout, OSError):
+            pass
+        command = f'screendump {out_path}' + (f' {device}' if device else '') + '\n'
+        conn.sendall(command.encode())
+        buf = b''
+        while time.monotonic() < deadline:
+            try:
+                chunk = conn.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if b'(qemu)' in buf:
+                break
+    finally:
+        conn.close()
+    while time.monotonic() < deadline:
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return True
+        time.sleep(0.05)
+    return False
+
 
 def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, output=None,
-        bundle=None, snapshot=True):
+        bundle=None, snapshot=True, monitor_socket=None, screendump=None,
+        screendump_device=None, screendump_delay=0.5):
     build = pathlib.Path(build).resolve()
     output = pathlib.Path(output) if output else pathlib.Path(tempfile.mkdtemp(prefix='ame-boot-'))
     output.mkdir(parents=True, exist_ok=True)
@@ -34,10 +83,15 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
     args = ['qemu-system-aarch64', '-machine', machine,
             '-cpu', 'cortex-a57', '-smp', str(cpus), '-m', '512M', '-device', 'ramfb',
             '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,bus=xhci.0',
-            '-device', 'usb-mouse,bus=xhci.0', '-display', 'none', '-monitor', 'none',
+            '-device', 'usb-mouse,bus=xhci.0', '-display', 'none',
             '-serial', f'file:{host}', '-serial', f'file:{guest}']
+    if monitor_socket:
+        args += ['-monitor', f'unix:{pathlib.Path(monitor_socket).resolve()},server,nowait']
+    else:
+        args += ['-monitor', 'none']
     if iommu:
-        args += ['-device', 'virtio-gpu-pci,iommu_platform=on']
+        args += ['-device', os.environ.get('AME_QEMU_GPU_DEVICE',
+                                           'virtio-gpu-pci,iommu_platform=on')]
     if testdev:
         args += ['-device', 'iommu-testdev']
     if disk:
@@ -54,6 +108,7 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
     markers = markers or ['system ready']
     success = False
     reason = 'timeout'
+    screen_ok = None
     # Clear previous evidence before Popen: QEMU may not open its serial files
     # before our first poll, especially when a caller reuses --output.
     for log in (host, guest):
@@ -63,11 +118,18 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
         started = time.monotonic()
         try:
             while time.monotonic() - started < timeout:
-                logs = '\n'.join(p.read_text(errors='replace') if p.exists() else '' for p in [host, guest])
-                if any(s in logs for s in ['KERNEL PANIC', 'spawn failed', 'init: manifest failed', 'TEST FAILED', 'gpu probe FAILED', 'invalid or incompatible BootInfo']):
+                raw = '\n'.join(p.read_text(errors='replace') if p.exists() else '' for p in [host, guest])
+                # Ame's own log entries can split a guest line; match markers on
+                # the raw stream (Ame markers) plus the de-interleaved guest view.
+                logs = logfmt.marker_stream(raw)
+                if any(s in logs for s in ['KERNEL PANIC', 'spawn failed', 'init: manifest failed', 'TEST FAILED', 'gpu probe FAILED', 'kms test FAILED', 'invalid or incompatible BootInfo']):
                     reason = 'guest failure'; break
                 if all(s in logs for s in markers):
-                    success = True; reason = 'ready'; break
+                    success = True; reason = 'ready'
+                    if screendump:
+                        time.sleep(screendump_delay)
+                        screen_ok = hmp_screendump(monitor_socket, screendump, screendump_device)
+                    break
                 if proc.poll() is not None:
                     reason = f'qemu exited {proc.returncode}'; break
                 time.sleep(0.1)
@@ -78,7 +140,8 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
                 except subprocess.TimeoutExpired: proc.kill(); proc.wait()
     result = dict(success=success, reason=reason, mode=mode, cpus=cpus,
                   elapsed=time.monotonic() - started, logs=str(output), command=args,
-                  snapshot=snapshot, iommu=iommu, testdev=testdev)
+                  snapshot=snapshot, iommu=iommu, testdev=testdev,
+                  screendump=screendump, screendump_ok=screen_ok)
     (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result))
     return success
@@ -95,6 +158,12 @@ def main():
     parser.add_argument('--firmware')
     parser.add_argument('--output')
     parser.add_argument('--marker', action='append', dest='markers')
+    parser.add_argument('--monitor-socket',
+                        help='attach a HMP monitor on this unix socket (enables screendump)')
+    parser.add_argument('--screendump', help='capture the display to this PPM once markers match')
+    parser.add_argument('--screendump-device', help='qdev id of the display device to capture')
+    parser.add_argument('--screendump-delay', type=float, default=0.5,
+                        help='settle time between marker match and capture (seconds)')
     parser.add_argument('--no-snapshot', action='store_true',
                         help='give the guest a writable disk (default uses a discarded overlay)')
     args = parser.parse_args()

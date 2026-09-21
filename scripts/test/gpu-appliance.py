@@ -9,6 +9,11 @@ import subprocess
 import sys
 import tempfile
 
+# The host tests load this file by path from the repo root, so the scripts/test
+# directory is not on sys.path automatically; add it for the sibling import.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import logfmt  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -52,6 +57,7 @@ def main():
         boot = {'success': False, 'reason': result.stderr or result.stdout}
     logs = ''.join((work / name).read_text(errors='replace') for name in ('host.log', 'guest.log')
                    if (work / name).exists())
+    logs = logfmt.marker_stream(logs)
     checks, counters = evidence(logs)
     checks['boot_ready'] = result.returncode == 0 and boot.get('success', False)
     success = all(checks.values())

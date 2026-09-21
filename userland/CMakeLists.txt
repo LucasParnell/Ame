@@ -52,9 +52,15 @@ mochi_service(nameservice   nameservice/main.cc 0x10100000)
 mochi_service(io.console    console/main.cc    0x10200000)
 mochi_service(demo.pong     demo/pong/main.cc  0x10300000)
 mochi_service(demo.ping     demo/ping/main.cc  0x10400000)
-mochi_service(dango.manager dango/manager/main.cc 0x10500000)
+mochi_service(dango.manager dango/manager/main.cc 0x10500000 drivers/gpu/linux/main.cc)
+# drv.gpu.linux has one implementation (userland/drivers/gpu/linux/main.cc) linked
+# into both of its halves: the client (io.framebuffer) and the server host
+# (dango.manager, which owns the Dango channel). See gpu_linux.h for why there is
+# deliberately no separate drv.gpu.linux process.
+target_include_directories(dango.manager PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/drivers/gpu/linux)
 mochi_service(dango.auth_probe dango/auth_probe/main.cc 0x10600000)
-mochi_service(io.framebuffer  drivers/framebuffer/main.cc 0x10700000)
+mochi_service(io.framebuffer  drivers/framebuffer/main.cc 0x10700000 drivers/gpu/linux/main.cc)
+target_include_directories(io.framebuffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/drivers/gpu/linux)
 if(DEFINED ANKO_FB_WIDTH AND DEFINED ANKO_FB_HEIGHT)
     target_compile_definitions(io.framebuffer PRIVATE
         ANKO_FB_WIDTH=${ANKO_FB_WIDTH}

@@ -11,6 +11,7 @@
 #include "midix/abi/dango_channel_guest.h"
 #include "midix/abi/dango_channel_test.h"
 #include "midix/abi/protocols/gpu.h"
+#include "gpu_linux.h"
 
 // The channel ring order is a guest-visible wire property; the manager must
 // agree with the driver and the DTS generator, so take it from the shared ABI.
@@ -35,6 +36,30 @@ constexpr uint32_t kLinuxRunnerSchedBand = dango::SCHED_BAND_VM_FAIR;
 constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
 constexpr uint64_t kVaBootInitrd = 0x2400'0000ull;
 constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;
+
+// Phase J: host-side VAs for the native GPU service. The request/reply rings and
+// the shared framebuffer window (`fb.memory`, shared read-only with this
+// process) sit alongside the channel VAs declared in dango/layout.h; the
+// asserts below keep every window disjoint so no mapping can silently shadow
+// another.
+constexpr uint64_t kVaGpuReqRing = 0x3100'0000ull;
+constexpr uint64_t kVaGpuReplyRing = 0x3101'0000ull;
+constexpr uint64_t kVaFbWindow = 0x3102'0000ull;
+
+static_assert(dango::windows_disjoint(kVaGpuReqRing, dango::kPageSize, kVaGpuReplyRing,
+                                      dango::kPageSize) &&
+                  dango::windows_disjoint(kVaGpuReqRing, dango::kPageSize, kVaFbWindow,
+                                          dango::kPageSize) &&
+                  dango::windows_disjoint(kVaGpuReplyRing, dango::kPageSize, kVaFbWindow,
+                                          dango::kPageSize),
+              "native GPU service VAs must not overlap each other");
+static_assert(dango::windows_disjoint(kVaGpuReqRing, dango::kPageSize, dango::kChannelHostTxVa,
+                                      dango::kPageSize) &&
+                  dango::windows_disjoint(kVaGpuReplyRing, dango::kPageSize,
+                                          dango::kChannelHostRxVa, dango::kPageSize) &&
+                  dango::windows_disjoint(kVaFbWindow, dango::kPageSize, dango::kStagingHostVa,
+                                          dango::kPageSize),
+              "native GPU service VAs must not overlap the channel/staging VAs");
 
 struct TarHeader {
     char name[100];
@@ -667,7 +692,7 @@ static bool gpu_fill_bars(CapHandle staging) {
 // stage-2 mapping exists: vm::stage_channel() validates the IPA against free
 // stage-2 space, so declaring it after sys_vm_memory_map() would be rejected as
 // an overlap with the mapping it just created.
-static void gpu_staging_publish(CapHandle vm, CapHandle channel) {
+static CapHandle gpu_staging_publish(CapHandle vm, CapHandle channel) {
     const CapHandle staging = as_cap(
         sys_vm_memory_create(vm, dango::kStagingSize, MX_VM_MEMORY_FLAG_SHARED_STAGING));
     if (staging == kNullCap) fail("gpu client FAILED: staging create\n");
@@ -681,12 +706,22 @@ static void gpu_staging_publish(CapHandle vm, CapHandle channel) {
     if (!gpu_fill_bars(staging)) fail("gpu client FAILED: staging fill\n");
     dango_counter("gpu.staging.ipa", dango::kStagingGuestIpa);
     dango_counter("gpu.staging.size", dango::kStagingSize);
+    return staging;
 }
+
+// The appliance objects the native GPU service needs after the bootstrap
+// exchange: the registered staging buffer, the bound framebuffer, and the boot
+// generation they are scoped to.
+struct GpuClientIds {
+    uint64_t buffer_id = 0;
+    uint64_t framebuffer_id = 0;
+    uint64_t boot_generation = 0;
+};
 
 // Drive GPU_HELLO -> ... -> GPU_PRESENT_COMPLETE. Each marker is printed only
 // after the stage it names succeeded, so a partial exchange never looks green.
 static void gpu_bootstrap_client(CapHandle channel, RingPage* tx, RingPage* rx,
-                                 CapHandle h2g_db, CapHandle g2h_db) {
+                                 CapHandle h2g_db, CapHandle g2h_db, GpuClientIds* out) {
     RingSlot slot{};
     // The pushed slot's seq, i.e. the token every reply must echo. GPU_PRESENT
     // leaves it set for the asynchronous completion match below.
@@ -816,7 +851,77 @@ static void gpu_bootstrap_client(CapHandle channel, RingPage* tx, RingPage* rx,
     }
     dango_counter("gpu.buffer.id", buffer_reply.buffer_id);
     dango_counter("gpu.framebuffer.id", set_mode_reply.framebuffer_id);
+    if (out) {
+        out->buffer_id = buffer_reply.buffer_id;
+        out->framebuffer_id = set_mode_reply.framebuffer_id;
+        out->boot_generation = set_mode_reply.boot_generation;
+    }
     console_log("gpu present: complete\n");
+}
+
+// --- Phase J: native GPU service (`drv.gpu.linux`) server half --------------
+//
+// The Mochi-facing face of the appliance (spec §15.1/§15.2). io.framebuffer
+// draws into its own window -- the ramfb store, which is exactly one bootstrap
+// frame -- and this service mirrors the damaged band into the Dango staging
+// window and drives GPU_PRESENT. The window is shared with this process
+// read-only by init: a native service cannot map VM memory, and there is no
+// cross-service cap passing for the channel yet, so the mirror is the one
+// honest boundary, and the client's own display stays authoritative on failure.
+struct GpuPresentContext {
+    CapHandle channel;
+    RingPage* tx;
+    RingPage* rx;
+    CapHandle h2g_db;
+    CapHandle g2h_db;
+    CapHandle staging;
+    const uint8_t* window;
+    GpuClientIds ids;
+    bool logged_first_frame = false;
+};
+
+// Copy one damaged band of the client window into the appliance staging window
+// and present it. `damage` is already clamped to the window by the service, and
+// the two windows share one frame layout, so the band is a contiguous run in
+// both -- one syscall regardless of the band's height.
+static bool gpu_service_present(void* ctx_ptr, const MxGpuDamageRect& damage, uint32_t flags) {
+    (void)flags;
+    auto& ctx = *static_cast<GpuPresentContext*>(ctx_ptr);
+    const uint64_t offset = static_cast<uint64_t>(damage.y) * kGpuScanoutStride;
+    const uint64_t bytes = static_cast<uint64_t>(damage.height) * kGpuScanoutStride;
+    if (sys_vm_memory_write(ctx.staging, offset, ctx.window + offset, bytes) != 0) {
+        dango_counter("gpu.service.copy_fail", 1);
+        return false;
+    }
+
+    // Present the whole frame: gpud copies the staging window as a unit, so only
+    // the host -> staging band copy is damage-limited today.
+    MxGpuPresentRequest present{};
+    present.buffer_id = ctx.ids.buffer_id;
+    present.framebuffer_id = ctx.ids.framebuffer_id;
+    present.boot_generation = ctx.ids.boot_generation;
+    present.flags = MX_GPU_PRESENT_FLAG_FULL_FRAME;
+    present.damage_count = 0;
+    uint64_t seq = 0;
+    RingSlot slot{};
+    MxGpuPresentReply reply{};
+    if (!gpu_request(ctx.tx, ctx.rx, ctx.h2g_db, ctx.g2h_db, ctx.channel, GPU_PRESENT,
+                     &present, sizeof(present), &seq, &slot) ||
+        !gpu_reply(slot, &reply) || reply.status != MX_OK) {
+        dango_counter("gpu.service.present_fail", 1);
+        return false;
+    }
+    MxGpuPresentComplete complete{};
+    if (!gpu_wait(ctx.rx, ctx.g2h_db, GPU_PRESENT_COMPLETE, &slot) || slot.seq != seq ||
+        !gpu_reply(slot, &complete) || complete.status != MX_OK) {
+        dango_counter("gpu.service.complete_fail", 1);
+        return false;
+    }
+    if (!ctx.logged_first_frame) {
+        ctx.logged_first_frame = true;
+        console_log("gpu service: present ok\n");
+    }
+    return true;
 }
 
 static void runner_entry(uint64_t vcpu_arg) {
@@ -907,6 +1012,35 @@ extern "C" [[noreturn]] void _start() {
                                                     dango::RIGHT_READ);
 
     const uint64_t auth_gate_base = sys_doorbell_read(kAuthGateDoorbell);
+
+    // Phase J: map the native GPU service endpoint and the shared framebuffer
+    // window. Both are optional -- a boot without the appliance never enters the
+    // service loop and the manager keeps its previous idle behaviour.
+    RingPage* gpu_requests = nullptr;
+    RingPage* gpu_replies = nullptr;
+    uint32_t gpu_order = MX_DEFAULT_RING_ORDER;
+    const CapHandle gpu_req_db = mochi::boot::handle(boot, "gpu.cmd.doorbell");
+    const CapHandle gpu_reply_db = mochi::boot::handle(boot, "gpu.reply.doorbell");
+    const MxBootEntry* gpu_req_entry =
+        mochi::boot::find_type(boot, "gpu.cmd.ring", MX_BOOT_ENTRY_RING);
+    const MxBootEntry* gpu_reply_entry =
+        mochi::boot::find_type(boot, "gpu.reply.ring", MX_BOOT_ENTRY_RING);
+    if (gpu_req_entry && gpu_reply_entry && gpu_req_db && gpu_reply_db &&
+        sys_map_page(gpu_req_entry->handle, kVaGpuReqRing,
+                     dango::RIGHT_READ | dango::RIGHT_WRITE) == 0 &&
+        sys_map_page(gpu_reply_entry->handle, kVaGpuReplyRing,
+                     dango::RIGHT_READ | dango::RIGHT_WRITE) == 0) {
+        gpu_requests = reinterpret_cast<RingPage*>(kVaGpuReqRing);
+        gpu_replies = reinterpret_cast<RingPage*>(kVaGpuReplyRing);
+        gpu_order = gpu_req_entry->aux0 ? static_cast<uint32_t>(gpu_req_entry->aux0)
+                                        : MX_DEFAULT_RING_ORDER;
+    }
+    const uint8_t* fb_window = nullptr;
+    const CapHandle fb_window_cap = mochi::boot::handle(boot, "fb.memory");
+    if (fb_window_cap && sys_cap_identify(fb_window_cap) == kCapTypeMmio &&
+        sys_map_mmio(fb_window_cap, kVaFbWindow, dango::RIGHT_READ) == 0) {
+        fb_window = reinterpret_cast<const uint8_t*>(kVaFbWindow);
+    }
 
     dango_log("manager starting\n");
     LinuxArtifacts linux{};
@@ -1158,6 +1292,7 @@ extern "C" [[noreturn]] void _start() {
     }
     RingPage* channel_tx = nullptr;
     RingPage* channel_rx = nullptr;
+    CapHandle gpu_staging = kNullCap;
     if (have_linux && linux.gpu_profile) {
         if (sys_vm_channel_map(channel, vcpu, layout.channel_base, layout.channel_size,
                                dango::kChannelGuestIrq) != 0)
@@ -1189,7 +1324,7 @@ extern "C" [[noreturn]] void _start() {
         // Phase H/I: publish and fill the shared staging window while the guest
         // is still stopped, so the channel descriptor describes it the moment
         // the guest can open the channel.
-        gpu_staging_publish(vm, channel);
+        gpu_staging = gpu_staging_publish(vm, channel);
     }
     console_log("channel ready\n");
     console_log("layout ready\n");
@@ -1243,8 +1378,9 @@ extern "C" [[noreturn]] void _start() {
     // exclusive) and its agent runs dango-gpud before the transport self-test,
     // so this exchange must complete before the guest ping/pong probe below,
     // which then reuses the same channel.
+    GpuClientIds gpu_ids{};
     if (channel_tx && channel_rx) {
-        gpu_bootstrap_client(channel, channel_tx, channel_rx, h2g_db, g2h_db);
+        gpu_bootstrap_client(channel, channel_tx, channel_rx, h2g_db, g2h_db, &gpu_ids);
     }
 
     if (channel_tx && channel_rx) {
@@ -1282,6 +1418,40 @@ extern "C" [[noreturn]] void _start() {
         dango_counter("channel.g2h", channel_info.messages_guest_to_host);
         console_log("channel guest probe passed: " DANGO_STRINGIFY(DANGO_CH_TEST_ROUNDS)
                     " ordered round trips\n");
+    }
+
+    // Phase J: serve the native GPU service. io.framebuffer draws into the
+    // window init shared read-only with us; every present is mirrored into the
+    // appliance staging window and driven through GPU_PRESENT. The service only
+    // runs when the whole chain is present (appliance exchange complete, the
+    // endpoint mapped and the shared window mapped); otherwise the manager
+    // keeps its original idle behaviour and the client keeps its local display.
+    if (gpu_requests && gpu_replies && fb_window && gpu_staging != kNullCap &&
+        gpu_ids.buffer_id != 0) {
+        static drv::gpu::linux::Server gpu_server;
+        const drv::gpu::linux::Endpoint gpu_endpoint{
+            gpu_requests,
+            gpu_replies,
+            gpu_order,
+            gpu_req_db,
+            gpu_reply_db,
+        };
+        drv::gpu::linux::ServerConfig gpu_config{};
+        gpu_config.width = kGpuScanoutWidth;
+        gpu_config.height = kGpuScanoutHeight;
+        gpu_config.stride = kGpuScanoutStride;
+        gpu_config.pixel_format = MX_GPU_PIXFMT_XRGB8888;
+        gpu_config.staging_pa = dango::kStagingGuestIpa;
+        gpu_config.staging_size = dango::kStagingSize;
+        gpu_server.init(gpu_endpoint, gpu_config);
+        gpu_server.set_buffer(gpu_ids.buffer_id, gpu_ids.boot_generation);
+        GpuPresentContext present_ctx{channel, channel_tx, channel_rx, h2g_db, g2h_db,
+                                      gpu_staging, fb_window, gpu_ids};
+        console_log("gpu service: serving\n");
+        for (;;) {
+            if (!gpu_server.serve_once(gpu_service_present, &present_ctx)) break;
+        }
+        console_log("gpu service: stopped\n");
     }
 
     // A latency-band monitor that repeatedly yields remains runnable and can

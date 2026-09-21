@@ -5,6 +5,12 @@
 // blit requests from tty.fb0.
 //
 // Cap policy: holds "fb.memory" CAP_MMIO only. No UART, no log rings direct.
+//
+// Phase J: when the appliance is present the same drawing path is additionally
+// presented to `drv.gpu.linux` (the GPU service hosted by dango.manager). The
+// ramfb path is untouched and stays authoritative, so a missing, refused or
+// failed appliance degrades to the ordinary local display -- never to no
+// display. This service knows nothing about virtio-gpu or DRM.
 
 #include "mochi/syscall.h"
 #include "mochi/ring.h"
@@ -14,6 +20,8 @@
 #include "mochi/framebuffer.h"
 #include "midix/font/vga8x16.h"
 #include "midix/abi/ring.h"
+#include "dango/layout.h"
+#include "gpu_linux.h"
 
 // Virtual address layout for io.framebuffer.
 constexpr uint64_t kVaBootInfo = 0x1000'0000ull;
@@ -21,6 +29,8 @@ constexpr uint64_t kVaLogRing  = 0x1800'0000ull;
 constexpr uint64_t kVaFbPixels = 0x2000'0000ull; // framebuffer pixel arena
 constexpr uint64_t kVaCmdRing  = 0x2100'0000ull;
 constexpr uint64_t kVaReplyRing = 0x2102'0000ull; // keep clear of 0x11000-byte order-10 cmd ring
+constexpr uint64_t kVaGpuReqRing = 0x2200'0000ull;
+constexpr uint64_t kVaGpuReplyRing = 0x2201'0000ull;
 
 // Framebuffer dimensions — set per board by CMake (ANKO_FB_WIDTH/HEIGHT).
 // QEMU virt: 1024×768.  Switch T210: 1280×720.
@@ -32,8 +42,11 @@ constexpr uint64_t kVaReplyRing = 0x2102'0000ull; // keep clear of 0x11000-byte 
 #endif
 constexpr uint32_t kFbWidth  = ANKO_FB_WIDTH;
 constexpr uint32_t kFbHeight = ANKO_FB_HEIGHT;
-[[maybe_unused]] constexpr uint32_t kFbStride = kFbWidth * 4; // XRGB8888
+constexpr uint32_t kFbStride = kFbWidth * 4; // XRGB8888
 constexpr uint32_t kRingOrder = MX_DEFAULT_RING_ORDER;
+// Bounded startup budget for the appliance handshake. Never a boot dependency:
+// if the GPU service is not live within it the terminal keeps drawing to ramfb.
+constexpr uint32_t kGpuHandshakeBudget = 256;
 
 // Clear color on startup: dark blue.
 constexpr uint32_t kClearColor = 0x001F3F;
@@ -47,6 +60,46 @@ static void fb_clear(volatile uint32_t* pixels, uint32_t color) {
 
 static uint32_t min_u32(uint32_t a, uint32_t b) {
     return a < b ? a : b;
+}
+
+// Damage accumulated since the last present the appliance accepted. It is
+// tracked only when the GPU service endpoint is present, so the ramfb-only
+// path (default boot) executes exactly the code it did before. A rectangle is
+// half-open and empty when x0 >= x1.
+struct DamageRect {
+    uint32_t x0 = 0xFFFF'FFFFu;
+    uint32_t y0 = 0xFFFF'FFFFu;
+    uint32_t x1 = 0;
+    uint32_t y1 = 0;
+
+    bool empty() const { return x0 >= x1 || y0 >= y1; }
+    void reset() { x0 = 0xFFFF'FFFFu; y0 = 0xFFFF'FFFFu; x1 = 0; y1 = 0; }
+    void whole() { x0 = 0; y0 = 0; x1 = kFbWidth; y1 = kFbHeight; }
+
+    // Union in one rectangle, clipped to the framebuffer. An untrusted width is
+    // clamped before it is added so it can never wrap the extent.
+    void add(uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+        if (width == 0 || height == 0 || x >= kFbWidth || y >= kFbHeight) return;
+        const uint32_t cx1 = x + min_u32(width, kFbWidth - x);
+        const uint32_t cy1 = y + min_u32(height, kFbHeight - y);
+        if (x < x0) x0 = x;
+        if (y < y0) y0 = y;
+        if (cx1 > x1) x1 = cx1;
+        if (cy1 > y1) y1 = cy1;
+    }
+
+    MxGpuDamageRect rect() const {
+        return MxGpuDamageRect{x0, y0, x1 - x0, y1 - y0};
+    }
+};
+
+// The pixel span one glyph command paints, using the same clamps as the drawer.
+static uint32_t glyph_span_width(const FbDrawGlyphCmd& cmd) {
+    return min_u32(cmd.width, 8) * (cmd.scale_x ? min_u32(cmd.scale_x, 8) : 1);
+}
+
+static uint32_t glyph_span_height(const FbDrawGlyphCmd& cmd) {
+    return min_u32(cmd.height, 16) * (cmd.scale_y ? min_u32(cmd.scale_y, 8) : 1);
 }
 
 static bool both_8byte_aligned(const void* a, const void* b) {
@@ -188,9 +241,43 @@ static void send_info(const mochi::framebuffer::Server& endpoint) {
     (void)endpoint.send_info(info);
 }
 
-static bool handle_fb_command(volatile uint32_t* pixels,
-                              const mochi::framebuffer::Server& endpoint,
-                              const RingSlot& slot) {
+// Everything one io.framebuffer service thread owns: the mapped pixels, the tty
+// endpoint, the damage accumulator, and (when the appliance is present) the
+// armed GPU service client. `gpu` is null on the default (ramfb-only) path.
+struct ServerState {
+    volatile uint32_t* pixels;
+    const mochi::framebuffer::Server* endpoint;
+    drv::gpu::linux::Client* gpu = nullptr;
+    bool gpu_force_full = false;
+    DamageRect damage;
+};
+
+// Push the frame the appliance must show now. Returns without effect when the
+// GPU service is not live, so the local display is always the floor.
+static void present_frame(ServerState& state) {
+    if (!state.gpu) return;
+    state.gpu->poll();
+    if (!state.gpu->live()) return;
+    if (state.gpu_force_full) {
+        // The first present after the handshake is always a whole frame, so a
+        // stale appliance scanout (the bootstrap placeholder) cannot survive.
+        if (state.gpu->submit_present(nullptr, true)) {
+            state.gpu_force_full = false;
+            state.damage.reset();
+        }
+        return;
+    }
+    if (state.damage.empty()) return;
+    const MxGpuDamageRect rect = state.damage.rect();
+    if (state.gpu->submit_present(&rect, false)) {
+        state.damage.reset();
+    }
+}
+
+static bool handle_fb_command(ServerState& state, const RingSlot& slot) {
+    volatile uint32_t* pixels = state.pixels;
+    const mochi::framebuffer::Server& endpoint = *state.endpoint;
+    DamageRect* damage = state.gpu ? &state.damage : nullptr;
     switch (slot.type) {
     case FB_INFO:
         send_info(endpoint);
@@ -199,34 +286,53 @@ static bool handle_fb_command(volatile uint32_t* pixels,
         if (slot.length >= sizeof(uint32_t)) {
             const uint32_t color = *reinterpret_cast<const uint32_t*>(slot.payload);
             fb_clear(pixels, color);
+            if (damage) damage->whole();
         }
         return true;
     case FB_FILL_RECT:
         if (slot.length >= sizeof(FbFillRectCmd)) {
             const auto& cmd = *reinterpret_cast<const FbFillRectCmd*>(slot.payload);
             fb_fill_rect(pixels, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color);
+            if (damage) damage->add(cmd.x, cmd.y, cmd.width, cmd.height);
         }
         return true;
     case FB_DRAW_GLYPH:
         if (slot.length >= sizeof(FbDrawGlyphCmd)) {
             const auto& cmd = *reinterpret_cast<const FbDrawGlyphCmd*>(slot.payload);
             fb_draw_glyph(pixels, cmd);
+            if (damage) damage->add(cmd.x, cmd.y, glyph_span_width(cmd), glyph_span_height(cmd));
         }
         return true;
     case FB_DRAW_TEXT:
         if (slot.length >= sizeof(FbDrawTextCmd)) {
             const auto& cmd = *reinterpret_cast<const FbDrawTextCmd*>(slot.payload);
             fb_draw_text(pixels, cmd);
+            if (damage) {
+                const uint32_t count = min_u32(cmd.len, static_cast<uint32_t>(sizeof(cmd.text)));
+                const uint32_t scale_x = cmd.scale_x ? min_u32(cmd.scale_x, 8) : 1;
+                const uint32_t scale_y = cmd.scale_y ? min_u32(cmd.scale_y, 8) : 1;
+                damage->add(cmd.x, cmd.y,
+                            count * midix::font::kVga8x16Width * scale_x,
+                            midix::font::kVga8x16Height * scale_y);
+            }
         }
         return true;
     case FB_COPY_RECT:
         if (slot.length >= sizeof(FbCopyRectCmd)) {
             const auto& cmd = *reinterpret_cast<const FbCopyRectCmd*>(slot.payload);
             fb_copy_rect(pixels, cmd);
+            // A copy dirties both rectangles; a scroll is exactly this case.
+            if (damage) {
+                damage->add(cmd.src_x, cmd.src_y, cmd.width, cmd.height);
+                damage->add(cmd.dst_x, cmd.dst_y, cmd.width, cmd.height);
+            }
         }
         return true;
     case FB_PRESENT:
+        // The ramfb store is normal RAM; the barrier orders the pixels before
+        // the appliance (and the display) reads them.
         asm volatile("dsb sy" ::: "memory");
+        present_frame(state);
         return true;
     default:
         return false;
@@ -296,6 +402,59 @@ extern "C" [[noreturn]] void _start() {
         mochi::log_raw_marker("io.framebuffer: no command endpoint\n");
     }
 
+    // Phase J: arm the GPU service client when init handed us the endpoint and
+    // this framebuffer really is the appliance staging geometry. On every other
+    // boot (the default, and switch-t210's 1280x720 panel) the ramfb path
+    // stands alone, unchanged.
+    drv::gpu::linux::Client gpu_client;
+    bool gpu_armed = false;
+    {
+        const CapHandle gpu_req = mochi::boot::handle(boot, "gpu.cmd.ring");
+        const CapHandle gpu_reply = mochi::boot::handle(boot, "gpu.reply.ring");
+        const CapHandle gpu_req_db = mochi::boot::handle(boot, "gpu.cmd.doorbell");
+        const CapHandle gpu_reply_db = mochi::boot::handle(boot, "gpu.reply.doorbell");
+        const bool geometry_ok =
+            kFbWidth == dango::kGpuModeWidth &&
+            kFbHeight == dango::kGpuModeHeight &&
+            kFbStride == dango::kGpuModeWidth * dango::kGpuModeBytesPerPixel;
+        if (gpu_req && gpu_reply && gpu_req_db && gpu_reply_db && geometry_ok &&
+            mx_map_page(gpu_req, kVaGpuReqRing, MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK &&
+            mx_map_page(gpu_reply, kVaGpuReplyRing, MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
+            const drv::gpu::linux::Endpoint gpu_ep{
+                reinterpret_cast<RingPage*>(kVaGpuReqRing),
+                reinterpret_cast<RingPage*>(kVaGpuReplyRing),
+                kRingOrder,
+                gpu_req_db,
+                gpu_reply_db,
+            };
+            // The window we declare is the appliance staging binding, read from
+            // its single home (the shared Dango binding). The service refuses a
+            // client whose window disagrees with its own.
+            MxGpuServiceRegisterStagingRequest window{};
+            window.staging_pa = dango::kStagingGuestIpa;
+            window.staging_size = dango::kStagingSize;
+            window.width = dango::kGpuModeWidth;
+            window.height = dango::kGpuModeHeight;
+            window.stride = dango::kGpuModeWidth * dango::kGpuModeBytesPerPixel;
+            window.pixel_format = MX_GPU_PIXFMT_XRGB8888;
+            window.flags = MX_GPU_SERVICE_BUFFER_FLAG_STAGING;
+            gpu_client.attach(gpu_ep, window);
+            gpu_armed = gpu_client.attached();
+        }
+        for (uint32_t i = 0; gpu_armed && i < kGpuHandshakeBudget; ++i) {
+            if (gpu_client.live()) break;
+            gpu_client.poll();
+            mx_yield();
+        }
+        // Bounded: if the service is late (or absent) we boot on and present
+        // opportunistically as the terminal works; the local path is unaffected.
+    }
+    if (gpu_armed) mochi::log_raw_marker("io.framebuffer: gpu backend armed\n");
+
+    // The first present after arming is always a whole frame, so nothing drawn
+    // before the handshake completed can be lost on the appliance.
+    ServerState state{pixels, &endpoint, gpu_armed ? &gpu_client : nullptr, gpu_armed, {}};
+
     mochi::boot::ready(boot);
     while (true) {
         if (!cmd_ring || cmd_db == MX_NULL_HANDLE) {
@@ -305,10 +464,12 @@ extern "C" [[noreturn]] void _start() {
 
         RingSlot slot{};
         while (endpoint.try_recv(&slot)) {
-            (void)handle_fb_command(pixels, endpoint, slot);
+            (void)handle_fb_command(state, slot);
         }
+        // Flush any damage that arrived while the service was still coming up.
+        present_frame(state);
         if (endpoint.wait_recv(&slot)) {
-            (void)handle_fb_command(pixels, endpoint, slot);
+            (void)handle_fb_command(state, slot);
         } else {
             mx_yield();
         }

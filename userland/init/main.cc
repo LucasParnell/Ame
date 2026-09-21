@@ -34,6 +34,7 @@ using integrity::bytes_equal;
 #include "midix/abi/image.h"
 #include "midix/abi/protocols/nameservice.h"
 #include "midix/abi/protocols/fs.h"
+#include "midix/abi/protocols/gpu_service.h"
 #include "supervision.h"
 
 constexpr uint32_t PRINCIPAL_NATIVE_TRUSTED = 1;
@@ -131,6 +132,13 @@ struct InitRuntime {
     CapHandle fb_reply_ring;
     CapHandle fb_cmd_db;
     CapHandle fb_reply_db;
+    // Phase J: the native GPU service endpoint (`drv.gpu.linux`). Allocated
+    // directly rather than through the manifest channel table, because the GPU
+    // service is a role hosted by dango.manager, not a spawned service.
+    CapHandle gpu_cmd_ring;
+    CapHandle gpu_reply_ring;
+    CapHandle gpu_cmd_db;
+    CapHandle gpu_reply_db;
     CapHandle xhci_hid_ring;
     CapHandle xhci_hid_db;
     CapHandle hid_input_ring;
@@ -582,6 +590,19 @@ static void refresh_exports() {
         boot_copy_name(entry.name, svc.name);
         entry.rights = RIGHT_READ;
         entry.protocol = streq(svc.name, "io.fs") ? MX_PROTOCOL_FS : 0;
+        // Phase J: publish the Mochi-facing GPU service name. The V0 export
+        // catalog holds exactly one entry per spawned service
+        // (MX_MAX_EXPORTS == service count), and `drv.gpu.linux` is a role hosted
+        // by dango.manager rather than a process of its own, so the name is
+        // published from the hosting process's slot. Resolving it yields the
+        // manager with the GPU service protocol, which is what a client of the
+        // service needs to identify it; dango.manager itself stays enumerable
+        // through the service registry. Without the appliance the catalog is
+        // exactly what it was before.
+        if (g_rt.gpu_cmd_ring != kNullCap && streq(svc.name, "dango.manager")) {
+            boot_copy_name(entry.name, "drv.gpu.linux");
+            entry.protocol = MX_PROTOCOL_GPU_SERVICE;
+        }
         const CapHandle cap = svc.proc ? as_cap(sys_cap_grant(nameservice->proc, svc.proc, RIGHT_READ | RIGHT_DUP)) : kNullCap;
         __atomic_store_n(&entry.process, cap, __ATOMIC_RELEASE);
         server.exports[i] = svc.identity;
@@ -742,6 +763,19 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
         if (kCapGpuIrq != kNullCap) {
             grant_to(svc, kCapGpuIrq, RIGHT_READ | RIGHT_WRITE, MX_BOOT_ENTRY_HANDLE, "gpu.irq");
         }
+        // Phase J: the server half of the native GPU service runs here, because
+        // this process owns the Dango channel. It gets the other side of the
+        // endpoint and read-only access to the framebuffer window it mirrors
+        // into the appliance staging window.
+        if (g_rt.gpu_cmd_ring != kNullCap) {
+            share_ring_to_with_rights(svc, g_rt.gpu_cmd_ring, "gpu.cmd.ring", RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
+            share_ring_to_with_rights(svc, g_rt.gpu_reply_ring, "gpu.reply.ring", RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
+            share_doorbell_to(svc, g_rt.gpu_cmd_db, "gpu.cmd.doorbell", RIGHT_WAIT);
+            share_doorbell_to(svc, g_rt.gpu_reply_db, "gpu.reply.doorbell", RIGHT_NOTIFY);
+            if (sys_cap_identify(kCapFbMemory) == kCapTypeMmio) {
+                grant_to(svc, kCapFbMemory, RIGHT_READ | RIGHT_MAP, MX_BOOT_ENTRY_MMIO, "fb.memory");
+            }
+        }
         boot_publish(svc);
         require_ok(set_service_affinity(svc.main_thread, 1ull << 1), "init: service start failed\n");
         require_ok(sys_thread_resume(svc.main_thread), "init: service start failed\n");
@@ -763,6 +797,14 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
         share_service_log(svc, g_rt.console_db);
         if (sys_cap_identify(kCapFbMemory) == kCapTypeMmio)
             grant_to(svc, kCapFbMemory, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, MX_BOOT_ENTRY_MMIO, "fb.memory");
+        // Phase J: the client half of the appliance endpoint. Absent without the
+        // GPU function, so the framebuffer stays ramfb-only on every other boot.
+        if (g_rt.gpu_cmd_ring != kNullCap) {
+            share_ring_to_with_rights(svc, g_rt.gpu_cmd_ring, "gpu.cmd.ring", RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
+            share_ring_to_with_rights(svc, g_rt.gpu_reply_ring, "gpu.reply.ring", RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
+            share_doorbell_to(svc, g_rt.gpu_cmd_db, "gpu.cmd.doorbell", RIGHT_NOTIFY);
+            share_doorbell_to(svc, g_rt.gpu_reply_db, "gpu.reply.doorbell", RIGHT_WAIT);
+        }
         share_ring_to_with_rights(svc, g_rt.fb_cmd_ring, "fb.cmd.ring", RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, kFbCmdRingOrder);
         share_ring_to_with_rights(svc, g_rt.fb_reply_ring, "fb.reply.ring", RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
         share_doorbell_to(svc, g_rt.fb_cmd_db, "fb.cmd.doorbell", RIGHT_WAIT);
@@ -956,6 +998,24 @@ static void create_channels() {
             }
         }
         if (!found || !*resource.handle) fail_halt("init: channel allocation failed\n");
+    }
+}
+
+// Phase J: the native GPU service endpoint. A GPU service is a role hosted by
+// dango.manager (the process that owns the Dango channel), so it is not a
+// spawned service and the boot manifest's fixed channel table has no slot for
+// it. The endpoint is therefore allocated directly here and handed to both
+// halves, exactly as the log and session rings are. Without the appliance the
+// endpoint does not exist at all, and every GPU path stays off.
+static void create_gpu_service_channels() {
+    if (kCapGpuFunction == kNullCap) return;
+    g_rt.gpu_cmd_ring = as_cap(sys_ring_create(kRingOrder, 0));
+    g_rt.gpu_reply_ring = as_cap(sys_ring_create(kRingOrder, 0));
+    g_rt.gpu_cmd_db = as_cap(sys_doorbell_create());
+    g_rt.gpu_reply_db = as_cap(sys_doorbell_create());
+    if (!g_rt.gpu_cmd_ring || !g_rt.gpu_reply_ring ||
+        !g_rt.gpu_cmd_db || !g_rt.gpu_reply_db) {
+        fail_halt("init: gpu channel failed\n");
     }
 }
 
@@ -1315,6 +1375,7 @@ extern "C" [[noreturn]] void _start() {
     if (!g_rt.config_arena || sys_map_page(g_rt.config_arena, kVaConsoleConfig, RIGHT_READ | RIGHT_WRITE))
         fail_halt("init: console config failed\n");
     create_channels();
+    create_gpu_service_channels();
     create_sessions();
     for (uint32_t i = 0; i < service_count; ++i) {
         services[i].log_ring = as_cap(sys_ring_create(kRingOrder, 0));

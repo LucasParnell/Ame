@@ -1,3 +1,14 @@
+# Boot manifest (legacy V0 view). Columns: name object principal restart caps.
+#
+# Phase J: there is deliberately no `drv.gpu.linux` line here. The native GPU
+# service (spec §15.1) is not a spawned process: its server half runs inside
+# dango.manager, which is the process that owns the Dango channel and the
+# appliance authority caps, and its client half is io.framebuffer. The endpoint
+# pair that connects them (ring + doorbell) and the shared framebuffer window are
+# wired by init at boot, because a GPU service is a role hosted by another
+# process rather than a service with an image of its own. The `drv.gpu.linux`
+# name is published through the nameservice by init (see refresh_exports), and
+# the whole path stays off unless the boot granted `gpu.function`.
 nameservice nameservice native_trusted never -
 io.console io.console native_trusted always uart
 demo.pong demo.pong native_sandboxed always -

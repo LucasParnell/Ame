@@ -66,6 +66,9 @@ set(ANKO_SOURCES
     vm/vm_channel.cc
     vm/vm_channel_notify.cc
 
+    # ---- Phase L: dynamic shared arenas (spec §12.3) ----------------------
+    vm/vm_shared.cc
+
     # ---- Phase D: PCI device assignment + interrupt virtualization --------
     vm/vm_device.cc
     vm/vm_device_irq.cc

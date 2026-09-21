@@ -73,6 +73,8 @@ bar4_ipa="$(macro_dec DANGO_GPU_BAR4_IPA)"
 bar4_size="$(macro_dec DANGO_GPU_BAR4_SIZE)"
 stg_base="$(macro_dec DANGO_GPU_STAGING_BASE)"
 stg_size="$(macro_dec DANGO_GPU_STAGING_SIZE)"
+shm_base="$(macro_dec DANGO_SHM_GUEST_BASE)"
+shm_size="$(macro_dec DANGO_SHM_GUEST_SIZE)"
 
 # The channel DTS `interrupts` cell carries the SPI number, not the vGIC hwirq
 # (32 + SPI). Derive it from the header rather than restating it.
@@ -99,11 +101,28 @@ if (( stg_base < mmio_base + mmio_size && stg_base + stg_size > mmio_base )); th
     exit 1
 fi
 
+# The dynamic shared-arena descriptor window (Phase L) must not overlap the
+# channel window, the staging window or the GPU MMIO aperture; regions live at
+# owner-chosen IPAs and are never placed inside this window.
+if (( shm_base < ch_base + ch_size )); then
+    echo "error: DANGO_SHM_GUEST_BASE overlaps the channel window" >&2
+    exit 1
+fi
+if (( shm_base < stg_base + stg_size )); then
+    echo "error: DANGO_SHM_GUEST_BASE overlaps the staging window" >&2
+    exit 1
+fi
+if (( shm_base < mmio_base + mmio_size && shm_base + shm_size > mmio_base )); then
+    echo "error: DANGO_SHM_GUEST window overlaps the MMIO window" >&2
+    exit 1
+fi
+
 # Placeholders are emitted longest-name-first so a plain name (e.g. BASE) can
 # never be substituted inside a longer one (e.g. BASE_UA).
 emit DANGO_CH_GUEST_BASE_UA  '%08x'   "${ch_base}"
 emit DANGO_GPU_ECAM_BASE_UA  '%08x'   "${ecam_base}"
 emit DANGO_GPU_STAGING_BASE_UA '%08x' "${stg_base}"
+emit DANGO_SHM_GUEST_BASE_UA '%08x' "${shm_base}"
 emit DANGO_GPU_INTX_SPI_1    '0x%02x' "$(( intx_spi + 1 ))"
 emit DANGO_GPU_INTX_SPI_2    '0x%02x' "$(( intx_spi + 2 ))"
 emit DANGO_GPU_INTX_SPI_3    '0x%02x' "$(( intx_spi + 3 ))"
@@ -117,4 +136,6 @@ emit DANGO_GPU_MMIO_BASE     '0x%08x' "${mmio_base}"
 emit DANGO_GPU_MMIO_SIZE     '0x%08x' "${mmio_size}"
 emit DANGO_GPU_STAGING_BASE  '0x%08x' "${stg_base}"
 emit DANGO_GPU_STAGING_SIZE  '0x%08x' "${stg_size}"
+emit DANGO_SHM_GUEST_BASE   '0x%08x' "${shm_base}"
+emit DANGO_SHM_GUEST_SIZE   '0x%x'   "${shm_size}"
 emit DANGO_GPU_INTX_SPI      '0x%02x' "${intx_spi}"

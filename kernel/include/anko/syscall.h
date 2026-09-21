@@ -109,7 +109,11 @@ enum Syscall : unsigned {
     // (channel_cap, ipa, size) -> E_OK. Records the VM's shared staging window
     // in the channel descriptor; fails E_INVALID until SYS_VM_CHANNEL_MAP has run.
     SYS_VM_CHANNEL_STAGE = MX_NR_VM_CHANNEL_STAGE,
-    SYS_COUNT = MX_NR_VM_CHANNEL_STAGE + 1,
+    // Phase L: dynamic shared arenas (spec §12.3).
+    SYS_VM_SHARED_MEMORY_ATTACH = MX_NR_VM_SHARED_MEMORY_ATTACH, // (vm, arena, pa, size, rights, flags) -> cap
+    SYS_VM_SHARED_MEMORY_REGISTER_DMA = MX_NR_VM_SHARED_MEMORY_REGISTER_DMA, // (shared, perms)
+    SYS_VM_SHARED_MEMORY_INSPECT = MX_NR_VM_SHARED_MEMORY_INSPECT, // (shared, SharedArenaInfo*, len)
+    SYS_COUNT = MX_NR_VM_SHARED_MEMORY_INSPECT + 1,
 };
 
 static_assert(static_cast<unsigned>(SYS_YIELD) == static_cast<unsigned>(MX_NR_YIELD), "syscall number drift: YIELD");
@@ -127,6 +131,9 @@ static_assert(static_cast<unsigned>(SYS_VM_ASSIGN_DEVICE)    == static_cast<unsi
 static_assert(static_cast<unsigned>(SYS_VM_ASSIGN_MAP_MMIO)  == static_cast<unsigned>(MX_NR_VM_ASSIGN_MAP_MMIO),  "syscall number drift: VM_ASSIGN_MAP_MMIO");
 static_assert(static_cast<unsigned>(SYS_VM_ASSIGN_ROUTE_IRQ) == static_cast<unsigned>(MX_NR_VM_ASSIGN_ROUTE_IRQ), "syscall number drift: VM_ASSIGN_ROUTE_IRQ");
 static_assert(static_cast<unsigned>(SYS_VM_ASSIGN_DESTROY)   == static_cast<unsigned>(MX_NR_VM_ASSIGN_DESTROY),   "syscall number drift: VM_ASSIGN_DESTROY");
+static_assert(static_cast<unsigned>(SYS_VM_SHARED_MEMORY_ATTACH) == static_cast<unsigned>(MX_NR_VM_SHARED_MEMORY_ATTACH), "syscall number drift: VM_SHARED_MEMORY_ATTACH");
+static_assert(static_cast<unsigned>(SYS_VM_SHARED_MEMORY_REGISTER_DMA) == static_cast<unsigned>(MX_NR_VM_SHARED_MEMORY_REGISTER_DMA), "syscall number drift: VM_SHARED_MEMORY_REGISTER_DMA");
+static_assert(static_cast<unsigned>(SYS_VM_SHARED_MEMORY_INSPECT) == static_cast<unsigned>(MX_NR_VM_SHARED_MEMORY_INSPECT), "syscall number drift: VM_SHARED_MEMORY_INSPECT");
 
 // ---------------------------------------------------------------------------
 // Error codes — negative, returned in x0

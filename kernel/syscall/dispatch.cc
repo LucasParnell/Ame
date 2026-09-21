@@ -242,7 +242,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     vm::CallGuard vm_call((nr >= SYS_VM_CREATE && nr <= SYS_VM_MEMORY_WRITE) ||
                           (nr >= SYS_VCPU_BIND_SCHED_CONTEXT && nr <= SYS_VCPU_BLOCK_UNTIL_IRQ_OR_TIMER) ||
-                          (nr >= SYS_VM_ASSIGN_DEVICE && nr <= SYS_VM_CHANNEL_STAGE));
+                          (nr >= SYS_VM_ASSIGN_DEVICE && nr <= SYS_VM_SHARED_MEMORY_INSPECT));
     switch (static_cast<Syscall>(nr)) {
 
     case SYS_YIELD:
@@ -839,6 +839,36 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         return rc == E_OK ? ok(E_OK) : err(rc);
     }
 
+    case SYS_VM_SHARED_MEMORY_ATTACH: {
+        // a0 = vm_cap, a1 = arena_cap, a2 = guest_pa, a3 = size, a4 = rights, a5 = flags
+        const u32 rights = static_cast<u32>(a4);
+        if (a4 != rights) return err(E_INVALID);
+        const u32 flags = static_cast<u32>(a5);
+        if (a5 != flags) return err(E_INVALID);
+        SysError rc = E_OK;
+        const CapHandle h = vm::attach_shared_memory(*p, static_cast<CapHandle>(a0),
+                                                     static_cast<CapHandle>(a1), a2, a3, rights,
+                                                     flags, &rc);
+        if (h == kNullCap) return err(rc);
+        return ok(static_cast<long>(h));
+    }
+
+    case SYS_VM_SHARED_MEMORY_REGISTER_DMA: {
+        // a0 = shared_cap, a1 = device permissions (DmaPerm bitmask)
+        const u32 perms = static_cast<u32>(a1);
+        if (a1 != perms) return err(E_INVALID);
+        const SysError rc = vm::register_shared_memory_dma(*p, static_cast<CapHandle>(a0), perms);
+        return rc == E_OK ? ok(E_OK) : err(rc);
+    }
+
+    case SYS_VM_SHARED_MEMORY_INSPECT: {
+        if (!a1 || a2 < sizeof(vm::SharedArenaInfo)) return err(E_INVALID);
+        vm::SharedArenaInfo info{};
+        const SysError rc = vm::inspect_shared_memory(*p, static_cast<CapHandle>(a0), &info);
+        if (rc != E_OK) return err(rc);
+        return copy_to_user(ua, a1, &info, sizeof(info)) ? ok(E_OK) : err(E_FAULT);
+    }
+
     case SYS_VM_CHANNEL_INSPECT: {
         if (!a1 || a2 < sizeof(vm::VmChannelInfo)) return err(E_INVALID);
         vm::VmChannelInfo info{};
@@ -911,6 +941,9 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         switch (a0) {
         case 200: return ok(static_cast<long>(object::live_count()));
         case 201: return ok(static_cast<long>(mm::allocated_page_count()));
+        // Phase L shared-arena counters (attached / number registered SharedGpu).
+        case 202: return ok(static_cast<long>(vm::shared_arena_stats().attached));
+        case 203: return ok(static_cast<long>(vm::shared_arena_stats().dma_registered));
         case DBG_SYSCALL_COUNT:         return ok(static_cast<long>(metric_load(g_syscall_count)));
         case DBG_IPC_SYSCALL_COUNT:     return ok(static_cast<long>(metric_load(g_ipc_syscall_count)));
         case DBG_CONTEXT_SWITCHES:      return ok(static_cast<long>(sched::context_switch_count()));
@@ -1072,6 +1105,19 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
             if (!mem) return err(E_NOTFOUND);
             info.base = mem->phys_base;
             info.size = mem->size;
+            break;
+        }
+        case CAP_VM_SHARED: {
+            // Geometry and DMA class of an attached shared region. `attr` carries
+            // the VmDmaClass (0 = None), so userspace can see the region has not
+            // been granted device access until it registers it.
+            auto* shared = static_cast<vm::SharedArena*>(e->target);
+            if (!shared) return err(E_NOTFOUND);
+            info.base = shared->guest_pa_base;
+            info.size = shared->size;
+            info.attr = static_cast<u32>(shared->dma_class);
+            info.flags = shared->flags;
+            info.aux0 = shared->shared_id;
             break;
         }
         case CAP_UART:

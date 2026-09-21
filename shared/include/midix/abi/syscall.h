@@ -77,6 +77,16 @@ enum MxSyscall : mx_u64_t {
     // registered through a device assignment). No-op-safe failure until
     // SYS_VM_CHANNEL_MAP has published the descriptor page.
     MX_NR_VM_CHANNEL_STAGE = 63,
+    // Phase L: dynamic shared arenas (spec §12.3).
+    // (vm_cap, arena_cap, guest_pa, size, rights, flags) -> attachment cap. The
+    // returned object couples the host arena lifetime and the guest mapping
+    // lifetime; dropping it tears down the guest mapping and releases the arena.
+    MX_NR_VM_SHARED_MEMORY_ATTACH = 64,
+    // (shared_cap, device_perms): the explicit, guarded transition of an attached
+    // region from VmDmaClass::None to SharedGpu. Attaching alone never grants DMA.
+    MX_NR_VM_SHARED_MEMORY_REGISTER_DMA = 65,
+    // (shared_cap, SharedArenaInfo* out, size) -> E_OK
+    MX_NR_VM_SHARED_MEMORY_INSPECT = 66,
 };
 
 constexpr mx_u32_t MX_SPAWN_SUSPENDED = 1u << 0;
@@ -154,3 +164,6 @@ constexpr mx_u64_t NR_VM_ASSIGN_EXPOSE_ECAM = MX_NR_VM_ASSIGN_EXPOSE_ECAM;
 constexpr mx_u64_t NR_VM_CHANNEL_MAP = MX_NR_VM_CHANNEL_MAP;
 constexpr mx_u64_t NR_VM_CHANNEL_NOTIFY = MX_NR_VM_CHANNEL_NOTIFY;
 constexpr mx_u64_t NR_VM_CHANNEL_STAGE = MX_NR_VM_CHANNEL_STAGE;
+constexpr mx_u64_t NR_VM_SHARED_MEMORY_ATTACH = MX_NR_VM_SHARED_MEMORY_ATTACH;
+constexpr mx_u64_t NR_VM_SHARED_MEMORY_REGISTER_DMA = MX_NR_VM_SHARED_MEMORY_REGISTER_DMA;
+constexpr mx_u64_t NR_VM_SHARED_MEMORY_INSPECT = MX_NR_VM_SHARED_MEMORY_INSPECT;

@@ -64,6 +64,16 @@ _Static_assert(sizeof(struct dango_channel_layout) == 80, "layout ABI");
 #define DANGO_GPU_STAGING_BASE 0x49000000ULL
 #define DANGO_GPU_STAGING_SIZE 0x00300000ULL /* 3 MiB = 1024x768x4 */
 
+/* Dynamic shared arenas (Phase L). Fixed guest window in which the host
+ * publishes the descriptor of every region a native owner has attached to this
+ * VM. The `dango_shm` device (compatible "ame,dango-shm-v1") reads the
+ * read-only descriptor page and exposes each region to appliance userspace
+ * through mmap. Region payloads live at owner-chosen guest IPAs named by the
+ * descriptor, never inside this window. Sits above the staging window and
+ * below the GPU MMIO aperture. */
+#define DANGO_SHM_GUEST_BASE 0x4A000000ULL
+#define DANGO_SHM_GUEST_SIZE 0x00100000ULL /* 1 MiB descriptor window */
+
 /* The one bootstrap scanout mode. The staging window is exactly one XRGB8888
  * frame of it, so the mode and the window size are the same fact. */
 #define DANGO_GPU_MODE_WIDTH 1024U
@@ -138,6 +148,10 @@ static_assert(DANGO_CH_STAGING_OFF(DANGO_CH_DEFAULT_RING_ORDER) ==
               "staging follows the descriptor page and both rings");
 static_assert(DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE <= 0x4C000000ULL,
               "staging window stays below the GPU MMIO aperture");
+static_assert(DANGO_SHM_GUEST_BASE >= DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE,
+              "shared-arena window sits above the staging window");
+static_assert(DANGO_SHM_GUEST_BASE + DANGO_SHM_GUEST_SIZE <= DANGO_GPU_MMIO_BASE,
+              "shared-arena window stays below the GPU MMIO aperture");
 #else
 _Static_assert(sizeof(struct dango_ring_hdr) == 256, "ring header ABI");
 _Static_assert(sizeof(struct dango_ring_slot) == 64, "ring slot ABI");
@@ -153,4 +167,8 @@ _Static_assert(DANGO_CH_STAGING_OFF(DANGO_CH_DEFAULT_RING_ORDER) ==
                "staging follows the descriptor page and both rings");
 _Static_assert(DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE <= 0x4C000000ULL,
                "staging window stays below the GPU MMIO aperture");
+_Static_assert(DANGO_SHM_GUEST_BASE >= DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE,
+               "shared-arena window sits above the staging window");
+_Static_assert(DANGO_SHM_GUEST_BASE + DANGO_SHM_GUEST_SIZE <= DANGO_GPU_MMIO_BASE,
+               "shared-arena window stays below the GPU MMIO aperture");
 #endif

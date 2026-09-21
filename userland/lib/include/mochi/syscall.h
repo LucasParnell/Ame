@@ -268,3 +268,15 @@ static inline mx_status_t mx_spawn(const void* image, uint64_t image_size, uint3
 static inline int64_t sys_vm_channel_map(CapHandle channel, CapHandle vcpu, uint64_t ipa, uint64_t size, uint32_t irq) { return _svc5(NR_VM_CHANNEL_MAP, channel, vcpu, ipa, size, irq); }
 static inline int64_t sys_vm_channel_notify(CapHandle channel) { return _svc1(NR_VM_CHANNEL_NOTIFY, channel); }
 static inline int64_t sys_vm_channel_stage(CapHandle channel, uint64_t ipa, uint64_t size) { return _svc3(NR_VM_CHANNEL_STAGE, channel, ipa, size); }
+
+// Phase L: dynamic shared arenas (spec §12.3).
+static inline int64_t sys_vm_shared_memory_attach(CapHandle vm, CapHandle arena, uint64_t guest_pa,
+                                                  uint64_t size, uint32_t rights, uint32_t flags) {
+    return _svc6(NR_VM_SHARED_MEMORY_ATTACH, vm, arena, guest_pa, size, rights, flags);
+}
+static inline int64_t sys_vm_shared_memory_register_dma(CapHandle shared, uint32_t perms) {
+    return _svc2(NR_VM_SHARED_MEMORY_REGISTER_DMA, shared, perms);
+}
+static inline int64_t sys_vm_shared_memory_inspect(CapHandle shared, void* info, uint64_t info_len) {
+    return _svc3(NR_VM_SHARED_MEMORY_INSPECT, shared, reinterpret_cast<uint64_t>(info), info_len);
+}

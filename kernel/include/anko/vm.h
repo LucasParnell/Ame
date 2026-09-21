@@ -20,6 +20,8 @@ constexpr u32 kMaxVms = 4;
 constexpr u32 kMaxVcpusPerVm = 4;
 constexpr u32 kMaxVmMemoryObjects = 32;
 constexpr u32 kMaxVmChannels = 16;
+// Phase L: attachments of an existing pinned page set (CAP_ARENA) into a VM.
+constexpr u32 kMaxSharedArenas = 16;
 // Guest RAM is mapped page-granular, so the table must hold all of it plus
 // headroom for the device/BAR mappings the assignment layer adds (Phase E).  A
 // 128 MiB guest is 32768 pages on its own.
@@ -439,6 +441,65 @@ struct VmChannel {
     u64 staging_size;
 };
 
+// ---------------------------------------------------------------------------
+// Phase L: dynamic shared arenas (spec §12.3).
+//
+// A native owner attaches an existing pinned page set (a kernel-backed
+// CAP_ARENA) into a VM's guest address space without rebooting it. The
+// attachment is a single capability-bearing object that couples the host arena
+// lifetime and the guest stage-2 mapping lifetime: `arena_lifetime` retains the
+// arena object so its pages cannot be freed under the guest, `owner_lifetime`
+// retains the VM record so the stage-2 mapping can never outlive the VM, and
+// releasing the attachment's last reference unmaps the guest range and drops
+// both. There is no path that lets one lifetime outlive the other.
+//
+// DMA stays explicit and separate: an attached region enters stage 2 as
+// iommu::VmDmaClass::None and is therefore absent from every DMA domain. It
+// becomes reachable by assigned devices only when the owner explicitly
+// registers it SharedGpu through shared_arena_register_dma(), the sole writer
+// of `dma_class`.
+// ---------------------------------------------------------------------------
+
+// Attach flags (a5). No flag may grant DMA authority today, so `None` is the
+// only accepted value: a future flag cannot silently become a DMA upgrade.
+constexpr u32 kSharedArenaFlagNone = 0;
+
+struct Vm; // defined below; SharedArena holds only a borrowed back-pointer
+
+struct SharedArena {
+    object::Record* lifetime;       // this attachment's own reference
+    object::Record* arena_lifetime; // retained host arena (pinned page set)
+    object::Record* owner_lifetime; // retained owner VM (guest mapping lifetime)
+    Arena* arena;                   // host page set backing the guest range
+    Vm* owner_vm;                   // VM whose stage 2 holds the mapping
+    u64 object_tag;                 // DMA owner identity reported to the IOMMU
+    u32 shared_id;
+    u32 owner_vm_id;
+    PhysAddr host_phys_base;
+    u64 size;
+    u64 guest_pa_base;
+    u32 rights;                     // stage-2 access rights (READ/WRITE only)
+    u32 flags;
+    u32 dma_perms;                  // device perms captured at registration
+    iommu::VmDmaClass dma_class;    // None until explicitly registered SharedGpu
+    bool mapped_stage2;
+    bool dead;
+    u8 pad[1];
+};
+
+// Guest-visible geometry of an attachment (SYS_VM_SHARED_MEMORY_INSPECT).
+struct SharedArenaInfo {
+    u32 shared_id;
+    u32 owner_vm_id;
+    u32 rights;
+    u32 flags;
+    u64 guest_pa_base;
+    u64 size;
+    u32 dma_class; // iommu::VmDmaClass
+    u32 mapped_stage2;
+    PhysAddr host_phys_base;
+};
+
 struct Vm {
     object::Record* lifetime;
     u64 owner_identity;
@@ -452,6 +513,8 @@ struct Vm {
     u32 vcpu_count;
     VmChannel* channels[kMaxVmChannels];
     u32 channel_count;
+    SharedArena* shared_arenas[kMaxSharedArenas];
+    u32 shared_arena_count;
     Stage2AddressSpace stage2;
     u64 guest_ram_bytes;
     u64 mapped_regions;
@@ -540,6 +603,7 @@ void destroy_owned_process(u64 identity);
 void dispose_memory(void* target);
 void dispose_vcpu(void* target);
 void dispose_channel(void* target);
+void dispose_shared_arena(void* target);
 
 cap::Ref require_cap(Process& caller, CapHandle handle, CapType type,
                       u32 need_rights, SysError* out_error);
@@ -583,6 +647,49 @@ SysError inspect_memory(Process& caller, CapHandle memory_cap, VmMemoryInfo* out
 SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset,
                       const void* src, u64 len);
 void destroy_memory_object(VmMemory* mem);
+
+// --- Phase L: dynamic shared arenas (vm_shared.cc) -------------------------
+// Core attach/teardown, free of capability and process machinery so the host
+// probe can drive it directly. `arena_record` is the CAP_ARENA entry's object
+// record (retained on success); `size` must equal the whole arena extent. On
+// success *out names the new attachment with one creator reference.
+SysError shared_arena_create(Vm* vm, Arena* arena, object::Record* arena_record, u64 guest_pa,
+                             u64 size, u32 rights, u32 flags, SharedArena** out);
+// Unmap the guest range and drop the VM list entry. Idempotent; safe on a
+// retired VM (whose stage 2 is already gone). Does not free the record.
+SysError shared_arena_teardown(SharedArena* shared);
+// Transition the region to SharedGpu. This is the only writer of `dma_class`;
+// it refuses unless the region is live and guest-mapped, and never widens an
+// already-registered permission set.
+SysError shared_arena_register_dma(SharedArena* shared, u32 perms);
+// Page-owner query for the IOMMU core (iommu::PageOwnerQuery shape, ctx is a
+// SharedArena*). Reports ownership only for a region that has been explicitly
+// registered; an unregistered (None) region is owned by nobody.
+bool shared_arena_dma_query(void* ctx, PhysAddr pa, iommu::PageOwnership* out);
+// DMA class of an attachment, for diagnostics and the host probe.
+iommu::VmDmaClass shared_arena_dma_class(const SharedArena& shared);
+
+// Capability-facing operations. CallGuard is held by the dispatcher, like every
+// other VM call, so these serialize with VM mutation and guest entry.
+cap::Borrow<SharedArena> shared_arena_from_cap(Process& caller, CapHandle shared_cap,
+                                               u32 need_rights, SysError* out_error);
+CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle arena_cap,
+                               u64 guest_pa, u64 size, u32 rights, u32 flags,
+                               SysError* out_error);
+SysError register_shared_memory_dma(Process& caller, CapHandle shared_cap, u32 perms);
+SysError inspect_shared_memory(Process& caller, CapHandle shared_cap, SharedArenaInfo* out);
+// VM retire / owner death: tear down every attachment bound to `vm` before its
+// stage-2 tables and RAM are freed. (Called from retire_vm once that one-line
+// hook lands; the host probe exercises it directly.)
+void shared_arena_release_for_vm(Vm* vm);
+
+// Aggregate attachment counters (diagnostics).
+struct SharedArenaStats {
+    u64 attached;
+    u64 teardowns;
+    u64 dma_registered;
+};
+SharedArenaStats shared_arena_stats();
 
 CapHandle create_vcpu(Process& caller, CapHandle vm_cap, u64 flags, SysError* out_error);
 SysError set_vcpu_entry(Process& caller, CapHandle vcpu_cap, u64 entry_pc,

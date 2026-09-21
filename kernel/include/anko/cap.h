@@ -55,6 +55,7 @@ enum CapType : u16 {
     CAP_IRQ = MX_CAP_IRQ,   // IRQ line object
     CAP_PCI_FUNCTION = MX_CAP_PCI_FUNCTION, // host PCI function authority (Phase D)
     CAP_VM_DEVICE = MX_CAP_VM_DEVICE,       // VM device assignment (Phase D, §6.1)
+    CAP_VM_SHARED = MX_CAP_VM_SHARED,       // attached shared arena (Phase L, §12.3)
 };
 
 static_assert(static_cast<u16>(CAP_PROCESS) == static_cast<u16>(MX_CAP_PROCESS),
@@ -79,6 +80,8 @@ static_assert(static_cast<u16>(CAP_PCI_FUNCTION) == static_cast<u16>(MX_CAP_PCI_
               "kernel cap type drift: PCI_FUNCTION");
 static_assert(static_cast<u16>(CAP_VM_DEVICE) == static_cast<u16>(MX_CAP_VM_DEVICE),
               "kernel cap type drift: VM_DEVICE");
+static_assert(static_cast<u16>(CAP_VM_SHARED) == static_cast<u16>(MX_CAP_VM_SHARED),
+              "kernel cap type drift: VM_SHARED");
 
 // ---------------------------------------------------------------------------
 // MMIO memory attribute classes (determines page-table memory type)

@@ -20,6 +20,7 @@
 #   AME_VERIFY_KMS=1 scripts/verify.sh                 # + Phase F KMS display row
 #   AME_VERIFY_GPUD=1 scripts/verify.sh                # + Phase H/I GPU control row
 #   AME_VERIFY_LIFECYCLE=1 scripts/verify.sh           # + Phase K IOMMU quarantine lifecycle
+#   AME_VERIFY_SHARED=1 scripts/verify.sh              # + Phase L dynamic shared arenas
 #   AME_VERIFY_PANIC=1 scripts/verify.sh                # + panic screen capture
 #
 # Exit status is 0 only when every check passes.
@@ -206,6 +207,15 @@ do_lifecycle_host() {
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> {} ({:.2f}s)".format(d["reason"], d.get("elapsed") or 0)); sys.exit(0 if d["success"] else 1)'
 }
 
+# Phase L: dynamic shared arenas (spec §12.3). Host-only — the attach path, the
+# overlap and lifetime coupling, and the "non-DMA unless explicitly registered"
+# gate are proved off target from the real kernel sources. Opt-in so the default
+# gate is unchanged.
+do_shared_arena() {
+    python3 -m unittest discover -s tests -p 'test_shared_arena.py' 2>&1 \
+    | python3 -c 'import sys; lines=[l.strip() for l in sys.stdin if l.strip()]; print("   -> " + (lines[-1] if lines else "no output"))'
+}
+
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
 # bespoke control flow below.
 CHECKS=(
@@ -254,6 +264,11 @@ fi
 
 if [[ "${AME_VERIFY_LIFECYCLE:-0}" == "1" ]]; then
     CHECKS+=("lifecycle-host:do_lifecycle_host")
+fi
+
+# Opt-in Phase L row.  Absent by default so the default gate is unchanged.
+if [[ "${AME_VERIFY_SHARED:-0}" == "1" ]]; then
+    CHECKS+=("shared-arena:do_shared_arena")
 fi
 
 record_toolchain

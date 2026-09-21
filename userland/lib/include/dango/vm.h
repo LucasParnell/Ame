@@ -19,7 +19,22 @@ constexpr uint32_t CAP_VM = MX_CAP_VM;
 constexpr uint32_t CAP_VCPU = MX_CAP_VCPU;
 constexpr uint32_t CAP_VM_MEMORY = MX_CAP_VM_MEMORY;
 constexpr uint32_t CAP_VM_CHANNEL = MX_CAP_VM_CHANNEL;
+constexpr uint32_t CAP_VM_SHARED = MX_CAP_VM_SHARED;   // attached shared arena (Phase L)
 constexpr uint32_t CAP_SCHED_CONTEXT = MX_CAP_SCHED_CONTEXT;
+
+// Phase L: dynamic shared arenas (spec §12.3). SYSCALL surface:
+//   sys_vm_shared_memory_attach(vm, arena, guest_pa, size, rights, flags) -> cap
+//   sys_vm_shared_memory_register_dma(shared, perms)
+//   sys_vm_shared_memory_inspect(shared, &info, sizeof(info))
+// An attached region is non-DMA (VmDmaClass::None) until it is explicitly
+// registered as SharedGpu; attaching alone never grants device access.
+constexpr uint32_t SHARED_ARENA_FLAG_NONE = 0;
+constexpr uint32_t SHARED_DMA_PERM_READ = 1u << 0;
+constexpr uint32_t SHARED_DMA_PERM_WRITE = 1u << 1;
+// iommu::VmDmaClass values, mirrored for the guest/userspace ABI.
+constexpr uint32_t VM_DMA_CLASS_NONE = 0;
+constexpr uint32_t VM_DMA_CLASS_APPLIANCE_RAM = 1;
+constexpr uint32_t VM_DMA_CLASS_SHARED_GPU = 2;
 
 constexpr uint32_t RIGHT_READ = MX_RIGHT_READ;
 constexpr uint32_t RIGHT_WRITE = MX_RIGHT_WRITE;
@@ -170,6 +185,20 @@ struct VmChannelInfo {
     uint64_t messages_host_to_guest;
     uint64_t messages_guest_to_host;
     uint64_t endpoint_present_mask;
+};
+
+// Phase L: geometry and DMA class of an attached shared region
+// (SYS_VM_SHARED_MEMORY_INSPECT). `dma_class` is a VM_DMA_CLASS_* value.
+struct SharedArenaInfo {
+    uint32_t shared_id;
+    uint32_t owner_vm_id;
+    uint32_t rights;
+    uint32_t flags;
+    uint64_t guest_pa_base;
+    uint64_t size;
+    uint32_t dma_class;
+    uint32_t mapped_stage2;
+    uint64_t host_phys_base;
 };
 
 } // namespace dango

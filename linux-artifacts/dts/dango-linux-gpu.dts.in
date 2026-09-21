@@ -56,6 +56,15 @@
             reg = <0x0 @DANGO_GPU_STAGING_BASE@ 0x0 @DANGO_GPU_STAGING_SIZE@>;
             no-map;
         };
+
+        // Dynamic shared-arena descriptor (Phase L): the host publishes the
+        // attached-region table in this read-only page; region payloads live at
+        // owner-chosen guest IPAs named by the table. `no-map` keeps the guest
+        // kernel from treating the descriptor window as RAM.
+        dango_shm: dango-shm@@DANGO_SHM_GUEST_BASE_UA@ {
+            reg = <0x0 @DANGO_SHM_GUEST_BASE@ 0x0 @DANGO_SHM_GUEST_SIZE@>;
+            no-map;
+        };
     };
 
     channel@@DANGO_CH_GUEST_BASE_UA@ {
@@ -65,6 +74,15 @@
         // Guest SPI @DANGO_CH_GUEST_SPI@; vGIC hwirq = @DANGO_CH_GUEST_IRQ@
         // (32 + SPI), edge triggered.
         interrupts = <0 @DANGO_CH_GUEST_SPI@ 1>;
+    };
+
+    // Dynamic shared arenas (Phase L): no IRQ, no MMIO aperture of its own —
+    // `dango_shm` reads the descriptor page in the reserved window above and
+    // exposes each attached region to userspace through mmap.
+    shm@@DANGO_SHM_GUEST_BASE_UA@ {
+        compatible = "ame,dango-shm-v1";
+        reg = <0x0 @DANGO_SHM_GUEST_BASE@ 0x0 @DANGO_SHM_GUEST_SIZE@>;
+        memory-region = <&dango_shm>;
     };
 
     psci {

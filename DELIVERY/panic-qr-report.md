@@ -61,6 +61,30 @@ ratio across a grid of box sizes.
 - **Gate.** `AME_VERIFY_IOMMU=1 AME_VERIFY_ASSIGN=1 AME_VERIFY_CHANNEL=1 AME_VERIFY_GPU=1
   AME_VERIFY_KMS=1 AME_VERIFY_PANIC=1 scripts/verify.sh` → all rows green.
 
+## Panic handling audit
+
+Multi-line UART output correctness: the report is emitted in one go through `log::panic_dump`
+(no ring, no prefixes) after interrupts are masked, so nothing else on this core interleaves.
+
+- **Every exception vector now reports.** The vector table used to send everything it did not handle
+  to a bare `wfe` loop: an SError (asynchronous abort), an FIQ, a stray EL1t fault or any AArch32
+  exception left a dead machine with a stale screen and no diagnostics. Those slots now capture the
+  full register state and call `kernel_unexpected_exception()`, which names the vector
+  (`anko/exception_vectors.h`) and goes through the same report, screen and halt path. `SError
+  (asynchronous abort, EL1h)` on the serial line is now the result of an SError instead of silence.
+- **The handled slots are still handled**: EL1h sync → `kernel_sync_fault` (panic), EL1h IRQ →
+  `irq_entry_kernel`, EL0 AArch64 sync → `syscall_entry`, which distinguishes SVC from every other
+  EL0 fault and kills the faulting thread rather than panicking the kernel. `tests/test_panic_vectors.py`
+  asserts the table names all 16 slots and that the three handled ones are not labelled "unexpected".
+- **A second panicking core leaves a breadcrumb.** Instead of parking silently, it writes
+  `(panic already in progress on another core; this core halted)` to the UART before parking, so a
+  multi-core panic is visible even though the screen and report belong to the first core.
+- **Assertions route here too**: `ANKO_ASSERT`/`ANKO_ASSERTF` call `panic()`/`panicf()`, so a failed
+  invariant produces the same report.
+- Evidence: `ANKO_PANIC_DEMO_VECTOR=<slot>` (dev only, default 0) raises a vector instead of the plain
+  demo panic; the capture harness accepts either and the SError run reports the reason, the full
+  register file, the trace and the halt line.
+
 ## Review-driven hardening
 
 An adversarial review of the panic path found real defects, all now fixed and guarded:

@@ -187,7 +187,11 @@ def main():
     logs = ''.join((work / name).read_text(errors='replace') for name in ('host.log', 'guest.log')
                    if (work / name).exists())
     checks = {
-        'panic_raised': 'panic screen demo' in logs and 'system halted' in logs,
+        # Either the plain-panic demo or the vector demo (ANKO_PANIC_DEMO_VECTOR)
+        # must produce a report and a halt.
+        'panic_raised': 'system halted' in logs and (
+            'panic screen demo' in logs or 'SError' in logs or 'unexpected FIQ' in logs
+            or 'unexpected sync' in logs or 'unexpected IRQ' in logs),
         'serial_report': 'esr_el1=' in logs and 'call trace (' in logs and 'capability denials=' in logs,
         'boot_ready': result.returncode == 0 and bool(boot.get('success', False)),
         'screendump': boot.get('screendump_ok') is True and shot.exists(),

@@ -211,7 +211,19 @@ void issue_boot_caps(Process& init_proc,
     // Dev-only capture hook: raise a real panic once the framebuffer exists so
     // scripts/test/panic-screen.py can assert the whole panic-screen path end to
     // end (no userland has run yet, so nothing repaints over it).
+    //
+    // ANKO_PANIC_DEMO_VECTOR selects an exception vector slot instead of the
+    // plain panic: it exercises kernel_unexpected_exception (the SError/FIQ path)
+    // with a synthetic frame, which the capture harness checks for the reason
+    // string. Zero keeps the plain panic.
+#if ANKO_PANIC_DEMO_VECTOR
+    {
+        TrapFrame frame{};
+        kernel_unexpected_exception(ANKO_PANIC_DEMO_VECTOR, 0, 0, &frame);
+    }
+#else
     panic("panic screen demo (ANKO_PANIC_SCREEN_DEMO)");
+#endif
 #endif
 
     // 12..14) xHCI host controller.  Two paths:

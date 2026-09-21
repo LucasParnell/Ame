@@ -7,6 +7,7 @@
 // running: a panic is a stop for the faulting core, not a silent spin.
 
 #include "anko/panic.h"
+#include "anko/exception_vectors.h"
 #include "anko/panic_screen.h"
 #include "anko/panic_report.h"
 #include "anko/cap.h"
@@ -106,6 +107,9 @@ static void capture_current_registers() {
 static void claim_or_park() {
     if (__atomic_exchange_n(&g_panic_owner, 1u, __ATOMIC_ACQ_REL) != 0u) {
         asm volatile("msr daifset, #2" ::: "memory");
+        // Another core is already producing the report; leave a breadcrumb on the
+        // wire (the screen belongs to the first report) and park this core.
+        anko::log::panic_dump("(panic already in progress on another core; this core halted)\n");
         for (;;) asm volatile("wfi" ::: "memory");
     }
     asm volatile("msr daifset, #2" ::: "memory");
@@ -169,6 +173,22 @@ extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* fram
     anko::panic_report::capture_registers(g_report, frame->x, frame->sp_el0,
                                           frame->elr, frame->spsr, esr, far);
     halt_and_report(ec_name(ec), frame->x[29]);
+}
+
+// ---------------------------------------------------------------------------
+// Unexpected exception vectors (see anko/exception_vectors.h). An SError or an
+// unmasked FIQ used to spin silently; now it produces the same report.
+// ---------------------------------------------------------------------------
+
+extern "C" [[noreturn]] void kernel_unexpected_exception(u64 vector_index, u64 esr,
+                                                          u64 far, TrapFrame* frame) {
+    claim_or_park();
+    anko::panic_report::capture_registers(g_report, frame->x, frame->sp_el0,
+                                          frame->elr, frame->spsr, esr, far);
+    const char* reason = vector_index < anko::kExceptionVectorCount
+                             ? anko::kExceptionVectorReason[vector_index]
+                             : "unexpected exception";
+    halt_and_report(reason, frame->x[29]);
 }
 
 // ---------------------------------------------------------------------------

@@ -108,48 +108,5 @@ DANGO_DTS_TEMPLATE="${AME}/linux-artifacts/dts/dango-linux-gpu.dts.in" \
     DANGO_DTB_NAME="dango-linux.dtb" \
     "${AME}/scripts/linux/build-dtb.sh"
 
-filesize() { python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$1"; }
-image_size=$(filesize "${OUT}/Image")
-initramfs_size=$(filesize "${OUT}/initramfs.cpio")
-dtb_size=$(filesize "${OUT}/dango-linux.dtb")
-image_text_offset=$(python3 - "${OUT}/Image" <<'PY_IMAGE_HEADER'
-import pathlib, struct, sys
-image = pathlib.Path(sys.argv[1]).read_bytes()[:64]
-print(str(struct.unpack_from('<Q', image, 8)[0]) if len(image) >= 64 and image[56:60] == b'ARMd' else '0')
-PY_IMAGE_HEADER
-)
-if [[ -n "${DANGO_LINUX_KERNEL_LOAD:-}" ]]; then
-    KERNEL_LOAD="${DANGO_LINUX_KERNEL_LOAD}"
-elif [[ "${image_text_offset}" == "0" ]]; then
-    KERNEL_LOAD="0x40200000"
-else
-    KERNEL_LOAD=$(printf '0x%x' $((0x40000000 + image_text_offset)))
-fi
-
-cat > "${OUT}/manifest.toml" <<EOF_MANIFEST
-name = "dango-linux-gpu"
-profile = "gpu"
-arch = "aarch64"
-
-kernel = "Image"
-dtb = "dango-linux.dtb"
-initramfs = "initramfs.cpio"
-
-kernel_size = ${image_size}
-initramfs_size = ${initramfs_size}
-dtb_size = ${dtb_size}
-
-memory_base = "0x40000000"
-memory_size = "0x08000000"
-
-kernel_load = "${KERNEL_LOAD}"
-initramfs_load = "0x46000000"
-dtb_load = "0x47000000"
-
-entry = "kernel_load"
-bootargs = "${DANGO_LINUX_BOOTARGS}"
-vcpus = 1
-EOF_MANIFEST
-
-"${AME}/scripts/linux/check-artifacts.sh" "${OUT}"
-echo "dango: GPU appliance artifacts ready in ${OUT}"
+# Manifest sizes must track the artifacts just built; keep one implementation.
+"${AME}/scripts/linux/build-manifest.sh"

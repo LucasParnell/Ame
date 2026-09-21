@@ -878,6 +878,7 @@ struct GpuPresentContext {
     const uint8_t* window;
     GpuClientIds ids;
     bool logged_first_frame = false;
+    bool logged_first_stage = false;
 };
 
 // Copy one damaged band of the client window into the appliance staging window
@@ -892,6 +893,14 @@ static bool gpu_service_present(void* ctx_ptr, const MxGpuDamageRect& damage, ui
     if (sys_vm_memory_write(ctx.staging, offset, ctx.window + offset, bytes) != 0) {
         dango_counter("gpu.service.copy_fail", 1);
         return false;
+    }
+    // The frame the client rendered now lives in the appliance scanout buffer.
+    // Logged once, before the device round trip, so the appliance acceptance can
+    // assert the tty frame reached the appliance even if the device later stalls
+    // (tests/tty acceptance, scripts/test/fb-tty.py).
+    if (!ctx.logged_first_stage) {
+        ctx.logged_first_stage = true;
+        console_log("gpu service: frame staged\n");
     }
 
     // Present the whole frame: gpud copies the staging window as a unit, so only

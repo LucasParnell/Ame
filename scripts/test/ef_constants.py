@@ -150,6 +150,16 @@ MARKERS = {
     'gpu_control_mode': 'gpu control: mode 1024x768',
     'gpu_staging_registered': 'gpu staging: registered',
     'gpu_present_complete': 'gpu present: complete',
+    # Phase J tty path: the framebuffer's client arms, tty.fb0 reaches the shell
+    # (msh prints its banner to tty.fb0 -> io.framebuffer), and the GPU service
+    # stages the frame the client rendered into the appliance scanout buffer.
+    # The staged marker is emitted once per run, before the device round trip,
+    # so a row can assert the tty frame reached the appliance independently of
+    # the (bootstrap-only) device session.
+    'fb_gpu_armed': 'io.framebuffer: gpu backend armed',
+    'tty_shell': 'tty.fb0: shell terminal attached',
+    'msh_attached': 'msh: terminal attached',
+    'gpu_frame_staged': 'gpu service: frame staged',
 }
 
 FAILURE_WORDS = (

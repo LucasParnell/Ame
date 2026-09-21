@@ -19,7 +19,9 @@ accepted, never a symbol that would be a second home for the value. Stdlib only;
 no build step required.
 """
 from pathlib import Path
+import os
 import re
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 _GUEST_HEADER = ROOT / 'shared/include/midix/abi/dango_channel_guest.h'
@@ -176,7 +178,32 @@ FAILURE_WORDS = (
 # One device string for every row that boots the appliance: the headless QEMU
 # console needs an EDID to offer modes, and `id=` targets the capture away from
 # ramfb. The one mode the rows assert is stated here once.
+#
+# Two render backends share this device shape (both are the *paravirtual* QEMU
+# path, not passthrough):
+#   software  - plain virtio-gpu, the guest renders with a guest-side ICD
+#               (Mesa lavapipe today). Works anywhere, including macOS, because
+#               nothing on the host has to render.
+#   virtio-gl - virtio-gpu-gl, where the guest's Mesa venus/virgl driver forwards
+#               the render stream and the *host* GPU executes it. Requires a
+#               host QEMU built with virglrenderer plus a host GPU/DRM render
+#               node: Linux only. macOS cannot instantiate this device (no EGL,
+#               no DRM render node, no dma-buf -- Metal instead), so selecting it
+#               here is an explicit error rather than a silent fallback.
 GPU_MODE = (GPU_MODE_WIDTH, GPU_MODE_HEIGHT)
 GPU_QDEV_ID = 'gpu0'
-GPU_DEVICE = (f'virtio-gpu-pci,iommu_platform=on,id={GPU_QDEV_ID},edid=on,'
+GPU_RENDER_SOFTWARE = 'software'
+GPU_RENDER_VIRTIO_GL = 'virtio-gl'
+GPU_RENDER = os.environ.get('AME_GPU_RENDER', GPU_RENDER_SOFTWARE)
+if GPU_RENDER not in (GPU_RENDER_SOFTWARE, GPU_RENDER_VIRTIO_GL):
+    raise SystemExit(f'AME_GPU_RENDER must be {GPU_RENDER_SOFTWARE!r} or {GPU_RENDER_VIRTIO_GL!r}, '
+                     f'got {GPU_RENDER!r}')
+if GPU_RENDER == GPU_RENDER_VIRTIO_GL and sys.platform != 'linux':
+    raise SystemExit('AME_GPU_RENDER=virtio-gl needs a Linux host with virglrenderer and a DRM render '
+                     'node; macOS cannot instantiate virtio-gpu-gl (use the default software renderer)')
+
+_GPU_QDEV = 'virtio-gpu-gl-pci' if GPU_RENDER == GPU_RENDER_VIRTIO_GL else 'virtio-gpu-pci'
+# venus=on exports a Vulkan device to the guest; only meaningful for -gl.
+_GPU_VENUS = ',venus=on' if GPU_RENDER == GPU_RENDER_VIRTIO_GL else ''
+GPU_DEVICE = (f'{_GPU_QDEV},iommu_platform=on,id={GPU_QDEV_ID}{_GPU_VENUS},edid=on,'
               f'xres={GPU_MODE[0]},yres={GPU_MODE[1]}')

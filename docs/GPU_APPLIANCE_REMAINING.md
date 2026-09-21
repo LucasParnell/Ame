@@ -77,3 +77,27 @@ The remaining integration is larger than adding libc:
 Phases **P** (physical GPU backend), **Q** (amdgpu appliance) and **R** (RADV). The generic
 `IommuDomain`/assignment contract, the Midix GPU ABI, the Dango channel and the session transport were
 kept backend-agnostic so they can be reused unchanged when that work starts.
+
+## Render backends: software (here) vs virtio-gl (Linux)
+
+Both are the QEMU *paravirtual* path; the choice is host policy, not a fork.
+
+- **software** (default, `AME_GPU_RENDER=software`) — plain `virtio-gpu-pci`, the guest renders with a
+  guest-side ICD (Mesa lavapipe). Works anywhere, including macOS. This is what the tree runs today.
+- **virtio-gl** (`AME_GPU_RENDER=virtio-gl`) — `virtio-gpu-gl-pci` with `venus=on`: the guest's Mesa
+  venus/virgl driver forwards the render stream and the **host** GPU executes it. Host-side selection is
+  implemented (`scripts/test/ef_constants.py`, and the harness derives the device string from it); it
+  errors explicitly on macOS rather than falling back, because a Mac cannot instantiate the device.
+
+What the virtio-gl path still needs **on the Linux machine** (not implementable here):
+
+1. Host QEMU built with **virglrenderer** (venus), plus a GL/egl-headless display backend and a DRM render
+   node; the harness should add `-display egl-headless` / `-vga none` (or `virtio-vga-gl`) when the render
+   backend is virtio-gl, and probe `virglrenderer` availability so a missing feature is a clear error.
+2. Guest side: stage Mesa's **venus** ICD (`virtio_gpu`/venus) in the guest rootfs alongside lavapipe, and
+   have `dango-vkd` pick the ICD from the render backend (venus when virtio-gl, lavapipe when software).
+   The rootfs staging script already resolves an ICD closure; this is a second ICD entry plus a selector.
+3. Re-run the acceptance on that host to prove the venus path end to end (the same rows, same markers).
+
+The backend-agnostic layers (session transport, brokerage, arena lifecycle, WSI, lifecycle hardening) are
+unchanged by the choice — that is the point of keeping the vendor out of the ABI.

@@ -34,6 +34,14 @@ constexpr u64 kGuestPhysMax = 0x4800'0000ull;
 constexpr u64 kDangoRamBase = 0x4000'0000ull;
 constexpr u64 kDangoRamSize = 128ull * 1024ull * 1024ull;
 
+// Stage-2 input address width: the guest runs with a 39-bit IPA.
+constexpr u32 kVmIpaBits = 39;
+// Lowest guest IPA a device BAR / synthetic ECAM mapping may be placed at; the
+// low 256 MiB window is reserved for the appliance's own layout.
+constexpr u64 kMinDeviceGuestIpa = 0x10000000ull;
+// Page count of the appliance's RAM, used to size the stage-2 table below.
+constexpr u64 kDangoRamPages = kDangoRamSize / PAGE_SIZE;
+
 enum VmState : u32 {
     VM_EMPTY = 0,
     VM_CREATED = 1,
@@ -575,6 +583,13 @@ void channel_publish(VmChannel& channel); // internal, CallGuard held
 // ===========================================================================
 constexpr u32 kMaxVmDevices = 8;
 constexpr u32 kMaxAssignMmio = 8;
+
+// Each assigned MMIO region can cost a few stage-2 entries beyond its own
+// pages (subrange bookkeeping / alignment padding). Reserve that slack on top of
+// the guest RAM so the fixed table can never be exhausted by device mappings.
+constexpr u32 kMaxAssignMmioSlackPages = 4;
+static_assert(kDangoRamPages + kMaxAssignMmio * kMaxAssignMmioSlackPages <= kMaxStage2Mappings,
+              "stage-2 table cannot hold appliance RAM plus device/BAR mappings");
 
 // Assignment flags (SYS_VM_ASSIGN_DEVICE a2).  BAR assignment is opt-in so the
 // default path (and the assignment self-test) is unchanged on platforms where

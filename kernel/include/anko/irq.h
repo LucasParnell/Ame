@@ -38,6 +38,9 @@ namespace irq {
 constexpr u32 kIrqSlots = 256; // power of two
 constexpr u32 kFirstSpi = 32;  // SGIs (0-15) and PPIs (16-31) are kernel-owned
 
+// GIC SPI INTID for SPI `number` (0-based): the distributor's first SPI line.
+constexpr u32 spi_intid(u32 number) { return kFirstSpi + number; }
+
 // Mask an untrusted interrupt id into the table's range *before* any table
 // access, then reject anything the mask aliased (sentinel, PPI/SGI, or an id
 // beyond the distributor). Masking is independent of the range check so the

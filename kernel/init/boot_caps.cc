@@ -4,6 +4,7 @@
 
 #include "anko/cap.h"
 #include "anko/hw_info.h"
+#include "anko/irq.h"
 #include "anko/pci.h"
 #include "anko/sched.h"
 #include "anko/smp.h"
@@ -17,6 +18,7 @@
 #include "anko/panic.h"
 #include "anko/panic_screen.h"
 #include "midix/abi/boot.h"
+#include "libk/integer.h"
 #include "libk/printf.h"
 #include "libk/string.h"
 
@@ -45,10 +47,6 @@ extern "C" PhysAddr g_dtb_phys;
 namespace {
 
 constexpr u32 kKernelLogRingOrder = 6;
-
-constexpr usize align_up(usize value, usize align) {
-    return (value + (align - 1)) & ~(align - 1);
-}
 
 } // namespace
 
@@ -86,7 +84,8 @@ void issue_boot_caps(Process& init_proc,
     auto* initrd = static_cast<MemoryObject*>(mm::heap_alloc(sizeof(MemoryObject), alignof(MemoryObject)));
     if (!manifest || !initrd) return;
 
-    const usize manifest_alloc_size = align_up(manifest_size ? manifest_size : PAGE_SIZE, PAGE_SIZE);
+    const usize manifest_alloc_size =
+        libk::align_up(manifest_size ? manifest_size : PAGE_SIZE, PAGE_SIZE);
     const usize manifest_pages = manifest_alloc_size / PAGE_SIZE;
     const PhysAddr manifest_page = mm::alloc_pages_contiguous(manifest_pages);
     if (!manifest_page) return;
@@ -334,17 +333,15 @@ void issue_boot_caps(Process& init_proc,
     // virtio-gpu-pci function (and its INTx line) to init so it can hand the
     // authority to dango.manager; the VM never names raw physical addresses.
     if (g_hw.has_pcie) {
-        constexpr u16 kVirtioVendor = 0x1af4;
-        constexpr u16 kVirtioGpuDevice = 0x1050;
         // QEMU virt swizzles PCI INTx onto GIC SPIs 3..6 (rotating per slot).
         // The DTB interrupt specifier is <type number flags> and for arm,gic the
         // INTID is 32 + number; the fixture (tests/fixtures/phasea-iommu-smmu-node.dts)
         // shows pin A of slot 0 -> number 3.
         //   intid = 32 + (3 + pin_index) % 4,  pin A = 1 -> (3 + device) % 4
         // Physical boards parse their own map in Phase P.
-        constexpr u32 kQemuVirtPciIntxSpiBase = 32 + 3;
         pci::PciFunctionInfo gpu_info{};
-        if (pci::find_by_id(g_hw.ecam_base, kVirtioVendor, kVirtioGpuDevice, &gpu_info)) {
+        if (pci::find_by_id(g_hw.ecam_base, pci::kVirtioVendorId, pci::kVirtioGpuDeviceId,
+                            &gpu_info)) {
             static pci::HostFunction g_gpu_function;
             g_gpu_function.info = gpu_info;
             g_gpu_function.group_id =
@@ -352,7 +349,8 @@ void issue_boot_caps(Process& init_proc,
             g_gpu_function.flags = 0;
 
             static IrqLine g_gpu_irq;
-            g_gpu_irq.irq_id = kQemuVirtPciIntxSpiBase + (gpu_info.device % 4u);
+            g_gpu_irq.irq_id = irq::spi_intid(pci::kQemuVirtIntxPinA +
+                                              (gpu_info.device % pci::kPciIntxPinCount));
             g_gpu_irq.trigger = 0; // INTx is level-triggered
             g_gpu_irq.flags = 0;
             g_gpu_irq.device_hint = 0;

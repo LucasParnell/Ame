@@ -173,7 +173,7 @@ SysError stage2_create(Stage2AddressSpace* s2) {
 
     s2->root_table_phys = root;
     s2->root_table_va = static_cast<VirtAddr>(root);
-    s2->ipa_bits = 39;
+    s2->ipa_bits = kVmIpaBits;
     s2->page_size = PAGE_SIZE;
     s2->mapped_pages = 0;
     s2->built = true;

@@ -15,18 +15,11 @@ namespace pci {
 
 namespace {
 
-// Configuration space register offsets (PCI Local Bus Spec 3.0 §6.1).
-// ECAM only permits naturally aligned 32-bit accesses, so vendor/device are
-// read as one word at 0x00.
-constexpr u32 kCfgVendorDevice = 0x00;
-constexpr u32 kCfgCommand = 0x04;
-constexpr u32 kCfgClassCode = 0x08;
-constexpr u32 kCfgHeaderTyp = 0x0C; // [23:16] = header type byte
-constexpr u32 kCfgBar0 = 0x10;
-
-// Command register bits we report but never modify.
-constexpr u16 kCmdMemoryEnable = 1u << 1;
-constexpr u16 kCmdBusMaster = 1u << 2;
+// Configuration-space register offsets come from anko/pci.h.  ECAM only permits
+// naturally aligned accesses, so the revision (0x08) and header-type (0x0E)
+// bytes are read as part of their enclosing 32-bit word.
+constexpr u32 kCfgRevisionClass = 0x08; // [0x0B:0x08] revision + class code
+constexpr u32 kCfgHeaderWord = 0x0C;     // [0x0F:0x0C] cache/latency + header type
 
 // USB xHCI class code: the one PCI function Ame drives natively, so its
 // bus-master enablement is left to drv.usb.xhci.
@@ -38,24 +31,8 @@ constexpr u32 kScanBuses = 16;
 constexpr u32 kScanDevices = 32;
 constexpr u32 kScanFunctions = 8;
 
-// Config-space word accessor.  All indices are masked so a malformed record
-// can never address outside the ECAM window.
-volatile u32* ecam_reg(PhysAddr ecam_base, u32 bus, u32 dev, u32 fn, u32 off) {
-    const u64 addr = ecam_base | (static_cast<u64>(bus & 0xFFu) << 20) |
-                     (static_cast<u64>(dev & 0x1Fu) << 15) | (static_cast<u64>(fn & 0x07u) << 12) |
-                     (off & 0xFFFu);
-    return reinterpret_cast<volatile u32*>(addr);
-}
-
-u32 cfg_read(PhysAddr base, u32 bus, u32 dev, u32 fn, u32 off) {
-    asm volatile("dsb sy" ::: "memory");
-    return *ecam_reg(base, bus, dev, fn, off);
-}
-
-void cfg_write(PhysAddr base, u32 bus, u32 dev, u32 fn, u32 off, u32 val) {
-    *ecam_reg(base, bus, dev, fn, off) = val;
-    asm volatile("dsb sy" ::: "memory");
-}
+// Config-space dword access uses pci::cfg_read/cfg_write (anko/pci.h) so every
+// consumer masks and orders ECAM accesses identically.
 
 // Size one BAR at `off`, writing ~0 and restoring the original value so the
 // device is left exactly as it was found.  `is_mmio64` selects whether the
@@ -63,7 +40,7 @@ void cfg_write(PhysAddr base, u32 bus, u32 dev, u32 fn, u32 off, u32 val) {
 // slots consumed (1 or 2) and fills `out`.
 u32 probe_bar(PhysAddr ecam_base, u32 bus, u32 dev, u32 fn, u32 off, PciBar& out) {
     const u32 orig = cfg_read(ecam_base, bus, dev, fn, off);
-    cfg_write(ecam_base, bus, dev, fn, off, 0xFFFF'FFFFu);
+    cfg_write(ecam_base, bus, dev, fn, off, kBarProbeValue);
     const u32 mask = cfg_read(ecam_base, bus, dev, fn, off);
     cfg_write(ecam_base, bus, dev, fn, off, orig);
 
@@ -83,18 +60,18 @@ u32 probe_bar(PhysAddr ecam_base, u32 bus, u32 dev, u32 fn, u32 off, PciBar& out
     } else if (is_mmio64) {
         const u32 off_hi = off + 4u;
         const u32 orig_hi = cfg_read(ecam_base, bus, dev, fn, off_hi);
-        cfg_write(ecam_base, bus, dev, fn, off_hi, 0xFFFF'FFFFu);
+        cfg_write(ecam_base, bus, dev, fn, off_hi, kBarProbeValue);
         const u32 mask_hi = cfg_read(ecam_base, bus, dev, fn, off_hi);
         cfg_write(ecam_base, bus, dev, fn, off_hi, orig_hi);
 
-        size_mask = (static_cast<u64>(mask_hi) << 32) | (mask & ~0xFu);
-        bar_base = (static_cast<u64>(orig_hi) << 32) | (orig & ~0xFu);
+        size_mask = (static_cast<u64>(mask_hi) << 32) | (mask & kBarAddrMask);
+        bar_base = (static_cast<u64>(orig_hi) << 32) | (orig & kBarAddrMask);
         type = BarType::Mmio64;
         prefetchable = (orig & 0x8u) != 0;
         consumed = 2;
     } else {
-        size_mask = mask & ~0xFu;
-        bar_base = orig & ~0xFu;
+        size_mask = mask & kBarAddrMask;
+        bar_base = orig & kBarAddrMask;
         type = BarType::Mmio32;
         prefetchable = (orig & 0x8u) != 0;
     }
@@ -119,7 +96,7 @@ void probe_bars(PhysAddr ecam_base, u32 bus, u32 dev, u32 fn, u8 header_type, Pc
     const u32 nbars = (header_type == 0u) ? kMaxBars : (header_type == 1u ? 2u : 0u);
     u32 i = 0;
     while (i < nbars) {
-        const u32 off = kCfgBar0 + i * 4u;
+        const u32 off = kRegBar0 + i * 4u;
         const u32 consumed = probe_bar(ecam_base, bus, dev, fn, off, bars[i]);
         i += (consumed == 2u && i + 1 < nbars) ? 2u : 1u;
     }
@@ -154,18 +131,19 @@ static u32 scan_functions(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap) {
     u32 count = 0;
     for (u32 bus = 0; bus < kScanBuses; ++bus) {
         for (u32 dev = 0; dev < kScanDevices; ++dev) {
-            const u32 vd = cfg_read(ecam_base, bus, dev, 0, kCfgVendorDevice);
+            const u32 vd = cfg_read(ecam_base, bus, dev, 0, kRegVendorId);
             const u16 vendor = static_cast<u16>(vd & 0xFFFFu);
             if (vendor == kInvalidVendor) {
                 continue; // no device at this slot
             }
 
             // Header type bit 7 marks a multi-function device.
-            const u32 dev_header = cfg_read(ecam_base, bus, dev, 0, kCfgHeaderTyp);
-            const u32 functions = ((dev_header >> 16) & 0x80u) != 0 ? kScanFunctions : 1u;
+            const u32 dev_header = cfg_read(ecam_base, bus, dev, 0, kCfgHeaderWord);
+            const u32 functions =
+                ((dev_header >> 16) & kHeaderTypeMultiFunction) != 0 ? kScanFunctions : 1u;
 
             for (u32 fn = 0; fn < functions; ++fn) {
-                const u32 vd_fn = cfg_read(ecam_base, bus, dev, fn, kCfgVendorDevice);
+                const u32 vd_fn = cfg_read(ecam_base, bus, dev, fn, kRegVendorId);
                 const u16 vf = static_cast<u16>(vd_fn & 0xFFFFu);
                 if (vf == kInvalidVendor) {
                     continue;
@@ -174,8 +152,8 @@ static u32 scan_functions(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap) {
                     return count;
                 }
 
-                const u32 fn_header = cfg_read(ecam_base, bus, dev, fn, kCfgHeaderTyp);
-                const u8 header_type = static_cast<u8>((fn_header >> 16) & 0x7Fu);
+                const u32 fn_header = cfg_read(ecam_base, bus, dev, fn, kCfgHeaderWord);
+                const u8 header_type = static_cast<u8>((fn_header >> 16) & kHeaderTypeMask);
 
                 PciFunctionInfo rec{};
                 rec.segment = kSegment;
@@ -185,10 +163,10 @@ static u32 scan_functions(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap) {
                 rec.vendor_id = vf;
                 rec.device_id = static_cast<u16>(vd_fn >> 16);
                 rec.class_code =
-                    (cfg_read(ecam_base, bus, dev, fn, kCfgClassCode) >> 8) & 0x00FF'FFFFu;
-                rec.command = static_cast<u16>(cfg_read(ecam_base, bus, dev, fn, kCfgCommand));
-                rec.bus_master = (rec.command & kCmdBusMaster) != 0;
-                rec.memory_enabled = (rec.command & kCmdMemoryEnable) != 0;
+                    (cfg_read(ecam_base, bus, dev, fn, kCfgRevisionClass) >> 8) & 0x00FF'FFFFu;
+                rec.command = static_cast<u16>(cfg_read(ecam_base, bus, dev, fn, kRegCommand));
+                rec.bus_master = (rec.command & kPciCmdBusMaster) != 0;
+                rec.memory_enabled = (rec.command & kPciCmdMemoryEnable) != 0;
                 rec.requester_id = requester_id(rec.bus, rec.device, rec.function);
                 probe_bars(ecam_base, bus, dev, fn, header_type, rec.bars);
 
@@ -213,17 +191,17 @@ u32 enumerate(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap) {
     const u32 written = count < cap ? count : cap;
     for (u32 i = 0; i < written; ++i) {
         auto record = inventory[i];
-        record.command = cfg_read(ecam_base, record.bus, record.device, record.function, kCfgCommand);
-        record.bus_master = (record.command & kCmdBusMaster) != 0;
-        record.memory_enabled = (record.command & kCmdMemoryEnable) != 0;
+        record.command = cfg_read(ecam_base, record.bus, record.device, record.function, kRegCommand);
+        record.bus_master = (record.command & kPciCmdBusMaster) != 0;
+        record.memory_enabled = (record.command & kPciCmdMemoryEnable) != 0;
         for (u32 b = 0; b < kMaxBars; ++b) {
             auto& bar = record.bars[b];
             if (!bar.size) continue;
-            const u32 low = cfg_read(ecam_base, record.bus, record.device, record.function, kCfgBar0 + b * 4);
-            bar.base = low & (bar.type == BarType::Io ? ~3u : ~15u);
+            const u32 low = cfg_read(ecam_base, record.bus, record.device, record.function, kRegBar0 + b * 4);
+            bar.base = low & (bar.type == BarType::Io ? ~3u : kBarAddrMask);
             if (bar.type == BarType::Mmio64 && b + 1 < kMaxBars) {
                 bar.base |= u64(cfg_read(ecam_base, record.bus, record.device, record.function,
-                                        kCfgBar0 + (b + 1) * 4)) << 32;
+                                        kRegBar0 + (b + 1) * 4)) << 32;
                 ++b;
             }
         }
@@ -273,12 +251,12 @@ u32 contain_assignable(PhysAddr ecam_base) {
         if (f.class_code == kClassXhci || base_class == 0x06u) {
             continue;
         }
-        const u32 command = cfg_read(ecam_base, f.bus, f.device, f.function, kCfgCommand);
-        const u32 contained_cmd = command & ~static_cast<u32>(kCmdBusMaster);
+        const u32 command = cfg_read(ecam_base, f.bus, f.device, f.function, kRegCommand);
+        const u32 contained_cmd = command & ~static_cast<u32>(kPciCmdBusMaster);
         if (contained_cmd == command) {
             continue;
         }
-        cfg_write(ecam_base, f.bus, f.device, f.function, kCfgCommand, contained_cmd);
+        cfg_write(ecam_base, f.bus, f.device, f.function, kRegCommand, contained_cmd);
         ++contained;
     }
     return contained;

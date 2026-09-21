@@ -23,6 +23,7 @@
 #include "anko/vm.h"
 
 #include "anko/hw_info.h"
+#include "anko/irq.h"
 #include "anko/log.h"
 #include "anko/smmuv3.h"
 #include "anko/spinlock.h"
@@ -119,33 +120,37 @@ u32 find_msi_cap(const pci::PciFunctionInfo& fn, bool* out_msix) {
         return 0;
     }
     const u32 status = pci::cfg_status_word(fn.bus, fn.device, fn.function);
-    if ((status & (1u << 4)) == 0) {
+    if ((status & pci::kStatusCapabilitiesList) == 0) {
         return 0; // capabilities list not present
     }
-    u32 off = pci::cfg_read_byte(fn.bus, fn.device, fn.function, 0x34) & 0xFCu;
-    for (u32 guard = 0; guard < 48 && off >= 0x40 && off < 0x100; ++guard) {
+    u32 off = pci::cfg_read_byte(fn.bus, fn.device, fn.function, pci::kRegCapPtr) & pci::kCfgCapPtrMask;
+    for (u32 guard = 0; guard < pci::kMaxCapabilityWalk && off >= pci::kCfgCapMin &&
+                      off <= pci::kCfgCapMax;
+         ++guard) {
         const u32 header = pci::cfg_read_byte(fn.bus, fn.device, fn.function, off);
         const u32 cap_id = header & 0xFFu;
-        if (cap_id == 0x05) {
+        if (cap_id == pci::kCapIdMsi) {
             *out_msix = false;
             return off;
         }
-        if (cap_id == 0x11) {
+        if (cap_id == pci::kCapIdMsix) {
             *out_msix = true;
             return off;
         }
-        off = pci::cfg_read_byte(fn.bus, fn.device, fn.function, off + 1) & 0xFCu;
+        off = pci::cfg_read_byte(fn.bus, fn.device, fn.function, off + 1) & pci::kCfgCapPtrMask;
     }
     return 0;
 }
 
 // Populate the synthetic guest config view for one assigned function.
 void expose_function(VmDeviceAssignment* a, u32 fn_index) {
-    const pci::PciFunctionInfo& fn = a->fns[fn_index].info;
-    pci::GuestConfig& cfg = a->cfg;
+    // Bound first: the record array is fixed, so an out-of-range index must not
+    // touch a->fns before it is rejected.
     if (fn_index >= pci::kMaxAssignFns) {
         return;
     }
+    const pci::PciFunctionInfo& fn = a->fns[fn_index].info;
+    pci::GuestConfig& cfg = a->cfg;
     u8* space = cfg.space[fn_index];
     libk::memset(space, 0, pci::kCfgSpaceBytes);
     space[0x00] = static_cast<u8>(fn.vendor_id & 0xFFu);
@@ -154,17 +159,18 @@ void expose_function(VmDeviceAssignment* a, u32 fn_index) {
     space[0x03] = static_cast<u8>(fn.device_id >> 8);
     // Command: memory decode on, bus-master off until the guest asks and the
     // assignment is ACTIVE.
-    space[pci::kRegCommand] = 0x02;
+    space[pci::kRegCommand] = static_cast<u8>(pci::kPciCmdMemoryEnable);
     space[pci::kRegCommand + 1] = 0x00;
-    space[0x08] = pci::cfg_read_byte(fn.bus, fn.device, fn.function, 0x08);
-    space[0x09] = static_cast<u8>(fn.class_code);
-    space[0x0A] = static_cast<u8>(fn.class_code >> 8);
-    space[0x0B] = static_cast<u8>(fn.class_code >> 16);
-    space[0x0E] = a->fn_count > 1 ? 0x80 : 0;
-    for (u32 offset = 0x2c; offset < 0x30; ++offset)
+    space[pci::kRegRevisionId] = pci::cfg_read_byte(fn.bus, fn.device, fn.function,
+                                                   pci::kRegRevisionId);
+    space[pci::kRegClassCode] = static_cast<u8>(fn.class_code);
+    space[pci::kRegClassCode + 1] = static_cast<u8>(fn.class_code >> 8);
+    space[pci::kRegClassCode + 2] = static_cast<u8>(fn.class_code >> 16);
+    space[pci::kRegHeaderType] = a->fn_count > 1 ? pci::kHeaderTypeMultiFunction : 0;
+    for (u32 offset = pci::kRegSubsystemIds; offset < pci::kRegSubsystemIds + 4; ++offset)
         space[offset] = pci::cfg_read_byte(fn.bus, fn.device, fn.function, offset);
     // Guest INTx routing is installed before ECAM publication.
-    space[0x3D] = pci::cfg_read_byte(fn.bus, fn.device, fn.function, 0x3d);
+    space[pci::kRegIntPin] = pci::cfg_read_byte(fn.bus, fn.device, fn.function, pci::kRegIntPin);
     cfg.present[fn_index] = true;
 }
 
@@ -204,8 +210,12 @@ SysError collect_vm_ram(VmDeviceAssignment* a) {
                 ++q;
             }
             const u64 iova = mem->guest_pa_base + p * PAGE_SIZE;
-            if (device_authorize_ram(a, start, len, iova) != E_OK) {
-                return E_OVERFLOW;
+            // Capacity exhaustion is the only failure here that means "too
+            // fragmented"; every other failure (malformed range, bad IOVA) is
+            // propagated as its real SysError instead of being collapsed.
+            const SysError rc = device_authorize_ram(a, start, len, iova);
+            if (rc != E_OK) {
+                return rc;
             }
             p = q;
         }
@@ -604,7 +614,9 @@ static SysError step_assign_bars(VmDeviceAssignment* a) {
 }
 
 SysError device_attach(VmDeviceAssignment* a, const DeviceAssignSpec& spec) {
-    if (!a) {
+    // An assignment without an owner VM cannot map anything; fail before the
+    // stage-2 headroom check dereferences a->owner_vm.
+    if (!a || !a->owner_vm) {
         return E_INVALID;
     }
     SysError rc = step_claim(a, spec);
@@ -623,7 +635,8 @@ SysError device_attach(VmDeviceAssignment* a, const DeviceAssignSpec& spec) {
     // guest can consume the whole stage-2 table and leave none for the device/BAR
     // mappings that follow.  Fail clearly here instead of overflow deeper in.
     if (rc == E_OK &&
-        (kMaxAssignMmio * 4u) > kMaxStage2Mappings - a->owner_vm->stage2.mapped_pages) {
+        (kMaxAssignMmio * kMaxAssignMmioSlackPages) >
+            kMaxStage2Mappings - a->owner_vm->stage2.mapped_pages) {
         ANKO_LOG_ERROR("kernel/vm",
                        "assign: guest RAM leaves no stage-2 headroom for device mappings");
         rc = E_OVERFLOW;
@@ -881,7 +894,12 @@ SysError device_map_bar_internal(VmDeviceAssignment* a, u32 bar_index, u32 bar_o
     if ((host_base & (PAGE_SIZE - 1)) != 0) {
         return E_INVALID; // BAR subrange must be page aligned to be guest-mappable
     }
-    if (guest_ipa < 0x10000000ull || guest_ipa >= (1ull << a->owner_vm->stage2.ipa_bits) ||
+    // A published BAR (the whole aperture) must land at its own alignment: the
+    // synthetic record and the manager both assume it, so enforce it here too.
+    if (bar_offset == 0 && size == bar.size && (guest_ipa & (bar.size - 1)) != 0) {
+        return E_INVALID;
+    }
+    if (guest_ipa < kMinDeviceGuestIpa || guest_ipa >= (1ull << a->owner_vm->stage2.ipa_bits) ||
         size > (1ull << a->owner_vm->stage2.ipa_bits) - guest_ipa) {
         return E_INVALID;
     }
@@ -966,7 +984,7 @@ SysError device_route_irq(Process& caller, CapHandle assign_cap, CapHandle irq_c
     if (flags != 0) {
         return E_INVALID;
     }
-    if (guest_irq < 32 || guest_irq >= kVgicMaxIrqs) {
+    if (guest_irq < irq::kFirstSpi || guest_irq >= kVgicMaxIrqs) {
         return E_INVALID; // devices may target SPIs, never guest SGIs or timer PPIs
     }
     SysError rc = E_OK;
@@ -1002,7 +1020,9 @@ SysError device_expose_ecam(Process& caller, CapHandle assign_cap, u64 ipa, u64 
 
 SysError device_expose_ecam_internal(VmDeviceAssignment* a, u64 ipa, u64 size) {
     if (!a || !a->owner_vm || !a->active || a->state != VM_DEV_ACTIVE) return E_DEAD;
-    if (a->ecam_size || size != pci::kGuestEcamSize || (ipa & (size - 1)) || ipa < 0x10000000ull)
+    if (a->ecam_size || size != pci::kGuestEcamSize || (ipa & (size - 1)) ||
+        ipa < kMinDeviceGuestIpa || ipa >= (1ull << a->owner_vm->stage2.ipa_bits) ||
+        size > (1ull << a->owner_vm->stage2.ipa_bits) - ipa)
         return E_INVALID;
     auto config = a->cfg;
     // The bootstrap transport is one synthetic device, with contiguous functions.

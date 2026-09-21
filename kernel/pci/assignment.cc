@@ -21,32 +21,34 @@
 
 #include "anko/hw_info.h"
 #include "anko/panic.h"
+#include "libk/integer.h"
 #include "libk/string.h"
 
 namespace pci {
 
 namespace {
 
-volatile u32* ecam_reg(PhysAddr ecam_base, u8 bus, u8 dev, u8 fn, u32 off) {
-    const u64 addr = ecam_base | (static_cast<u64>(bus) << 20) |
-                     (static_cast<u64>(dev & 0x1Fu) << 15) | (static_cast<u64>(fn & 0x07u) << 12) |
-                     (off & 0xFFFu);
-    return reinterpret_cast<volatile u32*>(addr);
-}
+// Config-space dword access uses pci::cfg_read/cfg_write (anko/pci.h), which
+// mask every index, order against the device and treat a zero base as absent.
 
-u32 cfg_read(PhysAddr base, u8 bus, u8 dev, u8 fn, u32 off) {
-    if (base == 0) {
-        return 0xFFFF'FFFFu;
-    }
-    asm volatile("dsb sy" ::: "memory");
-    return *ecam_reg(base, bus, dev, fn, off);
-}
-
-void cfg_write(PhysAddr base, u8 bus, u8 dev, u8 fn, u32 off, u32 val) {
-    if (base == 0) {
+// Read-modify-write one command-register bit, preserving every other bit.  Uses
+// the little-endian word helpers so the adjacent status register's W1C bits are
+// never touched.
+void set_command_bit(u8 bus, u8 device, u8 function, u16 mask, bool enable) {
+    if (g_hw.ecam_base == 0) {
         return;
     }
-    *ecam_reg(base, bus, dev, fn, off) = val;
+    volatile u8* reg = reinterpret_cast<volatile u8*>(
+        ecam_offset(g_hw.ecam_base, bus, device, function, kRegCommand));
+    asm volatile("dsb sy" ::: "memory");
+    u16 value = cfg_read_word(reg, 0);
+    if (enable) {
+        value |= mask;
+    } else {
+        value &= static_cast<u16>(~mask);
+    }
+    asm volatile("dsb sy" ::: "memory");
+    cfg_write_word(reg, 0, value);
     asm volatile("dsb sy" ::: "memory");
 }
 
@@ -72,41 +74,13 @@ u16 cfg_status_word(u8 bus, u8 device, u8 function) {
 }
 
 void set_bus_master(u8 bus, u8 device, u8 function, bool enable) {
-    if (g_hw.ecam_base == 0) {
-        return;
-    }
     // Read-modify-write so only the bus-master bit changes. The ECAM window is
     // bootstrap-identity mapped and never reachable from a guest.
-    // Use a halfword store: the adjacent status register contains W1C bits.
-    volatile u16* reg = reinterpret_cast<volatile u16*>(
-        ecam_reg(g_hw.ecam_base, bus, device, function, kRegCommand));
-    asm volatile("dsb sy" ::: "memory");
-    u16 value = *reg;
-    if (enable) {
-        value |= 1u << 2;
-    } else {
-        value &= ~(1u << 2);
-    }
-    *reg = value;
-    asm volatile("dsb sy" ::: "memory");
+    set_command_bit(bus, device, function, kPciCmdBusMaster, enable);
 }
 
 void set_memory_enable(u8 bus, u8 device, u8 function, bool enable) {
-    if (g_hw.ecam_base == 0) {
-        return;
-    }
-    // Use a halfword store: the adjacent status register contains W1C bits.
-    volatile u16* reg = reinterpret_cast<volatile u16*>(
-        ecam_reg(g_hw.ecam_base, bus, device, function, kRegCommand));
-    asm volatile("dsb sy" ::: "memory");
-    u16 value = *reg;
-    if (enable) {
-        value |= 1u << 1;
-    } else {
-        value &= ~(1u << 1);
-    }
-    *reg = value;
-    asm volatile("dsb sy" ::: "memory");
+    set_command_bit(bus, device, function, kPciCmdMemoryEnable, enable);
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +119,7 @@ bool assign_bars(PciFunctionInfo* info, PhysAddr window_base, u64 window_size,
         }
         // BAR apertures are powers of two; alignment and masking below rely on it.
         ANKO_ASSERT((bar.size & (bar.size - 1)) == 0);
-        offset = (offset + bar.size - 1) & ~(bar.size - 1);
+        offset = libk::align_up(offset, bar.size);
         if (offset > window_size || bar.size > window_size - offset) {
             return false;
         }
@@ -154,7 +128,7 @@ bool assign_bars(PciFunctionInfo* info, PhysAddr window_base, u64 window_size,
         // Only the address bits are writable; preserve the read-only type bits.
         const u32 low = cfg_read(g_hw.ecam_base, info->bus, info->device, info->function, reg);
         cfg_write(g_hw.ecam_base, info->bus, info->device, info->function, reg,
-                  (static_cast<u32>(base) & ~0xFu) | (low & 0xFu));
+                  (static_cast<u32>(base) & kBarAddrMask) | (low & kBarTypeMask));
         if (bar.type == BarType::Mmio64) {
             cfg_write(g_hw.ecam_base, info->bus, info->device, info->function, reg + 4,
                       static_cast<u32>(base >> 32));
@@ -216,6 +190,10 @@ u32 enumerate_groups(PhysAddr ecam_base, PciIsolationGroup* out, u32 cap) {
         if (g->function_count < kMaxGroupFunctions) {
             g->requester_ids[g->function_count] = f.requester_id;
         }
+        // Guard the class: the record array is fixed at kMaxGroupFunctions, so a
+        // topology that would exceed it must trip here, not silently inflate the
+        // count and overflow every later consumer.
+        ANKO_ASSERT(g->function_count < kMaxGroupFunctions);
         ++g->function_count;
     }
     return groups;

@@ -1,6 +1,8 @@
 // Pure synthetic PCI configuration operations. No host MMIO is reachable here.
 #include "anko/pci.h"
 
+#include "libk/integer.h"
+
 namespace pci {
 namespace {
 bool valid_access(u32 offset, u32 size, u32 limit) {
@@ -32,12 +34,19 @@ bool decode_ecam(u64 offset, u32 size, EcamAddress* out) {
 }
 
 u32 config_read(const GuestConfig& cfg, u32 function, u32 offset, u32 size) {
-    if (!valid_access(offset, size, 4096) || function >= kMaxAssignFns || !cfg.present[function]) {
+    if ((size != 1 && size != 2 && size != 4) || (offset & (size - 1)) ||
+        function >= kMaxAssignFns || !cfg.present[function]) {
         return 0xffffffffu;
     }
-    // No extended capabilities: unused extended configuration reads as zero.
+    // No extended capabilities: the portion of the 4 KiB ECAM access window
+    // beyond this function's 256-byte config space reads as zero.
     if (offset >= kCfgSpaceBytes) {
         return 0;
+    }
+    // Bound the on-image access to config space: never let size run past the
+    // 256-byte function header into the next synthetic record.
+    if (!valid_access(offset, size, kCfgSpaceBytes)) {
+        return 0xffffffffu;
     }
     if (offset >= kRegBar0 && offset < kRegBarEnd) {
         const u32 bar = (offset - kRegBar0) / 4;
@@ -56,7 +65,7 @@ bool config_bar_write(GuestConfig& cfg, u32 function, u32 offset, u32 value, u32
         return false;
     }
     const u32 bar = (offset - kRegBar0) / 4;
-    if (value == 0xffffffffu) {
+    if (value == kBarProbeValue) {
         cfg.bar_probe[function] |= static_cast<u8>(1u << bar);
         return true;
     }
@@ -69,7 +78,7 @@ bool config_bar_write(GuestConfig& cfg, u32 function, u32 offset, u32 value, u32
 }
 
 bool config_set_bar(GuestConfig& cfg, u32 function, u32 bar, u64 base, const PciBar& info) {
-    if (function >= kMaxAssignFns || bar >= kMaxBars || info.size < 16 ||
+    if (function >= kMaxAssignFns || bar >= kMaxBars || info.size < kBarMinSize ||
         cfg.bar_mask[function][bar] || (cfg.bar_upper[function] & (1u << bar)) ||
         (info.size & (info.size - 1)) || (base & (info.size - 1)) || base > ~0ull - info.size) {
         return false;
@@ -77,13 +86,13 @@ bool config_set_bar(GuestConfig& cfg, u32 function, u32 bar, u64 base, const Pci
     const bool wide = info.type == BarType::Mmio64;
     if ((!wide && info.type != BarType::Mmio32) ||
         (wide && (bar + 1 >= kMaxBars || cfg.bar_mask[function][bar + 1])) ||
-        (!wide && (base + info.size > (1ull << 32)))) {
+        (!wide && (base + info.size > kMmio32BarLimit))) {
         return false;
     }
     const u32 flags = (wide ? 4u : 0u) | (info.prefetchable ? 8u : 0u);
     const u64 mask = ~(info.size - 1);
     store(cfg.space[function], kRegBar0 + bar * 4, static_cast<u32>(base) | flags);
-    cfg.bar_mask[function][bar] = (static_cast<u32>(mask) & ~15u) | flags;
+    cfg.bar_mask[function][bar] = (static_cast<u32>(mask) & kBarAddrMask) | flags;
     if (wide) {
         store(cfg.space[function], kRegBar0 + (bar + 1) * 4, static_cast<u32>(base >> 32));
         cfg.bar_mask[function][bar + 1] = static_cast<u32>(mask >> 32);
@@ -98,22 +107,26 @@ bool bar_range_safe(const u8* host, const PciBar* bars, u32 bar, u64 start, u64 
         return false;
     }
     u64 visited = 0;
-    u32 offset = (host[6] & 0x10) ? host[kRegCapPtr] : 0;
+    u32 offset = (host[6] & kStatusCapabilitiesList) ? host[kRegCapPtr] : 0;
     while (offset) {
-        if (offset < 0x40 || offset > 0xfc || (offset & 3) || (visited & (1ull << (offset / 4)))) {
+        if (offset < kCfgCapMin || offset > kCfgCapMax || (offset & 3) ||
+            (visited & (1ull << (offset / 4)))) {
             return false;
         }
         visited |= 1ull << (offset / 4);
-        if (host[offset] == 0x11) {
+        if (host[offset] == kCapIdMsix) {
             if (offset > kCfgSpaceBytes - 12) {
                 return false;
             }
-            const u32 vectors = (load(host, offset + 2, 2) & 0x7ff) + 1;
+            const u32 vectors = (load(host, offset + kMsiCtrlOffset, 2) & kMsixVectorCountMask) + 1;
             for (u32 i = 0; i < 2; ++i) {
                 const u32 field = load(host, offset + 4 + i * 4, 4);
-                const u32 bir = field & 7;
-                const u64 region = field & ~7u;
-                const u64 bytes = i == 0 ? vectors * 16 : ((vectors + 63) / 64) * 8;
+                const u32 bir = field & kMsixBirMask;
+                const u64 region = field & ~kMsixBirMask;
+                const u64 bytes =
+                    i == 0
+                        ? static_cast<u64>(vectors) * kMsixTableEntryBytes
+                        : libk::div_round_up(vectors, kMsixPbaBitsPerEntry) * kMsixPbaEntryBytes;
                 if (bir >= kMaxBars || region >= bars[bir].size ||
                     bytes > bars[bir].size - region) {
                     return false;
@@ -137,15 +150,15 @@ bool config_filter_virtio_caps(GuestConfig& cfg, u32 function, const u8* host) {
     bool occupied[kCfgSpaceBytes]{};
     u64 visited = 0;
     u32 previous = kRegCapPtr;
-    u32 offset = (host[6] & 0x10) ? host[kRegCapPtr] : 0;
+    u32 offset = (host[6] & kStatusCapabilitiesList) ? host[kRegCapPtr] : 0;
     while (offset) {
-        if (offset < 0x40 || offset > 0xfc || (offset & 3) || occupied[offset] ||
+        if (offset < kCfgCapMin || offset > kCfgCapMax || (offset & 3) || occupied[offset] ||
             (visited & (1ull << (offset / 4)))) {
             return false;
         }
         visited |= 1ull << (offset / 4);
         const u32 next = host[offset + 1];
-        if (host[offset] == 9) {
+        if (host[offset] == kCapIdVendorSpecific) {
             const u32 length = host[offset + 2];
             const u32 type = host[offset + 3];
             if (length < 16 || length > kCfgSpaceBytes - offset) {
@@ -162,11 +175,11 @@ bool config_filter_virtio_caps(GuestConfig& cfg, u32 function, const u8* host) {
                 if (cfg.bar_upper[function] & (1u << bar)) {
                     return false;
                 }
-                u64 mask = cfg.bar_mask[function][bar] & ~15u;
+                u64 mask = cfg.bar_mask[function][bar] & kBarAddrMask;
                 if ((raw & 6) == 4 && bar + 1 < kMaxBars) {
                     mask |= static_cast<u64>(cfg.bar_mask[function][bar + 1]) << 32;
                 } else {
-                    mask |= 0xffffffff00000000ull;
+                    mask |= kBarUpperAbsent;
                 }
                 const u64 size = ~mask + 1;
                 const u32 start = load(host, offset + 8, 4);
@@ -193,11 +206,11 @@ bool config_filter_virtio_caps(GuestConfig& cfg, u32 function, const u8* host) {
         }
         offset = next;
     }
-    for (u32 i = 0x40; i < kCfgSpaceBytes; ++i) {
+    for (u32 i = kCfgCapMin; i < kCfgSpaceBytes; ++i) {
         cfg.space[function][i] = filtered[i];
     }
     cfg.space[function][kRegCapPtr] = filtered[kRegCapPtr];
-    cfg.space[function][6] = filtered[kRegCapPtr] ? 0x10 : 0;
+    cfg.space[function][6] = filtered[kRegCapPtr] ? static_cast<u8>(kStatusCapabilitiesList) : 0;
     cfg.space[function][7] = 0;
     cfg.msi_cap_off[function] = 0;
     return true;
@@ -238,7 +251,7 @@ CfgWriteAction classify_config_write(const GuestConfig& cfg, u32 fn_index, u32 o
     // MSI/MSI-X capability windows are mediated: the guest may program them,
     // but the value is bent into an Anko route, never a raw host MSI target.
     const u32 msi_off = cfg.msi_cap_off[fn_index];
-    if (msi_off != 0 && offset >= msi_off + 2 && offset + size <= msi_off + 24u) {
+    if (msi_off != 0 && offset >= msi_off + kMsiCtrlOffset && offset + size <= msi_off + kMsiCapBytes) {
         return CfgWriteAction::Mediate;
     }
     // Anything else (device-specific read-only fields, power management, reset)

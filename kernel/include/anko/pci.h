@@ -106,6 +106,9 @@ constexpr u16 kPciCmdMemoryEnable = 1u << 1;
 constexpr u16 kPciCmdBusMaster = 1u << 2;
 constexpr u16 kPciCmdWritableMask = kPciCmdIoEnable | kPciCmdMemoryEnable | kPciCmdBusMaster;
 
+// Status-register bits (PCI 3.0 §6.2.3): capabilities list present.
+constexpr u16 kStatusCapabilitiesList = 1u << 4;
+
 // Isolation-group id: functions of the same PCIe device (segment/bus/device)
 // share a device reset and are commonly behind one root port, so they cannot be
 // independently reset or contained. They form one group that Dango must assign
@@ -171,13 +174,113 @@ void set_memory_enable(u8 bus, u8 device, u8 function, bool enable);
 // ---------------------------------------------------------------------------
 constexpr u32 kCfgSpaceBytes = 256;
 
-// Config-space offsets the mediator reasons about.
+// Config-space register offsets the mediator and the ECAM walk reason about
+// (PCI Local Bus Spec 3.0 §6.1).
+constexpr u32 kRegVendorId = 0x00;
 constexpr u32 kRegCommand = 0x04;
+constexpr u32 kRegRevisionId = 0x08;
+constexpr u32 kRegClassCode = 0x09; // [0x0B:0x09] base class / subclass / prog-if
+constexpr u32 kRegHeaderType = 0x0E;
 constexpr u32 kRegBar0 = 0x10;
 constexpr u32 kRegBarEnd = 0x28;
+constexpr u32 kRegSubsystemIds = 0x2C; // [0x2F:0x2C] subsystem vendor / device id
 constexpr u32 kRegRomBar = 0x30;
 constexpr u32 kRegCapPtr = 0x34;
 constexpr u32 kRegIntLine = 0x3C;
+constexpr u32 kRegIntPin = 0x3D;
+
+// The six BARs and the expansion ROM BAR must lie wholly inside the (type-0)
+// 256-byte configuration space every consumer models.
+static_assert((kRegBar0 - kRegVendorId) / 4u == 4u, "BAR0 must start four dwords after the vendor id");
+static_assert(kRegBar0 + kMaxBars * 4u == kRegBarEnd, "BAR window must end at kRegBarEnd");
+static_assert(kRegBarEnd <= kCfgSpaceBytes, "BAR window must fit in config space");
+static_assert(kRegRomBar + 4u <= kCfgSpaceBytes, "expansion ROM BAR must fit in config space");
+
+// BAR register decoding (PCI 3.0 §6.2.5.1).
+constexpr u32 kBarTypeMask = 0x0Fu;          // low bits: address kind / flags
+constexpr u32 kBarAddrMask = ~0x0Fu;         // high bits: writable base address
+constexpr u64 kBarMinSize = 16;              // 16 bytes: the smallest BAR aperture
+constexpr u64 kMmio32BarLimit = 1ull << 32;  // 32-bit MMIO BARs live below 4 GiB
+constexpr u32 kBarProbeValue = 0xFFFF'FFFFu; // write to size a BAR, then restore
+constexpr u64 kBarUpperAbsent = 0xFFFF'FFFF'0000'0000ull; // 64-bit BAR, no upper half
+
+// Header-type byte (PCI 3.0 §6.1.2).
+constexpr u8 kHeaderTypeMultiFunction = 0x80;
+constexpr u8 kHeaderTypeMask = 0x7F;
+
+// Capability-list walk bounds and capability ids (PCI 3.0 §6.7).
+constexpr u32 kCfgCapMin = 0x40;
+constexpr u32 kCfgCapMax = 0xFC;
+constexpr u32 kMaxCapabilityWalk = 48; // cycle/overrun guard for a hostile list
+constexpr u32 kCfgCapPtrMask = 0xFC;
+constexpr u8 kCapIdMsi = 0x05;
+constexpr u8 kCapIdVendorSpecific = 0x09;
+constexpr u8 kCapIdMsix = 0x11;
+static_assert(kCfgCapMin % 4u == 0 && kCfgCapMax % 4u == 0 && kCfgCapMax + 4u <= kCfgSpaceBytes,
+              "capability window must stay inside config space");
+
+// MSI / MSI-X capability geometry (PCI 3.0 §6.8).
+constexpr u32 kMsiCtrlOffset = 2;      // control word, relative to the cap header
+constexpr u32 kMsiCapBytes = 24;       // header + control + address + data
+constexpr u32 kMsixVectorCountMask = 0x7FF;
+constexpr u32 kMsixBirMask = 0x7;
+constexpr u32 kMsixTableEntryBytes = 16;
+constexpr u32 kMsixPbaEntryBytes = 8;
+constexpr u32 kMsixPbaBitsPerEntry = 64;
+
+// Well-known virtio PCI ids (the appliance's assignable function).
+constexpr u16 kVirtioVendorId = 0x1AF4;
+constexpr u16 kVirtioGpuDeviceId = 0x1050;
+
+// QEMU virt swizzles PCI INTx onto GIC SPIs 3..6, one per slot (pin A -> SPI 3).
+constexpr u32 kQemuVirtIntxPinA = 3;
+constexpr u32 kPciIntxPinCount = 4;
+
+// ECAM address for one config-space dword. Every index is masked so a malformed
+// record or a hostile BDF can never address outside the function's 4 KiB window.
+constexpr u64 ecam_offset(u64 base, u32 bus, u32 dev, u32 fn, u32 off) {
+    return base | (static_cast<u64>(bus & 0xFFu) << 20) |
+           (static_cast<u64>(dev & 0x1Fu) << 15) | (static_cast<u64>(fn & 0x07u) << 12) |
+           (off & 0xFFFu);
+}
+
+// Little-endian 16-bit access through an identity-mapped ECAM window. Uses byte
+// accesses so the adjacent status register's W1C bits are never clobbered.
+inline u16 cfg_read_word(const volatile u8* ecam, u32 off) {
+    const u16 lo = static_cast<u16>(ecam[off]);
+    const u16 hi = static_cast<u16>(ecam[off + 1]);
+    return static_cast<u16>(lo | static_cast<u16>(hi << 8));
+}
+inline void cfg_write_word(volatile u8* ecam, u32 off, u16 v) {
+    ecam[off] = static_cast<u8>(v & 0xFFu);
+    ecam[off + 1] = static_cast<u8>((v >> 8) & 0xFFu);
+}
+
+// 32-bit config-space access through an identity-mapped ECAM window. One home
+// for every consumer (walker, assignment, SMMU containment) so the barrier,
+// masking and the absent-bus value can never drift between copies. A zero base
+// reads as all-ones, the "no device" value used by the assignment path.
+inline u32 cfg_read(u64 base, u32 bus, u32 dev, u32 fn, u32 off) {
+    if (base == 0) {
+        return 0xFFFF'FFFFu;
+    }
+    asm volatile("dsb sy" ::: "memory");
+    return *reinterpret_cast<volatile u32*>(ecam_offset(base, bus, dev, fn, off));
+}
+inline void cfg_write(u64 base, u32 bus, u32 dev, u32 fn, u32 off, u32 val) {
+    if (base == 0) {
+        return;
+    }
+    *reinterpret_cast<volatile u32*>(ecam_offset(base, bus, dev, fn, off)) = val;
+    asm volatile("dsb sy" ::: "memory");
+}
+
+// Split a PCI requester id / SMMU stream id back into its BDF parts.
+inline void bdf_from_requester_id(u32 sid, u8& bus, u8& dev, u8& fn) {
+    bus = static_cast<u8>((sid >> 8) & 0xFFu);
+    dev = static_cast<u8>((sid >> 3) & 0x1Fu);
+    fn = static_cast<u8>(sid & 0x07u);
+}
 
 enum class CfgWriteAction : u8 {
     Accept,  // benign: store into the synthetic image

@@ -25,6 +25,7 @@
 #include "anko/hw_info.h"
 #include "anko/log.h"
 #include "anko/mm.h"
+#include "anko/pci.h"
 #include "libk/string.h"
 
 #include "smmuv3_internal.h"
@@ -172,13 +173,6 @@ SysError program_deny_locked(u32 sid) {
 // ---------------------------------------------------------------------------
 // PCI configuration-space access (for bus-master containment)
 // ---------------------------------------------------------------------------
-volatile u32* ecam_reg(u32 bus, u32 dev, u32 fn, u32 off) {
-    const u64 addr = g_hw.ecam_base | (static_cast<u64>(bus & 0xFFu) << 20) |
-                     (static_cast<u64>(dev & 0x1Fu) << 15) | (static_cast<u64>(fn & 0x7u) << 12) |
-                     (off & 0xFFFu);
-    return reinterpret_cast<volatile u32*>(addr);
-}
-
 // ---------------------------------------------------------------------------
 // Backend hooks
 // ---------------------------------------------------------------------------
@@ -452,12 +446,18 @@ bool clear_pci_bus_master(u32 sid) {
     if (!g_hw.has_pcie || g_hw.ecam_base == 0) {
         return false;
     }
-    const u32 bus = (sid >> 8) & 0xFFu;
-    const u32 dev = (sid >> 3) & 0x1Fu;
-    const u32 fn = sid & 0x7u;
-    volatile u32* cmd = ecam_reg(bus, dev, fn, 0x04);
-    const u32 value = *cmd;
-    *cmd = value & ~(1u << 2); // clear PCI command register Bus Master Enable
+    u8 bus = 0;
+    u8 dev = 0;
+    u8 fn = 0;
+    pci::bdf_from_requester_id(sid, bus, dev, fn);
+    // Halfword access at the command register: the adjacent status register
+    // holds W1C bits and must not be written back.
+    volatile u8* cmd = reinterpret_cast<volatile u8*>(
+        pci::ecam_offset(g_hw.ecam_base, bus, dev, fn, pci::kRegCommand));
+    asm volatile("dsb sy" ::: "memory");
+    const u16 value = static_cast<u16>(pci::cfg_read_word(cmd, 0) & ~pci::kPciCmdBusMaster);
+    asm volatile("dsb sy" ::: "memory");
+    pci::cfg_write_word(cmd, 0, value);
     asm volatile("dsb sy" ::: "memory");
     return true;
 }

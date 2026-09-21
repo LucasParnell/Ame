@@ -20,6 +20,8 @@ struct dango_channel {
     struct dango_channel_layout layout;
     void *rx;
     void *tx;
+    void *staging;
+    u64 staging_bytes;
     wait_queue_head_t wait;
     atomic_t opened;
     atomic64_t irqs;
@@ -111,16 +113,36 @@ static long channel_ioctl(struct file *file, unsigned int cmd, unsigned long arg
 static int channel_mmap(struct file *file, struct vm_area_struct *vma)
 {
     struct dango_channel *ch = file->private_data;
-    if (vma->vm_pgoff || vma->vm_end - vma->vm_start != ch->layout.mapping_bytes ||
-        !(vma->vm_flags & VM_SHARED) || (vma->vm_flags & VM_EXEC)) return -EINVAL;
+    unsigned long len = vma->vm_end - vma->vm_start;
+    unsigned long rings = ch->layout.mapping_bytes;
+    unsigned long staging_off =
+        (unsigned long)DANGO_CH_STAGING_OFF(ch->layout.desc.ring_order);
+    int rc;
+    if (vma->vm_pgoff || !(vma->vm_flags & VM_SHARED) || (vma->vm_flags & VM_EXEC))
+        return -EINVAL;
+    /* DANGO_CH_STAGING: offset 0 exposes the two rings. A mapping that names
+     * the Phase I shared staging window exactly (DANGO_CH_STAGING_OFF + size)
+     * additionally exposes it at the page-aligned DANGO_CH_STAGING_OFF. The
+     * read-only descriptor page is never exposed through this mapping.
+     */
+    if (len != rings && !(ch->staging_bytes && len == staging_off + ch->staging_bytes))
+        return -EINVAL;
     vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP | VM_DONTCOPY);
     vm_flags_clear(vma, VM_MAYEXEC);
-    /* Normal WB on both sides: release/acquire atomics require normal memory.
-     * Descriptor and adjacent guest RAM are never exposed through this mmap.
-     */
-    return remap_pfn_range(vma, vma->vm_start,
-                          ch->layout.desc.host_to_guest_ring_pa >> PAGE_SHIFT,
-                          ch->layout.mapping_bytes, vma->vm_page_prot);
+    /* Normal WB on both sides: release/acquire atomics require normal memory. */
+    rc = remap_pfn_range(vma, vma->vm_start,
+                         ch->layout.desc.host_to_guest_ring_pa >> PAGE_SHIFT, rings,
+                         vma->vm_page_prot);
+    if (rc)
+        return rc;
+    if (len > rings) {
+        rc = remap_pfn_range(vma, vma->vm_start + staging_off,
+                             ch->layout.desc.shared_staging_pa >> PAGE_SHIFT,
+                             ch->staging_bytes, vma->vm_page_prot);
+        if (rc)
+            return rc;
+    }
+    return 0;
 }
 
 static const struct file_operations channel_fops = {
@@ -134,7 +156,7 @@ static int channel_probe(struct platform_device *pdev)
     struct dango_channel *ch;
     struct resource *r;
     void *desc;
-    u64 bytes;
+    u64 bytes, staging_pa, staging_bytes, window_end, chan_end;
     int irq, rc;
     if (PAGE_SIZE != 4096) return -EINVAL;
     r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -148,8 +170,7 @@ static int channel_probe(struct platform_device *pdev)
         ch->layout.desc.version_major != DANGO_CH_VERSION ||
         ch->layout.desc.version_minor || ch->layout.desc.reserved0 || ch->layout.reserved0 ||
         ch->layout.desc.flags != DANGO_CH_ARM_SUPPORTED ||
-        ch->layout.desc.ring_order < 4 || ch->layout.desc.ring_order > 10 ||
-        ch->layout.desc.shared_staging_pa || ch->layout.desc.shared_staging_size)
+        ch->layout.desc.ring_order < 4 || ch->layout.desc.ring_order > 10)
         return -EINVAL;
     bytes = ALIGN(256 + (64ULL << ch->layout.desc.ring_order), PAGE_SIZE);
     if (ch->layout.ring_bytes != bytes || ch->layout.mapping_bytes != 2 * bytes ||
@@ -157,6 +178,29 @@ static int channel_probe(struct platform_device *pdev)
         ch->layout.desc.host_to_guest_ring_pa != r->start + PAGE_SIZE ||
         ch->layout.desc.guest_to_host_ring_pa != r->start + PAGE_SIZE + bytes)
         return -EINVAL;
+    /* Phase I shared staging window (DANGO_CH_STAGING). Both fields stay zero
+     * until the host stages the VM; once present the window must be a
+     * page-aligned, page-multiple region inside the reserved GPU staging window,
+     * disjoint from this channel's descriptor/ring resource, and the ring order
+     * must be the profile default so userspace's DANGO_CH_STAGING_OFF matches
+     * the geometry the device actually exposes.
+     */
+    staging_pa = ch->layout.desc.shared_staging_pa;
+    staging_bytes = ch->layout.desc.shared_staging_size;
+    if ((staging_pa == 0) != (staging_bytes == 0)) return -EINVAL;
+    if (staging_bytes) {
+        window_end = DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE;
+        chan_end = r->start + PAGE_SIZE + 2 * bytes;
+        if (ch->layout.desc.ring_order != DANGO_CH_DEFAULT_RING_ORDER ||
+            !IS_ALIGNED(staging_pa, PAGE_SIZE) || !IS_ALIGNED(staging_bytes, PAGE_SIZE) ||
+            staging_bytes > DANGO_GPU_STAGING_SIZE || staging_pa < DANGO_GPU_STAGING_BASE ||
+            staging_pa >= window_end || staging_bytes > window_end - staging_pa ||
+            (staging_pa < chan_end && r->start < staging_pa + staging_bytes))
+            return -EINVAL;
+        ch->staging = devm_memremap(&pdev->dev, staging_pa, staging_bytes, MEMREMAP_WB);
+        if (IS_ERR(ch->staging)) return PTR_ERR(ch->staging);
+        ch->staging_bytes = staging_bytes;
+    }
     ch->rx = devm_memremap(&pdev->dev, r->start + PAGE_SIZE, 2 * bytes, MEMREMAP_WB);
     if (IS_ERR(ch->rx)) return PTR_ERR(ch->rx);
     ch->tx = (char *)ch->rx + bytes;

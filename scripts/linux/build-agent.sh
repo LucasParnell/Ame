@@ -26,6 +26,14 @@ if [[ "${DANGO_LINUX_PROFILE:-hello}" == gpu ]]; then
     CFLAGS+=(-DDANGO_GPU_KMS=1 -DDANGO_CHANNEL_TEST=1)
     SRCS+=("${AME}/linux-artifacts/channel_test/channel_test.c")
     SRCS+=("${AME}/linux-artifacts/kms_test/kms_test.c")
+    # Phase H/I: dango-gpud, the guest GPU protocol server. It serves the Midix
+    # GPU protocol over /dev/dango-channel0 and drives raw DRM/KMS through the
+    # shared helpers in linux-artifacts/gpud/.
+    CFLAGS+=(-DDANGO_GPU_GPUD=1)
+    SRCS+=("${AME}/linux-artifacts/gpud/gpud_main.c")
+    SRCS+=("${AME}/linux-artifacts/gpud/gpud_protocol.c")
+    SRCS+=("${AME}/linux-artifacts/gpud/gpud_channel.c")
+    SRCS+=("${AME}/linux-artifacts/gpud/gpud_drm.c")
 fi
 
 DST="${OUT}/dango-agent"

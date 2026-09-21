@@ -90,6 +90,10 @@ static int gpu_probe(void) {
 int dango_channel_test(void);
 #endif
 
+#ifdef DANGO_GPU_GPUD
+int dango_gpud_run(void);
+#endif
+
 void _start(void) {
     ensure_stdio_console();
 
@@ -104,6 +108,18 @@ void _start(void) {
 #ifdef DANGO_GPU_PROBE
     if (gpu_probe()) {
         mx_puts("dango: gpu probe passed\n");
+#ifdef DANGO_GPU_GPUD
+        // Phase H/I: dango-gpud serves the Midix GPU protocol over the Dango
+        // channel and drives the staging present path. It runs *before* the KMS
+        // self-test because only the first opener of the primary node becomes
+        // DRM master and can issue SETCRTC (drm_master_open()/drm_setmaster_ioctl
+        // reject a second master with -EBUSY), which both users need. Once the
+        // host's bootstrap session is done gpud drops master, keeps the card
+        // open so the presented frame stays on screen, closes the channel and
+        // returns, leaving the KMS and transport self-tests below untouched.
+        (void)dango_gpud_run();
+        mx_puts("dango-gpud: exited\n");
+#endif
 #ifdef DANGO_GPU_KMS
         // Phase F: drive a real KMS modeset so the host can assert the
         // displayed pattern (scripts/test/kms-display.py). Raw DRM ioctls live

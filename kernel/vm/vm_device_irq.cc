@@ -78,7 +78,10 @@ SysError device_irq_install(VmDeviceAssignment* a, u32 route_index) {
     }
     if (!irq::irq_bindable(route.host_irq)) {
         // A host line that is not a programmable SPI cannot be routed; this is
-        // a hard rejection, not a silent fallback.
+        // a hard rejection, not a silent fallback.  Log the id so a mis-derived
+        // INTx (wrong host interrupt-map parse) is immediately visible.
+        ANKO_LOGF_ERROR("kernel/vm", "assign: host irq %u is not a bindable SPI",
+                        route.host_irq);
         return E_INVALID;
     }
 

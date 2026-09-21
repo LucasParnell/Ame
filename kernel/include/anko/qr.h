@@ -33,7 +33,8 @@ u32 fit_version(u32 len, Level level);
 // Encode `data` in byte mode at `level`. Returns false when it does not fit.
 bool encode(const u8* data, u32 len, Level level, Code& out);
 
-// Module state (out-of-range reads are dark, matching the quiet-zone boundary).
+// Module state. Coordinates outside the symbol read as light, which is what a
+// renderer wants for the quiet zone.
 bool dark(const Code& code, u32 x, u32 y);
 
 } // namespace anko::qr

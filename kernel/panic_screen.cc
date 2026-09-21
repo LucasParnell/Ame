@@ -36,8 +36,8 @@ constexpr u32 kArtBright = 0xEAF1FF;
 constexpr u32 kHeadFg = 0xFF6B6B;    // panic red
 constexpr u32 kReasonFg = 0xFFD9A0;  // warm amber
 constexpr u32 kCaptionFg = 0xC8D6E8;
-constexpr u32 kQrDark = 0xF2F6FF;    // QR foreground (light on dark)
-constexpr u32 kQrLight = 0x0A1220;   // QR background / quiet zone
+constexpr u32 kQrModule = 0x08111C;  // QR module: dark ink on a light panel
+constexpr u32 kQrPanel = 0xF4F7FF;   // QR panel + quiet zone
 
 volatile u32* g_pixels = nullptr;
 u32 g_w = 0;
@@ -144,12 +144,12 @@ void draw_art(u32 x0, u32 y0, u32 x1, u32 y1) {
 u32 draw_qr(const anko::qr::Code& code, u32 x0, u32 y0, u32 module) {
     if (module == 0) return 0;
     const u32 side = (code.size + 2u * kQuietModules) * module;
-    fill_rect(x0, y0, side, side, kQrLight);
+    fill_rect(x0, y0, side, side, kQrPanel);
     for (u32 my = 0; my < code.size; ++my) {
         for (u32 mx = 0; mx < code.size; ++mx) {
             if (!anko::qr::dark(code, mx, my)) continue;
             fill_rect(x0 + (mx + kQuietModules) * module, y0 + (my + kQuietModules) * module,
-                      module, module, kQrDark);
+                      module, module, kQrModule);
         }
     }
     return side;

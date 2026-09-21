@@ -61,6 +61,29 @@ An adversarial review of the panic path found real defects, all now fixed and gu
 - **No silent QR loss**: the screen tries ECC M then L, returns whether a code was drawn, and the
   serial dump records payload truncation or a missing QR.
 
+## Encoder review outcome
+
+A second adversarial review (independent re-implementation, a real scanner via zxing-cpp, and segno as a
+second encoder, with ASan/UBSan sweeps) found **no critical or major defects**: 555 varied plus 92
+adversarial payloads all decoded, the function-module map matches segno for versions 2-40, and the whole
+codeword pipeline (padding/RS/interleave) matched a from-scratch implementation in 640 cases. Its minor
+findings were fixed anyway:
+
+- **Penalty rule 3 now counts the quiet-zone margin** (modules outside the symbol are treated as light)
+  and counts horizontal and vertical matches separately, so mask selection matches the ISO/Nayuki
+  interpretation rather than merely a working one.
+- **`fit_version()` no longer overflows** (`8u * len` → `u64`, plus an explicit maximum payload),
+  removing a latent path where an absurd length could report "version 1" and make `encode()` over-read.
+- **Spec-table bounds are now a compile-time invariant** (`consteval` check on EC-per-block/block counts),
+  and the Reed-Solomon helpers guard their degree, so a table edit that would not fit the fixed buffers
+  fails the build instead of corrupting memory.
+- **Comment corrected**: the encoder's large buffers are static, but it still uses a small bounded stack
+  frame; the header now says so instead of claiming zero stack.
+- **The on-screen QR is drawn dark-on-light** (light panel, dark modules) rather than inverted, which is
+  what real scanners expect; the host test and capture harness follow the change.
+- The capture harness now keeps the QEMU monitor socket in a short temp path when the output directory
+  is deep (a unix socket path limit, hit while filing the evidence).
+
 ## Fixed along the way
 
 The GPU build staged prebuilt Linux artifacts by inlining `copy_if_different` into the `system.mxb`

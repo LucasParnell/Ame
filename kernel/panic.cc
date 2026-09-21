@@ -143,7 +143,9 @@ static void claim_or_park() {
     (void)qr_len;
     if (qr_truncated) anko::log::panic_dump("(panic screen: QR payload truncated)\n");
     if (!anko::panic_screen::show(g_report.title, g_report.reason, g_qr_payload)) {
-        anko::log::panic_dump("(panic screen: QR not drawn; report too large or screen too small)\n");
+        anko::log::panic_dump(anko::panic_screen::bound()
+                                  ? "(panic screen: QR not drawn; report too large or screen too small)\n"
+                                  : "(panic screen: no framebuffer bound)\n");
     }
 
     // Halt only this core. Recovery is a machine reset, which is external.

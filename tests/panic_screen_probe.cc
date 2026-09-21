@@ -15,8 +15,8 @@
 namespace {
 
 constexpr uint32_t kBg = 0x00060E;
-constexpr uint32_t kQrDark = 0xF2F6FF;
-constexpr uint32_t kQrLight = 0x0A1220;
+constexpr uint32_t kQrModule = 0x08111C;
+constexpr uint32_t kQrPanel = 0xF4F7FF;
 constexpr uint32_t kTitle = 0xFF6B6B;
 constexpr uint32_t kReason = 0xFFD9A0;
 constexpr uint32_t kCaption = 0xC8D6E8;
@@ -64,14 +64,14 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
     for (uint32_t y = 0; y < h; ++y) {
         for (uint32_t x = 0; x < w; ++x) {
             const uint32_t c = f.px[static_cast<size_t>(y) * w + x];
-            if (near(c, kQrDark) || near(c, kQrLight)) qr_area_ink += (c != kQrLight);
-            if (near(c, kQrLight)) qr_area_ink += 0;
-            if (near(c, kQrDark)) ++qr_dark;
+            if (near(c, kQrModule) || near(c, kQrPanel)) qr_area_ink += (c != kQrPanel);
+            if (near(c, kQrPanel)) qr_area_ink += 0;
+            if (near(c, kQrModule)) ++qr_dark;
             if (near(c, kTitle)) ++title;
             if (near(c, kReason)) ++reason;
             if (near(c, kCaption)) ++caption;
             if (near(c, kArtDim) || near(c, kArtBright)) ++art;
-            if (c != kBg && c != kQrLight && c != kQrDark && !near(c, kTitle) &&
+            if (c != kBg && c != kQrPanel && c != kQrModule && !near(c, kTitle) &&
                 !near(c, kReason) && !near(c, kCaption) && !near(c, kArtDim) &&
                 !near(c, kArtBright)) {
                 // Unknown colour: only acceptable from the 2-px bleed of scaling.
@@ -95,7 +95,7 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
     for (uint32_t y = 0; y < h; ++y) {
         for (uint32_t x = 0; x < w; ++x) {
             const uint32_t c = f.px[static_cast<size_t>(y) * w + x];
-            if (near(c, kQrDark)) {
+            if (near(c, kQrModule)) {
                 if (x < qr_x_min) qr_x_min = x;
                 if (x > qr_x_max) qr_x_max = x;
                 if (y > qr_y_max) qr_y_max = y;

@@ -7,8 +7,10 @@
 // centres, format/version words) come from the generated tables in
 // qr_tables.h, which are produced from kernel/assets/qr_tables.json.
 //
-// Not reentrant: the working matrix and codeword buffers are static so the
-// encoder never touches the faulting thread's stack. Only the panic path uses it.
+// Not reentrant: every large working buffer (matrix, codewords, interleaved
+// stream, EC blocks) is static BSS rather than stack, so a panic cannot run the
+// encoder on a nearly-exhausted stack; the remaining stack footprint is small
+// and bounded (the per-block index arrays). Only the panic path uses it.
 
 #include "anko/qr.h"
 
@@ -33,6 +35,24 @@ inline bool is_dark_cell(u8 cell) { return (cell & 1u) != 0; }
 u8 g_cells[kTotalCells];             // working matrix
 static u8 g_interleaved[kMaxCodewords];  // final codeword sequence (static: not on a faulting stack)
 u8 g_codewords[kMaxCodewords];       // message + EC codewords
+static constexpr u32 kMaxEcPerBlock = 30;   // ISO maximum for QR Model 2
+
+// The fixed buffers above are sized for the worst case; refuse to compile with a
+// spec table that would not fit them.
+consteval bool ec_tables_are_bounded() {
+    for (u32 v = 0; v < kMaxVersion; ++v) {
+        for (u32 l = 0; l < tables::kLevelCount; ++l) {
+            u32 blocks = 0;
+            for (u32 g = 0; g < tables::kEc[v][l].group_count; ++g) {
+                if (tables::kEc[v][l].groups[g].ec_bytes > kMaxEcPerBlock) return false;
+                blocks += tables::kEc[v][l].groups[g].blocks;
+            }
+            if (blocks > kMaxBlocks) return false;
+        }
+    }
+    return true;
+}
+static_assert(ec_tables_are_bounded(), "QR EC tables exceed the fixed buffers");
 u8 g_ec[kMaxBlocks][30];             // per-block EC bytes (max EC per block = 30)
 u8 g_gen[30];                        // Reed-Solomon generator coefficients
 
@@ -67,6 +87,7 @@ u8 gf_mul(u8 x, u8 y) {
 
 // Generator polynomial of `degree`: coefficients for all but the leading 1.
 void rs_generator(u32 degree) {
+    if (degree == 0 || degree > kMaxEcPerBlock) return; // unreachable: tables are static_asserted
     for (u32 i = 0; i + 1 < degree; ++i) g_gen[i] = 0;
     g_gen[degree - 1] = 1;
     u8 root = 1;
@@ -80,6 +101,7 @@ void rs_generator(u32 degree) {
 }
 
 void rs_remainder(const u8* data, u32 len, u32 degree, u8* result) {
+    if (degree == 0 || degree > kMaxEcPerBlock) return; // unreachable: tables are static_asserted
     for (u32 i = 0; i < degree; ++i) result[i] = 0;
     for (u32 i = 0; i < len; ++i) {
         const u8 factor = static_cast<u8>(data[i] ^ result[0]);
@@ -91,7 +113,7 @@ void rs_remainder(const u8* data, u32 len, u32 degree, u8* result) {
 
 // --- feature tables --------------------------------------------------------
 
-u32 data_codewords(u32 version, Level level) {
+constexpr u32 data_codewords(u32 version, Level level) {
     const tables::EcSpec& spec = tables::kEc[version - 1][static_cast<u32>(level)];
     u32 total = 0;
     for (u32 g = 0; g < spec.group_count; ++g) {
@@ -110,7 +132,10 @@ u8 level_code(Level level) {
     return 0;
 }
 
-u32 char_count_bits(u32 version) { return version <= 9 ? 8u : 16u; }
+constexpr u32 char_count_bits(u32 version) { return version <= 9 ? 8u : 16u; }
+
+// Largest payload any version/level can carry (version 40, level L).
+constexpr u32 kMaxDataBytes = data_codewords(kMaxVersion, Level::L);
 
 // --- matrix helpers --------------------------------------------------------
 
@@ -298,30 +323,31 @@ u32 penalty(u32 size) {
         }
     }
 
-    // Rule 3: finder-like 1:1:3:1:1 patterns with a 4-module light margin, in
-    // both orientations (the 11-bit patterns 10111010000 and its reverse).
+    // Rule 3: finder-like 1:1:3:1:1 patterns in both orientations, counting a
+    // four-module light margin on either side. Modules outside the symbol are
+    // light (the quiet zone), so a window may start or end there.
     static const u8 pattern_a[11] = {1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0};
     static const u8 pattern_b[11] = {0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1};
     const u8* patterns[2] = {pattern_a, pattern_b};
-    auto matches = [&](u32 x, u32 y, int dx, int dy, const u8* pattern) {
-        for (u32 i = 0; i < 11; ++i) {
-            const int cx = static_cast<int>(x) + dx * static_cast<int>(i);
-            const int cy = static_cast<int>(y) + dy * static_cast<int>(i);
-            if (cx < 0 || cy < 0 || cx >= static_cast<int>(size) || cy >= static_cast<int>(size)) {
-                return false;
-            }
-            if (is_dark_cell(g_cells[static_cast<u32>(cy) * size + static_cast<u32>(cx)]) !=
-                (pattern[i] != 0)) {
-                return false;
-            }
-        }
-        return true;
-    };
-    for (u32 y = 0; y < size; ++y) {
-        for (u32 x = 0; x < size; ++x) {
+    const int extent = static_cast<int>(size);
+    for (int y = 0; y < extent; ++y) {
+        for (int x = -10; x < extent; ++x) {
             for (u32 p = 0; p < 2; ++p) {
-                if (matches(x, y, 1, 0, patterns[p]) || matches(x, y, 0, 1, patterns[p])) {
-                    score += 40;
+                const u8* pattern = patterns[p];
+                for (u32 direction = 0; direction < 2; ++direction) {
+                    const int dx = direction == 0 ? 1 : 0;
+                    const int dy = direction == 0 ? 0 : 1;
+                    bool match = true;
+                    for (u32 i = 0; i < 11 && match; ++i) {
+                        const int cx = x + dx * static_cast<int>(i);
+                        const int cy = y + dy * static_cast<int>(i);
+                        const bool dark = (cx >= 0 && cy >= 0 && cx < extent && cy < extent)
+                                              ? is_dark_cell(g_cells[static_cast<u32>(cy) * size +
+                                                                     static_cast<u32>(cx)])
+                                              : false; // quiet zone
+                        match = (dark == (pattern[i] != 0));
+                    }
+                    if (match) score += 40;
                 }
             }
         }
@@ -342,9 +368,12 @@ u32 penalty(u32 size) {
 } // namespace
 
 u32 fit_version(u32 len, Level level) {
+    // u64 arithmetic: `8u * len` would wrap for absurd lengths, and encode() must
+    // never be told a payload fits when it cannot be written.
+    if (len > kMaxDataBytes) return 0;
     for (u32 version = 1; version <= kMaxVersion; ++version) {
-        const u32 bits = 4u + char_count_bits(version) + 8u * len;
-        if (data_codewords(version, level) >= (bits + 7u) / 8u) return version;
+        const u64 bits = 4ull + char_count_bits(version) + 8ull * len;
+        if (data_codewords(version, level) >= (bits + 7ull) / 8ull) return version;
     }
     return 0;
 }

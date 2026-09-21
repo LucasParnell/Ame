@@ -29,8 +29,8 @@ REASON = (255, 217, 160)
 CAPTION = (200, 214, 232)
 ART_DIM = (143, 166, 196)
 ART_BRIGHT = (234, 241, 255)
-QR_DARK = (242, 246, 255)
-QR_LIGHT = (10, 18, 32)
+QR_DARK = (8, 17, 28)      # QR module (dark ink on a light panel)
+QR_LIGHT = (244, 247, 255)  # QR panel + quiet zone
 
 
 def read_ppm(path):
@@ -158,7 +158,11 @@ def main():
     build = Path(args.build)
     work = Path(args.output) if args.output else Path(tempfile.mkdtemp(prefix='ame-panic-'))
     work.mkdir(parents=True, exist_ok=True)
-    monitor = work / 'monitor.sock'
+    monitor = (work / 'monitor.sock').resolve()
+    # A QEMU monitor unix socket path must stay under 104 bytes (boot.py resolves
+    # it), so fall back to a short temp directory for a deep output path.
+    if len(str(monitor)) >= 100:
+        monitor = (Path(tempfile.mkdtemp(prefix='ame-mon-')) / 'm.sock').resolve()
     shot = work / 'panic.ppm'
 
     configure_and_build(build)

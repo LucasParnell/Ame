@@ -29,8 +29,8 @@ Master reference points: `kernel/iommu/{core,smmuv3,faults}.cc`, `kernel/vm/vm_d
 | B generic IOMMU core | **Done** |
 | C SMMUv3 backend + hostile DMA | **Done** (22 checks, `iommu-testdev`) |
 | D PCI assignment + IRQ virtualization | **Done** (32 checks) |
-| E Linux virtio-gpu-pci probe | **Partial** — guest kernel + pipeline exist; INTx-profile ECAM mediation proven; Dango construction + Linux probe remain |
-| F standalone Linux KMS | Not started |
+| E Linux virtio-gpu-pci probe | **Done** — Dango construction, GPU artifact packaging, INTx→vGIC delivery; Linux binds `virtio_gpu` and creates `/dev/dri/card0` |
+| F standalone Linux KMS | **Done** — guest raw-ioctl KMS self-test; host `screendump` asserts the displayed pattern |
 | G guest-visible Dango channel | Not started (ABI only) |
 | H `dango-gpud` control plane | Not started |
 | I shared staging framebuffer | Not started |
@@ -66,7 +66,14 @@ mappings, mediated config writes, MSI/MSI-X + INTx level routes → vGIC. See
 
 ---
 
-## Phase E — Linux `virtio-gpu-pci` probe — **Partial**
+## Phase E — Linux `virtio-gpu-pci` probe — Done
+
+**Landed (E.2–E.5):** Dango constructs the assignment (function + INTx authority, BAR
+assignment, ECAM exposure, stage-2 Device mapping, INTx route), the GPU artifact set is selected and
+packaged, and the Linux guest binds `virtio_gpu`, creates `/dev/dri/card0`, and observes its virtio
+ISR. Asserted by the opt-in `AME_VERIFY_GPU=1` gate row. See
+[DELIVERY/gpu-appliance-phase-e.md](../DELIVERY/gpu-appliance-phase-e.md); the historical substep
+narrative below is retained for context.
 
 **Done**
 - Guest kernel builds: `build/dango-linux-gpu/Image` (48.7 MB) via the Linux container; minimal-config
@@ -171,28 +178,31 @@ dango-agent: started / guest agent started / guest uart hello
 dango.manager: linux guest responded
 ```
 
-**Remaining for Phase E:** (1) let the guest finish booting so the Linux PCI scan binds `virtio_gpu` and
-creates `/dev/dri/card0` — the current capture window ends during early boot; (2) the manager keeps running the
-vCPU, so `init` reports a service readiness timeout — it should signal ready once the appliance is up (or the
-fixture should treat the running appliance as ready).  Then the explicit E.5 assertions.
+**Resolved (E.4/E.5):** the guest finishes booting, the Linux PCI scan binds `virtio_gpu` and creates
+`/dev/dri/card0`; INTx is delivered and the Linux virtio ISR is observed; `dango.manager: service ready`
+and `init: all services ready` close the readiness question.  Asserted by the `gpu-appliance` gate row.
 
-**Acceptance:** Linux binds `virtio_gpu`, creates a DRM primary device, no unexpected IOMMU faults, no
-global-bypass mapping.
+**Acceptance — met:** Linux binds `virtio_gpu`, creates a DRM primary device, no unexpected IOMMU
+faults, no global-bypass mapping (`faults=0 quarantines=0 smmu=1`, `routes=1 injected>0`).
 
-## Phase F — standalone Linux KMS — Not started
+## Phase F — standalone Linux KMS — Done
 
-**Remaining**
-1. A small static appliance userspace (`linux-artifacts/kms_test/`, raw DRM ioctls — no libdrm) added to
-   the initramfs: open `/dev/dri/card0`, `GET_RESOURCES`/`GET_CONNECTOR`, `CREATE_DUMB` + `MAP_DUMB`,
-   fill a pattern, `ADD_FB` (+ legacy `SETCRTC` or atomic), then keep it displayed.
-2. Host capture: extend `scripts/test/` to `screendump` the QEMU display to PPM and assert the pattern
-   (this proves device assignment + MMIO + IRQ + DMA + Linux DRM + `virtio_gpu`, with **no** virtio-gpu
-   register logic in Ame).
-3. devtmpfs (or explicit mknod) so `/dev/dri/card0` exists; keep the guest minimal
-   (`docs/LINUX_APPLIANCE_MINIMAL.md`).
+**Landed:** a freestanding raw-ioctl KMS self-test (`linux-artifacts/kms_test/kms_test.c`, linked into
+the appliance init) opens `/dev/dri/card0`, reads the resource/connector tables, allocates a dumb
+buffer, fills a four-colour bar pattern, creates an FB and programs the CRTC (legacy `SETCRTC`, which
+virtio_gpu exposes through `drm_atomic_helper_set_config`).  The host captures the assigned console
+with a QEMU monitor `screendump` (`scripts/test/kms-display.py`) and asserts the pattern — proving
+assignment + MMIO + IRQ + DMA + Linux DRM + `virtio_gpu` with **no** virtio-gpu register logic in Ame.
+Opt-in gate row `AME_VERIFY_KMS=1`.  See [DELIVERY/gpu-appliance-phase-f.md](../DELIVERY/gpu-appliance-phase-f.md).
 
-**Acceptance:** the QEMU display shows the Linux-generated pattern; DMA stays inside the appliance domain
-under sustained redraw.
+**Remaining plan (retained):**
+1. ~~Small static appliance userspace (`linux-artifacts/kms_test/`, raw DRM ioctls — no libdrm)~~ done.
+2. ~~Host capture: `screendump` the QEMU display to PPM and assert the pattern~~ done.
+3. ~~devtmpfs (or explicit mknod) so `/dev/dri/card0` exists; keep the guest minimal~~ done (the agent
+   mounts devtmpfs; no new kernel config).
+
+**Acceptance:** the QEMU display shows the Linux-generated pattern; DMA stays inside the appliance
+domain under sustained redraw.
 
 ## Phase G — guest-visible Dango channel — Not started
 
@@ -288,7 +298,7 @@ fence transfer, and IOMMU registration lifetimes.
 - **Docs.** Keep `docs/FEATURE_STATUS.md` and `docs/CLEANUP_STATUS.md` current as phases land.
 
 ## Immediate next actions (in order)
-1. Phase E.2/E.3 — Dango GPU appliance construction + GPU artifact packaging; boot it.
-2. Phase E.4/E.5 — vGIC SPI delivery + end-to-end assertion.
-3. Phase F — KMS self-test + `screendump` capture.
-4. Phase G — channel guest mapping + vIRQ/HVC + `/dev/dango-channel0` + ping/pong.
+1. Phase G — channel guest mapping + vIRQ/HVC + `/dev/dango-channel0` + ping/pong.
+2. Phase H — `dango-gpud` control plane over the Phase G channel.
+3. Phase I — shared staging framebuffer + async present.
+4. Phase J — framebuffer/TTY migration onto the appliance.

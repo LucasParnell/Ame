@@ -5,12 +5,13 @@ code that implements the feature and the boot/test evidence that exercises it.
 Nothing here is aspirational: where a claim could not be confirmed against the
 code or a captured log it is marked **unverified**.
 
-- **Tree**: branch `cleanup/docs`, base commit `ee6c160`.
+- **Tree**: branch `master`.
 - **Validated toolchain** (from `scripts/verify.sh`): Homebrew Clang 23.1.1,
   CMake 4.4.0, QEMU 11.1.1.
 - **Health gate**: `scripts/verify.sh` — configure → build → host regressions →
   provenance → direct boot → kernel lifecycle matrix → supervision restart.
-  All checks green (see [Verification](#verification)).
+  All checks green (see [Verification](#verification)).  Opt-in rows extend it for the
+  appliance work: `AME_VERIFY_IOMMU`, `AME_VERIFY_ASSIGN`, `AME_VERIFY_GPU`, `AME_VERIFY_KMS`.
 - **Boot evidence** below comes from the gate's QEMU runs (`scripts/test/boot.py`).
   The kernel and userland log over the *first* QEMU serial port; that is the
   `host.log` in the runner's output directory. The second serial port
@@ -108,19 +109,23 @@ less complete than it is. Do **not** treat these as status:
 | VM memory objects (backing pages, map/unmap, write) | Implemented | `kernel/vm/vm_memory.cc`: `create_memory`, `map_memory`, `unmap_memory`, `write_memory` | — |
 | Paravirt channels (host↔guest ring + doorbell endpoints) | Implemented | `kernel/vm/vm_channel.cc`: `create_channel`, `channel_endpoint`, `inspect_channel` | — |
 | VM/EL2 bring-up at boot | Implemented | Default boot: `dango.manager: vm.current_el=1`, `dango.manager: vm.el2_available=1`, `dango.manager: vm created`, `dango.manager: vcpu.id=1`, `dango.manager: channel ready`, `dango.manager: layout ready` | — |
-| Guest Linux payload run | **Not implemented (disabled by default)** | Manager logs `dango.manager: vcpu stub run skipped: no linux guest payload`; `linux/manifest.toml|Image|initramfs.cpio|dango-linux.dtb` reported missing (all builds default `DANGO_BUILD_LINUX_ARTIFACTS=OFF`) | Requires explicitly building the guest (`scripts/linux/build-min-linux.sh` / `-DDANGO_BUILD_LINUX_ARTIFACTS=ON`); not part of the gate |
+| Guest Linux payload run | **Implemented (opt-in)** | Default build still logs `dango.manager: vcpu stub run skipped: no linux guest payload`; the GPU artifact set (`build/dango-linux-gpu`) is packaged when configured with `-DDANGO_LINUX_PROFILE=gpu -DDANGO_LINUX_ARTIFACT_DIR=…` and booted by the opt-in `gpu-appliance` / `kms-display` rows (Linux binds `virtio_gpu`) | Requires the guest artifacts built separately (Linux container on macOS: `scripts/linux/build-gpu-linux-docker.sh`); not part of the default gate |
 | VM negative-authority probe | Implemented | Default boot: `dango.auth_probe: authority check passed` | Runs as a native probe, not a guest |
 | Stage-2 allocation/prune regression | Implemented | `tests/stage2_probe.cc` + `tests/test_stage2.py` (`test_failed_allocations_and_sparse_unmap_reclaim_tables`) | Host-only |
 
-### GPU appliance: Phase E.1 continuation
+### GPU appliance — Phases E and F
 
 | Capability | Status | Evidence / limit |
 |---|---|---|
 | Synthetic PCI ECAM through stage-2 faults | Implemented for INTx bootstrap | `kernel/pci/ecam.cc`, `kernel/vm/vcpu.cc`, syscall 60; real AArch64 guest probe in `vm_device_selftest.cc`, 43 assignment checks. Fixed BARs; only mapped virtio MMIO capabilities; MSI-X table/PBA mappings rejected. |
 | Config and mapping isolation | Implemented | ASan/UBSan ECAM + stage-2 probes; trapped ranges reject RAM/MMIO overlap; active-VM revoke removes Device leaves; BME requires an ACTIVE DMA domain. |
-| Linux `virtio_gpu` binds and creates DRM device | Not yet proven | Dango construction, function/IRQ authority, GPU artifact selection and Linux INTx delivery remain. This guest probe exercises PCI accesses only. |
+| Dango GPU appliance construction (assignment, BAR allocation, ECAM, INTx) | Implemented | `userland/dango/manager/main.cc`, `kernel/init/boot_caps.cc` (`gpu.function`/`gpu.irq`); boot: `assign: ACTIVE device=1`, `assign: bar4 mapped ipa=0x50000000`. |
+| Linux `virtio_gpu` binds and creates a DRM device | Implemented | Opt-in `gpu-appliance` row: `dango: DRM card0 driver=virtio_gpu dumb_buffer=1`, `dango: Linux virtio ISR observed`; counters `faults=0 quarantines=0 smmu=1`. |
+| Standalone Linux KMS modeset asserted from the host | Implemented | Opt-in `kms-display` row: guest raw-ioctl KMS (`linux-artifacts/kms_test/`), host `screendump` at `1024x768` showing mid-row R/G/B/W. See [Phase F delivery](../DELIVERY/gpu-appliance-phase-f.md). |
 
-See [Phase E.1 delivery](../DELIVERY/gpu-appliance-phase-e1.md) and
+See [Phase E delivery](../DELIVERY/gpu-appliance-phase-e.md),
+[Phase E.1 delivery](../DELIVERY/gpu-appliance-phase-e1.md),
+[Phase F delivery](../DELIVERY/gpu-appliance-phase-f.md) and
 [remaining phases](GPU_APPLIANCE_TODO.md).
 
 ### 1.7 Kernel drivers (in-kernel minimal set)
@@ -248,6 +253,10 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | Kernel lifecycle matrix | `lifecycle.mxb` at CPUs 1, 2, 4 (`lifecycle regression passed`) | green |
 | Supervision restart | `restart.mxb` (`supervision regression passed`) | green |
 | Durability persistence | `durable-persistence.py` — write `/data`, `FS_SYNC`, reboot, read back (`durability regression passed`) | green |
+| SMMUv3 hostile DMA (opt-in) | `AME_VERIFY_IOMMU=1` — `iommu-dma` row (`iommu_dma.py`) | green |
+| PCI assignment + IRQ virtualization (opt-in) | `AME_VERIFY_ASSIGN=1` — `assignment` row (`assignment.py`) | green |
+| Linux virtio-gpu appliance (opt-in) | `AME_VERIFY_GPU=1` — `gpu-appliance` row (`gpu-appliance.py`) | green |
+| Standalone KMS display (opt-in) | `AME_VERIFY_KMS=1` — `kms-display` row (`kms-display.py`) | green |
 
 ### 4.2 Manually-confirmed extras (this pass)
 
@@ -262,7 +271,7 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 |-----|-----|-----------------|
 | Disk-mode boot | Requires a locally built U-Boot firmware + `ame_disk` image; not part of the gate | `scripts/build-u-boot-qemu-arm64.sh`; `ame_disk`; `boot.py --mode disk --disk … --firmware …` |
 | Journaled on-disk B+tree writer | The read-only root is never mutated; durability is delivered by the separate `/data` region | Land the journaled writer, then extend the durability check to root writes |
-| Guest Linux / Dango guest boot | Linux artifacts disabled by default (`DANGO_BUILD_LINUX_ARTIFACTS=OFF`); manager logs `vcpu stub run skipped: no linux guest payload` | Build artifacts (+ `-DDANGO_BUILD_LINUX_ARTIFACTS=ON`) and wire a guest run; no captured green run here |
+| Guest Linux / Dango guest boot (default gate) | Linux artifacts disabled by default (`DANGO_BUILD_LINUX_ARTIFACTS=OFF`), so the default boot still logs `vcpu stub run skipped: no linux guest payload` | Covered by the opt-in `AME_VERIFY_GPU` / `AME_VERIFY_KMS` rows (artifacts built via `scripts/linux/build-gpu-linux-docker.sh`) |
 | Dango auth regression as a guest | `dango.auth_probe` runs as a native probe (`authority check passed`), not inside a guest | Enable guest path above |
 | Switch hardware acceptance | No physical device | Flash and boot the staging package on a T210 console |
 | Supervision as a long soak | The restart path is asserted by a bounded fixture | Extend the fixture / soak run |
@@ -278,7 +287,7 @@ Anything below has code but **no captured evidence in this tree**; treat as unpr
 
 - Switch on-device boot and any T210 peripheral beyond compile/link/stage.
 - Disk-mode boot end-to-end and the `midix-fs-v1` on-disk mount path.
-- Guest Linux boot through Dango (all guest-run counters exist but the default boot reports `no linux guest payload`).
+- Guest Linux boot through Dango in the **default** gate: the opt-in `gpu-appliance` / `kms-display` rows capture a green Linux `virtio_gpu` + KMS run, but the default boot still reports `no linux guest payload`.
 - `drv.blk.virtio` against a real backing device: the no-device path runs in the default boot; `BLK_READ`/`BLK_WRITE`/`BLK_FLUSH` run against a virtio-blk disk only in the durability check.
 - QEMU boot at CPUs other than 1/2/4 (e.g. 3), and any CPU count above 4 (`kMaxCpus` bounds the scheduler).
 
@@ -316,5 +325,5 @@ $ python3 scripts/test/boot.py --build out/verify --mode direct --cpus 4 --marke
 reason= ready  elapsed=1.67
 ```
 
-This document reflects the tree at commit `ee6c160`; re-run `scripts/verify.sh` after
-changes and update the matrix where behaviour moves.
+This document reflects the tree after Phase F (`DELIVERY/gpu-appliance-phase-f.md`); re-run
+`scripts/verify.sh` after changes and update the matrix where behaviour moves.

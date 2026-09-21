@@ -1,4 +1,4 @@
-# Ame — handoff (session 2026-09-20→21)
+# Ame — handoff (session 2026-09-21)
 
 Pick-up notes for continuing the Ame work in a fresh chat.
 
@@ -7,7 +7,6 @@ Pick-up notes for continuing the Ame work in a fresh chat.
 - **Canonical repo:** `/Users/lucasparnell/Documents/Code/Ame`
 - **Agent working copy:** `~/.openclaw-autoclaw/agents/meow/workspace/Ame` (kept in sync; the agent's
   file tools are workspace-scoped, so it edits here and fast-forwards the canonical repo)
-- **Both are clean and identical at `master = 01e7191`.**
 - Reference docs in-tree: `docs/GPU_APPLIANCE_TODO.md` (per-phase plan + status — **start here**),
   `docs/LINUX_APPLIANCE_MINIMAL.md` (guest minimal-config policy), `docs/FEATURE_STATUS.md`,
   `docs/CLEANUP_STATUS.md`, `DELIVERY/*` (per-phase delivery notes), `Architecture_3.md`,
@@ -24,16 +23,26 @@ Reference target: QEMU `virt`; board `switch-t210` builds only (no device).
 ## Current state (phases)
 
 **Done and verified:** A (PCI/IOMMU inventory), B (generic IOMMU core), C (SMMUv3 backend + hostile
-DMA, `iommu-testdev`), D (PCI assignment + IRQ virtualization), **E (Linux `virtio-gpu` appliance)**.
+DMA, `iommu-testdev`), D (PCI assignment + IRQ virtualization), **E (Linux `virtio-gpu` appliance)**,
+**F (standalone Linux KMS self-test + host `screendump`)**.
 
-Phase E end-to-end now works: Ame boots with the SMMU enforced, the Linux appliance runs under Dango
-with the assigned `virtio-gpu-pci`, Linux **binds the DRM driver** (`/dev/dri/card0` → `virtio_gpu`),
-the INTx route is installed/injected, with **no IOMMU faults/quarantines**.
+Phase E end-to-end works: Ame boots with the SMMU enforced, Dango constructs the assignment
+(function + INTx authority, BAR allocation from the PCIe window, synthetic ECAM, stage-2 **Device**
+BAR mapping), the Linux appliance runs under Dango with the assigned `virtio-gpu-pci`, Linux **binds
+the DRM driver** (`/dev/dri/card0` → `virtio_gpu`), the INTx route is installed/injected, with **no
+IOMMU faults/quarantines**.
 
-**Remaining:** F (standalone KMS self-test + `screendump` capture), G (guest-visible Dango channel),
-H (`dango-gpud` control plane), I (shared staging framebuffer), J (framebuffer/TTY migration),
-K–M (lifecycle, dynamic arenas, zero-copy), N–S (Vulkan). **Deferred by decision: P/Q/R (physical
-backend, amdgpu, RADV)** — build the plumbing backend-agnostic, no AMD-specific code yet.
+Phase F works: the guest appliance userspace (`linux-artifacts/kms_test/kms_test.c`, raw DRM ioctls,
+no libdrm, linked into the init binary) opens `/dev/dri/card0`, allocates a dumb buffer, fills a
+four-colour bar pattern, creates an FB and programs the CRTC (legacy `SETCRTC`); the host captures the
+assigned console with a QEMU monitor `screendump` (`scripts/test/kms-display.py`) and asserts the
+pattern. Proves assignment + MMIO + IRQ + DMA + Linux DRM + `virtio_gpu` with no virtio-gpu register
+logic in Ame.
+
+**Remaining:** G (guest-visible Dango channel), H (`dango-gpud` control plane), I (shared staging
+framebuffer), J (framebuffer/TTY migration), K–M (lifecycle, dynamic arenas, zero-copy), N–S (Vulkan).
+**Deferred by decision: P/Q/R (physical backend, amdgpu, RADV)** — build the plumbing
+backend-agnostic, no AMD-specific code yet.
 
 ## The gate (run this first, always)
 
@@ -44,10 +53,12 @@ scripts/verify.sh                  # configure/build/host-regressions/provenance
 AME_VERIFY_IOMMU=1   scripts/verify.sh    # + iommu-dma        (SMMUv3 hostile-DMA)
 AME_VERIFY_ASSIGN=1  scripts/verify.sh    # + assignment       (PCI assignment + IRQ)
 AME_VERIFY_GPU=1     scripts/verify.sh    # + gpu-appliance    (Linux virtio-gpu appliance)
+AME_VERIFY_KMS=1     scripts/verify.sh    # + kms-display      (KMS modeset + screendump)
 ```
 
-All four currently pass. The GPU row needs the guest artifacts built (below). Rows are opt-in so the
-default gate stays fast and unchanged. `scripts/verify.sh` is the single source of truth; keep it green.
+All rows currently pass. The GPU/KMS rows need the guest artifacts built (below). Rows are opt-in so
+the default gate stays fast and unchanged. `scripts/verify.sh` is the single source of truth; keep it
+green.
 
 ## Environment (macOS)
 
@@ -60,10 +71,23 @@ default gate stays fast and unchanged. `scripts/verify.sh` is the single source 
     (aarch64) into **`build/dango-linux-gpu/`** (`Image`, `dango-agent`, `initramfs.cpio`,
     `dango-linux.dtb`, `manifest.toml`). Kernel dir `build/dango-linux-gpu-kout` persists → rebuilds are
     incremental; delete it if a killed build corrupts `.cmd` files.
+- **Iterating on the guest userspace needs no container.** The agent cross-compiles natively on macOS
+  (clang + lld), so after editing `linux-artifacts/agent/` or `linux-artifacts/kms_test/` you can rebuild
+  just the agent/initramfs/DTB/manifest and repackage the MXB:
+  ```sh
+  export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
+  export DANGO_LINUX_OUT="$PWD/build/dango-linux-gpu" DANGO_LINUX_PROFILE=gpu
+  scripts/linux/build-agent.sh && scripts/linux/build-initramfs.sh
+  DANGO_DTS_TEMPLATE="$PWD/linux-artifacts/dts/dango-linux-gpu.dts.in" \
+    DANGO_DTB_NAME=dango-linux.dtb scripts/linux/build-dtb.sh
+  scripts/linux/build-manifest.sh        # sizes must match the artifacts (check-profile enforces)
+  cmake --build out/qemu-gpu --target mochi_system
+  ```
 - **Guest minimality:** `scripts/linux/check-minimal-config.py --flow gpu` enforces the deny-list;
-  `scripts/linux/check-profile.py` checks the profile. Policy: `docs/LINUX_APPLIANCE_MINIMAL.md`.
-  `=n` only wins if nothing `select`s the symbol (e.g. `CGROUPS` is selected by `SCHED_AUTOGROUP`;
-  arm64 `SMP` is `def_bool y`).
+  `scripts/linux/check-profile.py` checks the profile + manifest sizes. Policy:
+  `docs/LINUX_APPLIANCE_MINIMAL.md`. `=n` only wins if nothing `select`s the symbol (e.g. `CGROUPS` is
+  selected by `SCHED_AUTOGROUP`; arm64 `SMP` is `def_bool y`). The Phase F KMS test needs **no new
+  kernel config** (it uses the DRM/KMS path the GPU fragment already enables; `DRM_FBDEV_EMULATION=n`).
 
 ## Build / run commands
 
@@ -79,8 +103,8 @@ cmake -S . -B out/qemu-gpu -G Ninja -DCMAKE_TOOLCHAIN_FILE=scripts/build/toolcha
       -DDANGO_BUILD_LINUX_ARTIFACTS=OFF -DDANGO_LINUX_PROFILE=gpu \
       -DDANGO_LINUX_ARTIFACT_DIR="$PWD/build/dango-linux-gpu"
 cmake --build out/qemu-gpu --target anko mochi_system
-python3 scripts/test/gpu-appliance.py --build out/qemu-gpu     # E.5 proof
-# or: AME_QEMU_IOMMU=1 python3 scripts/test/boot.py --build out/qemu-gpu --mode direct --cpus 2 --timeout 200 --marker 'all services ready'
+python3 scripts/test/gpu-appliance.py --build out/qemu-gpu     # Phase E proof
+python3 scripts/test/kms-display.py  --build out/qemu-gpu     # Phase F proof (screendump)
 ```
 
 ## Key files for the GPU path
@@ -96,8 +120,10 @@ python3 scripts/test/gpu-appliance.py --build out/qemu-gpu     # E.5 proof
 | `gpu proof:` counters | `kernel/vm/vcpu.cc` |
 | Appliance sequence + budgeted runner | `userland/dango/manager/main.cc` |
 | Guest DRM probe / assertions | `linux-artifacts/agent/dango-agent.c` |
-| Guest DTS / profile / build | `linux-artifacts/dts/dango-linux-gpu.dts.in`, `linux-artifacts/config/dango_gpu_arm64.fragment`, `scripts/linux/build-gpu-linux.sh` |
-| Tests | `scripts/test/{iommu_dma,assignment,gpu-appliance}.py`, `tests/*` |
+| Guest KMS self-test (raw DRM ioctls) | `linux-artifacts/kms_test/kms_test.c` |
+| Guest DTS / profile / build | `linux-artifacts/dts/dango-linux-gpu.dts.in`, `linux-artifacts/config/dango_gpu_arm64.fragment`, `scripts/linux/build-gpu-linux.sh`, `scripts/linux/build-manifest.sh` |
+| Tests | `scripts/test/{iommu_dma,assignment,gpu-appliance,kms-display}.py`, `tests/*` |
+| Log de-interleaver (guest vs Ame console) | `scripts/test/logfmt.py` |
 
 ## Pitfalls already hit (don't rediscover these)
 
@@ -116,6 +142,15 @@ python3 scripts/test/gpu-appliance.py --build out/qemu-gpu     # E.5 proof
   sched context in `SCHED_BAND_LATENCY` (VM bands need per-VM class setup that isn't applied).
 - **Guest kernel console is quiet** (`loglevel=4`); use the agent's messages / the `gpu proof:` line
   for evidence, not the Linux console.
+- **Guest and Ame share the host console serial**, and the guest driver writes byte-by-byte, so Ame log
+  entries land *inside* guest lines and split markers (`dango: DRM card[ … ] [I] …\n0 driver=…`).
+  De-interleave before matching (`scripts/test/logfmt.py`, used by `boot.py` + both GPU tests). This was
+  the root cause of an intermittent `gpu-appliance` gate failure.
+- **Second `GETCONNECTOR` call must clear `count_props` / `count_encoders`.** The kernel copies into
+  every pointer whose matching count is non-zero; leaving the first call's counts set with NULL pointers
+  returns `-EFAULT` and the mode fetch silently yields no modes.
+- **A headless QEMU console needs `edid=on,xres=,yres=`** for `virtio-gpu` to expose modes; and pass
+  `id=` so `screendump` targets the assigned device rather than `ramfb`.
 - **macOS:** BSD `readlink`/`sed`/`cp` lack GNU options (`merge_config.sh` needs GNU tools — the build
   script shims them); `/usr/bin/make` is too old.
 
@@ -132,8 +167,10 @@ python3 scripts/test/gpu-appliance.py --build out/qemu-gpu     # E.5 proof
 
 ## Immediate next step
 
-**Phase F** (`docs/GPU_APPLIANCE_TODO.md`): add a small static appliance userspace KMS test (raw DRM
-ioctls, no libdrm) to the initramfs — open `/dev/dri/card0`, create+map a dumb buffer, fill a pattern,
-create an FB and program a CRTC — and capture the QEMU display via monitor `screendump` to a PPM so the
-pattern is asserted from the host. That proves device assignment + MMIO + IRQ + DMA + Linux DRM +
-`virtio_gpu` independently of the Midix GPU protocol, with Ame containing no virtio-gpu register logic.
+**Phase G** (`docs/GPU_APPLIANCE_TODO.md`): map a `VmChannel`'s two rings into the guest at the DTS
+reserved-memory address (`VmDmaClass::None`); deliver host→guest notification as a virtual IRQ (reuse
+the Phase D route mechanism) and guest→host via a reserved `HVC` range implemented in the EL2 exit path
+(`kernel/arch/arm64/el2.S`, `kernel/vm/vcpu.cc`) that must not collide with PSCI; add
+`linux-artifacts/guest-driver/dango_channel.c` → `/dev/dango-channel0` (mmap both rings, blocking
+read/poll, notify, version/ring-order query) with **no GPU logic**; then prove ordered bidirectional
+ping/pong — Ame-side first (Mochi ↔ host endpoint, testable without Linux), then Linux ↔ Mochi.

@@ -694,22 +694,16 @@ SysError add_or_update_msi_route(VmDeviceAssignment* a, u32 fn_index, u32 vector
     if (a->irq_count >= kMaxAssignIrqs) {
         return E_OVERFLOW;
     }
-    // A reserved line must have been provided by the assignment owner (the
-    // Dango manager names the host line a function's MSI path delivers on). The
-    // route target defaults to the first vCPU of the owner VM.
-    VmAssignIrq& route = a->irq[a->irq_count];
-    libk::memset(&route, 0, sizeof(route));
-    route.host_irq = 0;
-    route.guest_irq = vector;
-    route.trigger = 1; // MSI is edge
-    route.fn_index = fn_index;
-    route.vcpu_id = 0;
-    route.target = nullptr;
-    route.msi = true;
-    route.installed = false;
-    ++a->irq_count;
-    metric_inc(VM_DEBUG_VM_DEVICE_IRQ_ROUTES);
-    return E_OK;
+    // Only reachable when the assignment owner has NOT reserved a host MSI line
+    // for this function: the INTx bootstrap profile reserves INTx only, and both
+    // the assignment selftest and the appliance profile take the reuse branch
+    // above. Inventing a route with host_irq = 0 would accept a guest MSI
+    // programming write that could never be delivered, so refuse by name instead
+    // of counting it as a route. Host MSI/MSI-X line allocation ships with the
+    // physical/AMD appliance work (spec §8.13, phases P–Q) and must bring a
+    // delivery test with it.
+    ANKO_LOG_ERROR("kernel/vm", "msi: no host MSI line reserved for this function");
+    return E_NOTIMPL;
 }
 
 } // namespace

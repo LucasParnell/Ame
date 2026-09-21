@@ -151,6 +151,16 @@ void Server::init(const Endpoint& endpoint, const ServerConfig& config) {
     boot_generation_ = 0;
     frame_index_ = 0;
     consecutive_failures_ = 0;
+    vk_enabled_ = false;
+    vk_client_id_ = 0;
+}
+
+void Server::init_vulkan(const VulkanBackend& backend, mx_u32_t client_id) {
+    // The broker is scoped to the boot generation this server publishes, so an
+    // object id minted by an earlier appliance boot never validates here.
+    vk_.init(backend, boot_generation_);
+    vk_client_id_ = client_id;
+    vk_enabled_ = true;
 }
 
 void Server::set_buffer(uint64_t buffer_id, uint64_t boot_generation) {
@@ -162,6 +172,14 @@ bool Server::reply(uint32_t type, const void* payload, uint32_t length) {
     return endpoint_.valid() &&
            ring_try_push(endpoint_.reply_ring, endpoint_.order, type, payload, length,
                          endpoint_.reply_doorbell);
+}
+
+// Push a fully formed reply frame (the broker builds the Vulkan session replies
+// itself, so the service does not re-encode them).
+bool Server::reply_frame(const MxVkFrame& frame) {
+    return endpoint_.valid() &&
+           ring_try_push(endpoint_.reply_ring, endpoint_.order, frame.type, frame.payload,
+                         frame.length, endpoint_.reply_doorbell);
 }
 
 void Server::error(uint32_t opcode, mx_status_t status, uint64_t detail) {
@@ -179,6 +197,20 @@ bool Server::serve_once(PresentFn present, void* ctx) {
     if (!ring_wait_pop(endpoint_.request_ring, endpoint_.order, &slot,
                        endpoint_.request_doorbell)) {
         return false;
+    }
+
+    // The Vulkan session protocol is a distinct opcode range on the same ring.
+    // When the broker is bound, every request in the range is answered with the
+    // broker's reply frame; otherwise the client is told the service is absent
+    // and keeps its local path.
+    if (mx_vk_is_opcode(slot.type)) {
+        MxVkFrame vk_reply{};
+        if (vk_enabled_ && vk_.handle(vk_client_id_, slot, &vk_reply)) {
+            (void)reply_frame(vk_reply);
+        } else {
+            error(slot.type, MX_ERR_SERVICE_UNAVAILABLE, slot.length);
+        }
+        return true;
     }
 
     switch (slot.type) {

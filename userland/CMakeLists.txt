@@ -66,6 +66,16 @@ if(DEFINED ANKO_FB_WIDTH AND DEFINED ANKO_FB_HEIGHT)
         ANKO_FB_WIDTH=${ANKO_FB_WIDTH}
         ANKO_FB_HEIGHT=${ANKO_FB_HEIGHT})
 endif()
+# dango/vulkan.h — the native Vulkan session client and the `ame_remote` command
+# marshalling. It is an *object* library: the client is not linked into a service
+# yet (no service drives a remote Vulkan session in V0), but compiling it under
+# the freestanding userland flags proves it carries no Linux/host dependency and
+# no hot-path allocation. The host transport regression links these same sources.
+add_library(dango_vulkan OBJECT
+    lib/vulkan/session_client.cc
+    lib/vulkan/mochi_transport.cc)
+target_include_directories(dango_vulkan PRIVATE ${MOCHI_INCLUDES})
+
 mochi_service(tty.fb0         drivers/tty/main.cc         0x10800000)
 mochi_service(drv.pci         drivers/pci/main.cc         0x10900000)
 mochi_service(drv.usb.xhci    drivers/usb/xhci/main.cc   0x10A00000)

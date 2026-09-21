@@ -1445,9 +1445,17 @@ extern "C" [[noreturn]] void _start() {
         gpu_config.staging_size = dango::kStagingSize;
         gpu_server.init(gpu_endpoint, gpu_config);
         gpu_server.set_buffer(gpu_ids.buffer_id, gpu_ids.boot_generation);
+        // Phase N: broker remote Vulkan sessions on the same endpoint (spec
+        // §14.7). The guest dango-vkd backend is not wired into the boot yet, so
+        // a default backend is bound: sessions open and quota accounting runs,
+        // but a submit is refused with MX_ERR_SERVICE_UNAVAILABLE so the native
+        // client keeps its local path instead of stalling. Swapping in the real
+        // backend is the only change Phase N.5 needs.
+        gpu_server.init_vulkan(drv::gpu::linux::VulkanBackend{}, 0);
         GpuPresentContext present_ctx{channel, channel_tx, channel_rx, h2g_db, g2h_db,
                                       gpu_staging, fb_window, gpu_ids};
         console_log("gpu service: serving\n");
+        console_log("gpu service: vulkan sessions brokered\n");
         for (;;) {
             if (!gpu_server.serve_once(gpu_service_present, &present_ctx)) break;
         }

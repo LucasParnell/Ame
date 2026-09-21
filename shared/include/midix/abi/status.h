@@ -3,7 +3,11 @@
 
 #include "midix/abi/types.h"
 
+#if defined(__cplusplus)
 enum : mx_status_t {
+#else
+enum {
+#endif
     MX_OK                    = 0,
     MX_ERR_INVALID           = -1,
     MX_ERR_PERM              = -2,
@@ -24,6 +28,7 @@ enum : mx_status_t {
     MX_ERR_POLICY            = -17,
 };
 
+#if defined(__cplusplus)
 static inline bool mx_ok(mx_status_t status) {
     return status >= 0;
 }
@@ -31,3 +36,7 @@ static inline bool mx_ok(mx_status_t status) {
 static inline bool mx_err(mx_status_t status) {
     return status < 0;
 }
+#else
+#define mx_ok(status) ((status) >= 0)
+#define mx_err(status) ((status) < 0)
+#endif

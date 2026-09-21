@@ -20,7 +20,8 @@ bool bound();
 
 // Render the panic screen. `payload` is the QR report text (already rendered by
 // panic_report::format_qr); its leading lines are also drawn under the QR as
-// plain text. Null/empty payloads render the screen without a QR code.
-void show(const char* title, const char* reason, const char* payload);
+// plain text. Null/empty payloads render the screen without a QR code. Returns
+// true when a QR code was drawn (the payload may be too large for any version).
+bool show(const char* title, const char* reason, const char* payload);
 
 } // namespace anko::panic_screen

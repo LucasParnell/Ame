@@ -125,7 +125,10 @@ static void capture_current_registers() {
     bool qr_truncated = false;
     (void)anko::panic_report::format_qr(g_report, g_qr_payload,
                                         sizeof(g_qr_payload), &qr_truncated);
-    anko::panic_screen::show(g_report.title, g_report.reason, g_qr_payload);
+    if (!anko::panic_screen::show(g_report.title, g_report.reason, g_qr_payload)) {
+        anko::log::write(anko::log::Level::Fatal, "panic",
+                         "(panic screen: report too large for a QR code)");
+    }
 
     anko::log::write(anko::log::Level::Fatal, "panic",
                      "--- system halted: reset (Ctrl-Alt-Del / system_reset) to reboot ---");

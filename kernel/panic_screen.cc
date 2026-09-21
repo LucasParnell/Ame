@@ -191,8 +191,8 @@ void bind(volatile u32* pixels, u32 width, u32 height) {
 
 bool bound() { return g_pixels != nullptr; }
 
-void show(const char* title, const char* reason, const char* payload) {
-    if (!g_pixels) return;
+bool show(const char* title, const char* reason, const char* payload) {
+    if (!g_pixels) return false;
 
     const char* head = (title && title[0]) ? title : "KERNEL PANIC";
     const char* why = (reason && reason[0]) ? reason : "unknown";
@@ -200,16 +200,25 @@ void show(const char* title, const char* reason, const char* payload) {
     fill_background();
 
     // --- QR block, top-left ------------------------------------------------
+    // Try ECC M first, then L: a denser payload must not silently lose the code.
     u32 qr_width = 0;
     u32 qr_height = 0;
+    bool have_qr = false;
     const u32 box = smaller(g_w / 2u, (g_h * 3u) / 5u);
-    if (payload && payload[0] && anko::qr::encode(reinterpret_cast<const u8*>(payload),
-                                                  slen(payload), anko::qr::Level::M, g_code)) {
+    if (payload && payload[0]) {
+        const u8* bytes = reinterpret_cast<const u8*>(payload);
+        const u32 len = slen(payload);
+        have_qr = anko::qr::encode(bytes, len, anko::qr::Level::M, g_code) ||
+                  anko::qr::encode(bytes, len, anko::qr::Level::L, g_code);
+    }
+    if (have_qr) {
         const u32 modules = g_code.size + 2u * kQuietModules;
         const u32 module = box / modules;
         if (module >= 1) {
             qr_width = draw_qr(g_code, kMargin, kMargin, module);
             qr_height = qr_width;
+        } else {
+            have_qr = false;
         }
     }
 
@@ -236,6 +245,7 @@ void show(const char* title, const char* reason, const char* payload) {
 #if defined(__aarch64__)
     asm volatile("dsb sy" ::: "memory");
 #endif
+    return have_qr;
 }
 
 } // namespace anko::panic_screen

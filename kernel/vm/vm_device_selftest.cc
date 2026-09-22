@@ -330,6 +330,40 @@ void vm_device_selftest_if_testdev() {
                        mt == Stage2MemType::Device ? 1u : 0u);
     }
 
+    // (vi) Stage-2 block mappings: a 2 MiB block is one descriptor and one
+    // record; a page map inside it splits it without disturbing neighbours; and
+    // unmapping that page leaves the rest of the block mapped.
+    constexpr u64 block_ipa = 0x60000000;
+    const PhysAddr block_pa = mm::alloc_pages_contiguous_aligned(kStage2BlockPages, kStage2BlockPages);
+    check(block_pa != 0, "(vi) contiguous 2 MiB backing");
+    if (block_pa) {
+        check((block_pa & (kStage2BlockSize - 1)) == 0, "(vi) backing is 2 MiB aligned");
+        check(stage2_map_block(&owner->stage2, block_ipa, block_pa, RIGHT_READ | RIGHT_WRITE,
+                               Stage2MemType::NormalWB) == E_OK, "(vi) block map");
+        check(stage2_lookup_page(&owner->stage2, block_ipa + 0x3000, nullptr, nullptr) ==
+                  block_pa + 0x3000, "(vi) lookup resolves inside a block");
+        check(stage2_validate_no_overlap(&owner->stage2, block_ipa + 0x100000, PAGE_SIZE) == E_BUSY,
+              "(vi) overlap detection covers the whole block");
+        // A split already maps every page of the unit, so a page map over one of
+        // them is refused (the documented "cannot be replaced") -- and must not
+        // disturb the block.
+        check(stage2_map_page(&owner->stage2, block_ipa + 0x4000, block_pa + PAGE_SIZE,
+                              RIGHT_READ) == E_BUSY, "(vi) a block-mapped page cannot be replaced");
+        // Unmapping a page inside the block splits it: only that page goes away
+        // and the rest of the 2 MiB unit keeps its mapping.
+        check(stage2_unmap_page(&owner->stage2, block_ipa + 0x4000) == E_OK,
+              "(vi) unmap splits the block");
+        check(stage2_lookup_page(&owner->stage2, block_ipa + 0x4000, nullptr, nullptr) == 0,
+              "(vi) the unmapped page is gone");
+        check(stage2_lookup_page(&owner->stage2, block_ipa + 0x3000, nullptr, nullptr) ==
+                  block_pa + 0x3000, "(vi) block neighbour intact after split");
+        check(stage2_lookup_page(&owner->stage2, block_ipa + 0x5000, nullptr, nullptr) ==
+                  block_pa + 0x5000, "(vi) block survives the page unmap");
+        ANKO_LOGF_INFO("vm/selftest", "(vi) block map+split+unmap ok ipa=0x%llx pa=0x%llx",
+                       static_cast<unsigned long long>(block_ipa),
+                       static_cast<unsigned long long>(block_pa));
+    }
+
     // E.1: real guest loads/stores must fault into the production ECAM path.
     // No Linux or device driver is involved in this narrow transport proof.
     constexpr u64 ecam = 0x3f000000;

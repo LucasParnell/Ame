@@ -97,6 +97,11 @@ PhysAddr alloc_page();
 PhysAddr alloc_page_for(u32 owner_pid);
 PhysAddr alloc_pages_contiguous_for(u32 owner_pid, usize count);
 PhysAddr alloc_pages_contiguous(usize count); // returns 0 on failure
+// Same, but the run must start at an `align_pages`-page boundary (a power of two),
+// for callers that need the physical base aligned to the run size -- a 2 MiB
+// stage-2 block needs 2 MiB-aligned backing, which alloc_pages_contiguous()
+// does not promise.
+PhysAddr alloc_pages_contiguous_aligned(usize count, usize align_pages);
 void free_page(PhysAddr pa);
 void free_page_for(u32 owner_pid, PhysAddr pa);
 void free_page_for_identity(u64 identity, PhysAddr pa);

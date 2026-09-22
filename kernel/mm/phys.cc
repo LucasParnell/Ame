@@ -178,6 +178,27 @@ PhysAddr alloc_pages_contiguous(usize count) {
     return 0;
 }
 
+PhysAddr alloc_pages_contiguous_aligned(usize count, usize align_pages) {
+    kernel::LockGuard guard(g_phys_lock);
+    if (count == 0 || !g_phys.bitmap || g_phys.page_count == 0) return 0;
+    if (align_pages == 0 || (align_pages & (align_pages - 1)) != 0) return 0;  // power of two
+    const usize step = align_pages > 1 ? align_pages : 1;
+    // Walk the alignment grid; each scan stops at the first used page in the run,
+    // so the work is bounded by the grid size. Allocation is not a hot path.
+    for (usize start = 0; start + count <= g_phys.page_count; start += step) {
+        usize run = 0;
+        while (run < count && start + run < g_phys.page_count && bit_is_free(start + run)) {
+            ++run;
+        }
+        if (run == count) {
+            for (usize i = 0; i < count; ++i) bit_set_used(start + i);
+            if (g_phys.next_hint < start + count) g_phys.next_hint = start + count;
+            return g_phys.ram_base + static_cast<PhysAddr>(start * PAGE_SIZE);
+        }
+    }
+    return 0;
+}
+
 void free_page(PhysAddr pa) {
     kernel::LockGuard guard(g_phys_lock);
     ANKO_ASSERT((pa & (PAGE_SIZE - 1)) == 0);

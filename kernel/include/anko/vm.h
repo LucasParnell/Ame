@@ -26,6 +26,15 @@ constexpr u32 kMaxSharedArenas = 16;
 // headroom for the device/BAR mappings the assignment layer adds (Phase E).  A
 // 128 MiB guest is 32768 pages on its own.
 constexpr u32 kMaxStage2Mappings = 40960;
+
+// Stage-2 block mappings. A level-2 block descriptor covers 2 MiB with a single
+// table entry and a single mapping record, which is how guest RAM is meant to be
+// mapped; the backing range must be 2 MiB aligned guest-physical, so the caller
+// uses mm::alloc_pages_contiguous().
+constexpr u32 kStage2PageShift = 12;
+constexpr u32 kStage2BlockShift = 21;
+constexpr u64 kStage2BlockSize = 1ull << kStage2BlockShift;
+constexpr u32 kStage2BlockPages = 1u << (kStage2BlockShift - kStage2PageShift);
 constexpr u32 kVgicMaxIrqs = 64;
 constexpr u32 kVgicBitmapWords = kVgicMaxIrqs / 32;
 
@@ -182,7 +191,12 @@ struct Stage2Mapping {
     u32 rights;
     bool valid;
     Stage2MemType mem_type;
-    u8 pad[3];
+    // log2 of the mapped unit: kStage2PageShift for a 4 KiB page,
+    // kStage2BlockShift for a 2 MiB block. One block record describes
+    // kStage2BlockPages pages, so a compact table can still cover a large
+    // address space.
+    u8 pages_log2;
+    u8 pad[2];
 };
 
 struct Stage2AddressSpace {
@@ -625,6 +639,8 @@ void poll_vcpu_timer(Vcpu& vcpu);
 
 SysError stage2_create(Stage2AddressSpace* s2);
 SysError stage2_map_page(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights);
+SysError stage2_map_block(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights,
+                          Stage2MemType mem_type);
 SysError stage2_map_page_ex(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights,
                             Stage2MemType mem_type);
 SysError stage2_unmap_page(Stage2AddressSpace* s2, u64 ipa);

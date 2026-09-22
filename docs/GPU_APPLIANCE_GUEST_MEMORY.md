@@ -110,3 +110,30 @@ fixed table can still cover 4 GiB.
   legitimately produce (BAR 16 MiB = 4096 pages is the largest today).
 - The `static_assert` at `vm.h:765` becomes: RAM is mapped as blocks, so
   `kDangoRamPages / kStage2BlockPages + device_records <= kMaxStage2Mappings`.
+
+## Debugging log: RAM-on-blocks attempt (2026-09-22)
+
+Wiring `VmMemory` onto blocks was attempted and reverted; the tree is green without it. What was learned,
+so the next attempt is one cycle instead of three:
+
+1. **The failure was not the mapping — it was the host's assertion.** The manager checks, after mapping
+   guest RAM (`userland/dango/manager/main.cc` ~1126):
+   `vm_info.stage2_mapped_pages == active_ram_size / kPageSize`.
+   With blocks, `mapped_pages` counted *records* (64 for 128 MiB), so the map itself succeeded and the
+   check failed with the manager's `stage2 invalid`. `map_memory` returning `E_INVALID` had the same
+   masking problem, which is why `dc8c6c6` added the diagnostics.
+2. **The correct model is two counters.** `mapped_pages` must stay *pages covered* (sum of each record's
+   unit) because that is what "is all of RAM mapped" means; a new `mapped_records` is the fixed-table
+   budget (`kMaxStage2Mappings`). Callers that budget against the table (`vm_channel.cc` headroom,
+   `vm_memory.cc`'s pre-check) must use `mapped_records`; callers asking about coverage use `mapped_pages`.
+3. **Trap found while doing it:** `record_mapping`'s fast-append path indexes
+   `mappings[s2->mapped_pages]` as a *slot cursor*. That was only ever valid because the two counts were
+   identical; after a split they diverge (one block record becomes 512 page records) and the fast path
+   writes a record into an unrelated slot. It must index `mapped_records`.
+4. **Still unexplained:** with the two counters and that index fixed, the appliance stopped booting
+   entirely (every acceptance check false, no `vm_memory map failed` line). That is the next thing to
+   isolate — start by logging from `stage2_create`/`map_memory` and boot with `AME_VERIFY_GPU=1`, since
+   the diagnostics now exist. Everything else (the block primitive, split, lookup, overlap) is verified.
+
+**Landed and green:** stage-2 block mappings + `mm::alloc_pages_contiguous_aligned` + the assignment
+selftest case (`1a5aa42`), and the map-failure diagnostics (`dc8c6c6`).

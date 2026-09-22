@@ -256,6 +256,18 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
         if (rc != E_OK) break;
     }
     if (rc != E_OK) {
+        // The caller only sees E_INVALID/E_OVERFLOW, so name the failing page and
+        // the stage-2 state here: a guest RAM map that fails is otherwise a
+        // silent "invalid" all the way up at the manager.
+        ANKO_LOGF_ERROR("kernel/vm",
+                        "vm_memory map failed rc=%d guest_pa=0x%llx size=%llu page=%llu/%llu "
+                        "mapped_pages=%llu ipa_bits=%llu",
+                        static_cast<int>(rc), static_cast<unsigned long long>(guest_pa),
+                        static_cast<unsigned long long>(size),
+                        static_cast<unsigned long long>(mapped),
+                        static_cast<unsigned long long>(pages),
+                        static_cast<unsigned long long>(v->stage2.mapped_pages),
+                        static_cast<unsigned long long>(v->stage2.ipa_bits));
         for (usize i = 0; i < mapped; ++i) {
             (void)stage2_unmap_page(&v->stage2, guest_pa + static_cast<u64>(i * PAGE_SIZE));
         }

@@ -915,15 +915,30 @@ SysError device_map_bar_internal(VmDeviceAssignment* a, u32 bar_index, u32 bar_o
     if (bar_offset == 0 && size == bar.size &&
         !pci::config_set_bar(config, 0, bar_index, guest_ipa, bar)) return E_INVALID;
     const u64 pages = size / PAGE_SIZE;
-    for (u64 i = 0; i < pages; ++i) {
-        const SysError rc =
-            map_one_bar_page(a, guest_ipa + i * PAGE_SIZE, host_base + i * PAGE_SIZE, rights);
+    u64 i = 0;
+    while (i < pages) {
+        const u64 ipa = guest_ipa + i * PAGE_SIZE;
+        const PhysAddr pa = host_base + i * PAGE_SIZE;
+        // The window is mapped with uniform attributes, so an aligned 2 MiB run of
+        // the BAR is one block record instead of 512. Any failure falls back to
+        // pages: a device mapping must never depend on the block form.
+        if (ipa % kStage2BlockSize == 0 && pa % kStage2BlockSize == 0 &&
+            pages - i >= kStage2BlockPages) {
+            const SysError block = stage2_map_block(&a->owner_vm->stage2, ipa, pa, rights,
+                                                    Stage2MemType::Device);
+            if (block == E_OK) {
+                i += kStage2BlockPages;
+                continue;
+            }
+        }
+        const SysError rc = map_one_bar_page(a, ipa, pa, rights);
         if (rc != E_OK) {
             for (u64 j = 0; j < i; ++j) {
                 (void)stage2_unmap_page(&a->owner_vm->stage2, guest_ipa + j * PAGE_SIZE);
             }
             return rc;
         }
+        ++i;
     }
     VmAssignMmio& m = a->mmio[a->mmio_count++];
     libk::memset(&m, 0, sizeof(m));

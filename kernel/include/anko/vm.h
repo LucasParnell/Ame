@@ -45,14 +45,14 @@ constexpr u64 kDangoRamBase = 0x4000'0000ull;
 constexpr u64 kDangoRamSize = 128ull * 1024ull * 1024ull;
 constexpr u64 kDangoRamPages = kDangoRamSize / PAGE_SIZE;
 
-// Stage-2 mapping table sizing. Guest RAM is block-mapped (kStage2BlockPages
-// pages per record), so RAM costs kDangoRamPages / kStage2BlockPages records;
-// the rest of the table is the device budget. The largest page-granular consumer
-// is the assigned MMIO window (16 MiB = 4096 records); staging (3 MiB = 768), the
-// shared-region window (1 MiB = 256), ECAM (256) and the channel window (32) are
-// far smaller. Splitting a RAM block for a device page costs up to
-// kStage2BlockPages - 1 extra records, and a handful of those is ample headroom.
-constexpr u32 kMaxStage2DeviceRecords = 8192;
+// Stage-2 mapping table sizing. Guest RAM and the assigned MMIO window are both
+// block-mapped (kStage2BlockPages pages per record), so RAM costs
+// kDangoRamPages / kStage2BlockPages records and a fully mapped BAR costs one per
+// 2 MiB. The rest of the budget is the page-granular windows -- staging
+// (3 MiB = 768), the shared-region window (1 MiB = 256), ECAM (256) and the
+// channel window (32) -- plus headroom for splitting a block when a page inside
+// it needs its own mapping (up to kStage2BlockPages - 1 records each).
+constexpr u32 kMaxStage2DeviceRecords = 2048;
 constexpr u32 kMaxStage2Mappings =
     static_cast<u32>(kDangoRamPages / kStage2BlockPages) + kMaxStage2DeviceRecords;
 // The whole reason the block form exists: page-per-record RAM cannot fit the

@@ -191,6 +191,7 @@ MENU TITLE Ame
 LABEL Ame
     MENU LABEL Ame
     LINUX /ame/boot/Image
+    INITRD /ame/boot/system.uInitrd
     FDT /ame/l4t/ame-switch.dtb
     APPEND ame.boot=1
 EOF

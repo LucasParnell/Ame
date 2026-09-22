@@ -3,7 +3,7 @@
 // platform::probe() falls back to these constants when the DTB is absent
 // or corrupt.  Values confirmed from tegra210.dtsi and switchroot U-Boot.
 //
-// DRAM: 0x80000000, kernel loads at 0x90000000 (clear of U-Boot + TrustZone).
+// DRAM: 0x80000000, kernel loads at 0x80080000 (DRAM base + 0x80000 image offset).
 // UART: UARTA (16550 core) at 0x70006000.
 // GIC:  GIC-400 (GICv2-compatible) dist=0x50041000 cpu=0x50042000.
 

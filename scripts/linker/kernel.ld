@@ -7,7 +7,7 @@
  * ANKO_LOAD_BASE is defined at link time via -Wl,--defsym,ANKO_LOAD_BASE=...
  * from CMake (board-specific; see boards/<board>/board.cmake).
  *   qemu-virt:   0x40080000  (DRAM 0x40000000 + 0x80000 image offset)
- *   switch-t210: 0x90000000  (clear of U-Boot + TrustZone)
+ *   switch-t210: 0x80080000  (DRAM 0x80000000 + 0x80000 image offset)
  *
  * Phase 1 will switch to a high-half virtual link address (TTBR1 window
  * at 0xFFFF000000000000) once the MMU is up and an identity-map trampoline

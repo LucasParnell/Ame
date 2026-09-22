@@ -327,35 +327,58 @@ static void probe_t210_dc(HwInfo& hw) {
     constexpr u32 kHekateWidth = 1280;
     constexpr u32 kHekateHeight = 720;
 
-    constexpr u32 kWinHeaderOff = 0x108u; // DC_CMD_DISPLAY_WINDOW_HEADER
-    constexpr u32 kWinASelect = 1u << 4;
-    constexpr u32 kWinSizeOff = 0x1C1Cu; // DC_WIN_SIZE
-    constexpr u32 kWinBufOff = 0x2000u;  // DC_WINBUF_START_ADDR
+    // DC register byte offsets are `word index << 2` (Tegra X1 TRM §24; matches
+    // Linux drivers/gpu/drm/tegra/dc.h): DC_CMD_DISPLAY_WINDOW_HEADER = 0x042,
+    // DC_WIN_SIZE = 0x705, DC_WINBUF_START_ADDR{,_NS} = 0x800 / 0x801.
+    constexpr u32 kWinHeaderOff = 0x108u; // 0x042 << 2
+    constexpr u32 kWinASelect = 1u << 4;  // WINDOW_A_SELECT
+    constexpr u32 kWinSizeOff = 0x1C14u;  // 0x705 << 2 (was 0x1C1C = DC_WIN_H_INITIAL_DDA)
+    constexpr u32 kWinBufOff = 0x2000u;   // 0x800 << 2
+    constexpr u32 kWinBufNsOff = 0x2004u; // 0x801 << 2
 
     volatile u32* dc = reinterpret_cast<volatile u32*>(kDC0Base);
 
-    // Select Window A so banked registers reflect the active window.
+    // Select Window A so banked registers reflect the live window.
     dc[kWinHeaderOff / 4] = kWinASelect;
     asm volatile("dsb sy" ::: "memory");
 
     const u32 win_size = dc[kWinSizeOff / 4];
     const u32 dc_width = win_size & 0x1FFFu;
     const u32 dc_height = (win_size >> 16) & 0x1FFFu;
-    const u32 fb_lo = dc[kWinBufOff / 4];
+    u32 fb_lo = dc[kWinBufOff / 4];
+    if (fb_lo == 0) {
+        fb_lo = dc[kWinBufNsOff / 4]; // non-secure window variant
+    }
 
-    // Use DC-read values if plausible; fall back to Hekate constants otherwise.
-    const PhysAddr fb_phys = (fb_lo != 0) ? PhysAddr{fb_lo} : kHekateFbBase;
-    const u32 width = (dc_width > 0 && dc_width <= 4096) ? dc_width : kHekateWidth;
-    const u32 height = (dc_height > 0 && dc_height <= 4096) ? dc_height : kHekateHeight;
+    // Only trust a framebuffer address inside DRAM and page-aligned: a
+    // clock-gated or reset DC reads zero, and a wrong address scribbles over
+    // unrelated memory. If neither register yields a plausible value, fall back
+    // to Hekate's documented Erista constant (also DRAM-resident).
+    const PhysAddr ram_end = hw.ram_base + hw.ram_size;
+    const auto in_dram = [&](u64 a) {
+        return a != 0 && (a & 0xFFFull) == 0 && a >= hw.ram_base && a < ram_end;
+    };
+    PhysAddr fb_phys{0};
+    if (in_dram(fb_lo)) {
+        fb_phys = fb_lo;
+    } else if (in_dram(kHekateFbBase)) {
+        fb_phys = kHekateFbBase;
+    }
+    if (fb_phys == 0) {
+        hw.has_t210_dc = false; // no trustworthy framebuffer: paint nothing
+        return;
+    }
+    const u32 width = (dc_width >= 16 && dc_width <= 4096) ? dc_width : kHekateWidth;
+    const u32 height = (dc_height >= 16 && dc_height <= 4096) ? dc_height : kHekateHeight;
 
     hw.has_t210_dc = true;
     hw.t210_dc_fb_phys = fb_phys;
     hw.t210_dc_fb_width = width;
     hw.t210_dc_fb_height = height;
 
-    // Paint the ENTIRE screen bright green: "platform::probe() reached".
-    // Entry.S already painted red (first sign of life), so green here means
-    // we got through EL drop, BSS clear, init_array, and into C++.
+    // Paint the ENTIRE screen bright green: "platform::probe() reached". This is
+    // now the first framebuffer paint, using the live DC0 address just read;
+    // green means we got through EL drop, BSS clear, init_array, and into C++.
     volatile u32* fb = reinterpret_cast<volatile u32*>(fb_phys);
     const u64 pixels = static_cast<u64>(width) * static_cast<u64>(height);
     for (u64 i = 0; i < pixels; ++i) {

@@ -39,25 +39,13 @@ _start:
     lsr     x20, x20, #2
 
     // -----------------------------------------------------------------------
-    // T210 sign-of-life: paint full 1280×720 framebuffer red.
-    // FB is at 0xC0000000 (Hekate Erista constant, XRGB8888).
-    // Fires before stack, BSS clear, VBAR, or any C code.
-    // Full red screen = kernel _start was reached.
-    // Uses x21/x22/x23 as scratch; overwritten again by init_array loop.
+    // (T210) No framebuffer paint here. The previous sign-of-life wrote a full
+    // 1280x720 frame at a *hardcoded* 0xC0000000 before anything was validated:
+    // that address is a guess, and if it is not the live DC0 window it scribbles
+    // ~3.7 MiB over whatever happens to be there. The real address is only known
+    // after platform::probe() reads the TegraDC0 window registers, so the first
+    // framebuffer paint is now probe()'s (green) and kernel_main's (blue).
     // -----------------------------------------------------------------------
-#ifdef ANKO_BOARD_SWITCH_T210
-    mov     x21, #0xC000
-    lsl     x21, x21, #16           // x21 = 0xC0000000
-    mov     w22, #0xFF
-    lsl     w22, w22, #16           // w22 = 0x00FF0000 (red XRGB)
-    movz    x23, #0x1000            // 1280 * 720 = 0xE1000 pixels (full screen)
-    movk    x23, #0xe, lsl #16
-.Learly_fb_loop:
-    str     w22, [x21], #4
-    subs    x23, x23, #1
-    b.ne    .Learly_fb_loop
-    dsb     sy
-#endif
 
     // Drop from EL2 to EL1h if entered at EL2.
     cmp     x20, #2

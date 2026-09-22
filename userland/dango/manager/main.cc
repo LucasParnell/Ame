@@ -1128,6 +1128,12 @@ extern "C" [[noreturn]] void _start() {
         vm_info.stage2_mapped_pages != (active_ram_size / dango::kPageSize)) {
         fail("stage2 invalid\n");
     }
+    // The whole point of the block mappings: RAM must be described by far fewer
+    // records than pages. If this ever regresses to one record per page, the
+    // guest silently loses the block path (and the fixed-table ceiling returns).
+    if (vm_info.stage2_mapped_records > (active_ram_size / dango::kPageSize) / 2) {
+        fail("stage2 not block-mapped\n");
+    }
     dango_debug("stage2 ready\n");
 
     if (have_linux) {

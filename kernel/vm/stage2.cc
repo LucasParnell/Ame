@@ -133,8 +133,8 @@ SysError record_mapping(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights
     // range once, so mapped_pages is also the next free record slot. This keeps
     // VM RAM setup O(n) instead of O(n^2). One record is one mapped unit, whether
     // that unit is a 4 KiB page or a 2 MiB block.
-    if (s2->mapped_pages < kMaxStage2Mappings) {
-        Stage2Mapping& mapping = s2->mappings[s2->mapped_pages];
+    if (s2->mapped_records < kMaxStage2Mappings) {
+        Stage2Mapping& mapping = s2->mappings[s2->mapped_records];
         if (!mapping.valid) {
             mapping.ipa = ipa;
             mapping.pa = pa;
@@ -142,7 +142,8 @@ SysError record_mapping(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights
             mapping.mem_type = mem_type;
             mapping.pages_log2 = pages_log2;
             mapping.valid = true;
-            ++s2->mapped_pages;
+            ++s2->mapped_records;
+            s2->mapped_pages += (1ull << (pages_log2 - kStage2PageShift));
             metric_inc(VM_DEBUG_STAGE2_PAGES_MAPPED);
             return E_OK;
         }
@@ -159,7 +160,8 @@ SysError record_mapping(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights
         mapping.mem_type = mem_type;
         mapping.pages_log2 = pages_log2;
         mapping.valid = true;
-        ++s2->mapped_pages;
+        ++s2->mapped_records;
+        s2->mapped_pages += (1ull << (pages_log2 - kStage2PageShift));
         metric_inc(VM_DEBUG_STAGE2_PAGES_MAPPED);
         return E_OK;
     }
@@ -213,6 +215,7 @@ SysError split_block(Stage2AddressSpace* s2, u64 block_base) {
                     m.pages_log2 == kStage2PageShift && m.ipa != saved.ipa) {
                     m.valid = false;
                     --written;
+                    if (s2->mapped_records > 0) --s2->mapped_records;
                     if (s2->mapped_pages > 0) --s2->mapped_pages;
                 }
             }
@@ -226,13 +229,15 @@ SysError split_block(Stage2AddressSpace* s2, u64 block_base) {
         m.mem_type = saved.mem_type;
         m.pages_log2 = kStage2PageShift;
         m.valid = true;
+        ++s2->mapped_records;
         ++s2->mapped_pages;
         ++written;
         ++slot_index;
     }
 
     block->valid = false;  // the block record is superseded by its 512 pages
-    if (s2->mapped_pages > 0) --s2->mapped_pages;
+    if (s2->mapped_records > 0) --s2->mapped_records;
+    if (s2->mapped_pages >= kStage2BlockPages) s2->mapped_pages -= kStage2BlockPages;
     slot = l3 | S2_DESC_VALID | S2_DESC_TABLE;
     return E_OK;
 }
@@ -252,6 +257,7 @@ SysError stage2_create(Stage2AddressSpace* s2) {
     s2->ipa_bits = kVmIpaBits;
     s2->page_size = PAGE_SIZE;
     s2->mapped_pages = 0;
+    s2->mapped_records = 0;
     s2->built = true;
     s2->active = false;
     metric_inc(VM_DEBUG_STAGE2_TABLES_CREATED);
@@ -308,7 +314,7 @@ SysError stage2_map_block(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 righ
     for (const auto& trap : s2->traps) {
         if (trap.size && range_overlaps(ipa, kStage2BlockSize, trap.base, trap.size)) return E_BUSY;
     }
-    if (s2->mapped_pages >= kMaxStage2Mappings) return E_OVERFLOW;
+    if (s2->mapped_records >= kMaxStage2Mappings) return E_OVERFLOW;
 
     const u64 l1_desc = table_ptr(s2->root_table_phys)[level_index(ipa, 1)];
     PhysAddr l2_pa = 0;
@@ -344,7 +350,7 @@ SysError stage2_map_page_ex(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 ri
     if (ipa >= (1ull << s2->ipa_bits) || (pa & ~S2_DESC_ADDR_MASK) || !rights) return E_INVALID;
     for (const auto& trap : s2->traps)
         if (trap.size && range_overlaps(ipa, PAGE_SIZE, trap.base, trap.size)) return E_BUSY;
-    if (s2->mapped_pages >= kMaxStage2Mappings) return E_OVERFLOW;
+    if (s2->mapped_records >= kMaxStage2Mappings) return E_OVERFLOW;
     PhysAddr table_pa = s2->root_table_phys;
     for (u32 level = 1; level < 3; ++level) {
         auto& link = table_ptr(table_pa)[level_index(ipa, level)];
@@ -402,6 +408,7 @@ static SysError unmap_page(Stage2AddressSpace* s2, u64 ipa, bool revoke_device) 
         Stage2Mapping& mapping = s2->mappings[i];
         if (!mapping.valid || mapping.ipa != ipa) continue;
         mapping.valid = false;
+        if (s2->mapped_records > 0) --s2->mapped_records;
         if (s2->mapped_pages > 0) --s2->mapped_pages;
         prune_tables(s2, ipa);
         return E_OK;

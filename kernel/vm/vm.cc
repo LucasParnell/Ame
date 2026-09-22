@@ -487,6 +487,7 @@ SysError inspect_vm(Process& caller, CapHandle vm_cap, VmInfo* out) {
     info.mapped_regions = v->mapped_regions;
     info.flags = v->flags;
     info.stage2_mapped_pages = v->stage2.mapped_pages;
+    info.stage2_mapped_records = v->stage2.mapped_records;
     info.stage2_built = v->stage2.built ? 1 : 0;
     info.stage2_active = v->stage2.active ? 1 : 0;
     *out = info;

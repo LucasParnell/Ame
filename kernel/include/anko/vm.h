@@ -207,7 +207,13 @@ struct Stage2AddressSpace {
     u32 reserved0;
     u64 ipa_bits;
     u64 page_size;
+    // Pages covered by the mappings above (sum of each record's unit in pages):
+    // that is what "is all of this region mapped" means, and what the manager
+    // checks after mapping guest RAM. Distinct from mapped_records, the
+    // fixed-table budget -- one 2 MiB block record covers kStage2BlockPages.
     u64 mapped_pages;
+    // Mapping records in use, bounded by kMaxStage2Mappings.
+    u64 mapped_records;
     bool built;
     bool active;
     u8 pad[6];
@@ -556,6 +562,10 @@ struct VmInfo {
     u64 mapped_regions;
     u64 flags;
     u64 stage2_mapped_pages;
+    // Mapping records backing those pages: with 2 MiB blocks a fully mapped RAM
+    // region reports far fewer records than pages, which is how a caller can tell
+    // the block path is actually in use rather than silently falling back.
+    u64 stage2_mapped_records;
     u64 stage2_built;
     u64 stage2_active;
 };

@@ -43,22 +43,37 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
     }
     libk::memset(backing, 0, bytes);
 
-    for (usize i = 0; i < pages; ++i) {
+    // Back RAM with 2 MiB-aligned contiguous chunks when the allocator can supply
+    // them, so stage 2 describes each with one block record instead of 512 page
+    // records. Chunks are taken one at a time -- demanding the whole region be
+    // contiguous would be fragile -- and single pages remain the fallback.
+    usize i = 0;
+    while (i < pages) {
+        if (pages - i >= kStage2BlockPages) {
+            const PhysAddr chunk = mm::alloc_pages_contiguous_aligned(kStage2BlockPages,
+                                                                     kStage2BlockPages);
+            if (chunk) {
+                for (usize k = 0; k < kStage2BlockPages; ++k) {
+                    const PhysAddr pa = chunk + static_cast<PhysAddr>(k) * PAGE_SIZE;
+                    backing[i + k] = pa;
+                    libk::memset(reinterpret_cast<void*>(pa), 0, PAGE_SIZE);
+                }
+                i += kStage2BlockPages;
+                continue;
+            }
+        }
         PhysAddr pa = mm::alloc_page();
         if (!pa) {
             ANKO_LOGF_ERROR("kernel/vm", "vm_memory alloc_page failed at %llu/%llu",
                             static_cast<unsigned long long>(i),
                             static_cast<unsigned long long>(pages));
-            for (usize j = 0; j < i; ++j) mm::free_page(backing[j]);
+            for (usize j = 0; j < i; ++j) if (backing[j]) mm::free_page(backing[j]);
             mm::slab_free(backing, bytes, alignof(PhysAddr));
             return false;
         }
         backing[i] = pa;
-
-        // Keep the first Linux bring-up deterministic. This costs time for
-        // 128 MiB RAM, but with QEMU_MEM=512M it should complete and gives a
-        // clean zeroed guest RAM image.
         libk::memset(reinterpret_cast<void*>(pa), 0, PAGE_SIZE);
+        ++i;
     }
 
     *out_pages = backing;
@@ -237,7 +252,7 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
         note_error();
         return E_INVALID;
     }
-    if (v->stage2.mapped_pages + pages > kMaxStage2Mappings) {
+    if (v->stage2.mapped_records + pages > kMaxStage2Mappings) {
         note_error();
         return E_OVERFLOW;
     }
@@ -248,12 +263,29 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
     }
 
     usize mapped = 0;
-    for (; mapped < pages; ++mapped) {
-        rc = stage2_map_page(&v->stage2,
-                             guest_pa + static_cast<u64>(mapped * PAGE_SIZE),
-                             mem->pages[mapped],
-                             rights);
+    while (mapped < pages) {
+        const u64 ipa = guest_pa + static_cast<u64>(mapped) * PAGE_SIZE;
+        // A 2 MiB-aligned run of consecutive backing pages becomes one block
+        // descriptor. Any block failure falls back to page mappings: the block
+        // form is an optimisation and must never be why a map fails.
+        if (ipa % kStage2BlockSize == 0 && pages - mapped >= kStage2BlockPages) {
+            const PhysAddr base = mem->pages[mapped];
+            bool contiguous = (base % kStage2BlockSize) == 0;
+            for (usize k = 1; contiguous && k < kStage2BlockPages; ++k) {
+                contiguous = mem->pages[mapped + k] == base + static_cast<PhysAddr>(k) * PAGE_SIZE;
+            }
+            if (contiguous) {
+                rc = stage2_map_block(&v->stage2, ipa, base, rights, Stage2MemType::NormalWB);
+                if (rc == E_OK) {
+                    mapped += kStage2BlockPages;
+                    continue;
+                }
+                rc = E_OK;
+            }
+        }
+        rc = stage2_map_page(&v->stage2, ipa, mem->pages[mapped], rights);
         if (rc != E_OK) break;
+        ++mapped;
     }
     if (rc != E_OK) {
         // The caller only sees E_INVALID/E_OVERFLOW, so name the failing page and

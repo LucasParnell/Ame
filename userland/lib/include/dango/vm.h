@@ -146,6 +146,9 @@ struct VmInfo {
     uint64_t mapped_regions;
     uint64_t flags;
     uint64_t stage2_mapped_pages;
+    // Mapping records backing those pages: far fewer than pages once RAM is
+    // block-mapped, so a caller can prove the block path is in use.
+    uint64_t stage2_mapped_records;
     uint64_t stage2_built;
     uint64_t stage2_active;
 };

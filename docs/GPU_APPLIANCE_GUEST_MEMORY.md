@@ -85,3 +85,28 @@ record instead of 512.
     with neighbours and attributes intact; unmap back to a block reclaims; overlap detection across a
     block boundary; teardown with a mix of blocks and pages; and a capacity test that the old 160 MiB
     ceiling is gone.
+
+## The footprint problem, quantified (why blocks are also the *smallest* option)
+
+`Stage2AddressSpace` is embedded in `Vm` (`kernel/include/anko/vm.h:522`) and `kMaxVms = 4`, so the soft
+table is **static BSS per VM**, allocated whether or not the VM is ever used:
+
+| | records | bytes/record | per VM | all 4 VMs |
+|---|---|---|---|---|
+| today (`mappings[40960]`, 4 KiB leaf) | 40960 | 32 | **1.25 MiB** | **5 MiB** |
+| with 2 MiB blocks, table capped at 2048 | 2048 | 32 | **64 KiB** | **256 KiB** |
+
+and the same array is what caps the guest at 160 MiB. So the block change is not just "make 512 MiB
+fit" — it is the *right* fix for the footprint too: one descriptor and one record per 2 MiB means a small
+fixed table can still cover 4 GiB.
+
+**Retune that follows** (do it with the block change, not after):
+
+- Keep `kMaxStage2Mappings` as the *record* budget, but justify its value from the block-based worst case
+  (4 GiB of address space / 2 MiB = 2048 records, plus headroom for device pages), and shrink it from
+  40960 accordingly. `mapped_pages` already counts records, so the call sites that budget against it
+  (`vm_channel.cc` headroom, `vm.h` assert) need only their *expected* numbers updated, not their shape.
+- Device windows keep 4 KiB pages, so leave headroom in the record budget for the worst case a caller can
+  legitimately produce (BAR 16 MiB = 4096 pages is the largest today).
+- The `static_assert` at `vm.h:765` becomes: RAM is mapped as blocks, so
+  `kDangoRamPages / kStage2BlockPages + device_records <= kMaxStage2Mappings`.

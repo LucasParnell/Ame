@@ -39,10 +39,10 @@ constexpr u32 kVgicBitmapWords = kVgicMaxIrqs / 32;
 constexpr u64 kDefaultGuestMidr = 0x410FD034ull; // ARM Cortex-A53 MIDR.
 
 
-constexpr u64 kGuestPhysMin = 0x4000'0000ull;
-constexpr u64 kGuestPhysMax = 0x4800'0000ull;
-constexpr u64 kDangoRamBase = 0x4000'0000ull;
-constexpr u64 kDangoRamSize = 128ull * 1024ull * 1024ull;
+constexpr u64 kGuestPhysMin = DANGO_RAM_BASE;
+constexpr u64 kGuestPhysMax = DANGO_RAM_BASE + DANGO_RAM_SIZE;
+constexpr u64 kDangoRamBase = DANGO_RAM_BASE;
+constexpr u64 kDangoRamSize = DANGO_RAM_SIZE;
 constexpr u64 kDangoRamPages = kDangoRamSize / PAGE_SIZE;
 
 // Stage-2 mapping table sizing. Guest RAM and the assigned MMIO window are both
@@ -236,6 +236,13 @@ struct Stage2AddressSpace {
     TrapRange traps[8];
     Stage2Mapping mappings[kMaxStage2Mappings];
 };
+
+// Capacity is measured in records, never covered pages. Check before subtracting
+// so a corrupt/overfull counter cannot wrap into apparent free space.
+inline bool stage2_has_capacity(const Stage2AddressSpace* s2, u64 records) {
+    return s2 && s2->mapped_records <= kMaxStage2Mappings &&
+           records <= kMaxStage2Mappings - s2->mapped_records;
+}
 
 struct VmMemory {
     object::Record* lifetime;
@@ -666,6 +673,10 @@ SysError stage2_map_block(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 righ
 SysError stage2_map_page_ex(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights,
                             Stage2MemType mem_type);
 SysError stage2_unmap_page(Stage2AddressSpace* s2, u64 ipa);
+// Allocation-free teardown of whole mapping units. Holes are allowed; a range
+// cutting a block is rejected before mutation (use unmap_page for a partial split).
+SysError stage2_unmap_range(Stage2AddressSpace* s2, u64 ipa, u64 size);
+SysError stage2_revoke_device_range(Stage2AddressSpace* s2, u64 ipa, u64 size);
 // CallGuard required: revoke a Device leaf even after the VM has first run.
 SysError stage2_revoke_device_page(Stage2AddressSpace* s2, u64 ipa);
 SysError stage2_reserve_trap(Stage2AddressSpace* s2, u64 ipa, u64 size);

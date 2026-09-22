@@ -15,6 +15,9 @@
 #
 # Environment:
 #   DANGO_CHANNEL_GUEST_HEADER  override the header path (tests).
+#   DANGO_LINUX_GUEST / DANGO_GUEST_LAYOUT
+#                               guest layout (minimal | lavapipe) selecting the
+#                               RAM bounds and the fixed window bases.
 #
 # Exits non-zero when a required macro is missing, empty, or not an integer
 # literal, and when the derived SPI number is inconsistent with the header.
@@ -23,6 +26,8 @@ set -euo pipefail
 
 AME="$(cd "$(dirname "$0")/../.." && pwd)"
 HEADER="${DANGO_CHANNEL_GUEST_HEADER:-${AME}/shared/include/midix/abi/dango_channel_guest.h}"
+LAYOUT_HEADER="${AME}/shared/include/midix/abi/dango_guest_layout.h"
+LAYOUT="${DANGO_LINUX_GUEST:-${DANGO_GUEST_LAYOUT:-minimal}}"
 
 if [[ ! -f "${HEADER}" ]]; then
     echo "error: guest binding header not found: ${HEADER}" >&2
@@ -49,6 +54,12 @@ macro_dec() {
     printf '%d' "$(( value ))"
 }
 
+# layout_dec NAME -> the active value from dango_guest_layout.h (branch-aware).
+layout_dec() {
+    python3 "${AME}/scripts/linux/layout_macro.py" "${LAYOUT_HEADER}" "${LAYOUT}" "$1" \
+        | sed -n "s/^$1=//p"
+}
+
 # emit PLACEHOLDER FORMAT VALUE — one sed command per placeholder. The formats
 # reproduce the literal spellings the templates carried before they were
 # parameterised, so the generated DTS stays byte-identical while the values are
@@ -60,21 +71,23 @@ emit() {
     printf 's/@%s@/%s/g\n' "${placeholder}" "${rendered}"
 }
 
-ch_base="$(macro_dec DANGO_CH_GUEST_BASE)"
-ch_size="$(macro_dec DANGO_CH_GUEST_SIZE)"
+ram_base="$(layout_dec DANGO_RAM_BASE)"
+ram_size="$(layout_dec DANGO_RAM_SIZE)"
+ch_base="$(layout_dec DANGO_CH_GUEST_BASE)"
+ch_size="$(layout_dec DANGO_CH_GUEST_SIZE)"
 ch_irq="$(macro_dec DANGO_CH_GUEST_IRQ)"
 spi_base="$(macro_dec DANGO_GIC_SPI_BASE)"
 ecam_base="$(macro_dec DANGO_GPU_ECAM_BASE)"
 ecam_size="$(macro_dec DANGO_GPU_ECAM_SIZE)"
-mmio_base="$(macro_dec DANGO_GPU_MMIO_BASE)"
-mmio_size="$(macro_dec DANGO_GPU_MMIO_SIZE)"
+mmio_base="$(layout_dec DANGO_GPU_MMIO_BASE)"
+mmio_size="$(layout_dec DANGO_GPU_MMIO_SIZE)"
 intx_spi="$(macro_dec DANGO_GPU_INTX_SPI)"
 bar4_ipa="$(macro_dec DANGO_GPU_BAR4_IPA)"
 bar4_size="$(macro_dec DANGO_GPU_BAR4_SIZE)"
-stg_base="$(macro_dec DANGO_GPU_STAGING_BASE)"
-stg_size="$(macro_dec DANGO_GPU_STAGING_SIZE)"
-shm_base="$(macro_dec DANGO_SHM_GUEST_BASE)"
-shm_size="$(macro_dec DANGO_SHM_GUEST_SIZE)"
+stg_base="$(layout_dec DANGO_GPU_STAGING_BASE)"
+stg_size="$(layout_dec DANGO_GPU_STAGING_SIZE)"
+shm_base="$(layout_dec DANGO_SHM_GUEST_BASE)"
+shm_size="$(layout_dec DANGO_SHM_GUEST_SIZE)"
 
 # The channel DTS `interrupts` cell carries the SPI number, not the vGIC hwirq
 # (32 + SPI). Derive it from the header rather than restating it.
@@ -119,6 +132,9 @@ fi
 
 # Placeholders are emitted longest-name-first so a plain name (e.g. BASE) can
 # never be substituted inside a longer one (e.g. BASE_UA).
+emit DANGO_RAM_BASE_UA       '%08x'   "${ram_base}"
+emit DANGO_RAM_BASE          '0x%08x' "${ram_base}"
+emit DANGO_RAM_SIZE          '0x%08x' "${ram_size}"
 emit DANGO_CH_GUEST_BASE_UA  '%08x'   "${ch_base}"
 emit DANGO_GPU_ECAM_BASE_UA  '%08x'   "${ecam_base}"
 emit DANGO_GPU_STAGING_BASE_UA '%08x' "${stg_base}"

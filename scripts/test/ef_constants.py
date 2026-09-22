@@ -78,20 +78,53 @@ def _constexpr_int(path, name):
         f'are derived from the manager layout header')
 
 
+# The guest memory layout (RAM bounds and the fixed window bases) selects its
+# branch at build time, so it is evaluated for the active layout instead of being
+# scanned: a plain #define scan would return whichever branch came first.
+_GUEST_LAYOUT_HEADER = ROOT / 'shared/include/midix/abi/dango_guest_layout.h'
+GUEST_LAYOUT = (os.environ.get('DANGO_LINUX_GUEST') or
+                os.environ.get('ANKO_GUEST_LAYOUT') or 'minimal')
+
+
+def _layout_defines(path, layout):
+    lavapipe = layout == 'lavapipe'
+    active = True
+    found = {}
+    for line in Path(path).read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith('#if'):
+            active = lavapipe
+            continue
+        if stripped.startswith('#else'):
+            active = not lavapipe
+            continue
+        if stripped.startswith('#endif'):
+            active = True
+            continue
+        if not active:
+            continue
+        match = _DEFINE_RE.match(stripped)
+        if match:
+            found[match.group(1)] = match.group(2)
+    return found
+
 _GUEST = _defines(_GUEST_HEADER)
 _TEST = _defines(_TEST_HEADER)
+_LAYOUT = _layout_defines(_GUEST_LAYOUT_HEADER, GUEST_LAYOUT)
+GUEST_RAM_BASE = _int(_LAYOUT, 'DANGO_RAM_BASE', _GUEST_LAYOUT_HEADER)
+GUEST_RAM_SIZE = _int(_LAYOUT, 'DANGO_RAM_SIZE', _GUEST_LAYOUT_HEADER)
 
-CHANNEL_GUEST_BASE = _int(_GUEST, 'DANGO_CH_GUEST_BASE', _GUEST_HEADER)
-CHANNEL_GUEST_SIZE = _int(_GUEST, 'DANGO_CH_GUEST_SIZE', _GUEST_HEADER)
+CHANNEL_GUEST_BASE = _int(_LAYOUT, 'DANGO_CH_GUEST_BASE', _GUEST_LAYOUT_HEADER)
+CHANNEL_GUEST_SIZE = _int(_LAYOUT, 'DANGO_CH_GUEST_SIZE', _GUEST_LAYOUT_HEADER)
 CHANNEL_GUEST_IRQ = _int(_GUEST, 'DANGO_CH_GUEST_IRQ', _GUEST_HEADER)
 GPU_ECAM_BASE = _int(_GUEST, 'DANGO_GPU_ECAM_BASE', _GUEST_HEADER)
 GPU_ECAM_SIZE = _int(_GUEST, 'DANGO_GPU_ECAM_SIZE', _GUEST_HEADER)
-GPU_MMIO_BASE = _int(_GUEST, 'DANGO_GPU_MMIO_BASE', _GUEST_HEADER)
+GPU_MMIO_BASE = _int(_LAYOUT, 'DANGO_GPU_MMIO_BASE', _GUEST_LAYOUT_HEADER)
 GPU_BAR4_IPA = _int(_GUEST, 'DANGO_GPU_BAR4_IPA', _GUEST_HEADER)
-GPU_STAGING_BASE = _int(_GUEST, 'DANGO_GPU_STAGING_BASE', _GUEST_HEADER)
+GPU_STAGING_BASE = _int(_LAYOUT, 'DANGO_GPU_STAGING_BASE', _GUEST_LAYOUT_HEADER)
 GPU_MODE_WIDTH = _int(_GUEST, 'DANGO_GPU_MODE_WIDTH', _GUEST_HEADER)
 GPU_MODE_HEIGHT = _int(_GUEST, 'DANGO_GPU_MODE_HEIGHT', _GUEST_HEADER)
-GPU_STAGING_SIZE = _int(_GUEST, 'DANGO_GPU_STAGING_SIZE', _GUEST_HEADER)
+GPU_STAGING_SIZE = _int(_LAYOUT, 'DANGO_GPU_STAGING_SIZE', _GUEST_LAYOUT_HEADER)
 GPU_CHANNEL_TEST_ROUNDS = _int(_TEST, 'DANGO_CH_TEST_ROUNDS', _TEST_HEADER)
 # Host-side VA the manager reserves for the staging window (dango/layout.h).
 GPU_STAGING_HOST_VA = _constexpr_int(_LAYOUT_HEADER, 'kStagingHostVa')
@@ -138,6 +171,7 @@ MARKERS = {
     'linux_isr': 'dango: Linux virtio ISR observed',
     'gpu_probe': 'dango: gpu probe passed',
     'gpu_proof': 'gpu proof:',
+    'gpu_frame_presented': 'gpu service: present ok',
     'channel_proof': 'channel proof:',
     'native_channel': 'channel native probe passed',
     'kms_displayed': 'dango: kms displayed',

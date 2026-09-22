@@ -34,7 +34,7 @@
 
     memory@40000000 {
         device_type = "memory";
-        reg = <0x0 0x40000000 0x0 0x08000000>; // 128 MiB (see memory_size in the manifest)
+        reg = <0x0 @DANGO_RAM_BASE@ 0x0 @DANGO_RAM_SIZE@>; // layout-selected (dango_guest_layout.h)
     };
 
     reserved-memory {

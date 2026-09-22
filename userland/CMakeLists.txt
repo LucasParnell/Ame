@@ -130,6 +130,14 @@ set_property(CACHE DANGO_LINUX_GUEST PROPERTY STRINGS minimal lavapipe)
 if(NOT DANGO_LINUX_GUEST MATCHES "^(minimal|lavapipe)$")
     message(FATAL_ERROR "DANGO_LINUX_GUEST must be minimal or lavapipe")
 endif()
+# The guest variant and the guest memory layout must agree: the artifacts and the
+# kernel bounds come from the same choice, and a mismatch is a guest that faults
+# on a window the kernel put somewhere else (or a 512 MiB rootfs in 128 MiB).
+if(NOT "${DANGO_LINUX_GUEST}" STREQUAL "${ANKO_GUEST_LAYOUT}")
+    message(FATAL_ERROR
+        "DANGO_LINUX_GUEST (${DANGO_LINUX_GUEST}) must match ANKO_GUEST_LAYOUT "
+        "(${ANKO_GUEST_LAYOUT}); both select the same guest layout")
+endif()
 if(NOT DANGO_LINUX_PROFILE MATCHES "^(hello|gpu)$")
     message(FATAL_ERROR "DANGO_LINUX_PROFILE must be hello or gpu")
 endif()

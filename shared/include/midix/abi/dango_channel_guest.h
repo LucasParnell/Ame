@@ -1,4 +1,5 @@
 #pragma once
+#include "midix/abi/dango_guest_layout.h"
 /* C-compatible wire layout shared by Anko, the Linux driver and userspace.
  * All addresses are guest physical addresses, never host physical addresses.
  * The descriptor page is read-only at stage 2; rings are normal WB, RW, XN,
@@ -47,10 +48,9 @@ _Static_assert(sizeof(struct dango_channel_layout) == 80, "layout ABI");
 
 /* -------------------------------------------------------------------------- */
 /* Guest platform binding: physical windows, IRQ numbers and C ring view.     */
+/* Window bases (and RAM bounds) come from dango_guest_layout.h.             */
 /* Every address here is guest-physical; IRQs are GIC SPI numbers (>= 32).    */
 /* -------------------------------------------------------------------------- */
-#define DANGO_CH_GUEST_BASE 0x48000000ULL
-#define DANGO_CH_GUEST_SIZE 0x20000ULL
 #define DANGO_CH_GUEST_IRQ 48U
 /* DANGO_CH_VERSION (above) is the major; this is the matching minor. */
 #define DANGO_CH_VER_MINOR 0U
@@ -61,8 +61,6 @@ _Static_assert(sizeof(struct dango_channel_layout) == 80, "layout ABI");
 #define DANGO_GPU_ECAM_SIZE 0x00100000ULL
 /* Shared staging window the GPU borrows for scanout/upload buffers. It sits
  * between guest RAM (top 0x48000000) and the GPU MMIO aperture (0x50000000). */
-#define DANGO_GPU_STAGING_BASE 0x49000000ULL
-#define DANGO_GPU_STAGING_SIZE 0x00300000ULL /* 3 MiB = 1024x768x4 */
 
 /* Dynamic shared arenas (Phase L). Fixed guest window in which the host
  * publishes the descriptor of every region a native owner has attached to this
@@ -71,8 +69,6 @@ _Static_assert(sizeof(struct dango_channel_layout) == 80, "layout ABI");
  * through mmap. Region payloads live at owner-chosen guest IPAs named by the
  * descriptor, never inside this window. Sits above the staging window and
  * below the GPU MMIO aperture. */
-#define DANGO_SHM_GUEST_BASE 0x4A000000ULL
-#define DANGO_SHM_GUEST_SIZE 0x00100000ULL /* 1 MiB descriptor window */
 
 /* The one bootstrap scanout mode. The staging window is exactly one XRGB8888
  * frame of it, so the mode and the window size are the same fact. */
@@ -84,8 +80,6 @@ _Static_assert(sizeof(struct dango_channel_layout) == 80, "layout ABI");
      DANGO_GPU_MODE_BYTES_PER_PIXEL)
 _Static_assert(DANGO_GPU_FRAME_BYTES == DANGO_GPU_STAGING_SIZE,
                "staging window must be exactly one bootstrap frame");
-#define DANGO_GPU_MMIO_BASE 0x50000000ULL
-#define DANGO_GPU_MMIO_SIZE 0x10000000ULL
 #define DANGO_GPU_BAR4_IPA 0x50000000ULL
 #define DANGO_GPU_BAR4_SIZE 0x4000ULL
 #define DANGO_GPU_INTX_SPI 12U
@@ -146,7 +140,7 @@ static_assert(DANGO_CH_STAGING_OFF(DANGO_CH_DEFAULT_RING_ORDER) % DANGO_RING_PAG
 static_assert(DANGO_CH_STAGING_OFF(DANGO_CH_DEFAULT_RING_ORDER) ==
                   DANGO_RING_PAGE_BYTES + DANGO_RING_MAPPING_BYTES(DANGO_CH_DEFAULT_RING_ORDER),
               "staging follows the descriptor page and both rings");
-static_assert(DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE <= 0x4C000000ULL,
+static_assert(DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE <= DANGO_GPU_MMIO_BASE,
               "staging window stays below the GPU MMIO aperture");
 static_assert(DANGO_SHM_GUEST_BASE >= DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE,
               "shared-arena window sits above the staging window");
@@ -165,7 +159,7 @@ _Static_assert(DANGO_CH_STAGING_OFF(DANGO_CH_DEFAULT_RING_ORDER) % DANGO_RING_PA
 _Static_assert(DANGO_CH_STAGING_OFF(DANGO_CH_DEFAULT_RING_ORDER) ==
                    DANGO_RING_PAGE_BYTES + DANGO_RING_MAPPING_BYTES(DANGO_CH_DEFAULT_RING_ORDER),
                "staging follows the descriptor page and both rings");
-_Static_assert(DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE <= 0x4C000000ULL,
+_Static_assert(DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE <= DANGO_GPU_MMIO_BASE,
                "staging window stays below the GPU MMIO aperture");
 _Static_assert(DANGO_SHM_GUEST_BASE >= DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGING_SIZE,
                "shared-arena window sits above the staging window");

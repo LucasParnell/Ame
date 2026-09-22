@@ -78,7 +78,9 @@ initramfs_size = ${initramfs_size}
 dtb_size = ${dtb_size}
 
 memory_base = "0x40000000"
-memory_size = "0x08000000"
+memory_size = "$(python3 "${AME}/scripts/linux/layout_macro.py" \
+    "${AME}/shared/include/midix/abi/dango_guest_layout.h" "${GUEST}" DANGO_RAM_SIZE \
+    | sed -n 's/^DANGO_RAM_SIZE=//p' | xargs printf '0x%08x')"
 
 kernel_load = "${KERNEL_LOAD}"
 initramfs_load = "${initramfs_load}"

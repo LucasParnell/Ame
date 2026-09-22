@@ -40,6 +40,15 @@ endif()
 # ---------------------------------------------------------------------------
 set(ANKO_BOARD "qemu-virt" CACHE STRING "Target board (qemu-virt | switch-t210)")
 set_property(CACHE ANKO_BOARD PROPERTY STRINGS qemu-virt switch-t210)
+# Guest memory layout (shared/include/midix/abi/dango_guest_layout.h): the RAM
+# bounds and every fixed window derive from it, in the kernel, the guest DTS and
+# the artifact manifest. `minimal` is the freestanding appliance guest the tree
+# boots today; `lavapipe` is the 512 MiB libc guest, which moves all windows.
+set(ANKO_GUEST_LAYOUT "minimal" CACHE STRING "Guest memory layout (minimal | lavapipe)")
+set_property(CACHE ANKO_GUEST_LAYOUT PROPERTY STRINGS minimal lavapipe)
+if(ANKO_GUEST_LAYOUT STREQUAL "lavapipe")
+    add_compile_definitions(DANGO_GUEST_LAYOUT_LAVAPIPE=1)
+endif()
 include(${CMAKE_SOURCE_DIR}/boards/${ANKO_BOARD}/board.cmake)
 file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/board.json CONTENT
     "{\"board\":\"${ANKO_BOARD}\",\"load_base\":\"${ANKO_LOAD_BASE}\",\"text_offset\":\"${ANKO_IMAGE_TEXT_OFFSET}\"}\n")

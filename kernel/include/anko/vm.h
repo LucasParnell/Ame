@@ -22,10 +22,8 @@ constexpr u32 kMaxVmMemoryObjects = 32;
 constexpr u32 kMaxVmChannels = 16;
 // Phase L: attachments of an existing pinned page set (CAP_ARENA) into a VM.
 constexpr u32 kMaxSharedArenas = 16;
-// Guest RAM is mapped page-granular, so the table must hold all of it plus
-// headroom for the device/BAR mappings the assignment layer adds (Phase E).  A
-// 128 MiB guest is 32768 pages on its own.
-constexpr u32 kMaxStage2Mappings = 40960;
+// Stage-2 mapping table: defined below, after kDangoRamPages, because its size
+// is derived from the guest RAM size and the block granularity.
 
 // Stage-2 block mappings. A level-2 block descriptor covers 2 MiB with a single
 // table entry and a single mapping record, which is how guest RAM is meant to be
@@ -45,14 +43,28 @@ constexpr u64 kGuestPhysMin = 0x4000'0000ull;
 constexpr u64 kGuestPhysMax = 0x4800'0000ull;
 constexpr u64 kDangoRamBase = 0x4000'0000ull;
 constexpr u64 kDangoRamSize = 128ull * 1024ull * 1024ull;
+constexpr u64 kDangoRamPages = kDangoRamSize / PAGE_SIZE;
+
+// Stage-2 mapping table sizing. Guest RAM is block-mapped (kStage2BlockPages
+// pages per record), so RAM costs kDangoRamPages / kStage2BlockPages records;
+// the rest of the table is the device budget. The largest page-granular consumer
+// is the assigned MMIO window (16 MiB = 4096 records); staging (3 MiB = 768), the
+// shared-region window (1 MiB = 256), ECAM (256) and the channel window (32) are
+// far smaller. Splitting a RAM block for a device page costs up to
+// kStage2BlockPages - 1 extra records, and a handful of those is ample headroom.
+constexpr u32 kMaxStage2DeviceRecords = 8192;
+constexpr u32 kMaxStage2Mappings =
+    static_cast<u32>(kDangoRamPages / kStage2BlockPages) + kMaxStage2DeviceRecords;
+// The whole reason the block form exists: page-per-record RAM cannot fit the
+// fixed table, so a regression to it must fail the build, not the boot.
+static_assert(kDangoRamPages > kMaxStage2Mappings,
+              "guest RAM must be block-mapped: it does not fit page-per-record");
 
 // Stage-2 input address width: the guest runs with a 39-bit IPA.
 constexpr u32 kVmIpaBits = 39;
 // Lowest guest IPA a device BAR / synthetic ECAM mapping may be placed at; the
 // low 256 MiB window is reserved for the appliance's own layout.
 constexpr u64 kMinDeviceGuestIpa = 0x10000000ull;
-// Page count of the appliance's RAM, used to size the stage-2 table below.
-constexpr u64 kDangoRamPages = kDangoRamSize / PAGE_SIZE;
 
 // Shared staging window (SYS_VM_MEMORY_CREATE with MX_VM_MEMORY_FLAG_SHARED_STAGING).
 // The staging object is host-writable and guest-mappable, but its pages are
@@ -788,8 +800,8 @@ constexpr u32 kMaxAssignMmio = 8;
 // pages (subrange bookkeeping / alignment padding). Reserve that slack on top of
 // the guest RAM so the fixed table can never be exhausted by device mappings.
 constexpr u32 kMaxAssignMmioSlackPages = 4;
-static_assert(kDangoRamPages + kMaxAssignMmio * kMaxAssignMmioSlackPages <= kMaxStage2Mappings,
-              "stage-2 table cannot hold appliance RAM plus device/BAR mappings");
+static_assert(kMaxAssignMmio * kMaxAssignMmioSlackPages <= kMaxStage2DeviceRecords,
+              "the device budget must cover the assignment windows");
 
 // Assignment flags (SYS_VM_ASSIGN_DEVICE a2).  BAR assignment is opt-in so the
 // default path (and the assignment self-test) is unchanged on platforms where

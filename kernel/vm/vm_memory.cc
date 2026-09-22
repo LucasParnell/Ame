@@ -252,7 +252,13 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
         note_error();
         return E_INVALID;
     }
-    if (v->stage2.mapped_records + pages > kMaxStage2Mappings) {
+    // Records this map needs when the block path is used: RAM is block-backed, so
+    // it costs one record per kStage2BlockPages. The page fallback needs more and
+    // is allowed to fail with E_OVERFLOW once the table fills -- budgeting the
+    // page count here would refuse every block-mappable region instead.
+    const usize blocks = pages / kStage2BlockPages +
+                         ((pages % kStage2BlockPages) != 0 ? 1u : 0u);
+    if (v->stage2.mapped_records + blocks > kMaxStage2Mappings) {
         note_error();
         return E_OVERFLOW;
     }

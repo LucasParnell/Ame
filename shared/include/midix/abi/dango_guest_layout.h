@@ -31,6 +31,16 @@
 #define DANGO_SHM_GUEST_BASE 0x62000000ULL
 #define DANGO_GPU_MMIO_BASE 0x70000000ULL
 
+/* Static load addresses. The initramfs here is the ~186 MiB libc rootfs, so the
+ * DTB sits far above it instead of just after it as in the minimal layout. */
+#define DANGO_KERNEL_LOAD 0x40200000ULL
+#define DANGO_INITRAMFS_LOAD 0x46000000ULL
+#define DANGO_DTB_LOAD 0x5F000000ULL
+
+/* Userland VA span reserved for the initramfs, which the boot maps as one object
+ * above the appliance's own fixed mappings. The libc rootfs is ~186 MiB. */
+#define DANGO_INITRD_VA_SPAN 0x18000000ULL
+
 #else
 
 /* 128 MiB: the bootstrap appliance guest. */
@@ -41,6 +51,15 @@
 #define DANGO_GPU_STAGING_BASE 0x49000000ULL
 #define DANGO_SHM_GUEST_BASE 0x4A000000ULL
 #define DANGO_GPU_MMIO_BASE 0x50000000ULL
+
+/* Static load addresses: kernel, then the small appliance initramfs, then the
+ * DTB just above it. */
+#define DANGO_KERNEL_LOAD 0x40200000ULL
+#define DANGO_INITRAMFS_LOAD 0x46000000ULL
+#define DANGO_DTB_LOAD 0x47000000ULL
+
+/* The appliance initramfs is tens of KiB, so 64 MiB of VA is ample. */
+#define DANGO_INITRD_VA_SPAN 0x04000000ULL
 
 #endif
 
@@ -62,3 +81,14 @@ _Static_assert(DANGO_SHM_GUEST_BASE >= DANGO_GPU_STAGING_BASE + DANGO_GPU_STAGIN
                "shared-region window must follow the staging window");
 _Static_assert(DANGO_GPU_MMIO_BASE >= DANGO_SHM_GUEST_BASE + DANGO_SHM_GUEST_SIZE,
                "MMIO aperture must follow the shared-region window");
+
+/* Load addresses sit inside RAM, ordered kernel < initramfs < DTB, and below the
+ * first window. The initramfs-to-DTB gap is checked against the real artifact
+ * size at build time (build-manifest.sh), which is what caught a 186 MiB rootfs
+ * colliding with a DTB placed just above a small one. */
+_Static_assert(DANGO_KERNEL_LOAD >= DANGO_RAM_BASE &&
+                   DANGO_KERNEL_LOAD < DANGO_INITRAMFS_LOAD &&
+                   DANGO_INITRAMFS_LOAD < DANGO_DTB_LOAD,
+               "load addresses must be ordered inside RAM");
+_Static_assert(DANGO_DTB_LOAD < DANGO_CH_GUEST_BASE,
+               "the DTB must load below the first fixed window");

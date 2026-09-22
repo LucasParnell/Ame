@@ -6,21 +6,16 @@ lets `tty.fb0` reach the shell (`msh` prints its banner to the terminal), and
 asserts two things the `gpud` row does not:
 
   * the frame `io.framebuffer` renders reaches the appliance: the GPU service
-    logs `gpu service: frame staged` once it has written the client's frame into
-    the appliance scanout buffer (the shared staging window); and
+    logs `gpu service: present ok` only after the guest GPU server has completed
+    the native frame's present; and
   * that frame is *readable tty text*: the captured frame is decoded cell by
     cell against the shared VGA console font
     (`shared/include/midix/font/vga8x16.h`) and must carry the shell banner the
     runtime prints (`userland/msh/main.cc`), not merely the bootstrap bar
     pattern the `gpud` row asserts.
 
-Capture target: the frame the framebuffer service renders (the QEMU console the
-firmware exposes for `fb.memory`) -- that is the frame the native GPU service is
-handed and mirrors into the appliance. The appliance's own virtio-gpu scanout is
-owned by the guest's KMS self-test after the bootstrap device session (see
-docs/GPU_APPLIANCE_REMAINING.md), so the tty frame is asserted where the
-framebuffer draws it, with the appliance-side staged marker proving it crossed
-the service boundary.
+Capture target: the assigned GPU's QEMU console, selected by its qdev id.
+A native framebuffer capture cannot prove that an appliance present succeeded.
 
 The PPM reader and the screendump boot runner are Phase F/G's (kms-display.py /
 boot.py), imported rather than copied, so every appliance row agrees on the wire
@@ -164,6 +159,7 @@ def evidence(logs):
         # The tty frame crossed the service boundary: the GPU service wrote the
         # client's frame into the appliance scanout buffer.
         'frame_staged': ef.MARKERS['gpu_frame_staged'] in logs,
+        'frame_presented': ef.MARKERS['gpu_frame_presented'] in logs,
         'no_failures': not any(word in logs for word in ef.FAILURE_WORDS),
         'iommu_faults_zero': bool(counters) and counters['faults'] == 0 and
                              counters['quarantines'] == 0,
@@ -184,15 +180,15 @@ def main():
     shot = work / 'tty.ppm'
     env = dict(os.environ, AME_QEMU_IOMMU='1', AME_QEMU_TESTDEV='0',
                AME_QEMU_GPU_DEVICE=kms.GPU_DEVICE)
-    # No --screendump-device: the tty frame is what the framebuffer service
-    # renders into `fb.memory` (the QEMU console), not the guest KMS scanout.
+    # Require completed native-frame presentation and capture the assigned GPU.
     command = [sys.executable, str(ROOT / 'scripts/test/boot.py'), '--build', args.build,
                '--cpus', str(args.cpus), '--timeout', str(args.timeout), '--output', str(work),
                '--marker', ef.MARKERS['boot_ready'],
                '--marker', ef.MARKERS['gpu_present_complete'],
                '--marker', ef.MARKERS['tty_shell'],
-               '--marker', ef.MARKERS['gpu_frame_staged'],
-               '--monitor-socket', str(monitor), '--screendump', str(shot)]
+               '--marker', ef.MARKERS['gpu_frame_presented'],
+               '--monitor-socket', str(monitor), '--screendump', str(shot),
+               '--screendump-device', ef.GPU_QDEV_ID]
     result = subprocess.run(command, env=env, capture_output=True, text=True,
                             timeout=args.timeout + 60)
     try:

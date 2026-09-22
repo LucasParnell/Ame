@@ -80,7 +80,8 @@ _Static_assert(sizeof(struct dango_channel_layout) == 80, "layout ABI");
      DANGO_GPU_MODE_BYTES_PER_PIXEL)
 _Static_assert(DANGO_GPU_FRAME_BYTES == DANGO_GPU_STAGING_SIZE,
                "staging window must be exactly one bootstrap frame");
-#define DANGO_GPU_BAR4_IPA 0x50000000ULL
+/* BAR4 is placed at the MMIO aperture base, so it moves with the layout. */
+#define DANGO_GPU_BAR4_IPA DANGO_GPU_MMIO_BASE
 #define DANGO_GPU_BAR4_SIZE 0x4000ULL
 #define DANGO_GPU_INTX_SPI 12U
 
@@ -130,7 +131,8 @@ struct dango_ring_slot {
 #if defined(__cplusplus)
 static_assert(sizeof(dango_ring_hdr) == 256, "ring header ABI");
 static_assert(sizeof(dango_ring_slot) == 64, "ring slot ABI");
-static_assert(DANGO_GPU_BAR4_IPA == DANGO_GPU_MMIO_BASE, "BAR4 sits at the MMIO window base");
+static_assert(DANGO_GPU_BAR4_IPA + DANGO_GPU_BAR4_SIZE <= DANGO_GPU_MMIO_BASE + DANGO_GPU_MMIO_SIZE,
+              "BAR4 sits inside the MMIO aperture");
 static_assert(DANGO_RING_BYTES(6) == 8192, "ring bytes order 6");
 static_assert(DANGO_RING_MAPPING_BYTES(6) == 16384, "ring mapping bytes order 6");
 static_assert(DANGO_RING_BYTES(6) == DANGO_RING_MAPPING_BYTES(6) / 2, "mapping is two rings");
@@ -149,7 +151,8 @@ static_assert(DANGO_SHM_GUEST_BASE + DANGO_SHM_GUEST_SIZE <= DANGO_GPU_MMIO_BASE
 #else
 _Static_assert(sizeof(struct dango_ring_hdr) == 256, "ring header ABI");
 _Static_assert(sizeof(struct dango_ring_slot) == 64, "ring slot ABI");
-_Static_assert(DANGO_GPU_BAR4_IPA == DANGO_GPU_MMIO_BASE, "BAR4 sits at the MMIO window base");
+_Static_assert(DANGO_GPU_BAR4_IPA + DANGO_GPU_BAR4_SIZE <= DANGO_GPU_MMIO_BASE + DANGO_GPU_MMIO_SIZE,
+               "BAR4 sits inside the MMIO aperture");
 _Static_assert(DANGO_RING_BYTES(6) == 8192, "ring bytes order 6");
 _Static_assert(DANGO_RING_MAPPING_BYTES(6) == 16384, "ring mapping bytes order 6");
 _Static_assert(DANGO_RING_BYTES(6) == DANGO_RING_MAPPING_BYTES(6) / 2, "mapping is two rings");

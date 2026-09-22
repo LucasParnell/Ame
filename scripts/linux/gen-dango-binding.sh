@@ -82,7 +82,9 @@ ecam_size="$(macro_dec DANGO_GPU_ECAM_SIZE)"
 mmio_base="$(layout_dec DANGO_GPU_MMIO_BASE)"
 mmio_size="$(layout_dec DANGO_GPU_MMIO_SIZE)"
 intx_spi="$(macro_dec DANGO_GPU_INTX_SPI)"
-bar4_ipa="$(macro_dec DANGO_GPU_BAR4_IPA)"
+# BAR4 sits at the aperture base, which is a layout value (the ABI
+# header aliases it rather than restating the number).
+bar4_ipa="$(layout_dec DANGO_GPU_MMIO_BASE)"
 bar4_size="$(macro_dec DANGO_GPU_BAR4_SIZE)"
 stg_base="$(layout_dec DANGO_GPU_STAGING_BASE)"
 stg_size="$(layout_dec DANGO_GPU_STAGING_SIZE)"

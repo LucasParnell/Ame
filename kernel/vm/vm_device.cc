@@ -21,6 +21,7 @@
 // stopped.
 
 #include "anko/vm.h"
+#include "anko/panic.h"
 
 #include "anko/hw_info.h"
 #include "anko/irq.h"
@@ -632,12 +633,10 @@ SysError device_attach(VmDeviceAssignment* a, const DeviceAssignSpec& spec) {
     if (rc == E_OK) {
         rc = step_map_ram(a);
     }
-    // Guard (Phase E regression): guest RAM is mapped page-granular, so a large
-    // guest can consume the whole stage-2 table and leave none for the device/BAR
-    // mappings that follow.  Fail clearly here instead of overflow deeper in.
+    // Guest RAM coverage may be many pages per record. Reserve record slots
+    // without unsigned subtraction at the caller (stage2_has_capacity guards it).
     if (rc == E_OK &&
-        (kMaxAssignMmio * kMaxAssignMmioSlackPages) >
-            kMaxStage2Mappings - a->owner_vm->stage2.mapped_pages) {
+        !stage2_has_capacity(&a->owner_vm->stage2, kMaxAssignMmio * kMaxAssignMmioSlackPages)) {
         ANKO_LOG_ERROR("kernel/vm",
                        "assign: guest RAM leaves no stage-2 headroom for device mappings");
         rc = E_OVERFLOW;
@@ -919,26 +918,22 @@ SysError device_map_bar_internal(VmDeviceAssignment* a, u32 bar_index, u32 bar_o
     while (i < pages) {
         const u64 ipa = guest_ipa + i * PAGE_SIZE;
         const PhysAddr pa = host_base + i * PAGE_SIZE;
-        // The window is mapped with uniform attributes, so an aligned 2 MiB run of
-        // the BAR is one block record instead of 512. Any failure falls back to
-        // pages: a device mapping must never depend on the block form.
-        if (ipa % kStage2BlockSize == 0 && pa % kStage2BlockSize == 0 &&
-            pages - i >= kStage2BlockPages) {
-            const SysError block = stage2_map_block(&a->owner_vm->stage2, ipa, pa, rights,
-                                                    Stage2MemType::Device);
-            if (block == E_OK) {
-                i += kStage2BlockPages;
-                continue;
-            }
-        }
-        const SysError rc = map_one_bar_page(a, ipa, pa, rights);
+        // Uniform aligned runs use blocks. Only geometry selects the page
+        // path; a failed block map is a real error and must unwind the range.
+        const bool block = ipa % kStage2BlockSize == 0 && pa % kStage2BlockSize == 0 &&
+                           pages - i >= kStage2BlockPages;
+        const SysError rc =
+            block ? stage2_map_block(&a->owner_vm->stage2, ipa, pa, rights, Stage2MemType::Device)
+                  : map_one_bar_page(a, ipa, pa, rights);
         if (rc != E_OK) {
-            for (u64 j = 0; j < i; ++j) {
-                (void)stage2_unmap_page(&a->owner_vm->stage2, guest_ipa + j * PAGE_SIZE);
+            if (i) {
+                const SysError undo =
+                    stage2_unmap_range(&a->owner_vm->stage2, guest_ipa, i * PAGE_SIZE);
+                ANKO_ASSERT(undo == E_OK);
             }
             return rc;
         }
-        ++i;
+        i += block ? kStage2BlockPages : 1;
     }
     VmAssignMmio& m = a->mmio[a->mmio_count++];
     libk::memset(&m, 0, sizeof(m));
@@ -1172,14 +1167,13 @@ static SysError device_revoke_impl(VmDeviceAssignment* a, bool faulting) {
             if (!m.mapped) {
                 continue;
             }
-            bool removed = true;
-            for (u64 p = 0; p < m.size / PAGE_SIZE; ++p) {
-                const auto rc = stage2_revoke_device_page(&a->owner_vm->stage2,
-                                                          m.guest_ipa + p * PAGE_SIZE);
-                if (rc != E_OK && rc != E_NOTFOUND) removed = false;
+            const SysError rc =
+                stage2_revoke_device_range(&a->owner_vm->stage2, m.guest_ipa, m.size);
+            if (rc != E_OK) {
+                quarantine = true;
+            } else {
+                m.mapped = false;
             }
-            if (!removed) quarantine = true;
-            else m.mapped = false;
         }
     }
 

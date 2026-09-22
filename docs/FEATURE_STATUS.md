@@ -124,6 +124,9 @@ less complete than it is. Do **not** treat these as status:
 | Standalone Linux KMS modeset asserted from the host | Implemented | Opt-in `kms-display` row: guest raw-ioctl KMS (`linux-artifacts/kms_test/`), host `screendump` at `1024x768` showing mid-row R/G/B/W. See [Phase F delivery](../DELIVERY/gpu-appliance-phase-f.md). |
 | Real lavapipe transfer executor | Partial | `linux-artifacts/vkd/`, `scripts/linux/build-vkd.sh`, opt-in `AME_VERIFY_VULKAN=1`: libc rootfs boots under Linux, real device/fill/copy/fence/readback and malformed-command regressions pass. Native session bridge, larger appliance memory layout and graphics/WSI are still open; see [remaining work](GPU_APPLIANCE_REMAINING.md). |
 
+| Native TTY on assigned GPU | Implemented | `AME_VERIFY_FB_TTY=1` requires completed native-frame presentation and decodes shell text from the assigned GPU console. `gpud` resumes after KMS/channel self-tests and flushes dumb-buffer updates through Linux DRM; a native framebuffer capture alone is insufficient. |
+| Stage-2 block capacity and teardown | Implemented | RAM and aligned MMIO use 2 MiB blocks. Host regressions map 512 MiB in 256 records and cover failed/exact-capacity splits, mixed-page/block teardown and active Device revocation with allocations disabled. The appliance layout itself remains 128 MiB. |
+
 See [Phase E delivery](../DELIVERY/gpu-appliance-phase-e.md),
 [Phase E.1 delivery](../DELIVERY/gpu-appliance-phase-e1.md),
 [Phase F delivery](../DELIVERY/gpu-appliance-phase-f.md) and

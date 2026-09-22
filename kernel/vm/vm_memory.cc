@@ -258,7 +258,7 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
     // page count here would refuse every block-mappable region instead.
     const usize blocks = pages / kStage2BlockPages +
                          ((pages % kStage2BlockPages) != 0 ? 1u : 0u);
-    if (v->stage2.mapped_records + blocks > kMaxStage2Mappings) {
+    if (!stage2_has_capacity(&v->stage2, blocks)) {
         note_error();
         return E_OVERFLOW;
     }
@@ -272,8 +272,8 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
     while (mapped < pages) {
         const u64 ipa = guest_pa + static_cast<u64>(mapped) * PAGE_SIZE;
         // A 2 MiB-aligned run of consecutive backing pages becomes one block
-        // descriptor. Any block failure falls back to page mappings: the block
-        // form is an optimisation and must never be why a map fails.
+        // descriptor. Fall back to pages only for unsuitable geometry; a real
+        // mapping error must propagate instead of being masked by a retry.
         if (ipa % kStage2BlockSize == 0 && pages - mapped >= kStage2BlockPages) {
             const PhysAddr base = mem->pages[mapped];
             bool contiguous = (base % kStage2BlockSize) == 0;
@@ -286,7 +286,7 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
                     mapped += kStage2BlockPages;
                     continue;
                 }
-                rc = E_OK;
+                break;
             }
         }
         rc = stage2_map_page(&v->stage2, ipa, mem->pages[mapped], rights);
@@ -306,8 +306,9 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
                         static_cast<unsigned long long>(pages),
                         static_cast<unsigned long long>(v->stage2.mapped_pages),
                         static_cast<unsigned long long>(v->stage2.ipa_bits));
-        for (usize i = 0; i < mapped; ++i) {
-            (void)stage2_unmap_page(&v->stage2, guest_pa + static_cast<u64>(i * PAGE_SIZE));
+        if (mapped) {
+            const SysError undo = stage2_unmap_range(&v->stage2, guest_pa, mapped * PAGE_SIZE);
+            ANKO_ASSERT(undo == E_OK);
         }
         note_error();
         return rc;
@@ -349,9 +350,9 @@ SysError unmap_memory(Process& caller, CapHandle vm_cap, u64 guest_pa, u64 size)
         return E_NOTFOUND;
     }
 
-    const usize pages = static_cast<usize>(size / PAGE_SIZE);
-    for (usize i = 0; i < pages; ++i) {
-        (void)stage2_unmap_page(&v->stage2, guest_pa + static_cast<u64>(i * PAGE_SIZE));
+    rc = stage2_unmap_range(&v->stage2, guest_pa, size);
+    if (rc != E_OK) {
+        return rc;
     }
     mem->mapped_stage2 = false;
     mem->guest_pa_base = 0;

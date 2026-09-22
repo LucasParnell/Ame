@@ -116,10 +116,24 @@ struct drm_get_cap {
     uint64_t value;
 };
 
+/* Linux drm_mode.h: num_clips == 0 flushes the entire framebuffer. */
+struct drm_mode_fb_dirty_cmd {
+    uint32_t fb_id;
+    uint32_t flags;
+    uint32_t color;
+    uint32_t num_clips;
+    uint64_t clips_ptr;
+};
+DRM_ASSERT(sizeof(struct drm_mode_fb_dirty_cmd) == 24, "dirty framebuffer ABI");
+
 /* --- ioctls --------------------------------------------------------------- */
 #define DRM_IOCTL_VERSION DRM_IOWR(0x00, struct drm_version)
 #define DRM_IOCTL_GET_CAP DRM_IOWR(0x0c, struct drm_get_cap)
 #define DRM_IOCTL_SET_MASTER DRM_IO(0x1e)
+#define DRM_IOCTL_DROP_MASTER DRM_IO(0x1f)
+DRM_ASSERT(DRM_IOCTL_DROP_MASTER == 0x0000641Fu, "DROP_MASTER request");
+#define DRM_IOCTL_MODE_DIRTYFB DRM_IOWR(0xB1, struct drm_mode_fb_dirty_cmd)
+DRM_ASSERT(DRM_IOCTL_MODE_DIRTYFB == 0xC01864B1u, "DIRTYFB request");
 
 #define DRM_IOCTL_MODE_GETRESOURCES DRM_IOWR(0xA0, struct drm_mode_card_res)
 #define DRM_IOCTL_MODE_GETCRTC DRM_IOWR(0xA1, struct drm_mode_crtc)

@@ -143,7 +143,7 @@ SysError shared_arena_create(Vm* vm, Arena* arena, object::Record* arena_record,
     if (vm->shared_arena_count >= kMaxSharedArenas) {
         return E_OVERFLOW;
     }
-    if (size / PAGE_SIZE > kMaxStage2Mappings - vm->stage2.mapped_pages) {
+    if (!stage2_has_capacity(&vm->stage2, size / PAGE_SIZE)) {
         return E_OVERFLOW;
     }
     // The single stage-2 authority for "is this IPA range free": rejects overlap

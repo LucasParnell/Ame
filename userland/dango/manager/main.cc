@@ -7,6 +7,7 @@
 #include "dango/vm.h"
 #include "dango/channel.h"
 #include "dango/layout.h"
+#include "midix/abi/dango_guest_layout.h"
 #include "midix/abi/image.h"
 #include "midix/abi/dango_channel_guest.h"
 #include "midix/abi/dango_channel_test.h"
@@ -35,7 +36,10 @@ constexpr uint32_t kLinuxRunnerHomeCpu = 1;
 constexpr uint32_t kLinuxRunnerSchedBand = dango::SCHED_BAND_VM_FAIR;
 constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
 constexpr uint64_t kVaBootInitrd = 0x2400'0000ull;
-constexpr uint64_t kInitrdScanLimit = 64ull * 1024ull * 1024ull;
+// The appliance bundle is staged in guest RAM, so that is the honest bound on
+// how large it can be: the libc (lavapipe) guest's bundle is ~200 MiB, far past
+// the old fixed 64 MiB cap that made the manager report every artifact missing.
+constexpr uint64_t kInitrdScanLimit = DANGO_RAM_SIZE;
 
 // Phase J: host-side VAs for the native GPU service. The request/reply rings and
 // the shared framebuffer window (`fb.memory`, shared read-only with this
@@ -904,10 +908,8 @@ static bool gpu_service_present(void* ctx_ptr, const MxGpuDamageRect& damage, ui
         dango_counter("gpu.service.copy_fail", 1);
         return false;
     }
-    // The frame the client rendered now lives in the appliance scanout buffer.
-    // Logged once, before the device round trip, so the appliance acceptance can
-    // assert the tty frame reached the appliance even if the device later stalls
-    // (tests/tty acceptance, scripts/test/fb-tty.py).
+    // This confirms the staging copy only. Appliance acceptance waits for
+    // "present ok" below and captures the assigned GPU's actual scanout.
     if (!ctx.logged_first_stage) {
         ctx.logged_first_stage = true;
         console_log("gpu service: frame staged\n");
@@ -1117,6 +1119,11 @@ extern "C" [[noreturn]] void _start() {
         mem_info.guest_pa_base != layout.ram_base ||
         mem_info.mapped_size != active_ram_size ||
         mem_info.mapped_stage2 == 0) {
+        dango_counter("mem.guest_pa_base=0x", mem_info.guest_pa_base);
+        dango_counter("mem.want_pa_base=0x", layout.ram_base);
+        dango_counter("mem.mapped_size=0x", mem_info.mapped_size);
+        dango_counter("mem.want_size=0x", active_ram_size);
+        dango_counter("mem.mapped_stage2=", mem_info.mapped_stage2);
         fail("guest memory failed\n");
     }
     dango_debug("guest memory ready\n");

@@ -18,6 +18,7 @@
 #   AME_VERIFY_GPU=1 scripts/verify.sh                 # + Phase E Linux virtio-gpu
 #   AME_VERIFY_CHANNEL=1 scripts/verify.sh             # + Phase G channel row
 #   AME_VERIFY_KMS=1 scripts/verify.sh                 # + Phase F KMS display row
+#   AME_VERIFY_FB_TTY=1 scripts/verify.sh              # + appliance TTY capture
 #   AME_VERIFY_GPUD=1 scripts/verify.sh                # + Phase H/I GPU control row
 #   AME_VERIFY_LIFECYCLE=1 scripts/verify.sh           # + Phase K IOMMU quarantine lifecycle
 #   AME_VERIFY_VULKAN=1 scripts/verify.sh              # + real lavapipe Linux executor
@@ -74,7 +75,7 @@ do_provenance() {
     cmake --build "$BUILD_DIR" --target provenance >/dev/null
     local json="$BUILD_DIR/generated/provenance.json"
     [[ -f "$json" ]] || fail "generated/provenance.json missing"
-    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("   -> {} {} {} key={} mxb={}".format(d["git"]["describe"], d["build"]["type"], d["build"]["board"], d["signing"]["key_id"], d["artifact"]["sha256"][:12]))' "$json"
+    python3 -c 'import json,sys; from pathlib import Path; from scripts.provenance import git_record; d=json.load(open(sys.argv[1])); assert d["git"] == git_record(Path.cwd()), "stale build provenance"; print("   -> {} {} {} key={} mxb={}".format(d["git"]["describe"], d["build"]["type"], d["build"]["board"], d["signing"]["key_id"], d["artifact"]["sha256"][:12]))' "$json"
 }
 
 # boot <marker> <cpus> [bundle] — run one bounded QEMU boot and report a
@@ -188,6 +189,12 @@ do_gpud() {
 # Panic screen: a dev-only kernel (ANKO_PANIC_SCREEN_DEMO) panics as soon as the
 # framebuffer is bound; the host captures the screen and asserts the logo art and
 # headline.  Opt-in, and it builds its own kernel.
+do_fb_tty() {
+    local tree
+    tree="$(gpu_tree)" || return 1
+    python3 scripts/test/fb-tty.py --build "$tree"
+}
+
 do_panic() {
     python3 scripts/test/panic-screen.py --build "${AME_VERIFY_PANIC_BUILD:-${ROOT}/out/qemu-panic}" \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("counts", {}); print("   -> panic {} frame={} painted={}".format(d["reason"], c.get("size"), c.get("painted"))); sys.exit(0 if d["success"] else 1)'
@@ -260,6 +267,10 @@ fi
 # Opt-in Phase H/I row.
 if [[ "${AME_VERIFY_GPUD:-0}" == "1" ]]; then
     CHECKS+=("gpud:do_gpud")
+fi
+
+if [[ "${AME_VERIFY_FB_TTY:-0}" == "1" ]]; then
+    CHECKS+=("fb-tty:do_fb_tty")
 fi
 
 # Opt-in panic-screen row.

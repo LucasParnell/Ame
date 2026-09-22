@@ -410,6 +410,27 @@ int main() {
         destroy_vm(cv);
     }
 
+    // Block coverage approaches the old page-based budget while leaving ample
+    // records for an attachment that the old coverage-based check refused.
+    {
+        VmFixture cv = make_vm(15);
+        constexpr u32 blocks = vm::kMaxStage2Mappings / vm::kStage2BlockPages;
+        constexpr u32 attached_pages = vm::kMaxStage2Mappings - blocks * vm::kStage2BlockPages + 1;
+        ArenaFixture cf = make_arena(attached_pages);
+        for (u32 i = 0; i < blocks; ++i) {
+            assert(vm::stage2_map_block(
+                       &cv.vm->stage2, vm::kDangoRamBase + i * vm::kStage2BlockSize,
+                       (i + 1) * vm::kStage2BlockSize, kRw, vm::Stage2MemType::NormalWB) == E_OK);
+        }
+        vm::SharedArena* slot = nullptr;
+        assert(vm::shared_arena_create(cv.vm, &cf.arena, cf.record, 0x51000000, cf.arena.size, kRw,
+                                       vm::kSharedArenaFlagNone, &slot) == E_OK);
+        assert(cv.vm->stage2.mapped_records == blocks + attached_pages);
+        object::release(slot->lifetime);
+        destroy_arena(cf);
+        destroy_vm(cv);
+    }
+
     destroy_vm(base);
 
     assert(g_mm_pages.empty() && "stage-2 page-table pages leaked");

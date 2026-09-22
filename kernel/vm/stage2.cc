@@ -130,7 +130,7 @@ SysError record_mapping(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights
     if (!s2) return E_INVALID;
 
     // Fast append path. The common VM-RAM mapping path maps a contiguous IPA
-    // range once, so mapped_pages is also the next free record slot. This keeps
+    // range once, so mapped_records is also the next free record slot. This keeps
     // VM RAM setup O(n) instead of O(n^2). One record is one mapped unit, whether
     // that unit is a 4 KiB page or a 2 MiB block.
     if (s2->mapped_records < kMaxStage2Mappings) {
@@ -149,7 +149,7 @@ SysError record_mapping(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 rights
         }
     }
 
-    // Fallback for sparse maps after unmap or if mapped_pages no longer points
+    // Fallback for sparse maps after unmap or if mapped_records no longer points
     // at a free slot.
     for (u32 i = 0; i < kMaxStage2Mappings; ++i) {
         Stage2Mapping& mapping = s2->mappings[i];
@@ -180,8 +180,7 @@ Stage2Mapping* find_mapping(Stage2AddressSpace* s2, u64 base) {
 
 // Replace a 2 MiB block with 512 page entries, keeping the block intact if the
 // record budget cannot hold the pages: a split must never leave a half-published
-// table, and callers (page map, page unmap) depend on the old shape surviving a
-// failure.
+// table. Partial page removal depends on the old shape surviving failure.
 SysError split_block(Stage2AddressSpace* s2, u64 block_base) {
     Stage2Mapping* block = find_mapping(s2, block_base);
     if (!block || block->pages_log2 != kStage2BlockShift) return E_NOTFOUND;
@@ -194,50 +193,33 @@ SysError split_block(Stage2AddressSpace* s2, u64 block_base) {
     auto& slot = table_ptr(l2_pa)[level_index(block_base, 2)];
     if (is_table_desc(slot)) return E_INVALID;
 
+    // Reuse the block record; only 511 additional slots are needed. All
+    // failure checks precede both metadata and descriptor mutation.
+    if (!stage2_has_capacity(s2, kStage2BlockPages - 1)) {
+        return E_OVERFLOW;
+    }
     const PhysAddr l3 = alloc_stage2_table(s2);
     if (!l3) return E_NOMEM;
     for (u32 i = 0; i < kStage2BlockPages; ++i) {
         table_ptr(l3)[i] = ((saved.pa + static_cast<PhysAddr>(i) * PAGE_SIZE) & S2_DESC_ADDR_MASK) |
                            S2_DESC_BLOCK_PAGE | stage2_page_attrs(saved.rights, saved.mem_type);
     }
-
-    // Journal the page records; on overflow undo them and drop the new table.
-    u32 written = 0;
-    u32 slot_index = 0;
-    while (written < kStage2BlockPages) {
-        for (; slot_index < kMaxStage2Mappings; ++slot_index) {
-            if (!s2->mappings[slot_index].valid) break;
+    u32 page = 1;
+    for (auto& mapping : s2->mappings) {
+        if (mapping.valid) {
+            continue;
         }
-        if (slot_index >= kMaxStage2Mappings) {
-            for (u32 i = 0; i < kMaxStage2Mappings && written; ++i) {
-                Stage2Mapping& m = s2->mappings[i];
-                if (m.valid && m.ipa >= block_base && m.ipa < block_base + kStage2BlockSize &&
-                    m.pages_log2 == kStage2PageShift && m.ipa != saved.ipa) {
-                    m.valid = false;
-                    --written;
-                    if (s2->mapped_records > 0) --s2->mapped_records;
-                    if (s2->mapped_pages > 0) --s2->mapped_pages;
-                }
-            }
-            release_table(s2, l3);
-            return E_OVERFLOW;
+        mapping = saved;
+        mapping.ipa += static_cast<u64>(page) * PAGE_SIZE;
+        mapping.pa += static_cast<PhysAddr>(page) * PAGE_SIZE;
+        mapping.pages_log2 = kStage2PageShift;
+        if (++page == kStage2BlockPages) {
+            break;
         }
-        Stage2Mapping& m = s2->mappings[slot_index];
-        m.ipa = block_base + static_cast<u64>(written) * PAGE_SIZE;
-        m.pa = saved.pa + static_cast<PhysAddr>(written) * PAGE_SIZE;
-        m.rights = saved.rights;
-        m.mem_type = saved.mem_type;
-        m.pages_log2 = kStage2PageShift;
-        m.valid = true;
-        ++s2->mapped_records;
-        ++s2->mapped_pages;
-        ++written;
-        ++slot_index;
     }
-
-    block->valid = false;  // the block record is superseded by its 512 pages
-    if (s2->mapped_records > 0) --s2->mapped_records;
-    if (s2->mapped_pages >= kStage2BlockPages) s2->mapped_pages -= kStage2BlockPages;
+    block->pages_log2 = kStage2PageShift;
+    s2->mapped_records += kStage2BlockPages - 1;
+    // Coverage is unchanged by a split; only the number of records grows.
     slot = l3 | S2_DESC_VALID | S2_DESC_TABLE;
     return E_OK;
 }
@@ -314,7 +296,9 @@ SysError stage2_map_block(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 righ
     for (const auto& trap : s2->traps) {
         if (trap.size && range_overlaps(ipa, kStage2BlockSize, trap.base, trap.size)) return E_BUSY;
     }
-    if (s2->mapped_records >= kMaxStage2Mappings) return E_OVERFLOW;
+    if (!stage2_has_capacity(s2, 1)) {
+        return E_OVERFLOW;
+    }
 
     const u64 l1_desc = table_ptr(s2->root_table_phys)[level_index(ipa, 1)];
     PhysAddr l2_pa = 0;
@@ -350,17 +334,17 @@ SysError stage2_map_page_ex(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 ri
     if (ipa >= (1ull << s2->ipa_bits) || (pa & ~S2_DESC_ADDR_MASK) || !rights) return E_INVALID;
     for (const auto& trap : s2->traps)
         if (trap.size && range_overlaps(ipa, PAGE_SIZE, trap.base, trap.size)) return E_BUSY;
-    if (s2->mapped_records >= kMaxStage2Mappings) return E_OVERFLOW;
+    if (!stage2_has_capacity(s2, 1)) {
+        return E_OVERFLOW;
+    }
     PhysAddr table_pa = s2->root_table_phys;
     for (u32 level = 1; level < 3; ++level) {
         auto& link = table_ptr(table_pa)[level_index(ipa, level)];
         if (!is_table_desc(link)) {
             if (link & S2_DESC_VALID) {
-                // A 2 MiB block covers this page (level 2 only). Split it so a
-                // page-granular mapping can coexist with block-mapped RAM.
-                if (level != 2) { prune_tables(s2, ipa); return E_BUSY; }
-                const SysError rc = split_block(s2, ipa & ~(kStage2BlockSize - 1));
-                if (rc != E_OK) return rc;
+                // Mapping is never replacement. Reject overlap without
+                // allocating or fragmenting the existing block.
+                return E_BUSY;
             } else {
                 PhysAddr child = alloc_stage2_table(s2);
                 if (!child) { prune_tables(s2, ipa); return E_NOMEM; }
@@ -377,43 +361,84 @@ SysError stage2_map_page_ex(Stage2AddressSpace* s2, u64 ipa, PhysAddr pa, u32 ri
     return E_OK;
 }
 
-static SysError unmap_page(Stage2AddressSpace* s2, u64 ipa, bool revoke_device) {
-    if (!s2 || !s2->built || (s2->active && !revoke_device)) return E_INVALID;
-    if ((ipa & (PAGE_SIZE - 1)) != 0 || ipa >= (1ull << s2->ipa_bits)) return E_INVALID;
-
-    if (revoke_device) {
-        Stage2MemType type{};
-        if (!stage2_lookup_page(s2, ipa, nullptr, &type)) return E_NOTFOUND;
-        if (type != Stage2MemType::Device) return E_PERM;
+// Range removal never splits or allocates. Teardown must work even when
+// mapping records and physical memory are exhausted. CallGuard excludes guest
+// entry; EL2 entry invalidates the selected VMID before execution resumes.
+static SysError unmap_range(Stage2AddressSpace* s2, u64 ipa, u64 size, bool device_only) {
+    if (!s2 || !s2->built || (s2->active && !device_only) || !size || ipa % PAGE_SIZE ||
+        size % PAGE_SIZE || ipa >= (1ull << s2->ipa_bits) || size > (1ull << s2->ipa_bits) - ipa) {
+        return E_INVALID;
     }
-
-    const u64 l1_desc = table_ptr(s2->root_table_phys)[level_index(ipa, 1)];
-    if (is_table_desc(l1_desc)) {
-        const PhysAddr l2_pa = l1_desc & S2_DESC_ADDR_MASK;
-        const u64 l2_desc = table_ptr(l2_pa)[level_index(ipa, 2)];
-        if (is_table_desc(l2_desc)) {
-            const PhysAddr l3_pa = l2_desc & S2_DESC_ADDR_MASK;
-            table_ptr(l3_pa)[level_index(ipa, 3)] = 0;
-        } else if ((l2_desc & S2_DESC_VALID) != 0) {
-            // A block covers this page: split so only this page is removed and
-            // the rest of the 2 MiB unit keeps its mapping.
-            const SysError rc = split_block(s2, ipa & ~(kStage2BlockSize - 1));
-            if (rc != E_OK) return rc;
-            const PhysAddr l3_pa = table_ptr(l2_pa)[level_index(ipa, 2)] & S2_DESC_ADDR_MASK;
-            table_ptr(l3_pa)[level_index(ipa, 3)] = 0;
+    const u64 end = ipa + size;
+    // Validate the whole request before mutation, including mixed Device/RAM
+    // requests. Revocation must never remove ordinary RAM.
+    for (const auto& mapping : s2->mappings) {
+        if (!mapping.valid) {
+            continue;
+        }
+        const u64 unit = 1ull << mapping.pages_log2;
+        if (!range_overlaps(ipa, size, mapping.ipa, unit)) {
+            continue;
+        }
+        if (device_only && mapping.mem_type != Stage2MemType::Device) {
+            return E_PERM;
+        }
+        if (mapping.ipa < ipa || unit > end - mapping.ipa) {
+            return E_INVALID;
         }
     }
-
-    for (u32 i = 0; i < kMaxStage2Mappings; ++i) {
-        Stage2Mapping& mapping = s2->mappings[i];
-        if (!mapping.valid || mapping.ipa != ipa) continue;
+    for (auto& mapping : s2->mappings) {
+        if (!mapping.valid || mapping.ipa < ipa || mapping.ipa >= end) {
+            continue;
+        }
+        const u64 root = table_ptr(s2->root_table_phys)[level_index(mapping.ipa, 1)];
+        const PhysAddr l2 = root & S2_DESC_ADDR_MASK;
+        auto& link = table_ptr(l2)[level_index(mapping.ipa, 2)];
+        if (mapping.pages_log2 == kStage2BlockShift) {
+            link = 0;
+        } else {
+            table_ptr(link & S2_DESC_ADDR_MASK)[level_index(mapping.ipa, 3)] = 0;
+        }
         mapping.valid = false;
-        if (s2->mapped_records > 0) --s2->mapped_records;
-        if (s2->mapped_pages > 0) --s2->mapped_pages;
-        prune_tables(s2, ipa);
-        return E_OK;
+        --s2->mapped_records;
+        s2->mapped_pages -= 1ull << (mapping.pages_log2 - kStage2PageShift);
+        prune_tables(s2, mapping.ipa);
     }
-    return E_NOTFOUND;
+    return E_OK;
+}
+
+SysError stage2_unmap_range(Stage2AddressSpace* s2, u64 ipa, u64 size) {
+    return unmap_range(s2, ipa, size, false);
+}
+
+SysError stage2_revoke_device_range(Stage2AddressSpace* s2, u64 ipa, u64 size) {
+    return unmap_range(s2, ipa, size, true);
+}
+
+static SysError unmap_page(Stage2AddressSpace* s2, u64 ipa, bool revoke_device) {
+    if (!s2 || !s2->built || (s2->active && !revoke_device)) {
+        return E_INVALID;
+    }
+    if (ipa % PAGE_SIZE || ipa >= (1ull << s2->ipa_bits)) {
+        return E_INVALID;
+    }
+    Stage2Mapping* mapping = find_mapping(s2, ipa);
+    if (!mapping) {
+        mapping = find_mapping(s2, ipa & ~(kStage2BlockSize - 1));
+        if (!mapping || mapping->pages_log2 != kStage2BlockShift) {
+            return E_NOTFOUND;
+        }
+    }
+    if (revoke_device && mapping->mem_type != Stage2MemType::Device) {
+        return E_PERM;
+    }
+    if (mapping->pages_log2 == kStage2BlockShift) {
+        const SysError rc = split_block(s2, mapping->ipa);
+        if (rc != E_OK) {
+            return rc;
+        }
+    }
+    return unmap_range(s2, ipa, PAGE_SIZE, revoke_device);
 }
 
 SysError stage2_unmap_page(Stage2AddressSpace* s2, u64 ipa) {

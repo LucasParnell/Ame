@@ -58,7 +58,110 @@ u64 leaf_desc(const vm::Stage2AddressSpace* s, u64 ipa) {
 }
 } // namespace
 
+static void split_failure_preserves_mapping() {
+    auto* s = new vm::Stage2AddressSpace{};
+    assert(vm::stage2_create(s) == E_OK);
+    constexpr u64 base = 0x40000000;
+    constexpr PhysAddr backing = 0x200000;
+    assert(vm::stage2_map_block(s, base, backing, RIGHT_READ, vm::Stage2MemType::NormalWB) == E_OK);
+    // Leave one fewer free record than the net expansion of a block split.
+    const u32 occupied = vm::kMaxStage2Mappings - (vm::kStage2BlockPages - 2);
+    for (u32 i = 1; i < occupied; ++i) {
+        assert(vm::stage2_map_page(s, base + vm::kStage2BlockSize + i * PAGE_SIZE, 0x1000,
+                                   RIGHT_READ) == E_OK);
+    }
+    const auto records = s->mapped_records;
+    const auto covered = s->mapped_pages;
+    const auto tables = pages.size();
+    assert(vm::stage2_unmap_page(s, base + PAGE_SIZE) == E_OVERFLOW);
+    assert(s->mapped_records == records && s->mapped_pages == covered);
+    assert(pages.size() == tables);
+    for (u32 i = 0; i < vm::kStage2BlockPages; ++i) {
+        assert(vm::stage2_lookup_page(s, base + i * PAGE_SIZE, nullptr) == backing + i * PAGE_SIZE);
+    }
+    // Free exactly one slot: the split now has its net 511-record budget.
+    assert(vm::stage2_unmap_page(s, base + vm::kStage2BlockSize + (occupied - 1) * PAGE_SIZE) ==
+           E_OK);
+    assert(vm::stage2_unmap_page(s, base + PAGE_SIZE) == E_OK);
+    assert(s->mapped_records == vm::kMaxStage2Mappings - 1);
+    assert(s->mapped_pages == covered - 2);
+    assert(vm::stage2_lookup_page(s, base + PAGE_SIZE, nullptr) == 0);
+    assert(leaf_desc(s, base) ==
+           (backing | kValid | kTable | kAf | kShInner | kMemNormalWB | kS2apRead | kXn));
+    assert(vm::stage2_lookup_page(s, base + 2 * PAGE_SIZE, nullptr) == backing + 2 * PAGE_SIZE);
+    assert(vm::stage2_destroy(s) == E_OK);
+    delete s;
+    assert(pages.empty());
+}
+
+static void block_teardown_and_coverage() {
+    auto* s = new vm::Stage2AddressSpace{};
+    assert(vm::stage2_create(s) == E_OK);
+    constexpr u64 base = 0x40000000;
+    constexpr u64 ram_bytes = 512ull * 1024 * 1024;
+    constexpr PhysAddr backing = 0x200000;
+    for (u64 offset = 0; offset < ram_bytes; offset += vm::kStage2BlockSize) {
+        assert(vm::stage2_map_block(s, base + offset, backing + offset, RIGHT_READ | RIGHT_EXEC,
+                                    vm::Stage2MemType::NormalWB) == E_OK);
+    }
+    assert(s->mapped_records == ram_bytes / vm::kStage2BlockSize);
+    assert(s->mapped_pages == ram_bytes / PAGE_SIZE);
+    assert(vm::stage2_has_capacity(s, vm::kMaxStage2Mappings - s->mapped_records));
+    assert(!vm::stage2_has_capacity(s, UINT64_MAX));
+    const auto records = s->mapped_records;
+    s->mapped_records = vm::kMaxStage2Mappings + 1;
+    assert(!vm::stage2_has_capacity(s, 1));
+    s->mapped_records = records;
+    assert(vm::stage2_lookup_page(s, base + ram_bytes - PAGE_SIZE, nullptr) ==
+           backing + ram_bytes - PAGE_SIZE);
+    // Independent L2 decoding: block attributes and PA, not just soft metadata.
+    const auto* root = reinterpret_cast<const u64*>(s->root_table_phys);
+    const auto* l2 = reinterpret_cast<const u64*>(root[index_of(base, 1)] & kAddrMask);
+    assert(l2[index_of(base, 2)] == (backing | kValid | kAf | kShInner | kMemNormalWB | kS2apRead));
+    assert(vm::stage2_validate_no_overlap(s, base - PAGE_SIZE, 2 * PAGE_SIZE) == E_BUSY);
+    const auto tables = pages.size();
+    allocation_budget = 0;
+    assert(vm::stage2_map_page(s, base + PAGE_SIZE, 0x1000, RIGHT_WRITE) == E_BUSY);
+    assert(vm::stage2_unmap_page(s, base + PAGE_SIZE) == E_NOMEM);
+    assert(s->mapped_records == records && pages.size() == tables);
+    assert(vm::stage2_unmap_range(s, base + PAGE_SIZE, vm::kStage2BlockSize) == E_INVALID);
+    assert(s->mapped_records == records && pages.size() == tables);
+    // Removing complete blocks needs neither new table pages nor free records.
+    assert(vm::stage2_unmap_range(s, base, ram_bytes) == E_OK);
+    assert(s->mapped_records == 0 && s->mapped_pages == 0 && s->next_level_table_count == 0);
+    allocation_budget = -1;
+
+    constexpr u64 bar_bytes = 8 * vm::kStage2BlockSize;
+    for (u64 off = 0; off < bar_bytes; off += vm::kStage2BlockSize) {
+        assert(vm::stage2_map_block(s, base + off, backing + off, RIGHT_READ | RIGHT_WRITE,
+                                    vm::Stage2MemType::Device) == E_OK);
+    }
+    constexpr u64 other = base + bar_bytes;
+    const auto device_records = s->mapped_records;
+    const auto ram_pages = vm::kMaxStage2Mappings - device_records;
+    for (u64 i = 0; i < ram_pages; ++i) {
+        assert(vm::stage2_map_page(s, other + i * PAGE_SIZE, 0x1000, RIGHT_READ) == E_OK);
+    }
+    assert(!vm::stage2_has_capacity(s, 1));
+    assert(vm::stage2_activate(s) == E_OK);
+    allocation_budget = 0;
+    assert(vm::stage2_unmap_range(s, base, bar_bytes) == E_INVALID);
+    assert(vm::stage2_revoke_device_range(s, base, bar_bytes + PAGE_SIZE) == E_PERM);
+    assert(s->mapped_records == vm::kMaxStage2Mappings);
+    assert(vm::stage2_revoke_device_range(s, base, bar_bytes) == E_OK);
+    assert(s->mapped_records == ram_pages && s->mapped_pages == ram_pages);
+    assert(vm::stage2_lookup_page(s, base, nullptr) == 0);
+    assert(vm::stage2_lookup_page(s, other, nullptr) == 0x1000);
+    assert(vm::stage2_revoke_device_range(s, base, bar_bytes) == E_OK); // idempotent
+    allocation_budget = -1;
+    assert(vm::stage2_destroy(s) == E_OK);
+    delete s;
+    assert(pages.empty());
+}
+
 int main() {
+    split_failure_preserves_mapping();
+    block_teardown_and_coverage();
     auto* s = new vm::Stage2AddressSpace{};
     assert(vm::stage2_create(s) == E_OK);
     const auto baseline = pages.size();

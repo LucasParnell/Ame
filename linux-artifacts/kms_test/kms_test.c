@@ -248,8 +248,12 @@ int dango_kms_test(void) {
         return k_fail("crtc not scanning our fb");
     }
 
-    /* Keep the fd open: closing would release master. The caller keeps the
-     * process (and the modeset) alive for the host capture. */
+    /* Keep the framebuffer alive but hand DRM authority back to gpud after
+     * this self-test. The retained file owns the KMS test framebuffer. */
+    if (mx_ioctl((int)fd, DRM_IOCTL_DROP_MASTER, 0) != 0) {
+        (void)mx_close((int)fd);
+        return k_fail("drop_master");
+    }
     char buf[160];
     char* p = mx_append_str(buf, "dango: kms fb=");
     p = mx_append_u32(p, fb.fb_id);

@@ -15,6 +15,7 @@ def module(name, path):
 
 profile = module('profile', 'scripts/linux/check-profile.py')
 proof = module('proof', 'scripts/test/gpu-appliance.py')
+tty_proof = module('tty_proof', 'scripts/test/fb-tty.py')
 
 
 class GpuArtifacts(unittest.TestCase):
@@ -39,3 +40,13 @@ class GpuArtifacts(unittest.TestCase):
         self.assertFalse(checks['contained_dma'])
         checks, _ = proof.evidence('gpu proof: faults=0 quarantines=0 routes=1 injected=0 smmu=1')
         self.assertFalse(checks['host_interrupts'])
+
+    def test_staging_is_not_completed_tty_presentation(self):
+        staged = tty_proof.ef.MARKERS['gpu_frame_staged']
+        checks, _ = tty_proof.evidence(staged)
+        self.assertTrue(checks['frame_staged'])
+        self.assertFalse(checks['frame_presented'])
+        completed = staged + '\n' + tty_proof.ef.MARKERS['gpu_frame_presented']
+        checks, _ = tty_proof.evidence(completed)
+        self.assertTrue(checks['frame_presented'])
+        self.assertFalse(all(checks.values()))  # still requires DMA/driver/boot evidence

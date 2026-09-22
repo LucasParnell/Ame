@@ -71,9 +71,12 @@ int gdrm_card_open(struct gdrm_card *card, const char *path) {
         return -1;
     }
     card->fd = (int)fd;
-    /* A primary node grants master to its first opener. Making it explicit lets
-     * the present path fail loudly later if another opener already holds it. */
-    card->master = mx_ioctl((int)fd, DRM_IOCTL_SET_MASTER, 0) == 0;
+    /* A primary node grants master to its first opener. Require it explicitly
+     * before advertising a usable modesetting device. */
+    if (gdrm_card_acquire_master(card) != 0) {
+        gdrm_card_close(card);
+        return -1;
+    }
 
     memset(&res, 0, sizeof(res));
     if (mx_ioctl((int)fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0) {
@@ -113,7 +116,7 @@ void gdrm_card_close(struct gdrm_card *card) {
     }
     if (card->fd >= 0) {
         if (card->master) {
-            (void)mx_ioctl(card->fd, GDRM_IOCTL_DROP_MASTER, 0);
+            (void)mx_ioctl(card->fd, DRM_IOCTL_DROP_MASTER, 0);
         }
         (void)mx_close(card->fd);
     }
@@ -121,12 +124,39 @@ void gdrm_card_close(struct gdrm_card *card) {
     card->master = 0;
 }
 
-void gdrm_card_release_master(struct gdrm_card *card) {
-    if (!card || card->fd < 0 || !card->master) {
-        return;
+int gdrm_card_acquire_master(struct gdrm_card* card) {
+    if (!card || card->fd < 0) {
+        return -1;
     }
-    (void)mx_ioctl(card->fd, GDRM_IOCTL_DROP_MASTER, 0);
+    if (mx_ioctl(card->fd, DRM_IOCTL_SET_MASTER, 0) != 0) {
+        return -1;
+    }
+    card->master = 1;
+    return 0;
+}
+
+int gdrm_fb_flush(struct gdrm_card* card, uint32_t fb_id) {
+    if (!card || card->fd < 0 || !fb_id) {
+        return -1;
+    }
+    struct drm_mode_fb_dirty_cmd dirty;
+    memset(&dirty, 0, sizeof(dirty));
+    dirty.fb_id = fb_id;
+    return mx_ioctl(card->fd, DRM_IOCTL_MODE_DIRTYFB, &dirty) == 0 ? 0 : -1;
+}
+
+int gdrm_card_release_master(struct gdrm_card* card) {
+    if (!card || card->fd < 0) {
+        return -1;
+    }
+    if (!card->master) {
+        return 0;
+    }
+    if (mx_ioctl(card->fd, DRM_IOCTL_DROP_MASTER, 0) != 0) {
+        return -1;
+    }
     card->master = 0;
+    return 0;
 }
 
 int gdrm_card_enumerate(struct gdrm_card *card) {

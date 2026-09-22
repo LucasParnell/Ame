@@ -27,6 +27,7 @@ using integrity::bytes_equal;
 #include "mochi/log.h"
 #include "mochi/fs.h"
 #include "mochi/console_config.h"
+#include "midix/abi/dango_guest_layout.h"  // guest layout: VA spans
 #include "mochi/svc_registry.h"
 #include "mochi/svc_control.h"
 #include "midix/abi/boot.h"
@@ -44,13 +45,21 @@ constexpr uint32_t kRingOrder = 6;
 constexpr uint32_t kFbCmdRingOrder = 10;       // 1024 slots for chatty per-cell tty rendering.
 constexpr uint32_t kConsoleMirrorRingOrder = 10; // 48 KiB of UART->TTY mirror backlog.
 constexpr uint64_t kVaManifest = 0x2000'0000ull;
+// The initrd is mapped as one object starting at kVaInitrd, so every fixed
+// mapping above it begins after the layout's initrd span: 64 MiB for the
+// appliance initramfs, 384 MiB for the libc rootfs (a 186 MiB initrd used to run
+// straight through kVaSvcRegistry and fail the boot).
 constexpr uint64_t kVaInitrd = 0x2400'0000ull;
-constexpr uint64_t kVaInitLogRing = 0x2800'0000ull;
-constexpr uint64_t kVaConsoleConfig  = 0x2802'0000ull;
-constexpr uint64_t kVaSvcCtlReqRing = 0x2807'0000ull;
-constexpr uint64_t kVaSvcCtlReplyRing = 0x2808'0000ull;
-constexpr uint64_t kVaBootInfoBase   = 0x2900'0000ull;
-constexpr uint64_t kVaSvcRegistry    = 0x2A00'0000ull;
+constexpr uint64_t kVaInitLogRing = kVaInitrd + DANGO_INITRD_VA_SPAN;
+constexpr uint64_t kVaConsoleConfig  = kVaInitLogRing + 0x2'0000ull;
+constexpr uint64_t kVaSvcCtlReqRing = kVaInitLogRing + 0x7'0000ull;
+constexpr uint64_t kVaSvcCtlReplyRing = kVaInitLogRing + 0x8'0000ull;
+constexpr uint64_t kVaBootInfoBase   = kVaInitLogRing + 0x10'0000'0ull;
+constexpr uint64_t kVaSvcRegistry    = kVaInitLogRing + 0x20'0000'0ull;
+// Per-service session directories follow the registry (64 KiB each), so they
+// move with the layout instead of sitting at a literal that a large initrd
+// covers.
+constexpr uint64_t kVaSessions       = kVaSvcRegistry + 0x1'0000ull;
 
 
 static CapHandle kCapManifest, kCapInitrd, kCapSupervisor, kCapUart;
@@ -557,8 +566,15 @@ static void create_sessions() {
         auto& server = g_servers[index];
         if (!find_service(g_rt.services, g_rt.service_count, server.name)) continue;
         server.arena = as_cap(sys_arena_create(4096, 0));
-        const uint64_t va = 0x2b000000ull + index * 0x10000;
-        if (!server.arena || sys_map_page(server.arena, va, RIGHT_READ | RIGHT_WRITE)) fail_halt("init: sessions map failed\n");
+        const uint64_t va = kVaSessions + index * 0x10000;
+        if (!server.arena) {
+            fail_halt("init: sessions arena create failed\n");
+        }
+        if (sys_map_page(server.arena, va, RIGHT_READ | RIGHT_WRITE)) {
+            // Distinguish "the arena could not be mapped here" from a capacity
+            // failure: a layout that moves the windows can collide with it.
+            fail_halt("init: sessions map failed (va out of window?)\n");
+        }
         server.directory = reinterpret_cast<MxSessionDirectory*>(va);
         *server.directory = {};
         server.directory->magic = MX_SESSION_MAGIC;

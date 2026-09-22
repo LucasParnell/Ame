@@ -849,6 +849,13 @@ static int gpud_present_finish(const struct gpud_pending *pending) {
         }
     }
 
+    // Writes to a mapped dumb buffer do not themselves upload pixels to a
+    // virtio scanout resource. Ask the Linux DRM driver to flush every present,
+    // including when the framebuffer and CRTC have not changed.
+    if (status == MX_OK && gdrm_fb_flush(&g_card, buffer->fb_id) != 0) {
+        status = MX_ERR_FAULT;
+    }
+
     memset(&out, 0, sizeof(out));
     out.status = status;
     out.buffer_id = buffer->id;
@@ -883,7 +890,7 @@ static int gpud_complete_pending(void) {
 
 /* --- Serve loop ----------------------------------------------------------- */
 
-static void gpud_serve(void) {
+static void gpud_serve(int bootstrap_handoff) {
     for (;;) {
         int progress = 0;
         int drained;
@@ -899,7 +906,7 @@ static void gpud_serve(void) {
         if (progress) {
             continue;
         }
-        if (g_presents_completed != 0 && g_pending_count == 0) {
+        if (bootstrap_handoff && g_presents_completed != 0 && g_pending_count == 0) {
             /* Session complete and nothing queued: wait out the handoff grace
              * for a further request, then return to the caller. */
             long idle = gpud_channel_wait_timeout(&g_channel, GPUD_HANDOFF_GRACE_MS);
@@ -959,17 +966,41 @@ int dango_gpud_run(void) {
     gpud_import_probe();
 
     mx_puts("dango-gpud: ready\n");
-    gpud_serve();
+    gpud_serve(1);
 
     /* Hand the appliance back: release DRM master but keep the card open so the
      * presented framebuffer stays on the CRTC, and close the channel so the
      * boot-time self-tests can open it. Both happen whether the loop ended by a
      * completed session or by a terminal transport error. */
+    // The shared-region fd and registered buffers survive the self-test handoff.
+    const int released = gdrm_card_release_master(&g_card);
+    if (released != 0) {
+        mx_puts("dango-gpud: release master FAILED\n");
+    }
+    gpud_channel_close(&g_channel);
+    return g_presents_completed != 0 && released == 0 ? 0 : -1;
+}
+
+/* Resume the same registered buffers and ids after KMS/channel self-tests.
+ * There is one channel owner at a time; steady-state service has no idle exit. */
+int dango_gpud_resume(void) {
+    if (!g_drm_ready || gpud_channel_open(&g_channel) != 0) {
+        return -1;
+    }
+    if (g_channel.layout.desc.boot_generation != g_generation ||
+        gdrm_card_acquire_master(&g_card) != 0) {
+        gpud_channel_close(&g_channel);
+        return -1;
+    }
+    mx_puts("dango-gpud: serving native frames\n");
+    gpud_serve(0);
+    if (gdrm_card_release_master(&g_card) != 0) {
+        mx_puts("dango-gpud: release master FAILED\n");
+    }
     if (g_shm_fd >= 0) {
         (void)mx_close(g_shm_fd);
         g_shm_fd = -1;
     }
-    gdrm_card_release_master(&g_card);
     gpud_channel_close(&g_channel);
-    return g_presents_completed != 0 ? 0 : -1;
+    return -1; /* Steady-state service returns only after a transport failure. */
 }

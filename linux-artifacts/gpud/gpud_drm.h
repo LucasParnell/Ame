@@ -43,13 +43,11 @@ struct gdrm_gem_close {
 
 #define GDRM_IOCTL_MODE_RMFB DRM_IOWR(0xAF, uint32_t)
 #define GDRM_IOCTL_MODE_DESTROY_DUMB DRM_IOWR(0xB4, uint32_t)
-#define GDRM_IOCTL_DROP_MASTER DRM_IO(0x1f)
 #define GDRM_IOCTL_GEM_CLOSE DRM_IOC(1, 'd', 0x09, sizeof(struct gdrm_gem_close))
 #define GDRM_IOCTL_PRIME_FD_TO_HANDLE DRM_IOWR(0x2e, struct gdrm_prime_handle)
 
 DRM_ASSERT(GDRM_IOCTL_MODE_RMFB == 0xC00464AFu, "RMFB request");
 DRM_ASSERT(GDRM_IOCTL_MODE_DESTROY_DUMB == 0xC00464B4u, "DESTROY_DUMB request");
-DRM_ASSERT(GDRM_IOCTL_DROP_MASTER == 0x0000641Fu, "DROP_MASTER request");
 DRM_ASSERT(GDRM_IOCTL_GEM_CLOSE == 0x40086409u, "GEM_CLOSE request");
 DRM_ASSERT(sizeof(struct gdrm_prime_handle) == 12, "drm_prime_handle layout");
 DRM_ASSERT(GDRM_IOCTL_PRIME_FD_TO_HANDLE == 0xC00C642Eu, "PRIME_FD_TO_HANDLE request");
@@ -104,7 +102,9 @@ void gdrm_card_close(struct gdrm_card *card);
 /* Release DRM master while keeping the card open, so the framebuffer this file
  * created stays on the CRTC (closing would drop it: drm_file_free() calls
  * drm_fb_release()). Used when the server hands the card to the self-tests. */
-void gdrm_card_release_master(struct gdrm_card *card);
+int gdrm_card_release_master(struct gdrm_card* card);
+int gdrm_card_acquire_master(struct gdrm_card* card);
+int gdrm_fb_flush(struct gdrm_card* card, uint32_t fb_id);
 
 /* Fill `outputs`/`modes` from the connector tables (preferred mode first).
  * Returns 0 when at least one output with modes was found. */

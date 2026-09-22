@@ -91,7 +91,8 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
     if iommu:
         machine += ',iommu=smmuv3,default-bus-bypass-iommu=off'
     args = ['qemu-system-aarch64', '-machine', machine,
-            '-cpu', 'cortex-a57', '-smp', str(cpus), '-m', '512M', '-device', 'ramfb',
+            '-cpu', 'cortex-a57', '-smp', str(cpus),
+            '-m', os.environ.get('AME_QEMU_MEM', '512M'), '-device', 'ramfb',
             '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,bus=xhci.0',
             '-device', 'usb-mouse,bus=xhci.0', '-display', 'none',
             '-serial', f'file:{host}', '-serial', f'file:{guest}']

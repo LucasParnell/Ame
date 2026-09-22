@@ -157,9 +157,11 @@ python3 scripts/test/kms-display.py  --build out/qemu-gpu     # Phase F proof (s
   starting at the window base aliased the native xHCI (`0x10000000`) and broke its reset.
 - **GIC interrupt specifiers** are `<type number flags>` and the SPI INTID is **32 + number**
   (QEMU virt PCI INTx pin A slot 0 → number 3). Using the raw number is rejected by `irq_bindable`.
-- **Stage-2 table sizing.** Guest RAM is mapped page-granular; 128 MiB alone is 32768 entries
-  (`kMaxStage2Mappings` is 40960). `device_map_bar` returns `E_NOTFOUND` for `bar.base == 0` and
-  `E_BUSY`/`E_OVERFLOW` for the table being full — check the headroom guard in `vm_device.cc`.
+- **Stage-2 table sizing.** RAM and aligned MMIO use 2 MiB blocks. Coverage
+  (`mapped_pages`) and capacity (`mapped_records`) are distinct. Use
+  `stage2_has_capacity` for budgets and whole-range unmap/revoke for teardown;
+  splitting blocks during teardown can fail under memory pressure. See
+  `docs/GPU_APPLIANCE_GUEST_MEMORY.md` for the remaining libc guest layout work.
 - **MSI-X BAR must not be mapped.** `bar_range_safe` rejects mapping a BAR containing the MSI-X
   table — map the virtio modern BAR (BAR4), not BAR1.
 - **BAR guest IPA must be aligned to the BAR size** (asserted at compile time in the manager).
@@ -208,13 +210,11 @@ python3 scripts/test/kms-display.py  --build out/qemu-gpu     # Phase F proof (s
 
 ## Immediate next step
 
-**Phase H** (`docs/GPU_APPLIANCE_TODO.md`): implement `dango-gpud` control-plane
-requests (`GPU_HELLO`, `GPU_ENUM_OUTPUTS`, `GPU_GET_MODES`, `GPU_ERROR`) over the
-Phase G channel, with a Mochi probe enumerating the virtio-gpu output. Replace
-the startup transport test with the service protocol as that phase lands.
+Continue `docs/GPU_APPLIANCE_REMAINING.md` from the current code, not the historical
+phase notes above. Stage-2 block mapping is integrated and its split/teardown
+failure paths are tested. The actual appliance TTY frame now passes
+`AME_VERIFY_FB_TTY=1`; gpud resumes after KMS/channel self-tests and stays serving.
 
-Phase G's Linux driver is built in through a shallow source overlay; the original
-Linux sources remain read-only. Native userspace iteration also rebuilds
-`linux-artifacts/channel_test/channel_test.c`. The aperture is outside appliance
-RAM at `0x48000000` and never enters the GPU DMA domain. See the Phase G delivery
-for the exact ABI and the existing single-host-CPU VM-runner starvation limit.
+The next dependency for native Vulkan is the shared minimal/lavapipe guest memory
+layout and rootfs delivery described in `docs/GPU_APPLIANCE_GUEST_MEMORY.md`.
+The standalone libc executor proof does not establish native N/O completion.

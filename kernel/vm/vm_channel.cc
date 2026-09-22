@@ -244,8 +244,9 @@ SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
         reserved_size > (1ull << owner->stage2.ipa_bits) - ipa) return E_INVALID;
     rc = stage2_validate_no_overlap(&owner->stage2, ipa, reserved_size);
     if (rc != E_OK) return rc;
-    if ((bytes + DANGO_SHM_GUEST_SIZE) / PAGE_SIZE >
-        kMaxStage2Mappings - owner->stage2.mapped_records) return E_OVERFLOW;
+    if (!stage2_has_capacity(&owner->stage2, (bytes + DANGO_SHM_GUEST_SIZE) / PAGE_SIZE)) {
+        return E_OVERFLOW;
+    }
     const PhysAddr page = mm::alloc_page();
     if (!page) return E_NOMEM;
     libk::memset(reinterpret_cast<void*>(page), 0, PAGE_SIZE);

@@ -92,6 +92,7 @@ int dango_channel_test(void);
 
 #ifdef DANGO_GPU_GPUD
 int dango_gpud_run(void);
+int dango_gpud_resume(void);
 #endif
 
 void _start(void) {
@@ -117,7 +118,9 @@ void _start(void) {
         // host's bootstrap session is done gpud drops master, keeps the card
         // open so the presented frame stays on screen, closes the channel and
         // returns, leaving the KMS and transport self-tests below untouched.
-        (void)dango_gpud_run();
+        if (dango_gpud_run() != 0) {
+            mx_puts("dango-gpud: bootstrap FAILED\n");
+        }
         mx_puts("dango-gpud: exited\n");
 #endif
 #ifdef DANGO_GPU_KMS
@@ -135,6 +138,12 @@ void _start(void) {
 
 #ifdef DANGO_CHANNEL_TEST
     mx_puts(dango_channel_test() ? "dango: channel test passed\n" : "dango: channel test FAILED\n");
+#endif
+
+#ifdef DANGO_GPU_GPUD
+    if (dango_gpud_resume() != 0) {
+        mx_puts("dango-gpud: native frame service FAILED\n");
+    }
 #endif
 
     for (;;) {

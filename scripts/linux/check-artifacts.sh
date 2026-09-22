@@ -4,7 +4,12 @@ set -euo pipefail
 AME="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-${AME}/build/dango-linux}"
 
-required=(Image initramfs.cpio dango-linux.dtb dango-agent manifest.toml)
+# The freestanding guest boots the appliance agent as its userspace; the lavapipe
+# guest's userspace is the libc rootfs inside the initramfs, so it ships no agent.
+required=(Image initramfs.cpio dango-linux.dtb manifest.toml)
+if [[ "${DANGO_LINUX_GUEST:-minimal}" != "lavapipe" ]]; then
+    required+=(dango-agent)
+fi
 for name in "${required[@]}"; do
     if [[ ! -s "${OUT}/${name}" ]]; then
         echo "error: missing or empty ${OUT}/${name}" >&2
@@ -12,11 +17,14 @@ for name in "${required[@]}"; do
     fi
 done
 
-file "${OUT}/dango-agent" | grep -q 'ARM aarch64' || {
-    echo "error: dango-agent is not an AArch64 ELF" >&2
-    file "${OUT}/dango-agent" >&2 || true
-    exit 1
-}
+# The agent runs before the MMU with caches off, so it must be AArch64 and static.
+if [[ -e "${OUT}/dango-agent" ]]; then
+    file "${OUT}/dango-agent" | grep -q 'ARM aarch64' || {
+        echo "error: dango-agent is not an AArch64 ELF" >&2
+        file "${OUT}/dango-agent" >&2 || true
+        exit 1
+    }
+fi
 
 python3 "${AME}/scripts/linux/check-initramfs.py" "${OUT}/initramfs.cpio"
 

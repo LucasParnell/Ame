@@ -218,3 +218,19 @@ capability/VM isolation and mapped-channel reclamation. See
 - **Dead MSI route.** `add_or_update_msi_route` refuses by name (`E_NOTIMPL`,
   phase P–Q) when no host MSI line was reserved, instead of creating a route that
   can never be delivered.
+
+### GPU continuation from `0da9833` (2026-09-22)
+
+- Fixed block-split failure atomicity and exact-capacity accounting; whole-range
+  RAM/MMIO rollback and revocation no longer allocate. Shared-arena and assignment
+  headroom use a shared record-capacity check, with no unsigned underflow.
+- Propagated block-map errors rather than retrying them as page maps. The host
+  regressions cover 512 MiB capacity, failed splits, unchanged overlap rejection,
+  and allocation-free active Device revocation at full record capacity.
+- Repaired the native-frame guest service handoff after KMS/channel tests, and
+  added shared Linux DRM `DIRTYFB` UAPI plus a checked flush for each present.
+- Wired the TTY gate and changed its proof from the native framebuffer/staging
+  marker to completed presentation and the assigned GPU's captured shell text.
+- Fixed stale provenance after branch advances and made the gate check it against
+  the current checkout. The larger libc appliance layout/native Vulkan bridge
+  remains unfinished; see `GPU_APPLIANCE_GUEST_MEMORY.md`.

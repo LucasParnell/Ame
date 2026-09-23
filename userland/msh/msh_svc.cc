@@ -20,6 +20,22 @@ static void put_rule(uint32_t width) {
     put("\n");
 }
 
+// " label=" + a hex/decimal value: the shape every field below prints.
+static void field_hex(const char* label, uint64_t v) { put(label); put_hex(v); }
+static void field_dec(const char* label, uint64_t v) { put(label); put_dec(v); }
+
+// Walk BootInfo entries, optionally filtered to one entry type. Every "list the
+// things of type X" builtin is this loop with a different body.
+template <typename Fn>
+static void for_boot_entries(mx_u32_t type, Fn fn) {
+    if (!g.boot) return;
+    for (uint16_t i = 0; i < g.boot->entry_count; ++i) {
+        const MxBootEntry& e = g.boot->entries[i];
+        if (type != MX_BOOT_ENTRY_NONE && e.type != type) continue;
+        fn(i, e);
+    }
+}
+
 static const char* svc_group_name(const char* name) {
     if (!name) return "other";
     if (starts_with(name, "drv.")) return "drivers";
@@ -31,16 +47,16 @@ static const char* svc_group_name(const char* name) {
 int cmd_bootinfo(int, char**) {
     if (!g.boot || !mochi::boot::valid(g.boot)) return 1;
     put("BootInfo entries: "); put_dec(g.boot->entry_count); put("\n");
-    for (uint16_t i = 0; i < g.boot->entry_count; ++i) {
-        const MxBootEntry& e = g.boot->entries[i];
+    for_boot_entries(MX_BOOT_ENTRY_NONE, [](uint16_t i, const MxBootEntry& e) {
         put("  "); put_dec(i); put("  ");
         put(boot_type_name(e.type)); put("  ");
-        put(e.name); put("  h="); put_hex(e.handle);
+        put(e.name); field_hex("  h=", e.handle);
         if (e.aux0 || e.aux1) {
-            put(" aux0="); put_hex(e.aux0); put(" aux1="); put_hex(e.aux1);
+            field_hex(" aux0=", e.aux0);
+            field_hex(" aux1=", e.aux1);
         }
         put("\n");
-    }
+    });
     return 0;
 }
 
@@ -200,25 +216,24 @@ static void print_cap_info(mx_handle_t h) {
         return;
     }
     put(cap_type_name(info.type));
-    put(" rights="); put_hex(info.rights);
-    put(" base="); put_hex(info.base);
-    put(" size="); put_hex(info.size);
-    if (info.attr) { put(" attr="); put_hex(info.attr); }
-    if (info.flags) { put(" flags="); put_hex(info.flags); }
-    if (info.aux0) { put(" aux0="); put_hex(info.aux0); }
+    field_hex(" rights=", info.rights);
+    field_hex(" base=", info.base);
+    field_hex(" size=", info.size);
+    if (info.attr) field_hex(" attr=", info.attr);
+    if (info.flags) field_hex(" flags=", info.flags);
+    if (info.aux0) field_hex(" aux0=", info.aux0);
 }
 
 int cmd_cap(int argc, char** argv) {
     if (argc < 2 || streq(argv[1], "ls")) {
         if (!g.boot) return 1;
         putln("BOOTINFO CAPABILITIES");
-        for (uint16_t i = 0; i < g.boot->entry_count; ++i) {
-            const MxBootEntry& e = g.boot->entries[i];
-            if (e.handle == MX_NULL_HANDLE) continue;
+        for_boot_entries(MX_BOOT_ENTRY_NONE, [](uint16_t i, const MxBootEntry& e) {
+            if (e.handle == MX_NULL_HANDLE) return;
             put("  "); put_dec(i); put(" "); put(e.name); put(" "); put_hex(e.handle); put(" ");
             print_cap_info(e.handle);
             put("\n");
-        }
+        });
         return 0;
     }
     if (streq(argv[1], "tree")) {
@@ -250,11 +265,10 @@ int cmd_arena(int argc, char** argv) {
     if (argc < 2 || streq(argv[1], "ls")) {
         if (!g.boot) return 1;
         putln("ARENAS");
-        for (uint16_t i = 0; i < g.boot->entry_count; ++i) {
-            const MxBootEntry& e = g.boot->entries[i];
-            if (e.type != MX_BOOT_ENTRY_ARENA) continue;
-            put("  "); put(e.name); put(" "); put_hex(e.handle); put(" "); print_cap_info(e.handle); put("\n");
-        }
+        for_boot_entries(MX_BOOT_ENTRY_ARENA, [](uint16_t, const MxBootEntry& e) {
+            put("  "); put(e.name); field_hex(" ", e.handle);
+            put(" "); print_cap_info(e.handle); put("\n");
+        });
         return 0;
     }
     if (streq(argv[1], "show")) {
@@ -276,12 +290,10 @@ int cmd_arena(int argc, char** argv) {
 static int cmd_ring_stats(int, char**) {
     if (!g.boot) return 1;
     putln("RINGS");
-    for (uint16_t i = 0; i < g.boot->entry_count; ++i) {
-        const MxBootEntry& e = g.boot->entries[i];
-        if (e.type != MX_BOOT_ENTRY_RING) continue;
-        put("  "); put(e.name); put(" order="); put_dec(e.aux0 ? e.aux0 : kDefaultOrder);
-        put(" handle="); put_hex(e.handle); put(" "); print_cap_info(e.handle); put("\n");
-    }
+    for_boot_entries(MX_BOOT_ENTRY_RING, [](uint16_t, const MxBootEntry& e) {
+        put("  "); put(e.name); field_dec(" order=", e.aux0 ? e.aux0 : kDefaultOrder);
+        field_hex(" handle=", e.handle); put(" "); print_cap_info(e.handle); put("\n");
+    });
     return 0;
 }
 
@@ -294,13 +306,11 @@ int cmd_ring(int argc, char** argv) {
 static int cmd_doorbell_stats(int, char**) {
     if (!g.boot) return 1;
     putln("DOORBELLS");
-    for (uint16_t i = 0; i < g.boot->entry_count; ++i) {
-        const MxBootEntry& e = g.boot->entries[i];
-        if (e.type != MX_BOOT_ENTRY_DOORBELL) continue;
-        put("  "); put(e.name); put(" handle="); put_hex(e.handle);
-        put(" counter="); put_dec(mx_doorbell_read(e.handle));
+    for_boot_entries(MX_BOOT_ENTRY_DOORBELL, [](uint16_t, const MxBootEntry& e) {
+        put("  "); put(e.name); field_hex(" handle=", e.handle);
+        field_dec(" counter=", mx_doorbell_read(e.handle));
         put(" "); print_cap_info(e.handle); put("\n");
-    }
+    });
     return 0;
 }
 

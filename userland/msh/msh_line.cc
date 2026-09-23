@@ -227,6 +227,14 @@ static bool try_complete_line(char* line, uint32_t cap, uint32_t* len_io, uint32
     return true;
 }
 
+// Control bytes the line editor recognises, named so the loop reads as keys
+// rather than numbers.
+constexpr char kEsc   = 27;
+constexpr char kCtrlA = 1, kCtrlB = 2, kCtrlC = 3, kCtrlD = 4, kCtrlE = 5, kCtrlF = 6;
+constexpr char kCtrlK = 11, kCtrlL = 12, kCtrlN = 14, kCtrlP = 16, kCtrlU = 21;
+constexpr char kDel = 0x7f;
+constexpr uint32_t kClearLines = 48;
+
 bool read_line(char* out, uint32_t cap) {
     if (!out || cap == 0) return false;
     out[0] = '\0';
@@ -235,132 +243,134 @@ bool read_line(char* out, uint32_t cap) {
     uint32_t prev_render_len = 0;
     char prompt_text[kPromptMax];
     build_prompt(prompt_text, sizeof(prompt_text));
-    int32_t history_nav = -1;
+    int32_t history_nav = -1;   // -1: editing a fresh line; >=0: history offset
     char live_line[kLineMax]{};
 
-    auto load_history = [&](int32_t nav) {
+    const auto redraw = [&] { render_edit_line(prompt_text, out, len, cursor, &prev_render_len); };
+
+    const auto load_history = [&](int32_t nav) {
         if (g_history_count == 0) return;
         if (nav < 0) nav = 0;
         if (nav >= static_cast<int32_t>(g_history_count)) nav = static_cast<int32_t>(g_history_count) - 1;
-        const uint32_t idx = g_history_count - 1u - static_cast<uint32_t>(nav);
-        const char* entry = history_get(idx);
+        const char* entry = history_get(g_history_count - 1u - static_cast<uint32_t>(nav));
         if (!entry) return;
         copy_str(out, cap, entry);
         len = slen(out);
         cursor = len;
         history_nav = nav;
-        render_edit_line(prompt_text, out, len, cursor, &prev_render_len);
+        redraw();
     };
 
-    RingSlot slot{};
-    int esc_state = 0;
+    // Up / down through history: shared by the arrow keys and ^P / ^N.
+    const auto history_prev = [&] {
+        if (history_nav < 0) copy_str(live_line, sizeof(live_line), out);
+        load_history(history_nav < 0 ? 0 : history_nav + 1);
+    };
+    const auto history_next = [&] {
+        if (history_nav > 0) {
+            load_history(history_nav - 1);
+        } else if (history_nav == 0) {
+            copy_str(out, cap, live_line);
+            len = slen(out);
+            cursor = len;
+            history_nav = -1;
+            redraw();
+        }
+    };
+
+    // Forward-delete at the cursor: shared by ^D and the ESC[3~ sequence.
+    const auto delete_at_cursor = [&] {
+        if (cursor >= len) return;
+        for (uint32_t j = cursor; j < len; ++j) out[j] = out[j + 1];
+        --len;
+        redraw();
+    };
+
+    // Escape (arrow / function key) sequence state.
+    enum EscState { EscNone, EscSeen, EscCsi, EscParam };
+    EscState esc = EscNone;
     char esc_param = '\0';
+
     for (;;) {
         if (!g.have_terminal || !g.term.valid()) return false;
+        RingSlot slot{};
         if (!g.term.wait_read(&slot)) return false;
         if (slot.type != MX_TERM_INPUT_BYTES) continue;
+
         for (uint32_t i = 0; i < slot.length; ++i) {
             char c = static_cast<char>(slot.payload[i]);
-            if (esc_state == 1) {
-                if (c == '[') { esc_state = 2; continue; }
-                esc_state = 0;
-            } else if (esc_state == 2) {
-                if (c == 'A') {
-                    if (history_nav < 0) copy_str(live_line, sizeof(live_line), out);
-                    load_history(history_nav < 0 ? 0 : history_nav + 1);
-                    esc_state = 0;
-                    continue;
-                }
-                if (c == 'B') {
-                    if (g_history_count == 0) { esc_state = 0; continue; }
-                    if (history_nav > 0) load_history(history_nav - 1);
-                    else if (history_nav == 0) {
-                        copy_str(out, cap, live_line);
-                        len = slen(out);
-                        cursor = len;
-                        history_nav = -1;
-                        render_edit_line(prompt_text, out, len, cursor, &prev_render_len);
-                    }
-                    esc_state = 0;
-                    continue;
-                }
-                if (c == 'C') { if (cursor < len) { ++cursor; render_edit_line(prompt_text, out, len, cursor, &prev_render_len); } esc_state = 0; continue; }
-                if (c == 'D') { if (cursor > 0) { --cursor; render_edit_line(prompt_text, out, len, cursor, &prev_render_len); } esc_state = 0; continue; }
-                if (c == 'H') { cursor = 0; render_edit_line(prompt_text, out, len, cursor, &prev_render_len); esc_state = 0; continue; }
-                if (c == 'F') { cursor = len; render_edit_line(prompt_text, out, len, cursor, &prev_render_len); esc_state = 0; continue; }
-                if (c >= '0' && c <= '9') { esc_param = c; esc_state = 3; continue; }
-                esc_state = 0;
-            } else if (esc_state == 3) {
-                if (esc_param == '3' && c == '~') {
-                    if (cursor < len) {
-                        for (uint32_t j = cursor; j < len; ++j) out[j] = out[j + 1];
-                        --len;
-                        render_edit_line(prompt_text, out, len, cursor, &prev_render_len);
-                    }
-                }
-                esc_state = 0;
+
+            if (esc == EscSeen) {
+                if (c == '[') { esc = EscCsi; continue; }
+                esc = EscNone;   // a bare ESC followed by a key: dispatch that key
+            } else if (esc == EscCsi) {
+                if (c == 'A') { history_prev(); esc = EscNone; continue; }
+                if (c == 'B') { history_next(); esc = EscNone; continue; }
+                if (c == 'C') { if (cursor < len) { ++cursor; redraw(); } esc = EscNone; continue; }
+                if (c == 'D') { if (cursor > 0) { --cursor; redraw(); } esc = EscNone; continue; }
+                if (c == 'H') { cursor = 0; redraw(); esc = EscNone; continue; }
+                if (c == 'F') { cursor = len; redraw(); esc = EscNone; continue; }
+                if (c >= '0' && c <= '9') { esc_param = c; esc = EscParam; continue; }
+                esc = EscNone;
+            } else if (esc == EscParam) {
+                if (esc_param == '3' && c == '~') delete_at_cursor();
+                esc = EscNone;
                 continue;
             }
-            if (c == 27) { esc_state = 1; continue; }
+
+            if (c == kEsc) { esc = EscSeen; continue; }
             if (c == '\r') c = '\n';
-            if (c == 16) { if (history_nav < 0) copy_str(live_line, sizeof(live_line), out); load_history(history_nav < 0 ? 0 : history_nav + 1); continue; }
-            if (c == 14) {
-                if (history_nav > 0) load_history(history_nav - 1);
-                else if (history_nav == 0) {
-                    copy_str(out, cap, live_line);
-                    len = slen(out);
-                    cursor = len;
-                    history_nav = -1;
-                    render_edit_line(prompt_text, out, len, cursor, &prev_render_len);
-                }
-                continue;
-            }
-            if (c == 4) {
+
+            switch (c) {
+            case kCtrlP: history_prev(); continue;
+            case kCtrlN: history_next(); continue;
+            case kCtrlD:
                 if (len == 0) return false;
-                if (cursor < len) {
-                    for (uint32_t j = cursor; j < len; ++j) out[j] = out[j + 1];
-                    --len;
-                    render_edit_line(prompt_text, out, len, cursor, &prev_render_len);
-                }
+                delete_at_cursor();
                 continue;
-            }
-            if (c == 3) { put("^C\n"); out[0] = '\0'; return true; }
-            if (c == 1) { cursor = 0; render_edit_line(prompt_text, out, len, cursor, &prev_render_len); continue; }
-            if (c == 5) { cursor = len; render_edit_line(prompt_text, out, len, cursor, &prev_render_len); continue; }
-            if (c == 2) { if (cursor > 0) { --cursor; render_edit_line(prompt_text, out, len, cursor, &prev_render_len); } continue; }
-            if (c == 6) { if (cursor < len) { ++cursor; render_edit_line(prompt_text, out, len, cursor, &prev_render_len); } continue; }
-            if (c == 21) {
+            case kCtrlC: put("^C\n"); out[0] = '\0'; return true;
+            case kCtrlA: cursor = 0; redraw(); continue;
+            case kCtrlE: cursor = len; redraw(); continue;
+            case kCtrlB: if (cursor > 0) { --cursor; redraw(); } continue;
+            case kCtrlF: if (cursor < len) { ++cursor; redraw(); } continue;
+            case kCtrlU:
                 for (uint32_t j = cursor; j <= len; ++j) out[j - cursor] = out[j];
                 len -= cursor;
                 cursor = 0;
-                render_edit_line(prompt_text, out, len, cursor, &prev_render_len);
+                redraw();
                 continue;
-            }
-            if (c == 11) { out[cursor] = '\0'; len = cursor; render_edit_line(prompt_text, out, len, cursor, &prev_render_len); continue; }
-            if (c == 12) { for (uint32_t j = 0; j < 48; ++j) put("\n"); render_edit_line(prompt_text, out, len, cursor, &prev_render_len); continue; }
-            if (c == '\b' || c == 0x7f) {
+            case kCtrlK: out[cursor] = '\0'; len = cursor; redraw(); continue;
+            case kCtrlL: for (uint32_t j = 0; j < kClearLines; ++j) put("\n"); redraw(); continue;
+            case '\b':
+            case kDel:
                 if (cursor > 0) {
                     for (uint32_t j = cursor - 1; j < len; ++j) out[j] = out[j + 1];
                     --cursor;
                     --len;
-                    render_edit_line(prompt_text, out, len, cursor, &prev_render_len);
+                    redraw();
                 }
                 continue;
+            case '\t':
+                (void)try_complete_line(out, cap, &len, &cursor, prompt_text, &prev_render_len);
+                continue;
+            case '\n':
+                put("\n");
+                out[len] = '\0';
+                history_push(out);
+                return true;
+            default:
+                break;
             }
-            if (c == '\t') { (void)try_complete_line(out, cap, &len, &cursor, prompt_text, &prev_render_len); continue; }
-            if (c == '\n') { put("\n"); out[len] = '\0'; history_push(out); return true; }
-            if (is_printable(c) || c == '\t') {
-                if (len + 1 < cap) {
-                    for (uint32_t j = len + 1; j > cursor; --j) out[j] = out[j - 1];
-                    out[cursor] = c;
-                    ++cursor;
-                    ++len;
-                    out[len] = '\0';
-                    history_nav = -1;
-                    render_edit_line(prompt_text, out, len, cursor, &prev_render_len);
-                }
+
+            if (is_printable(c) && len + 1 < cap) {
+                for (uint32_t j = len + 1; j > cursor; --j) out[j] = out[j - 1];
+                out[cursor] = c;
+                ++cursor;
+                ++len;
+                out[len] = '\0';
+                history_nav = -1;
+                redraw();
             }
         }
     }
 }
-

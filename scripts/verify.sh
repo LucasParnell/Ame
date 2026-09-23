@@ -234,11 +234,19 @@ do_vulkan_executor() {
 
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
 # bespoke control flow below.
+# The generated manifest is the source of capability authority. Prove the
+# declared grants are internally consistent: every dependency and cap resolves,
+# no name is declared twice, principals and restart policies are known.
+do_caps() {
+    python3 "${ROOT}/scripts/mx/check-caps.py" --manifest "$BUILD_DIR/manifest.json" >/dev/null
+}
+
 CHECKS=(
     "configure:do_configure"
     "build:do_build"
     "host-regressions:do_host_tests"
     "provenance:do_provenance"
+    "caps-manifest:do_caps"
     "boot-direct:do_boot"
     "lifecycle-matrix:do_lifecycle"
     "supervision-restart:do_supervision"

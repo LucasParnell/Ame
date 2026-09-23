@@ -391,12 +391,8 @@ extern "C" [[noreturn]] void _start() {
             : kRingOrder;
     }
     const mochi::framebuffer::Server endpoint{
-        cmd_ring,
-        reply_ring,
-        cmd_ring_order,
-        reply_ring_order,
-        cmd_db,
-        reply_db,
+        {cmd_ring, cmd_ring_order, cmd_db},
+        {reply_ring, reply_ring_order, reply_db},
     };
     if (!cmd_ring || cmd_db == MX_NULL_HANDLE) {
         mochi::log_raw_marker("io.framebuffer: no command endpoint\n");

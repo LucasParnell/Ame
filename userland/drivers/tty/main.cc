@@ -462,12 +462,8 @@ extern "C" [[noreturn]] void _start() {
             : kRingOrder;
     }
     g_fb = {
-        fb_cmd_ring,
-        fb_reply_ring,
-        fb_cmd_order,
-        fb_reply_order,
-        mochi::boot::handle(boot, "fb.cmd.doorbell"),
-        mochi::boot::handle(boot, "fb.reply.doorbell"),
+        {fb_cmd_ring, fb_cmd_order, mochi::boot::handle(boot, "fb.cmd.doorbell")},
+        {fb_reply_ring, fb_reply_order, mochi::boot::handle(boot, "fb.reply.doorbell")},
     };
 
     const MxBootEntry* mirror =

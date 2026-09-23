@@ -244,6 +244,112 @@ static inline bool ring_wait_pop(RingPage* r, uint32_t order,
 // ---------------------------------------------------------------------------
 namespace mochi {
 
+// ---------------------------------------------------------------------------
+// Ring — one mapped SPSC ring plus the doorbell that wakes its consumer.
+//
+// A Ring is a value view over shared memory (the caller maps and owns the page).
+// It carries EVERY operation the raw ring has: non-blocking / spinning / deadline
+// publish; non-blocking / blocking / deadline consume; a byte run split into
+// ordered inline slots; typed inline messages; queue depth; and the
+// receiver-sleep flag the doorbell protocol reads. Wrapping a ring in a Ring
+// therefore costs no functionality — it only names the geometry and the
+// doorbell, and raw() returns the RingPage for anything not covered here.
+// ---------------------------------------------------------------------------
+struct Ring {
+    RingPage* ring = nullptr;
+    uint32_t order = 0;
+    CapHandle doorbell = kNullCap;
+
+    bool valid() const { return ring != nullptr; }
+    RingPage* raw() const { return ring; }
+    uint32_t capacity() const { return mx_ring_capacity(order); }
+    uint32_t mask() const { return mx_ring_mask(order); }
+
+    // --- publish (producer) -------------------------------------------------
+    bool try_push(uint32_t type, const void* data, uint32_t len) const {
+        return ring != nullptr && ring_try_push(ring, order, type, data, len, doorbell);
+    }
+    bool push(uint32_t type, const void* data, uint32_t len, uint32_t max_yields = 1024) const {
+        return ring != nullptr && ring_send_spinning(ring, order, type, data, len, doorbell, max_yields);
+    }
+    bool push_bounded(uint32_t type, const void* data, uint32_t len, mx_u64_t deadline_ns) const {
+        if (!ring) return false;
+        for (;;) {
+            if (ring_try_push(ring, order, type, data, len, doorbell)) return true;
+            if (mx_clock_ns() >= deadline_ns) return false;
+            sys_yield();
+        }
+    }
+    // A byte run as ordered inline slots; returns bytes accepted. max_yields 0 is
+    // non-blocking (stop at the first full slot), otherwise each chunk yields.
+    uint32_t push_bytes(uint32_t type, const void* data, uint32_t len,
+                        uint32_t max_yields = 0) const {
+        if (!ring) return 0;
+        return max_yields == 0
+                   ? ring_push_bytes(ring, order, type, data, len, doorbell)
+                   : ring_push_bytes_spinning(ring, order, type, data, len, doorbell, max_yields);
+    }
+    template <typename T>
+    bool try_push_msg(uint32_t type, const T& msg) const {
+        static_assert(sizeof(T) <= MX_RING_INLINE_PAYLOAD, "message exceeds one inline payload");
+        return ring_try_push(ring, order, type, &msg, static_cast<uint32_t>(sizeof(T)), doorbell);
+    }
+    template <typename T>
+    bool push_msg(uint32_t type, const T& msg, uint32_t max_yields = 1024) const {
+        static_assert(sizeof(T) <= MX_RING_INLINE_PAYLOAD, "message exceeds one inline payload");
+        return ring != nullptr &&
+               ring_send_spinning(ring, order, type, &msg, static_cast<uint32_t>(sizeof(T)),
+                                  doorbell, max_yields);
+    }
+
+    // --- consume (consumer) -------------------------------------------------
+    bool try_pop(RingSlot* out) const { return ring != nullptr && ring_pop(ring, order, out); }
+    bool wait_pop(RingSlot* out) const {
+        return ring != nullptr && doorbell != kNullCap && ring_wait_pop(ring, order, out, doorbell);
+    }
+    bool pop_bounded(RingSlot* out, mx_u64_t deadline_ns) const {
+        if (!ring) return false;
+        for (;;) {
+            if (ring_pop(ring, order, out)) return true;
+            if (mx_clock_ns() >= deadline_ns) return false;
+            sys_yield();
+        }
+    }
+
+    // Slots queued but not yet consumed, bounded by the capacity.
+    uint32_t depth() const {
+        if (!ring) return 0;
+        const uint64_t tail = __atomic_load_n(&ring->tail.v, __ATOMIC_ACQUIRE);
+        const uint64_t head = __atomic_load_n(&ring->head.v, __ATOMIC_ACQUIRE);
+        const uint64_t pending = head - tail;
+        const uint64_t capacity = mx_ring_capacity(order);
+        return pending > capacity ? static_cast<uint32_t>(capacity)
+                                  : static_cast<uint32_t>(pending);
+    }
+
+    // --- doorbell / receiver-sleep flag -------------------------------------
+    uint64_t doorbell_counter() const { return sys_doorbell_read(doorbell); }
+    void publish_sleep(uint64_t counter) const {
+        if (!ring) return;
+        ring->flags.doorbell_counter_snapshot = counter;
+        __atomic_store_n(&ring->flags.receiver_about_to_sleep, 1u, __ATOMIC_RELEASE);
+    }
+    void clear_sleep() const {
+        if (!ring) return;
+        __atomic_store_n(&ring->flags.receiver_about_to_sleep, 0u, __ATOMIC_RELEASE);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// RingReaderSet — one consumer draining many SPSC rings through a shared
+// doorbell.
+//
+// A service reading several producer rings can only sleep on one wakeup, so the
+// single-ring protocol in ring_wait_pop() is fanned out: publish
+// receiver_about_to_sleep on every ring, re-check them all, then wait on the
+// shared doorbell. That is what drain()/wait() do here. This is a view — the
+// caller owns the ring array.
+// ---------------------------------------------------------------------------
 struct RingReaderSet {
     RingPage* const* rings;
     uint32_t count;
@@ -257,7 +363,8 @@ struct RingReaderSet {
         bool any = false;
         RingSlot slot{};
         for (uint32_t i = 0; i < count; ++i) {
-            while (ring_pop(rings[i], order, &slot)) {
+            const Ring ring{rings[i], order, doorbell};
+            while (ring.try_pop(&slot)) {
                 on_slot(slot);
                 any = true;
             }
@@ -296,16 +403,16 @@ struct RingReaderSet {
 private:
     void publish_sleep(uint64_t counter) const {
         for (uint32_t i = 0; i < count; ++i) {
-            rings[i]->flags.doorbell_counter_snapshot = counter;
-            __atomic_store_n(&rings[i]->flags.receiver_about_to_sleep, 1u, __ATOMIC_RELEASE);
+            const Ring ring{rings[i], order, doorbell};
+            ring.publish_sleep(counter);
         }
     }
     void clear_sleep() const {
         for (uint32_t i = 0; i < count; ++i) {
-            __atomic_store_n(&rings[i]->flags.receiver_about_to_sleep, 0u, __ATOMIC_RELEASE);
+            const Ring ring{rings[i], order, doorbell};
+            ring.clear_sleep();
         }
     }
 };
 
 } // namespace mochi
-

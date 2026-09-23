@@ -1,5 +1,8 @@
 #pragma once
-// Midix filesystem and block-driver protocol ABI.
+// Midix filesystem protocol ABI.
+//
+// The block-driver protocol is split out into protocols/blk.h; this header
+// re-includes it so callers that speak both keep one include.
 //
 // All request/reply payload structs below are sized for MxRingSlot::payload,
 // which is 48 bytes on the V0 64-byte control-ring slot.
@@ -7,9 +10,9 @@
 #include "midix/abi/types.h"
 #include "midix/abi/status.h"
 #include "midix/abi/ring.h"
+#include "midix/abi/protocols/blk.h"
 
 constexpr mx_u32_t MX_PROTOCOL_FS  = 0x46530000u; // 'FS\0\0'
-constexpr mx_u32_t MX_PROTOCOL_BLK = 0x424C4B00u; // 'BLK\0'
 constexpr mx_u16_t MX_FS_VERSION = 1;
 
 using fs_handle_t = mx_u32_t;
@@ -423,30 +426,3 @@ struct JournalCommit {
     mx_u8_t pad[4064];
 };
 static_assert(sizeof(JournalCommit) == 4096, "journal commit must be exactly one block");
-
-enum BlkMsgType : mx_u32_t {
-    BLK_READ  = 1,
-    BLK_WRITE = 2,
-    BLK_FLUSH = 3,
-    BLK_REPLY = 4,
-};
-
-constexpr mx_u32_t BLK_DMA_CLIENT_OFFSET = 0x0001'0000u;
-
-struct BlkRequest {
-    mx_u32_t type;
-    mx_u32_t flags;
-    mx_u64_t sector;
-    mx_u32_t sector_count;
-    mx_u32_t reserved;
-    mx_cap_handle_t arena_cap;
-    mx_u32_t arena_offset;
-    mx_u32_t reserved2;
-};
-static_assert(sizeof(BlkRequest) == 40, "block request must fit one payload");
-
-struct BlkReply {
-    mx_i32_t status;
-    mx_u32_t sectors_transferred;
-};
-static_assert(sizeof(BlkReply) == 8, "block reply size drift");

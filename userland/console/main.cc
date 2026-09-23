@@ -8,6 +8,7 @@
 //   using the cap handles stored in the config.  Ring count is dynamic.
 
 #include "mochi/syscall.h"
+#include "mochi/handle.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/console_config.h"
@@ -21,11 +22,24 @@ constexpr uint64_t kVaUart          = 0x2000'0000ull;
 constexpr uint64_t kVaLogRingBase   = 0x2001'0000ull;
 constexpr uint64_t kVaTtyMirrorRing = 0x2040'0000ull;
 
+// PL011 register word offsets: FR (flag register) at byte 0x18, DR (data
+// register) at byte 0x00. Naming them keeps the driver body data-shaped and the
+// offsets stated once.
+constexpr uint32_t kUartDr     = 0x00u / 4u;
+constexpr uint32_t kUartFr     = 0x18u / 4u;
+constexpr uint32_t kUartFrTxFf = 1u << 5; // FR.TXFF: transmit FIFO full
+
+// Every log ring gets a private, generously aligned VA window so the rings can
+// never overlap; the window must hold one whole ring page.
+constexpr uint64_t kLogRingVaStride = 0x1'0000ull;
+static_assert(kLogRingVaStride >= mx_ring_page_bytes(kLogRingOrder),
+              "log ring VA stride must hold one ring page");
+
 // ---- UART helpers ----------------------------------------------------------
 
 static void uart_putchar(volatile uint32_t* base, char c) {
-    while (base[0x18 / 4] & (1u << 5)) { }
-    base[0x00 / 4] = static_cast<uint32_t>(static_cast<unsigned char>(c));
+    while (base[kUartFr] & kUartFrTxFf) { }
+    base[kUartDr] = static_cast<uint32_t>(static_cast<unsigned char>(c));
 }
 
 static void uart_puts(volatile uint32_t* base, const char* s, uint32_t len) {
@@ -34,25 +48,31 @@ static void uart_puts(volatile uint32_t* base, const char* s, uint32_t len) {
 
 // ---- Cap/mapping helpers ---------------------------------------------------
 
+// Wait for a capability to become the expected type, then map it and hand back a
+// typed pointer. The capability operations live on mochi::Handle, so this reads
+// as what it does rather than as raw identify/map syscalls.
 template <typename T>
 static T* wait_map(CapHandle cap, int64_t expected_type, uint64_t va, uint32_t rights) {
+    mochi::Handle<> h(cap);
     while (true) {
-        if (sys_cap_identify(cap) == expected_type) {
-            if (sys_map_page(cap, va, rights) == 0) return reinterpret_cast<T*>(va);
+        if (static_cast<int64_t>(h.type()) == expected_type) {
+            T* mapped = nullptr;
+            if (h.map<T>(va, rights, &mapped) == MX_OK) return mapped;
         }
         sys_yield();
     }
 }
 
 static void wait_cap(CapHandle cap, int64_t expected_type) {
-    while (sys_cap_identify(cap) != expected_type) {
+    mochi::Handle<> h(cap);
+    while (static_cast<int64_t>(h.type()) != expected_type) {
         sys_yield();
     }
 }
 
 static RingPage* log_ring_at(uint32_t index) {
     return reinterpret_cast<RingPage*>(kVaLogRingBase +
-                                       (static_cast<uint64_t>(index) * 0x10000ull));
+                                       (static_cast<uint64_t>(index) * kLogRingVaStride));
 }
 
 // ---- Ring drain / sleep ----------------------------------------------------
@@ -155,7 +175,7 @@ extern "C" [[noreturn]] void _start() {
     for (uint32_t i = 0; i < mapped; ++i) {
         (void)wait_map<RingPage>(static_cast<CapHandle>(cfg->log_ring_caps[i]),
                                  kCapTypeSharedRing,
-                                 kVaLogRingBase + (static_cast<uint64_t>(i) * 0x10000ull),
+                                 kVaLogRingBase + (static_cast<uint64_t>(i) * kLogRingVaStride),
                                  RIGHT_READ | RIGHT_WRITE);
     }
 

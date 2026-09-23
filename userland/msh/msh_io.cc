@@ -224,42 +224,13 @@ void put_status(mx_status_t s) {
 }
 
 const char* cap_type_name(uint32_t type) {
-    switch (type) {
-    case MX_CAP_NULL: return "null";
-    case MX_CAP_THREAD: return "thread";
-    case MX_CAP_PROCESS: return "process";
-    case MX_CAP_PAGE: return "page";
-    case MX_CAP_SHARED_RING: return "ring";
-    case MX_CAP_DOORBELL: return "doorbell";
-    case MX_CAP_ARENA: return "arena";
-    case MX_CAP_NAMESERVICE: return "nameservice";
-    case MX_CAP_SUPERVISOR: return "supervisor";
-    case MX_CAP_UART: return "uart";
-    case MX_CAP_TIMER: return "timer";
-    case MX_CAP_VM_ROOT: return "vm_root";
-    case MX_CAP_VM: return "vm";
-    case MX_CAP_VCPU: return "vcpu";
-    case MX_CAP_VM_MEMORY: return "vm_memory";
-    case MX_CAP_VM_CHANNEL: return "vm_channel";
-    case MX_CAP_SCHED_CONTEXT: return "sched_context";
-    case MX_CAP_MMIO: return "mmio";
-    case MX_CAP_IRQ: return "irq";
-    default: return "unknown";
-    }
+    // Names live next to the capability enum in the ABI (midix/abi/cap.h).
+    return mx_cap_type_name(type);
 }
 
 const char* boot_type_name(uint32_t type) {
-    switch (type) {
-    case MX_BOOT_ENTRY_NONE: return "none";
-    case MX_BOOT_ENTRY_HANDLE: return "handle";
-    case MX_BOOT_ENTRY_RING: return "ring";
-    case MX_BOOT_ENTRY_DOORBELL: return "doorbell";
-    case MX_BOOT_ENTRY_MMIO: return "mmio";
-    case MX_BOOT_ENTRY_ARENA: return "arena";
-    case MX_BOOT_ENTRY_ENDPOINT: return "endpoint";
-    case MX_BOOT_ENTRY_VALUE: return "value";
-    default: return "?";
-    }
+    // Names live next to the BootInfo entry enum in the ABI (midix/abi/boot.h).
+    return mx_boot_entry_type_name(type);
 }
 
 

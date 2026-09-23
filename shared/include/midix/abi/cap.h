@@ -125,3 +125,44 @@ constexpr mx_i64_t kCapTypeVmDevice = MX_CAP_VM_DEVICE;
 constexpr mx_i64_t kCapTypeVmShared = MX_CAP_VM_SHARED;
 
 #endif // MIDIX_ABI_NO_COMPAT_NAMES
+
+#if defined(__cplusplus)
+// Data-oriented capability type names. One row per MxCapType accepted by the
+// ABI; the shell and diagnostics read this table instead of re-spelling a
+// switch. A missing row degrades to "unknown" rather than a wrong name, and
+// every cap type the ABI mints has a row here.
+struct MxCapTypeName {
+    mx_u16_t type;
+    const char* name;
+};
+inline constexpr MxCapTypeName kMxCapTypeNames[] = {
+    {MX_CAP_NULL, "null"},
+    {MX_CAP_THREAD, "thread"},
+    {MX_CAP_PROCESS, "process"},
+    {MX_CAP_PAGE, "page"},
+    {MX_CAP_SHARED_RING, "ring"},
+    {MX_CAP_DOORBELL, "doorbell"},
+    {MX_CAP_ARENA, "arena"},
+    {MX_CAP_NAMESERVICE, "nameservice"},
+    {MX_CAP_SUPERVISOR, "supervisor"},
+    {MX_CAP_UART, "uart"},
+    {MX_CAP_TIMER, "timer"},
+    {MX_CAP_VM_ROOT, "vm_root"},
+    {MX_CAP_VM, "vm"},
+    {MX_CAP_VCPU, "vcpu"},
+    {MX_CAP_VM_MEMORY, "vm_memory"},
+    {MX_CAP_VM_CHANNEL, "vm_channel"},
+    {MX_CAP_SCHED_CONTEXT, "sched_context"},
+    {MX_CAP_MMIO, "mmio"},
+    {MX_CAP_IRQ, "irq"},
+    {MX_CAP_PCI_FUNCTION, "pci_function"},
+    {MX_CAP_VM_DEVICE, "vm_device"},
+    {MX_CAP_VM_SHARED, "vm_shared"},
+};
+inline const char* mx_cap_type_name(mx_u32_t type) {
+    for (const MxCapTypeName& row : kMxCapTypeNames) {
+        if (row.type == type) return row.name;
+    }
+    return "unknown";
+}
+#endif // __cplusplus

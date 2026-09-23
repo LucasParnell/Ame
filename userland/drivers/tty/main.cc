@@ -48,20 +48,8 @@ static TtyState g_tty{};
 static mochi::framebuffer::Client g_fb{};
 static mochi::terminal::OutputSource g_mirror{};
 static mochi::input::EventSource g_input{};
-struct ShellInputSink {
-    RingPage* ring;
-    uint32_t order;
-    CapHandle doorbell;
-
-    bool valid() const {
-        return ring && doorbell != kNullCap;
-    }
-
-    bool write_input_byte_spinning(char ch, uint32_t max_yields) const {
-        return valid() && ring_send_spinning(ring, order, MX_TERM_INPUT_BYTES,
-                                             &ch, 1, doorbell, max_yields);
-    }
-};
+// The tty -> shell input sink is the shared terminal input endpoint.
+using ShellInputSink = mochi::terminal::InputSink;
 
 static ShellInputSink g_shell_input{};
 static mochi::terminal::OutputSource g_shell_output{};

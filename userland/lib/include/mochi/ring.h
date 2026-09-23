@@ -41,7 +41,8 @@ static_assert(sizeof(RingSlot) == sizeof(MxRingSlot), "userspace RingSlot diverg
 static_assert(sizeof(RingPage) == sizeof(MxRingPage), "userspace RingPage diverged from ABI");
 
 static inline RingSlot* ring_slots(RingPage* r) {
-    return reinterpret_cast<RingSlot*>(reinterpret_cast<uint8_t*>(r) + 0x100);
+    // The header offset lives in the ABI (mx_ring_slots); never restate 0x100.
+    return mx_ring_slots(r);
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +148,52 @@ static inline bool ring_send_spinning(RingPage* r, uint32_t order,
         sys_yield();
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Byte runs
+//
+// A byte run longer than the inline payload becomes ordered slots on one ring
+// (the terminal contract, midix/abi/protocols/terminal.h). The chunking lives
+// here once so every byte-stream producer splits a run identically instead of
+// re-deriving the 48-byte boundary in each service.
+// ---------------------------------------------------------------------------
+
+// Push `len` bytes of `data` as ordered <=MX_RING_INLINE_PAYLOAD slots. Returns
+// the number of bytes accepted. A short return means the ring filled mid-run: the
+// caller owns the policy for the tail (never silently treated as success).
+static inline uint32_t ring_push_bytes(RingPage* r, uint32_t order, uint32_t type,
+                                       const void* data, uint32_t len,
+                                       CapHandle doorbell_cap) {
+    const auto* p = static_cast<const uint8_t*>(data);
+    uint32_t off = 0;
+    while (off < len) {
+        const uint32_t remaining = len - off;
+        const uint32_t chunk = remaining > MX_RING_INLINE_PAYLOAD
+                                   ? MX_RING_INLINE_PAYLOAD
+                                   : remaining;
+        if (!ring_try_push(r, order, type, p + off, chunk, doorbell_cap)) break;
+        off += chunk;
+    }
+    return off;
+}
+
+// Spinning variant: each chunk may yield up to `max_yields` times before the run
+// is abandoned. Returns the number of bytes accepted.
+static inline uint32_t ring_push_bytes_spinning(RingPage* r, uint32_t order, uint32_t type,
+                                                const void* data, uint32_t len,
+                                                CapHandle doorbell_cap, uint32_t max_yields) {
+    const auto* p = static_cast<const uint8_t*>(data);
+    uint32_t off = 0;
+    while (off < len) {
+        const uint32_t remaining = len - off;
+        const uint32_t chunk = remaining > MX_RING_INLINE_PAYLOAD
+                                   ? MX_RING_INLINE_PAYLOAD
+                                   : remaining;
+        if (!ring_send_spinning(r, order, type, p + off, chunk, doorbell_cap, max_yields)) break;
+        off += chunk;
+    }
+    return off;
 }
 
 // ---------------------------------------------------------------------------

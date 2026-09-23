@@ -34,9 +34,10 @@ constexpr fs_handle_t kRootHandle = 1;
 // Bounded waits: an example must never wedge the boot if a peer is slow.
 constexpr uint32_t kWaitSpins = 200000;
 
-// Backing store for the example's arena (mochi/arena.h): a fixed region, in the
-// spirit of a mapped CAP_ARENA, with no heap anywhere.
-alignas(16) unsigned char g_arena_mem[256];
+// Backing store for the example's arena (mochi/arena.h). It is a registered
+// arena, not an ambient heap: the service hands the region to the kernel with
+// sys_arena_register (architecture §8) and only then sub-allocates from it.
+alignas(4096) unsigned char g_arena_mem[4096];
 
 // Build an SPSC endpoint from the BootInfo names a manifest session grants.
 static bool wire(const MxBootInfo* boot,
@@ -96,11 +97,13 @@ extern "C" [[noreturn]] void _start() {
     mochi::boot::ready(boot);
     mochi::log_raw_marker("example application ready\n");
 
-    // Demonstrate arena-backed allocation: the example service sub-allocates its
-    // scratch from a fixed region (mochi/arena.h) rather than a heap.
+    // Demonstrate arena-backed allocation: register the region with the kernel
+    // (so it is a snapshot-accounted arena, not ambient memory), then
+    // sub-allocate the example's scratch from it.
+    (void)sys_arena_register(reinterpret_cast<uint64_t>(g_arena_mem), sizeof(g_arena_mem), 0);
     mochi::Arena arena(g_arena_mem, sizeof(g_arena_mem));
     if (char* line = arena.alloc<char>(64)) {
-        (void)libk::str::copy_into(line, 64, "arena: scratch from a fixed region\n");
+        (void)libk::str::copy_into(line, 64, "arena: scratch from a registered region\n");
         mochi::log_raw_marker(line);
     }
 

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include "midix/abi/boot.h"
+#include "mochi/syscall.h"
 
 struct ConsoleBootConfig {
     static constexpr uint32_t kMagic   = 0x434F4E46u; // 'CONF'
@@ -34,3 +35,14 @@ struct ConsoleBootConfig {
     uint64_t log_ring_caps[kMaxRings]; // CapHandles of each log ring in console's table
 };
 static_assert(sizeof(ConsoleBootConfig) <= 4096, "ConsoleBootConfig must fit in one page");
+
+// Wait until init has published the config. init writes `magic` last, so the
+// acquire load here pairs with init's release store and every other field is
+// visible once it returns. The wait is a yield loop, not a doorbell: console is
+// spawned alongside the publish, so there is nothing to be woken by, and this
+// stays the one place the handshake is written down.
+static inline void console_config_wait_ready(const ConsoleBootConfig* cfg) {
+    while (__atomic_load_n(&cfg->magic, __ATOMIC_ACQUIRE) != ConsoleBootConfig::kMagic) {
+        sys_yield();
+    }
+}

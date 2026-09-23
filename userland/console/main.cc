@@ -19,18 +19,38 @@ namespace {
 
 // --- Addresses this service maps into its own space ------------------------
 namespace va {
-constexpr uint64_t kConfig      = 0x3000'0000ull;
-constexpr uint64_t kUart        = 0x2000'0000ull;
-constexpr uint64_t kLogRingBase = 0x2001'0000ull;
-constexpr uint64_t kMirrorRing  = 0x2040'0000ull;
+// io.console's own VA windows. These are mapping targets in this process, not
+// device addresses; V0 has no per-service VA allocator, so each service picks
+// disjoint windows and states them here. The asserts below are the invariant:
+// the windows must not overlap, and each must be large enough for what lands
+// in it.
+constexpr uint64_t kConfig      = 0x3000'0000ull; // one page: ConsoleBootConfig
+constexpr uint64_t kUart        = 0x2000'0000ull; // one page: the PL011 registers
+constexpr uint64_t kLogRingBase = 0x2001'0000ull; // one window per log ring
+constexpr uint64_t kMirrorRing  = 0x2040'0000ull; // one page: the tty mirror ring
 } // namespace va
 
 // Every log ring gets its own window, far enough apart that they can never
 // overlap; each window must hold one whole ring page.
 constexpr uint32_t kLogRingOrder  = 6;
 constexpr uint64_t kLogRingStride = 0x1'0000ull;
+constexpr uint64_t kLogRingSpan   = kLogRingStride * ConsoleBootConfig::kMaxRings;
+constexpr uint64_t kPageWindow    = 0x1000;
+
+// Disjoint when neither window contains the start of the other.
+constexpr bool disjoint(uint64_t a, uint64_t asz, uint64_t b, uint64_t bsz) {
+    return a + asz <= b || b + bsz <= a;
+}
+
 static_assert(kLogRingStride >= mx_ring_page_bytes(kLogRingOrder),
               "log ring VA stride must hold one ring page");
+static_assert(disjoint(va::kUart, kPageWindow, va::kLogRingBase, kLogRingSpan),
+              "UART window overlaps the log-ring windows");
+static_assert(disjoint(va::kLogRingBase, kLogRingSpan, va::kMirrorRing, kPageWindow),
+              "log-ring windows overlap the tty mirror window");
+static_assert(disjoint(va::kUart, kPageWindow, va::kMirrorRing, kPageWindow) &&
+                  disjoint(va::kConfig, kPageWindow, va::kLogRingBase, kLogRingSpan),
+              "console VA windows must not overlap");
 
 // --- Board UART ------------------------------------------------------------
 //
@@ -67,9 +87,7 @@ const ConsoleBootConfig* open_config(const MxBootInfo* boot) {
     const CapHandle cap = mochi::boot::require_handle(boot, "console.config");
     const ConsoleBootConfig* cfg =
         mochi::cap_map_when<ConsoleBootConfig>(cap, MX_CAP_ARENA, va::kConfig, MX_RIGHTS_RW);
-    while (__atomic_load_n(&cfg->magic, __ATOMIC_ACQUIRE) != ConsoleBootConfig::kMagic) {
-        sys_yield();
-    }
+    console_config_wait_ready(cfg);
     return cfg;
 }
 

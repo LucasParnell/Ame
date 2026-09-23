@@ -6,6 +6,8 @@
 // write emits a compact drop notice.
 
 #include <cstdint>
+#include "libk/printf.h"
+#include "libk/str.h"
 #include "mochi/ring.h"
 
 namespace mochi {
@@ -36,10 +38,7 @@ static inline LogSink& default_log_sink() {
 }
 
 static inline uint32_t log_slen(const char* s) {
-    uint32_t n = 0;
-    if (!s) return 0;
-    while (s[n]) ++n;
-    return n;
+    return static_cast<uint32_t>(libk::str::length(s));
 }
 
 static inline char log_level_char(LogLevel level) {
@@ -68,58 +67,45 @@ static inline void log_append_str(char* out, uint32_t cap, uint32_t* n,
     while (*s) log_append_char(out, cap, n, truncated, *s++);
 }
 
+// Append `value` as decimal into the tail of a bounded line buffer. Number
+// formatting is libk::snprintf (the one shared engine); the rest of the line
+// stays a hand-rolled, allocation-free append.
 static inline void log_append_u64(char* out, uint32_t cap, uint32_t* n,
                                   bool* truncated, uint64_t value) {
-    char tmp[24];
-    uint32_t t = 0;
-    do {
-        tmp[t++] = static_cast<char>('0' + (value % 10));
-        value /= 10;
-    } while (value && t < sizeof(tmp));
-    while (t) log_append_char(out, cap, n, truncated, tmp[--t]);
-}
-
-static inline void log_append_u64_zero_padded(char* out, uint32_t cap, uint32_t* n,
-                                              bool* truncated, uint64_t value,
-                                              uint32_t width) {
-    char tmp[24];
-    uint32_t t = 0;
-    do {
-        tmp[t++] = static_cast<char>('0' + (value % 10));
-        value /= 10;
-    } while (value && t < sizeof(tmp));
-    while (t < width && t < sizeof(tmp)) tmp[t++] = '0';
-    while (t) log_append_char(out, cap, n, truncated, tmp[--t]);
-}
-
-static inline void log_append_u64_space_padded(char* out, uint32_t cap, uint32_t* n,
-                                               bool* truncated, uint64_t value,
-                                               uint32_t width) {
-    char tmp[24];
-    uint32_t t = 0;
-    do {
-        tmp[t++] = static_cast<char>('0' + (value % 10));
-        value /= 10;
-    } while (value && t < sizeof(tmp));
-    while (t < width) {
-        log_append_char(out, cap, n, truncated, ' ');
-        --width;
+    if (*n >= cap) {
+        if (truncated) *truncated = true;
+        return;
     }
-    while (t) log_append_char(out, cap, n, truncated, tmp[--t]);
+    const int wrote = libk::snprintf(out + *n, cap - *n, "%llu",
+                                     static_cast<unsigned long long>(value));
+    if (wrote < 0 || static_cast<uint32_t>(wrote) > cap - *n - 1u) {
+        *n = cap - 1u;
+        if (truncated) *truncated = true;
+        return;
+    }
+    *n += static_cast<uint32_t>(wrote);
 }
 
 static inline void log_append_timestamp(char* out, uint32_t cap, uint32_t* n,
                                         bool* truncated) {
-    int64_t ticks_raw = sys_debug_counter(7);
-    uint64_t ticks = ticks_raw > 0 ? static_cast<uint64_t>(ticks_raw) : 0;
+    const int64_t ticks_raw = sys_debug_counter(7);
+    const uint64_t ticks = ticks_raw > 0 ? static_cast<uint64_t>(ticks_raw) : 0;
     const uint64_t sec = ticks / 100ull;
     const uint64_t usec = (ticks % 100ull) * 10000ull;
 
-    log_append_char(out, cap, n, truncated, '[');
-    log_append_u64_space_padded(out, cap, n, truncated, sec, 5);
-    log_append_char(out, cap, n, truncated, '.');
-    log_append_u64_zero_padded(out, cap, n, truncated, usec, 6);
-    log_append_char(out, cap, n, truncated, ']');
+    if (*n >= cap) {
+        if (truncated) *truncated = true;
+        return;
+    }
+    const int wrote = libk::snprintf(out + *n, cap - *n, "[%5llu.%06llu]",
+                                     static_cast<unsigned long long>(sec),
+                                     static_cast<unsigned long long>(usec));
+    if (wrote < 0 || static_cast<uint32_t>(wrote) > cap - *n - 1u) {
+        *n = cap - 1u;
+        if (truncated) *truncated = true;
+        return;
+    }
+    *n += static_cast<uint32_t>(wrote);
 }
 
 static inline uint32_t log_finish(char* out, uint32_t cap, uint32_t n) {

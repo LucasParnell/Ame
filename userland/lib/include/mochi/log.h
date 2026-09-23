@@ -156,18 +156,11 @@ static inline bool log_try_push_bytes(LogSink& sink, const char* data, uint32_t 
     if (!sink.ready || !data) return false;
     if (len == 0) return true;
 
-    const uint32_t chunks = (len + 47u) / 48u;
+    const uint32_t chunks = (len + MX_RING_INLINE_PAYLOAD - 1u) / MX_RING_INLINE_PAYLOAD;
     if (!log_has_capacity(sink, chunks)) return false;
 
-    uint32_t off = 0;
-    while (off < len) {
-        const uint32_t chunk = (len - off) > 48u ? 48u : (len - off);
-        if (!ring_push(sink.ring, sink.order, 1, data + off, chunk, sink.doorbell)) {
-            return false;
-        }
-        off += chunk;
-    }
-    return true;
+    // Same chunking as every other byte-stream producer (mochi/ring.h).
+    return ring_push_bytes(sink.ring, sink.order, 1, data, len, sink.doorbell) == len;
 }
 
 static inline void log_emit_drop_notice(LogSink& sink) {

@@ -16,6 +16,7 @@
 // init is policy. The kernel does not know service names (spec §11).
 
 #include "mochi/syscall.h"
+#include "libk/str.h"
 #include "midix/abi/session.h"
 #include "mochi/boot.h"
 #include "midix/format/json.h"
@@ -177,18 +178,11 @@ struct InitRuntime {
 static InitRuntime g_rt{};
 
 static uint32_t slen(const char* s) {
-    uint32_t n = 0;
-    while (s[n]) ++n;
-    return n;
+    return static_cast<uint32_t>(libk::str::length(s));
 }
 
 static bool streq(const char* a, const char* b) {
-    uint32_t i = 0;
-    while (a[i] && b[i]) {
-        if (a[i] != b[i]) return false;
-        ++i;
-    }
-    return a[i] == b[i];
+    return libk::str::equal(a, b);
 }
 
 static bool token_eq(const char* token, const char* literal) {

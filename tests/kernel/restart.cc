@@ -19,7 +19,8 @@
 #include "mochi/boot.h"
 #include "midix/format/bundle.h"
 #include "midix/abi/image.h"
-#include "libk/string.h"
+#include "libk/bytes.h"
+#include "libk/str.h"
 #include "supervision.h"
 
 using supervision::backoff_ns;
@@ -35,7 +36,7 @@ static uint32_t cpu_count;
 static midix::format::Bundle bundle;
 
 static void print(const char* text) {
-    sys_debug_puts(text, libk::strlen(text));
+    sys_debug_puts(text, libk::str::length(text));
 }
 [[noreturn]] static void fail(const char* message) {
     print("TEST FAILED: ");
@@ -367,7 +368,7 @@ extern "C" [[noreturn]] void _start() {
     check(!sys_map_page(archive, 0x20000000, RIGHT_READ), "bundle mapping");
     bundle.data = reinterpret_cast<const uint8_t*>(0x20000000);
     bundle.size = mochi::boot::find(boot, "boot.initrd")->aux0;
-    libk::memcpy(&bundle.header, bundle.data, sizeof(bundle.header));
+    (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)), libk::as_bytes(bundle.data, sizeof(bundle.header)), sizeof(bundle.header));
     print("supervision regression started\n");
 
     test_generation_matching();

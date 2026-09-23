@@ -1,22 +1,19 @@
 #pragma once
 // mochi/fs.h — small helpers for the io.fs and drv.blk.virtio ring protocols.
 
+#include "libk/bytes.h"
+#include "libk/str.h"
 #include "mochi/endpoint.h"
 #include "midix/abi/protocols/fs.h"
 
 namespace mochi::fs {
 
 static inline void copy_bytes(void* dst, const void* src, mx_u32_t len) {
-    auto* d = static_cast<mx_u8_t*>(dst);
-    const auto* s = static_cast<const mx_u8_t*>(src);
-    for (mx_u32_t i = 0; i < len; ++i) d[i] = s[i];
+    (void)libk::copy_n(libk::as_bytes(dst, len), libk::as_bytes(src, len), len);
 }
 
 static inline mx_u32_t bounded_strlen(const char* s, mx_u32_t limit) {
-    mx_u32_t n = 0;
-    if (!s) return 0;
-    while (n < limit && s[n]) ++n;
-    return n;
+    return static_cast<mx_u32_t>(libk::str::length_n(s, limit));
 }
 
 static inline void copy_inline_name(char* dst, mx_u32_t dst_len,

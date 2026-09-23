@@ -2,23 +2,18 @@
 
 #include "msh.h"
 
+#include "libk/bytes.h"
+#include "libk/num.h"
+#include "libk/str.h"
+
 // Output, string helpers, cap/boot type names, and service-registry reads.
 
 uint32_t slen(const char* s) {
-    uint32_t n = 0;
-    if (!s) return 0;
-    while (s[n]) ++n;
-    return n;
+    return static_cast<uint32_t>(libk::str::length(s));
 }
 
 bool streq(const char* a, const char* b) {
-    if (!a || !b) return false;
-    uint32_t i = 0;
-    while (a[i] && b[i]) {
-        if (a[i] != b[i]) return false;
-        ++i;
-    }
-    return a[i] == b[i];
+    return libk::str::equal(a, b);
 }
 
 bool svc_registry_valid_snapshot(const mochi::svc::RegistryPage* page) {
@@ -70,20 +65,11 @@ bool svc_exists(const char* name) {
 }
 
 void memzero(void* p, uint64_t len) {
-    auto* b = static_cast<uint8_t*>(p);
-    for (uint64_t i = 0; i < len; ++i) b[i] = 0;
+    libk::fill(libk::as_bytes(p, static_cast<std::size_t>(len)), 0);
 }
 
 void copy_str(char* dst, uint32_t cap, const char* src) {
-    if (!dst || cap == 0) return;
-    uint32_t i = 0;
-    if (src) {
-        while (i + 1 < cap && src[i]) {
-            dst[i] = src[i];
-            ++i;
-        }
-    }
-    dst[i] = '\0';
+    (void)libk::str::copy_into(dst, cap, src);
 }
 
 void append_char(char* dst, uint32_t cap, uint32_t* n, char c) {
@@ -101,15 +87,15 @@ void append_str(char* dst, uint32_t cap, uint32_t* n, const char* s) {
 }
 
 bool is_space(char c) {
-    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    return libk::str::is_space(c);
 }
 
 bool is_printable(char c) {
-    return c >= 32 && c <= 126;
+    return libk::str::is_ascii_printable(c);
 }
 
 bool is_digit(char c) {
-    return c >= '0' && c <= '9';
+    return libk::str::is_digit(c);
 }
 
 bool is_name_char(char c) {
@@ -120,65 +106,18 @@ bool is_name_char(char c) {
 }
 
 uint64_t parse_u64(const char* s, bool* ok) {
-    uint64_t v = 0;
-    bool any = false;
-    if (!s) {
-        if (ok) *ok = false;
-        return 0;
-    }
-    uint32_t i = 0;
-    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
-        i = 2;
-        while (s[i]) {
-            char c = s[i];
-            uint64_t d = 0;
-            if (c >= '0' && c <= '9') d = static_cast<uint64_t>(c - '0');
-            else if (c >= 'a' && c <= 'f') d = 10ull + static_cast<uint64_t>(c - 'a');
-            else if (c >= 'A' && c <= 'F') d = 10ull + static_cast<uint64_t>(c - 'A');
-            else break;
-            v = (v << 4) | d;
-            any = true;
-            ++i;
-        }
-    } else {
-        while (s[i] && is_digit(s[i])) {
-            v = v * 10ull + static_cast<uint64_t>(s[i] - '0');
-            any = true;
-            ++i;
-        }
-    }
-    if (ok) *ok = any && s[i] == '\0';
-    return v;
+    uint64_t value = 0;
+    const bool valid = libk::num::parse_u64(s, &value);
+    if (ok) *ok = valid;
+    return value;
 }
 
 void u64_to_dec(uint64_t v, char* out, uint32_t cap) {
-    if (!out || cap == 0) return;
-    char tmp[24];
-    uint32_t n = 0;
-    do {
-        tmp[n++] = static_cast<char>('0' + (v % 10));
-        v /= 10;
-    } while (v && n < sizeof(tmp));
-    uint32_t j = 0;
-    while (n && j + 1 < cap) out[j++] = tmp[--n];
-    out[j] = '\0';
+    (void)libk::num::to_dec(v, out, cap);
 }
 
 void u64_to_hex(uint64_t v, char* out, uint32_t cap) {
-    if (!out || cap == 0) return;
-    const char* hex = "0123456789abcdef";
-    uint32_t n = 0;
-    if (n + 1 < cap) out[n++] = '0';
-    if (n + 1 < cap) out[n++] = 'x';
-    bool started = false;
-    for (int shift = 60; shift >= 0; shift -= 4) {
-        uint32_t d = static_cast<uint32_t>((v >> shift) & 0xfull);
-        if (d || started || shift == 0) {
-            started = true;
-            if (n + 1 < cap) out[n++] = hex[d];
-        }
-    }
-    out[n] = '\0';
+    (void)libk::num::to_hex(v, out, cap);
 }
 
 void put_bytes(const char* data, uint32_t len) {
@@ -235,13 +174,7 @@ const char* boot_type_name(uint32_t type) {
 
 
 bool starts_with(const char* s, const char* prefix) {
-    if (!s || !prefix) return false;
-    uint32_t i = 0;
-    while (prefix[i]) {
-        if (s[i] != prefix[i]) return false;
-        ++i;
-    }
-    return true;
+    return libk::str::starts_with(s, prefix);
 }
 
 

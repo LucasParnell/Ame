@@ -9,6 +9,7 @@
 //  - Only io.console sends log records here; tty.fb0 does not poll log rings.
 
 #include "mochi/syscall.h"
+#include "libk/str.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
@@ -79,9 +80,7 @@ static uint32_t g_ready_match_pos = 0;
 static uint32_t g_esc_streak = 0;
 
 static uint32_t slen(const char* s) {
-    uint32_t n = 0;
-    while (s && s[n]) ++n;
-    return n;
+    return static_cast<uint32_t>(libk::str::length(s));
 }
 
 static bool fb_send(uint32_t type, const void* data, uint32_t len) {

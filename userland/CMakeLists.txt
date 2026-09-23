@@ -26,7 +26,10 @@ function(mochi_service name src load_base)
 
     add_executable(${name} ${src} ${ARGN})
     target_include_directories(${name} PRIVATE ${MOCHI_INCLUDES})
-    target_link_libraries(${name} PRIVATE freestanding_memory ame_format mochi_runtime)
+    # Services must not touch the raw memory floor (libk/string.h); the header
+    # rejects AME_MOCHI_SERVICE builds that try.
+    target_compile_definitions(${name} PRIVATE AME_MOCHI_SERVICE=1)
+    target_link_libraries(${name} PRIVATE libk freestanding_memory ame_format mochi_runtime)
     target_link_options(${name} PRIVATE
         -nostdlib -static -fno-pie
         -T ${LINKER_SCRIPT}

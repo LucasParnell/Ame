@@ -5,6 +5,7 @@
 // The only fixed slot is slot 0: a one-page MxBootInfo arena granted by init.
 // Every other service capability is found by name and type from that page.
 
+#include "libk/str.h"
 #include "midix/abi/boot.h"
 #include "midix/abi/cap.h"
 #include "mochi/ring.h"
@@ -21,28 +22,11 @@ constexpr CapHandle cap_slot(uint32_t idx) {
 constexpr CapHandle kBootInfoCap = cap_slot(0);
 
 static inline uint32_t slen(const char* s) {
-    uint32_t n = 0;
-    if (!s) {
-        return 0;
-    }
-    while (s[n]) {
-        ++n;
-    }
-    return n;
+    return static_cast<uint32_t>(libk::str::length(s));
 }
 
 static inline bool streq(const char* a, const char* b) {
-    if (!a || !b) {
-        return false;
-    }
-    uint32_t i = 0;
-    while (a[i] && b[i]) {
-        if (a[i] != b[i]) {
-            return false;
-        }
-        ++i;
-    }
-    return a[i] == b[i];
+    return libk::str::equal(a, b);
 }
 
 static inline bool valid(const MxBootInfo* info) {

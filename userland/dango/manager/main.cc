@@ -1,6 +1,7 @@
 // userland/dango/manager/main.cc — Linux appliance construction and channel probe.
 
 #include "mochi/syscall.h"
+#include "libk/str.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
@@ -105,9 +106,7 @@ struct LinuxArtifacts {
 };
 
 static uint32_t slen(const char* s) {
-    uint32_t n = 0;
-    while (s[n]) ++n;
-    return n;
+    return static_cast<uint32_t>(libk::str::length(s));
 }
 
 static CapHandle as_cap(int64_t v) {
@@ -229,12 +228,7 @@ static uint64_t octal_value(const char* s, uint32_t len) {
 }
 
 static bool streq(const char* a, const char* b) {
-    uint32_t i = 0;
-    while (a[i] && b[i]) {
-        if (a[i] != b[i]) return false;
-        ++i;
-    }
-    return a[i] == b[i];
+    return libk::str::equal(a, b);
 }
 
 static bool tar_name_matches(const TarHeader* h, const char* wanted) {

@@ -2,7 +2,8 @@
 #include "midix/abi/image.h"
 #include "midix/format/bundle.h"
 #include "midix/format/integrity.h"
-#include "libk/string.h"
+#include "libk/bytes.h"
+#include "libk/str.h"
 
 static CapHandle supervisor;
 static uint32_t cpu_count;
@@ -31,7 +32,7 @@ static constexpr uint64_t kCounterVmDestroyed = 34;
 static constexpr uint64_t kCounterIrqSelftest = 69;
 
 static void print(const char* text) {
-    sys_debug_puts(text, libk::strlen(text));
+    sys_debug_puts(text, libk::str::length(text));
 }
 [[noreturn]] static void fail(const char* message) {
     print("TEST FAILED: ");
@@ -113,7 +114,7 @@ static uint64_t build_oversized_image(uint8_t* buffer) {
     constexpr uint64_t kCodeSize = 4096;
     constexpr uint64_t kImageSize = kCodeOffset + kCodeSize;
 
-    libk::memset(buffer, 0, kImageSize);
+    libk::fill(libk::as_bytes(buffer, kImageSize), 0);
 
     // One executable page. It never runs: loading fails on the oversized
     // zero-fill segment that follows. `b .` keeps it valid AArch64 regardless.
@@ -151,12 +152,12 @@ static uint64_t build_oversized_image(uint8_t* buffer) {
     segments[1].flags = MX_IMAGE_SEG_ZERO_FILL;
     static_assert(kSegmentSize == 64);
 
-    libk::memcpy(buffer, &header, kHeaderSize);
-    libk::memcpy(buffer + kHeaderSize, segments, sizeof(segments));
+    (void)libk::copy_n(libk::as_bytes(buffer, kHeaderSize), libk::as_bytes(&header, kHeaderSize), kHeaderSize);
+    (void)libk::copy_n(libk::as_bytes(buffer + kHeaderSize, sizeof(segments)), libk::as_bytes(segments, sizeof(segments)), sizeof(segments));
 
     const uint32_t crc = integrity::crc32c_zero_field(
         buffer, kImageSize, __builtin_offsetof(MxImageHeader, image_crc32c), sizeof(uint32_t));
-    libk::memcpy(buffer + __builtin_offsetof(MxImageHeader, image_crc32c), &crc, sizeof(crc));
+    (void)libk::copy_n(libk::as_bytes(buffer + __builtin_offsetof(MxImageHeader, image_crc32c), sizeof(crc)), libk::as_bytes(&crc, sizeof(crc)), sizeof(crc));
     return kImageSize;
 }
 
@@ -244,7 +245,7 @@ static void vm_owner_death(long objects, long pages) {
     check(!sys_map_page(boot_arena, 0x30000000, RIGHT_READ | RIGHT_WRITE), "vm child boot map");
     check(!sys_map_page(result_arena, 0x30010000, RIGHT_READ | RIGHT_WRITE), "vm child result map");
     auto* child_boot = reinterpret_cast<MxBootInfo*>(0x30000000);
-    libk::memset(child_boot, 0, sizeof(*child_boot));
+    libk::fill(libk::as_bytes(child_boot, sizeof(*child_boot)), 0);
     check(sys_cap_grant(child.process, boot_arena, RIGHT_READ | RIGHT_MAP) == (1ull << 32),
           "vm child bootstrap handle");
     child_boot->magic = MX_BOOT_MAGIC;
@@ -253,24 +254,24 @@ static void vm_owner_death(long objects, long pages) {
 
     auto& root_entry = child_boot->entries[0];
     root_entry.type = MX_BOOT_ENTRY_HANDLE;
-    libk::memcpy(root_entry.name, "vm.root", 8);
+    (void)libk::copy_n(libk::as_bytes(root_entry.name, 8), libk::as_bytes("vm.root", 8), 8);
     root_entry.handle = sys_cap_grant(child.process,
                                       mochi::boot::require_handle(boot_info, "vm.root"),
                                       RIGHT_VM_CREATE);
     auto& parent_entry = child_boot->entries[1];
     parent_entry.type = MX_BOOT_ENTRY_HANDLE;
-    libk::memcpy(parent_entry.name, "parent", 7);
+    (void)libk::copy_n(libk::as_bytes(parent_entry.name, 7), libk::as_bytes("parent", 7), 7);
     parent_entry.handle = sys_cap_grant(child.process,
                                         mochi::boot::require_handle(boot_info, "self"),
                                         RIGHT_READ | RIGHT_SPAWN);
     auto& result_entry = child_boot->entries[2];
     result_entry.type = MX_BOOT_ENTRY_ARENA;
-    libk::memcpy(result_entry.name, "result", 7);
+    (void)libk::copy_n(libk::as_bytes(result_entry.name, 7), libk::as_bytes("result", 7), 7);
     result_entry.handle =
         sys_cap_grant(child.process, result_arena, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
     auto& mode_entry = child_boot->entries[3];
     mode_entry.type = MX_BOOT_ENTRY_VALUE;
-    libk::memcpy(mode_entry.name, "mode", 5);
+    (void)libk::copy_n(libk::as_bytes(mode_entry.name, 5), libk::as_bytes("mode", 5), 5);
     mode_entry.aux0 = kModeVmWorker;
 
     check(root_entry.handle && parent_entry.handle && result_entry.handle &&
@@ -488,7 +489,7 @@ extern "C" [[noreturn]] void _start() {
     check(!sys_map_page(archive, 0x20000000, RIGHT_READ), "bundle mapping");
     bundle.data = reinterpret_cast<const uint8_t*>(0x20000000);
     bundle.size = mochi::boot::find(boot, "boot.initrd")->aux0;
-    libk::memcpy(&bundle.header, bundle.data, sizeof(bundle.header));
+    (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)), libk::as_bytes(bundle.data, sizeof(bundle.header)), sizeof(bundle.header));
     print("lifecycle regression started\n");
 
     // The kernel raised a spare SPI at boot and delivered it to a doorbell;
@@ -566,7 +567,7 @@ extern "C" [[noreturn]] void _start() {
     check(!sys_map_page(boot_arena, 0x30000000, RIGHT_READ | RIGHT_WRITE), "child BootInfo map");
     check(!sys_map_page(result_arena, 0x30010000, RIGHT_READ | RIGHT_WRITE), "result map");
     auto* child_boot = reinterpret_cast<MxBootInfo*>(0x30000000);
-    libk::memset(child_boot, 0, sizeof(*child_boot));
+    libk::fill(libk::as_bytes(child_boot, sizeof(*child_boot)), 0);
     check(sys_cap_grant(child.process, boot_arena, RIGHT_READ | RIGHT_MAP) == (1ull << 32),
           "bootstrap handle");
     child_boot->magic = MX_BOOT_MAGIC;
@@ -574,12 +575,12 @@ extern "C" [[noreturn]] void _start() {
     child_boot->entry_count = 2;
     auto& parent = child_boot->entries[0];
     parent.type = MX_BOOT_ENTRY_HANDLE;
-    libk::memcpy(parent.name, "parent", 7);
+    (void)libk::copy_n(libk::as_bytes(parent.name, 7), libk::as_bytes("parent", 7), 7);
     parent.handle = sys_cap_grant(child.process, mochi::boot::require_handle(boot, "self"),
                                   RIGHT_READ | RIGHT_SPAWN);
     auto& result = child_boot->entries[1];
     result.type = MX_BOOT_ENTRY_ARENA;
-    libk::memcpy(result.name, "result", 7);
+    (void)libk::copy_n(libk::as_bytes(result.name, 7), libk::as_bytes("result", 7), 7);
     result.handle =
         sys_cap_grant(child.process, result_arena, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
     check(parent.handle && result.handle && !sys_thread_resume(child.thread),

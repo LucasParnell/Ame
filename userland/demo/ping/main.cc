@@ -14,6 +14,7 @@
 #include "mochi/boot.h"
 #include "mochi/nameservice.h"
 #include "midix/abi/protocols/nameservice.h"
+#include "mochi/va_layout.h"
 
 constexpr uint32_t kRingOrder    = 6;
 constexpr uint32_t kMessageCount = 4096;
@@ -30,11 +31,7 @@ constexpr uint32_t MSG_CPU_REPLY = 0x43505552; // 'CPUR'
 constexpr uint32_t MSG_HOT_START = 0x484F5453; // 'HOTS'
 constexpr uint32_t MSG_HOT_READY = 0x484F5452; // 'HOTR'
 
-constexpr uint64_t kVaSendRing = 0x2000'0000ull;
-constexpr uint64_t kVaRecvRing = 0x2001'0000ull;
-constexpr uint64_t kVaConsoleRing = 0x2002'0000ull;
-constexpr uint64_t kVaNsRequestRing = 0x2003'0000ull;
-constexpr uint64_t kVaNsReplyRing = 0x2004'0000ull;
+using namespace mochi::va::demo_ping;
 
 template <typename T>
 static T* wait_map(CapHandle cap, int64_t expected_type, uint64_t va, uint32_t rights) {

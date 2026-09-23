@@ -11,6 +11,7 @@
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
+#include "mochi/va_layout.h"
 
 constexpr uint32_t MSG_PING  = 1;
 constexpr uint32_t MSG_PONG  = 2;
@@ -26,9 +27,7 @@ constexpr uint32_t MSG_HOT_READY = 0x484F5452; // 'HOTR'
 
 constexpr uint32_t kOrder = 6;
 
-constexpr uint64_t kVaRecvRing = 0x2000'0000ull;
-constexpr uint64_t kVaSendRing = 0x2001'0000ull;
-constexpr uint64_t kVaLogRing = 0x2002'0000ull;
+using namespace mochi::va::demo_pong;
 
 template <typename T>
 static T* wait_map(CapHandle cap, int64_t expected_type, uint64_t va, uint32_t rights) {

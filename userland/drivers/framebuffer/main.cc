@@ -22,15 +22,10 @@
 #include "midix/abi/ring.h"
 #include "dango/layout.h"
 #include "gpu_linux.h"
+#include "mochi/va_layout.h"
 
 // Virtual address layout for io.framebuffer.
-constexpr uint64_t kVaBootInfo = 0x1000'0000ull;
-constexpr uint64_t kVaLogRing  = 0x1800'0000ull;
-constexpr uint64_t kVaFbPixels = 0x2000'0000ull; // framebuffer pixel arena
-constexpr uint64_t kVaCmdRing  = 0x2100'0000ull;
-constexpr uint64_t kVaReplyRing = 0x2102'0000ull; // keep clear of 0x11000-byte order-10 cmd ring
-constexpr uint64_t kVaGpuReqRing = 0x2200'0000ull;
-constexpr uint64_t kVaGpuReplyRing = 0x2201'0000ull;
+using namespace mochi::va::framebuffer;
 
 // Framebuffer dimensions — set per board by CMake (ANKO_FB_WIDTH/HEIGHT).
 // QEMU virt: 1024×768.  Switch T210: 1280×720.

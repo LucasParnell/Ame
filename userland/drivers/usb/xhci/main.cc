@@ -15,12 +15,9 @@
 #include "mochi/boot.h"
 #include "mochi/boot_log.h"
 #include "mochi/usb.h"
+#include "mochi/va_layout.h"
 
-constexpr uint64_t kVaBootInfo  = 0x1000'0000ull;
-constexpr uint64_t kVaLogRing   = 0x1800'0000ull;
-constexpr uint64_t kVaHidRing   = 0x1900'0000ull;
-constexpr uint64_t kVaXhciMmio  = 0x2000'0000ull;
-constexpr uint64_t kVaXhciDma   = 0x2100'0000ull;
+using namespace mochi::va::xhci;
 
 constexpr uint32_t kRingOrder = MX_DEFAULT_RING_ORDER;
 

@@ -8,12 +8,13 @@
 #include "mochi/sessions.h"
 #include "mochi/boot_log.h"
 #include "midix/abi/protocols/nameservice.h"
+#include "mochi/va_layout.h"
 
 static void no_close(uint32_t) {}
 
 extern "C" [[noreturn]] void _start() {
     auto* boot = mochi::boot::map();
-    (void)mochi::log_map_from_boot(boot, 0x20020000, "nameservice");
+    (void)mochi::log_map_from_boot(boot, mochi::va::nameservice::kVaLogRing, "nameservice");
     static mochi::ServerSessions sessions;
     if (!sessions.map(boot)) mochi::boot::invalid_boot();
     for (uint32_t i = 0; i < sessions.directory->count; ++i) sessions.refresh(i, no_close);

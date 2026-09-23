@@ -13,11 +13,9 @@
 #include "mochi/boot_log.h"
 #include "mochi/input.h"
 #include "mochi/usb.h"
+#include "mochi/va_layout.h"
 
-constexpr uint64_t kVaBootInfo = 0x1000'0000ull;
-constexpr uint64_t kVaLogRing  = 0x1800'0000ull;
-constexpr uint64_t kVaXhciRing = 0x1900'0000ull;
-constexpr uint64_t kVaInputRing = 0x1901'0000ull;
+using namespace mochi::va::hid;
 constexpr uint32_t kRingOrder = MX_DEFAULT_RING_ORDER;
 
 static mochi::usb::BootKeyboardReportSource g_xhci{};

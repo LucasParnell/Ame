@@ -8,9 +8,8 @@
 #include "fs_internal.h"
 #include "mochi/log.h"
 
-constexpr mx_vaddr_t kVaBlkReqRing = 0x2002'0000ull;
-constexpr mx_vaddr_t kVaBlkReplyRing = 0x2003'0000ull;
-constexpr mx_vaddr_t kVaBlkDma = 0x2100'0000ull;
+
+
 
 constexpr mx_u16_t kBTreeInternal = 1;
 constexpr mx_u16_t kBTreeLeaf = 2;

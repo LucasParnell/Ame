@@ -36,11 +36,13 @@
 
 #include "libk/bytes.h"
 #include "libk/str.h"
+#include "mochi/va_layout.h"
 #include "mochi/syscall.h"
 #include "mochi/ring.h"
 #include "mochi/fs.h"
 #include "mochi/boot.h"
 #include "midix/abi/protocols/fs.h"
+using namespace mochi::va::fs;
 
 // ---------------------------------------------------------------------------
 // Geometry and shared limits. All storage is fixed-capacity on purpose: the

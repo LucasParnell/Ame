@@ -14,9 +14,9 @@
 #include "mochi/log.h"
 #include "mochi/boot.h"
 #include "mochi/boot_log.h"
+#include "mochi/va_layout.h"
 
-constexpr uint64_t kVaBootInfo = 0x1000'0000ull;
-constexpr uint64_t kVaLogRing  = 0x1800'0000ull;
+using namespace mochi::va::pci;
 
 extern "C" [[noreturn]] void _start() {
     MxBootInfo* boot = mochi::boot::map(kVaBootInfo);

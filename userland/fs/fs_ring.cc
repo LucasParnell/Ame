@@ -17,8 +17,7 @@
 #include "mochi/boot_log.h"
 #include "mochi/sessions.h"
 
-constexpr mx_vaddr_t kVaBootInfo = 0x1000'0000ull;
-constexpr mx_vaddr_t kVaLogRing = 0x1800'0000ull;
+
 
 static mochi::ServerSessions g_sessions;
 

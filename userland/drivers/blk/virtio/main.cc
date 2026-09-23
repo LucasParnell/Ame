@@ -12,13 +12,9 @@
 #include "mochi/boot_log.h"
 #include "mochi/fs.h"
 #include "midix/abi/protocols/fs.h"
+#include "mochi/va_layout.h"
 
-constexpr mx_vaddr_t kVaBootInfo = 0x1000'0000ull;
-constexpr mx_vaddr_t kVaLogRing = 0x1800'0000ull;
-constexpr mx_vaddr_t kVaReqRing = 0x2000'0000ull;
-constexpr mx_vaddr_t kVaReplyRing = 0x2001'0000ull;
-constexpr mx_vaddr_t kVaVirtioMmio = 0x2100'0000ull;
-constexpr mx_vaddr_t kVaVirtioDma = 0x2200'0000ull;
+using namespace mochi::va::blk;
 
 constexpr mx_u32_t kRingOrder = MX_DEFAULT_RING_ORDER;
 constexpr mx_u32_t kVirtioMmioSlotSize = 0x200;

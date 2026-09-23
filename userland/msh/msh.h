@@ -29,14 +29,15 @@
 #include "midix/abi/cap.h"
 #include "midix/abi/protocols/fs.h"
 #include "midix/abi/protocols/terminal.h"
+#include "mochi/va_layout.h"
+using mochi::va::msh::kVaBootInfo;
+using mochi::va::msh::kVaLogRing;
+using mochi::va::msh::kVaTermInput;
+using mochi::va::msh::kVaTermOutput;
+using mochi::va::msh::kVaFsCmdRing;
+using mochi::va::msh::kVaFsReplyRing;
+using mochi::va::msh::kVaSvcRegistry;
 
-inline constexpr mx_vaddr_t kVaBootInfo      = 0x1000'0000ull;
-inline constexpr mx_vaddr_t kVaLogRing       = 0x1800'0000ull;
-inline constexpr mx_vaddr_t kVaTermInput     = 0x2000'0000ull; // tty -> shell
-inline constexpr mx_vaddr_t kVaTermOutput    = 0x2002'0000ull; // shell -> tty
-inline constexpr mx_vaddr_t kVaFsCmdRing     = 0x2004'0000ull;
-inline constexpr mx_vaddr_t kVaFsReplyRing   = 0x2006'0000ull;
-inline constexpr mx_vaddr_t kVaSvcRegistry   = 0x2010'0000ull;
 inline constexpr uint32_t kDefaultOrder      = MX_DEFAULT_RING_ORDER;
 inline constexpr uint32_t kLineMax           = 256;
 inline constexpr uint32_t kTokenMax          = 32;

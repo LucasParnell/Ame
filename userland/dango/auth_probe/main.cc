@@ -5,9 +5,10 @@
 #include "mochi/log.h"
 #include "mochi/boot.h"
 #include "dango/vm.h"
+#include "mochi/va_layout.h"
 
 constexpr uint32_t kRingOrder = 6;
-constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
+using namespace mochi::va::dango_auth_probe;
 
 
 template <typename T>

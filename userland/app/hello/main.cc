@@ -21,12 +21,9 @@
 #include "libk/str.h"
 #include "midix/abi/protocols/fs.h"
 #include "midix/abi/protocols/nameservice.h"
+#include "mochi/va_layout.h"
 
-constexpr mx_vaddr_t kVaLogRing = 0x1800'0000ull;
-constexpr mx_vaddr_t kVaNsTx    = 0x2A000000ull;
-constexpr mx_vaddr_t kVaNsRx    = 0x2A010000ull;
-constexpr mx_vaddr_t kVaFsTx    = 0x2A020000ull;
-constexpr mx_vaddr_t kVaFsRx    = 0x2A030000ull;
+using namespace mochi::va::app_hello;
 
 // io.fs exposes the root directory through the well-known handle 1.
 constexpr fs_handle_t kRootHandle = 1;

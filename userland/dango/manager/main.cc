@@ -14,6 +14,7 @@
 #include "midix/abi/dango_channel_test.h"
 #include "midix/abi/protocols/gpu.h"
 #include "gpu_linux.h"
+#include "mochi/va_layout.h"
 
 // The channel ring order is a guest-visible wire property; the manager must
 // agree with the driver and the DTS generator, so take it from the shared ABI.
@@ -35,8 +36,7 @@ constexpr uint32_t kLinuxRunnerHomeCpu = 1;
 // rendering work stays budgeted, and the latency hint belongs to the completion
 // notification path, not the runner.  SCHED_BAND_VM_FAIR is the budgeted VM band.
 constexpr uint32_t kLinuxRunnerSchedBand = dango::SCHED_BAND_VM_FAIR;
-constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
-constexpr uint64_t kVaBootInitrd = 0x2400'0000ull;
+using namespace mochi::va::dango_manager;
 // The appliance bundle is staged in guest RAM, so that is the honest bound on
 // how large it can be: the libc (lavapipe) guest's bundle is ~200 MiB, far past
 // the old fixed 64 MiB cap that made the manager report every artifact missing.
@@ -47,9 +47,6 @@ constexpr uint64_t kInitrdScanLimit = DANGO_RAM_SIZE;
 // process) sit alongside the channel VAs declared in dango/layout.h; the
 // asserts below keep every window disjoint so no mapping can silently shadow
 // another.
-constexpr uint64_t kVaGpuReqRing = 0x3100'0000ull;
-constexpr uint64_t kVaGpuReplyRing = 0x3101'0000ull;
-constexpr uint64_t kVaFbWindow = 0x3102'0000ull;
 
 static_assert(dango::windows_disjoint(kVaGpuReqRing, dango::kPageSize, kVaGpuReplyRing,
                                       dango::kPageSize) &&

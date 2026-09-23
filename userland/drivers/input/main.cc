@@ -12,11 +12,9 @@
 #include "mochi/boot.h"
 #include "mochi/boot_log.h"
 #include "mochi/input.h"
+#include "mochi/va_layout.h"
 
-constexpr uint64_t kVaBootInfo = 0x1000'0000ull;
-constexpr uint64_t kVaLogRing  = 0x1800'0000ull;
-constexpr uint64_t kVaHidRing  = 0x1900'0000ull;
-constexpr uint64_t kVaTtyRing  = 0x1901'0000ull;
+using namespace mochi::va::input;
 constexpr uint32_t kRingOrder = MX_DEFAULT_RING_ORDER;
 
 static mochi::input::EventSource g_hid{};

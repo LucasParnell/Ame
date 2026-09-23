@@ -17,15 +17,9 @@
 #include "mochi/framebuffer.h"
 #include "mochi/input.h"
 #include "mochi/terminal.h"
+#include "mochi/va_layout.h"
 
-constexpr uint64_t kVaBootInfo = 0x1000'0000ull;
-constexpr uint64_t kVaLogRing  = 0x1800'0000ull;
-constexpr uint64_t kVaFbCmdRing = 0x1900'0000ull;
-[[maybe_unused]] constexpr uint64_t kVaFbReplyRing = 0x1902'0000ull; // keep clear of order-10 cmd ring
-constexpr uint64_t kVaMirrorRing = 0x1904'0000ull;
-constexpr uint64_t kVaInputRing = 0x1906'0000ull; // avoid order-10 mirror ring overlap
-constexpr uint64_t kVaShellInputRing = 0x1908'0000ull;  // tty -> msh
-constexpr uint64_t kVaShellOutputRing = 0x190A'0000ull; // msh -> tty
+using namespace mochi::va::tty;
 
 // Text grid dimensions: cover the full 1024×768 ramfb with 8×16 cells.
 // Keeping the terminal at 80×25 made boot logs hit the scroll path almost

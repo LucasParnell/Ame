@@ -39,6 +39,7 @@ using integrity::bytes_equal;
 #include "midix/abi/protocols/fs.h"
 #include "midix/abi/protocols/gpu_service.h"
 #include "supervision.h"
+#include "mochi/va_layout.h"
 
 constexpr uint32_t PRINCIPAL_NATIVE_TRUSTED = 1;
 constexpr uint32_t PRINCIPAL_NATIVE_SANDBOXED = 2;
@@ -46,22 +47,14 @@ constexpr uint32_t PRINCIPAL_NATIVE_SANDBOXED = 2;
 constexpr uint32_t kRingOrder = 6;
 constexpr uint32_t kFbCmdRingOrder = 10;       // 1024 slots for chatty per-cell tty rendering.
 constexpr uint32_t kConsoleMirrorRingOrder = 10; // 48 KiB of UART->TTY mirror backlog.
-constexpr uint64_t kVaManifest = 0x2000'0000ull;
+using namespace mochi::va::init;
 // The initrd is mapped as one object starting at kVaInitrd, so every fixed
 // mapping above it begins after the layout's initrd span: 64 MiB for the
 // appliance initramfs, 384 MiB for the libc rootfs (a 186 MiB initrd used to run
 // straight through kVaSvcRegistry and fail the boot).
-constexpr uint64_t kVaInitrd = 0x2400'0000ull;
-constexpr uint64_t kVaInitLogRing = kVaInitrd + DANGO_INITRD_VA_SPAN;
-constexpr uint64_t kVaConsoleConfig  = kVaInitLogRing + 0x2'0000ull;
-constexpr uint64_t kVaSvcCtlReqRing = kVaInitLogRing + 0x7'0000ull;
-constexpr uint64_t kVaSvcCtlReplyRing = kVaInitLogRing + 0x8'0000ull;
-constexpr uint64_t kVaBootInfoBase   = kVaInitLogRing + 0x10'0000'0ull;
-constexpr uint64_t kVaSvcRegistry    = kVaInitLogRing + 0x20'0000'0ull;
 // Per-service session directories follow the registry (64 KiB each), so they
 // move with the layout instead of sitting at a literal that a large initrd
 // covers.
-constexpr uint64_t kVaSessions       = kVaSvcRegistry + 0x1'0000ull;
 
 
 static CapHandle kCapManifest, kCapInitrd, kCapSupervisor, kCapUart;

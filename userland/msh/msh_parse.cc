@@ -74,27 +74,16 @@ bool parse_line(const char* line, ParsedLine* out) {
         memzero(&t, sizeof(t));
         uint32_t n = 0;
 
-        if (line[i] == ';') {
+        // A control operator is its own token: ; && ||.
+        const auto control = [&](const char* op, uint32_t advance) {
             t.control = true;
-            append_char(t.text, sizeof(t.text), &n, ';');
-            ++i;
+            append_str(t.text, sizeof(t.text), &n, op);
+            i += advance;
             ++out->count;
-            continue;
-        }
-        if (line[i] == '&' && line[i + 1] == '&') {
-            t.control = true;
-            append_str(t.text, sizeof(t.text), &n, "&&");
-            i += 2;
-            ++out->count;
-            continue;
-        }
-        if (line[i] == '|' && line[i + 1] == '|') {
-            t.control = true;
-            append_str(t.text, sizeof(t.text), &n, "||");
-            i += 2;
-            ++out->count;
-            continue;
-        }
+        };
+        if (line[i] == ';') { control(";", 1); continue; }
+        if (line[i] == '&' && line[i + 1] == '&') { control("&&", 2); continue; }
+        if (line[i] == '|' && line[i + 1] == '|') { control("||", 2); continue; }
 
         bool single = false;
         bool dbl = false;
@@ -149,21 +138,26 @@ bool parse_line(const char* line, ParsedLine* out) {
 }
 
 
+bool set_var_from_assignment(char* token) {
+    if (!token) return false;
+    char* eq = nullptr;
+    for (uint32_t i = 0; token[i]; ++i) {
+        if (token[i] == '=') { eq = token + i; break; }
+    }
+    if (!eq) return false;
+    *eq = '\0';
+    const bool ok = set_var(token, eq + 1);
+    *eq = '=';
+    return ok;
+}
+
 int execute_simple(int argc, char** argv) {
     if (argc <= 0) return 0;
 
     // Leading assignments in a simple command mutate shell vars for now.
     uint32_t first = 0;
     while (first < static_cast<uint32_t>(argc) && token_is_assignment(argv[first])) {
-        char* eq = nullptr;
-        for (uint32_t i = 0; argv[first][i]; ++i) {
-            if (argv[first][i] == '=') { eq = argv[first] + i; break; }
-        }
-        if (eq) {
-            *eq = '\0';
-            (void)set_var(argv[first], eq + 1);
-            *eq = '=';
-        }
+        (void)set_var_from_assignment(argv[first]);
         ++first;
     }
     if (first >= static_cast<uint32_t>(argc)) return 0;
@@ -183,7 +177,6 @@ int execute_parsed(ParsedLine* p) {
     int status = 0;
     char* argv[kArgMax];
     int argc = 0;
-    enum NextMode { Always, IfSuccess, IfFailure } next = Always;
     bool should_run = true;
 
     auto flush = [&]() -> void {
@@ -202,16 +195,11 @@ int execute_parsed(ParsedLine* p) {
         flush();
         if (at_end) break;
         if (streq(p->tokens[i].text, ";")) {
-            next = Always;
             should_run = true;
         } else if (streq(p->tokens[i].text, "&&")) {
-            next = IfSuccess;
             should_run = (status == 0);
         } else if (streq(p->tokens[i].text, "||")) {
-            next = IfFailure;
             should_run = (status != 0);
-        } else {
-            (void)next;
         }
     }
     return status;

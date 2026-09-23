@@ -48,6 +48,12 @@ inline constexpr uint32_t kVarValueMax       = 128;
 inline constexpr uint32_t kHistoryMax        = 16;
 inline constexpr uint32_t kPromptMax         = 96;
 inline constexpr uint32_t kCompletionMax     = 24;
+// Path handling limits (fs_internal.h's inline-name width and the component
+// depth cap) and the well-known root handle.
+inline constexpr uint32_t kPathNameMax  = 36;
+inline constexpr uint32_t kPathDepthMax = 12;
+inline constexpr uint32_t kPathMax      = 128;
+inline constexpr fs_handle_t kRootHandle = 1;
 
 struct Token {
     char text[96];
@@ -133,6 +139,8 @@ bool read_line(char* out, uint32_t cap);
 EnvVar* find_var(const char* name);
 bool set_var(const char* name, const char* value);
 bool parse_line(const char* line, ParsedLine* out);
+// Split a NAME=VALUE token in place, set the variable, and restore the '='.
+bool set_var_from_assignment(char* token);
 int execute_simple(int argc, char** argv);
 int execute_parsed(ParsedLine* p);
 

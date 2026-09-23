@@ -18,21 +18,21 @@ static bool fs_open_name_at(fs_handle_t parent, const char* name, mx_u32_t flags
     return g.fs.wait_open(parent, name, flags, out);
 }
 
-static bool path_push(char parts[][36], uint32_t* count, const char* s, uint32_t len) {
+static bool path_push(char parts[][kPathNameMax], uint32_t* count, const char* s, uint32_t len) {
     if (!parts || !count || len == 0) return true;
     if (len == 1 && s[0] == '.') return true;
     if (len == 2 && s[0] == '.' && s[1] == '.') {
         if (*count > 0) --*count;
         return true;
     }
-    if (*count >= 12 || len >= 36) return false;
+    if (*count >= kPathDepthMax || len >= kPathNameMax) return false;
     (void)libk::copy_n(libk::as_bytes(parts[*count], len), libk::as_bytes(s, len), len);
     parts[*count][len] = '\0';
     ++*count;
     return true;
 }
 
-static bool path_collect(const char* path, char parts[][36], uint32_t* count) {
+static bool path_collect(const char* path, char parts[][kPathNameMax], uint32_t* count) {
     if (!path || !parts || !count) return false;
     uint32_t i = 0;
     while (path[i]) {
@@ -47,7 +47,7 @@ static bool path_collect(const char* path, char parts[][36], uint32_t* count) {
 static bool normalize_path(const char* input, char* out, uint32_t out_cap) {
     if (!input || !input[0]) input = ".";
     if (!out || out_cap == 0) return false;
-    char parts[12][36]{};
+    char parts[kPathDepthMax][kPathNameMax]{};
     uint32_t count = 0;
     if (input[0] != '/') {
         if (!path_collect(g.cwd, parts, &count)) return false;
@@ -64,7 +64,7 @@ static bool normalize_path(const char* input, char* out, uint32_t out_cap) {
 
 static bool split_parent_name(const char* path, char* parent, uint32_t parent_cap,
                               char* name, uint32_t name_cap) {
-    char norm[128];
+    char norm[kPathMax];
     if (!normalize_path(path, norm, sizeof(norm))) return false;
     if (streq(norm, "/")) return false;
     uint32_t last = 0;
@@ -86,7 +86,7 @@ struct ResolvedPath {
     mx_u64_t inode;
     mx_u16_t type;
     mx_u64_t size;
-    char normalized[128];
+    char normalized[kPathMax];
     bool borrowed_root;
 };
 
@@ -101,19 +101,19 @@ static bool resolve_normalized(const char* normalized, mx_u32_t flags, ResolvedP
     *out = {};
     copy_str(out->normalized, sizeof(out->normalized), normalized);
     if (streq(normalized, "/")) {
-        out->handle = 1;
-        out->inode = 1;
+        out->handle = kRootHandle;
+        out->inode = kRootHandle;
         out->type = FS_INODE_DIR;
         out->size = 0;
         out->borrowed_root = true;
         return true;
     }
 
-    fs_handle_t parent = 1;
+    fs_handle_t parent = kRootHandle;
     bool parent_owned = false;
     uint32_t i = 1;
     while (normalized[i]) {
-        char component[36]{};
+        char component[kPathNameMax]{};
         uint32_t n = 0;
         while (normalized[i] && normalized[i] != '/') {
             if (n + 1 >= sizeof(component)) {
@@ -151,7 +151,7 @@ static bool resolve_normalized(const char* normalized, mx_u32_t flags, ResolvedP
 }
 
 static bool resolve_path(const char* path, mx_u32_t flags, ResolvedPath* out) {
-    char norm[128];
+    char norm[kPathMax];
     if (!normalize_path(path, norm, sizeof(norm))) return false;
     return resolve_normalized(norm, flags, out);
 }
@@ -291,8 +291,8 @@ int cmd_mkdir(int argc, char** argv) {
     if (!g.have_fs) return notimpl("mkdir io.fs");
     int rc = 0;
     for (int a = 1; a < argc; ++a) {
-        char parent_path[128]{};
-        char name[36]{};
+        char parent_path[kPathMax]{};
+        char name[kPathNameMax]{};
         if (!split_parent_name(argv[a], parent_path, sizeof(parent_path), name, sizeof(name))) {
             put("mkdir: bad path: "); putln(argv[a]); rc = 1; continue;
         }
@@ -322,8 +322,8 @@ int cmd_rm(int argc, char** argv) {
     if (!g.have_fs) return notimpl("rm io.fs");
     int rc = 0;
     for (int a = 1; a < argc; ++a) {
-        char parent_path[128]{};
-        char name[36]{};
+        char parent_path[kPathMax]{};
+        char name[kPathNameMax]{};
         if (!split_parent_name(argv[a], parent_path, sizeof(parent_path), name, sizeof(name))) {
             put("rm: bad path: "); putln(argv[a]); rc = 1; continue;
         }
@@ -352,8 +352,8 @@ int cmd_touch(int argc, char** argv) {
     if (!g.have_fs) return notimpl("touch io.fs");
     int rc = 0;
     for (int a = 1; a < argc; ++a) {
-        char parent_path[128]{};
-        char name[36]{};
+        char parent_path[kPathMax]{};
+        char name[kPathNameMax]{};
         if (!split_parent_name(argv[a], parent_path, sizeof(parent_path), name, sizeof(name))) {
             put("touch: bad path: "); putln(argv[a]); rc = 1; continue;
         }

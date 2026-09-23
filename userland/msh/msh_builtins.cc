@@ -53,9 +53,9 @@ int cmd_help(int, char**) {
     return 0;
 }
 
-int cmd_exit(int argc, char**) {
+int cmd_exit(int, char**) {
     g.running = false;
-    return argc > 1 ? 0 : 0;
+    return 0;
 }
 
 int cmd_echo(int argc, char** argv) {
@@ -107,21 +107,11 @@ int cmd_set(int argc, char** argv) {
         return 0;
     }
     for (int a = 1; a < argc; ++a) {
-        char* eq = nullptr;
-        for (uint32_t i = 0; argv[a][i]; ++i) {
-            if (argv[a][i] == '=') {
-                eq = argv[a] + i;
-                break;
-            }
-        }
-        if (!eq) {
+        if (!set_var_from_assignment(argv[a])) {
             put("msh: set: expected NAME=VALUE: ");
             putln(argv[a]);
             return 1;
         }
-        *eq = '\0';
-        if (!set_var(argv[a], eq + 1)) return 1;
-        *eq = '=';
     }
     return 0;
 }

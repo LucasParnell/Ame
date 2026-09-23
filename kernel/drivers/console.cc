@@ -14,20 +14,31 @@ namespace drivers::uart {
 namespace {
     const ConsoleOps* g_console_ops = nullptr;
     void (*g_secondary_sink)(char)  = nullptr;
+
+    // One row per ConsoleKind the kernel knows how to drive. Board selection is
+    // a data table, not a dispatch switch: adding a board is one row here,
+    // matching the function-pointer ops table the drivers already use.
+    struct ConsoleDriver {
+        ConsoleKind       kind;
+        const ConsoleOps* ops;
+    };
+    const ConsoleDriver kConsoleDrivers[] = {
+        { ConsoleKind::PL011,      &drivers::uart::kPl011Ops },
+        { ConsoleKind::Tegra16550, &drivers::uart::kTegraUartOps },
+    };
+
+    const ConsoleOps* ops_for(ConsoleKind kind) {
+        for (const ConsoleDriver& driver : kConsoleDrivers) {
+            if (driver.kind == kind) return driver.ops;
+        }
+        return nullptr;
+    }
 } // namespace
 
 namespace console {
 
 void bind(ConsoleKind k, PhysAddr base) {
-    const ConsoleOps* ops = nullptr;
-    switch (k) {
-    case ConsoleKind::PL011:
-        ops = &drivers::uart::kPl011Ops;
-        break;
-    case ConsoleKind::Tegra16550:
-        ops = &drivers::uart::kTegraUartOps;
-        break;
-    }
+    const ConsoleOps* ops = ops_for(k);
     if (!ops) return;
     ops->early_init(base);
     g_console_ops = ops;

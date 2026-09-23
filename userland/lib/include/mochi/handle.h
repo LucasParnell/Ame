@@ -90,4 +90,26 @@ static inline bool is_type(mx_handle_t h, mx_i64_t type) {
     return identify(h, &got).ok() && got == type;
 }
 
+// Block until `cap` names `expect` (an MX_CAP_* value), then map it at `va` with
+// `rights` and return a typed pointer. During bring-up a grant can appear a few
+// yields after the handle that names it; this is the wait-then-map dance, stated
+// once here instead of in every service that maps a boot capability.
+template <typename T>
+inline T* cap_map_when(mx_handle_t cap, mx_i64_t expect, mx_vaddr_t va, mx_rights_t rights) {
+    Handle<> h(cap);
+    for (;;) {
+        if (static_cast<mx_i64_t>(h.type()) == expect) {
+            T* mapped = nullptr;
+            if (h.map<T>(va, rights, &mapped) == MX_OK) return mapped;
+        }
+        mx_yield();
+    }
+}
+
+// Block until `cap` names `expect` (an MX_CAP_* value).
+inline void cap_wait_type(mx_handle_t cap, mx_i64_t expect) {
+    Handle<> h(cap);
+    while (static_cast<mx_i64_t>(h.type()) != expect) mx_yield();
+}
+
 } // namespace mochi

@@ -7,6 +7,7 @@
 
 #include "midix/abi/boot.h"
 #include "midix/abi/cap.h"
+#include "mochi/ring.h"
 #include "mochi/syscall.h"
 
 namespace mochi::boot {
@@ -123,6 +124,21 @@ static inline mx_handle_t require_handle(const MxBootInfo* info, const char* nam
         invalid_boot();
     }
     return h;
+}
+
+// Map a named MX_BOOT_ENTRY_RING into this process at `va` and report its ring
+// order (from the entry's aux0, or `default_order`). Returns the mapped page, or
+// nullptr if the entry is absent or the map fails. Centralises the
+// find_type + order + mx_map_page dance the console, tty and shell all repeat.
+static inline RingPage* map_ring(const MxBootInfo* info, const char* name, mx_vaddr_t va,
+                                 uint32_t default_order, uint32_t* order_out = nullptr) {
+    const MxBootEntry* entry = find_type(info, name, MX_BOOT_ENTRY_RING);
+    if (!entry || entry->handle == MX_NULL_HANDLE) return nullptr;
+    if (mx_map_page(entry->handle, va, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) return nullptr;
+    if (order_out) {
+        *order_out = entry->aux0 ? static_cast<uint32_t>(entry->aux0) : default_order;
+    }
+    return reinterpret_cast<RingPage*>(va);
 }
 
 // Services publish readiness only after their endpoints and local state exist.

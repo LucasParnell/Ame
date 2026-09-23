@@ -231,3 +231,81 @@ static inline bool ring_wait_pop(RingPage* r, uint32_t order,
         // Wake or immediate return: retry the pop.
     }
 }
+
+// ---------------------------------------------------------------------------
+// RingReaderSet — one consumer draining many SPSC rings through a shared
+// doorbell.
+//
+// A service that reads several producer rings can only sleep on one wakeup, so
+// the single-ring protocol in ring_wait_pop() has to be fanned out: publish
+// receiver_about_to_sleep on every ring, re-check them all, then wait on the
+// shared doorbell. That is what drain()/wait() do here, so no service ever
+// hand-rolls it again. This is a view — the caller owns the ring array.
+// ---------------------------------------------------------------------------
+namespace mochi {
+
+struct RingReaderSet {
+    RingPage* const* rings;
+    uint32_t count;
+    uint32_t order;
+    CapHandle doorbell;
+
+    // Consume every slot currently available on every ring, calling on_slot for
+    // each. Never blocks. Returns true if any slot was consumed.
+    template <typename OnSlot>
+    bool drain(OnSlot on_slot) const {
+        bool any = false;
+        RingSlot slot{};
+        for (uint32_t i = 0; i < count; ++i) {
+            while (ring_pop(rings[i], order, &slot)) {
+                on_slot(slot);
+                any = true;
+            }
+        }
+        return any;
+    }
+
+    // Block until at least one slot is consumed, running on_slot for every slot
+    // drained. This is the multi-ring form of the ring_wait_pop() protocol: the
+    // publish-sleep / re-check / wait ordering closes the wake race against the
+    // shared doorbell. Returns false only if the doorbell wait itself fails.
+    template <typename OnSlot>
+    bool wait(OnSlot on_slot) const {
+        for (;;) {
+            if (drain(on_slot)) return true;
+
+            const uint64_t counter = sys_doorbell_read(doorbell);
+            publish_sleep(counter);
+
+            // Close the race where a producer publishes after the empty check
+            // but before the sleep flag became visible.
+            if (drain(on_slot)) {
+                clear_sleep();
+                return true;
+            }
+
+            // The flag must stay set across the wait: a producer only notifies
+            // the doorbell while it observes the sleep request. Clearing it
+            // early would let a publication go unnotified and lose the wake.
+            const int64_t rc = sys_wait_doorbell(doorbell, counter);
+            clear_sleep();
+            if (rc < 0) return false;
+        }
+    }
+
+private:
+    void publish_sleep(uint64_t counter) const {
+        for (uint32_t i = 0; i < count; ++i) {
+            rings[i]->flags.doorbell_counter_snapshot = counter;
+            __atomic_store_n(&rings[i]->flags.receiver_about_to_sleep, 1u, __ATOMIC_RELEASE);
+        }
+    }
+    void clear_sleep() const {
+        for (uint32_t i = 0; i < count; ++i) {
+            __atomic_store_n(&rings[i]->flags.receiver_about_to_sleep, 0u, __ATOMIC_RELEASE);
+        }
+    }
+};
+
+} // namespace mochi
+

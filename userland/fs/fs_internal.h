@@ -34,6 +34,8 @@
 //     a usable reserved region) /data is an explicitly NON-DURABLE in-memory
 //     volume and FS_SYNC returns MX_ERR_NOT_IMPLEMENTED. See fs_durable.cc.
 
+#include "libk/bytes.h"
+#include "libk/str.h"
 #include "mochi/syscall.h"
 #include "mochi/ring.h"
 #include "mochi/fs.h"
@@ -181,29 +183,17 @@ extern mx_u64_t g_session_generation;
 // Small freestanding helpers, shared by every module.
 // ---------------------------------------------------------------------------
 static inline void zero_bytes(void* ptr, mx_u64_t len) {
-    auto* p = static_cast<mx_u8_t*>(ptr);
-    for (mx_u64_t i = 0; i < len; ++i) {
-        p[i] = 0;
-    }
+    libk::fill(libk::as_bytes(ptr, static_cast<std::size_t>(len)), 0);
 }
 
 static inline void fs_copy_bytes(void* dst, const void* src, mx_u64_t len) {
-    auto* d = static_cast<mx_u8_t*>(dst);
-    const auto* s = static_cast<const mx_u8_t*>(src);
-    for (mx_u64_t i = 0; i < len; ++i) {
-        d[i] = s[i];
-    }
+    (void)libk::copy_n(libk::as_bytes(dst, static_cast<std::size_t>(len)),
+                       libk::as_bytes(src, static_cast<std::size_t>(len)),
+                       static_cast<std::size_t>(len));
 }
 
 static inline mx_u32_t str_len(const char* s, mx_u32_t limit) {
-    mx_u32_t n = 0;
-    if (!s) {
-        return 0;
-    }
-    while (n < limit && s[n]) {
-        ++n;
-    }
-    return n;
+    return static_cast<mx_u32_t>(libk::str::length_n(s, limit));
 }
 
 static inline bool name_eq(const char* a, const char* b, mx_u8_t b_len) {

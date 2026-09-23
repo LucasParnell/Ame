@@ -26,7 +26,7 @@ static bool path_push(char parts[][36], uint32_t* count, const char* s, uint32_t
         return true;
     }
     if (*count >= 12 || len >= 36) return false;
-    for (uint32_t i = 0; i < len; ++i) parts[*count][i] = s[i];
+    (void)libk::copy_n(libk::as_bytes(parts[*count], len), libk::as_bytes(s, len), len);
     parts[*count][len] = '\0';
     ++*count;
     return true;

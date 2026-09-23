@@ -4,22 +4,14 @@
 // ask the kernel to copy data. Full dynamic endpoint allocation is a later
 // nameservice policy, not a kernel feature.
 
+#include "libk/str.h"
 #include "mochi/endpoint.h"
 #include "midix/abi/protocols/nameservice.h"
 
 namespace mochi::nameservice {
 
 static inline uint32_t copy_name(char* dst, uint32_t dst_len, const char* src) {
-    if (!dst || dst_len == 0) return 0;
-    uint32_t n = 0;
-    if (src) {
-        while (n + 1 < dst_len && src[n]) {
-            dst[n] = src[n];
-            ++n;
-        }
-    }
-    dst[n] = '\0';
-    return n;
+    return static_cast<uint32_t>(libk::str::copy_into(dst, dst_len, src));
 }
 
 static inline bool try_resolve_request(const SpscEndpoint& ns, const char* name) {

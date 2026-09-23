@@ -1,5 +1,6 @@
 #pragma once
 
+#include "libk/str.h"
 #include "mochi/channel.h"
 #include "midix/abi/status.h"
 
@@ -25,15 +26,7 @@ struct Reply {
 static_assert(sizeof(Reply) <= MX_RING_INLINE_PAYLOAD, "svc control reply must fit in one ring slot");
 
 static inline void copy_name(char* dst, mx_u32_t cap, const char* src) {
-    if (!dst || cap == 0) return;
-    mx_u32_t i = 0;
-    if (src) {
-        while (i + 1 < cap && src[i]) {
-            dst[i] = src[i];
-            ++i;
-        }
-    }
-    dst[i] = '\0';
+    (void)libk::str::copy_into(dst, cap, src);
 }
 
 // Client and Server are Channels: the ring pair and doorbells are inherited, and

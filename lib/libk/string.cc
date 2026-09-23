@@ -5,6 +5,7 @@
 // extern "C" wrappers with the standard C signatures.
 
 #include "libk/string.h"
+#include "libk/str.h"
 
 namespace libk {
 
@@ -47,9 +48,8 @@ int strncmp(const char* a, const char* b, size_t n) {
 }
 
 size_t strlen(const char* s) {
-    size_t n = 0;
-    while (s[n]) ++n;
-    return n;
+    // One implementation of the length scan lives in libk/str.h.
+    return libk::str::length(s);
 }
 
 uint32_t be32(const void* p) {

@@ -4,6 +4,7 @@
 
 #include "libk/bytes.h"
 #include "libk/num.h"
+#include "libk/printf.h"
 #include "libk/str.h"
 
 // Output, string helpers, cap/boot type names, and service-registry reads.
@@ -112,13 +113,9 @@ uint64_t parse_u64(const char* s, bool* ok) {
     return value;
 }
 
-void u64_to_dec(uint64_t v, char* out, uint32_t cap) {
-    (void)libk::num::to_dec(v, out, cap);
-}
 
-void u64_to_hex(uint64_t v, char* out, uint32_t cap) {
-    (void)libk::num::to_hex(v, out, cap);
-}
+
+
 
 void put_bytes(const char* data, uint32_t len) {
     if (!data || len == 0) return;
@@ -139,15 +136,15 @@ void putln(const char* s) {
 }
 
 void put_dec(uint64_t v) {
-    char b[32];
-    u64_to_dec(v, b, sizeof(b));
-    put(b);
+    char b[24];
+    const int n = libk::snprintf(b, sizeof(b), "%llu", static_cast<unsigned long long>(v));
+    put_bytes(b, n < 0 ? 0u : static_cast<uint32_t>(n));
 }
 
 void put_hex(uint64_t v) {
-    char b[32];
-    u64_to_hex(v, b, sizeof(b));
-    put(b);
+    char b[24];
+    const int n = libk::snprintf(b, sizeof(b), "0x%llx", static_cast<unsigned long long>(v));
+    put_bytes(b, n < 0 ? 0u : static_cast<uint32_t>(n));
 }
 
 void put_status(mx_status_t s) {

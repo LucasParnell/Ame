@@ -2,6 +2,8 @@
 
 #include "msh.h"
 
+#include "libk/printf.h"
+
 // Shell variables, the word/token tokenizer, and command execution.
 // The tokenizer expands $name and $? while it scans; execution splits a
 // parsed line on the control operators ; && || and dispatches to the builtin
@@ -17,7 +19,8 @@ EnvVar* find_var(const char* name) {
 static const char* get_var(const char* name) {
     if (streq(name, "?")) {
         static char last[16];
-        u64_to_dec(static_cast<uint64_t>(g.last_status < 0 ? -g.last_status : g.last_status), last, sizeof(last));
+        (void)libk::snprintf(last, sizeof(last), "%llu",
+                             static_cast<unsigned long long>(g.last_status < 0 ? -g.last_status : g.last_status));
         return last;
     }
     if (streq(name, "PWD")) return g.cwd;

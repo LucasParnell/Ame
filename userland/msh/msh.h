@@ -109,8 +109,7 @@ bool is_printable(char c);
 bool is_digit(char c);
 bool is_name_char(char c);
 uint64_t parse_u64(const char* s, bool* ok = nullptr);
-void u64_to_dec(uint64_t v, char* out, uint32_t cap);
-void u64_to_hex(uint64_t v, char* out, uint32_t cap);
+
 void put_bytes(const char* data, uint32_t len);
 void put(const char* s);
 void putln(const char* s);

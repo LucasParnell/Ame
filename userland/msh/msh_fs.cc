@@ -2,6 +2,8 @@
 
 #include "msh.h"
 
+#include "libk/bytes.h"
+
 // Filesystem builtins: io.fs path resolution and pwd/cd/ls/cat/mkdir/rm/touch.
 // Paths are normalised into components, resolved one component at a time with
 // FS_OPEN, and every intermediate handle is closed on the way out.
@@ -304,7 +306,7 @@ int cmd_mkdir(int argc, char** argv) {
         uint32_t n = slen(name);
         if (n > sizeof(req.name)) n = sizeof(req.name);
         req.name_len = static_cast<mx_u8_t>(n);
-        for (uint32_t i = 0; i < n; ++i) req.name[i] = name[i];
+        (void)libk::copy_n(libk::as_bytes(req.name, n), libk::as_bytes(name, n), n);
         mx_i32_t status = MX_ERR_BAD_PROTOCOL;
         if (!g.fs.ep.send_spinning(FS_MKDIR, &req, sizeof(req)) || !wait_status_reply(FS_MKDIR_REPLY, &status)) {
             status = MX_ERR_BAD_PROTOCOL;
@@ -334,7 +336,7 @@ int cmd_rm(int argc, char** argv) {
         uint32_t n = slen(name);
         if (n > sizeof(req.name)) n = sizeof(req.name);
         req.name_len = static_cast<mx_u8_t>(n);
-        for (uint32_t i = 0; i < n; ++i) req.name[i] = name[i];
+        (void)libk::copy_n(libk::as_bytes(req.name, n), libk::as_bytes(name, n), n);
         mx_i32_t status = MX_ERR_BAD_PROTOCOL;
         if (!g.fs.ep.send_spinning(FS_UNLINK, &req, sizeof(req)) || !wait_status_reply(FS_UNLINK_REPLY, &status)) {
             status = MX_ERR_BAD_PROTOCOL;

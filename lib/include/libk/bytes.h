@@ -21,10 +21,15 @@ struct bytes {
     std::size_t size;
 };
 
-// A read-only byte view.
+// A read-only byte view. Constructors are explicit about the two shapes a
+// caller holds, and a mutable view converts to a read-only one for free.
 struct const_bytes {
-    const std::uint8_t* data;
-    std::size_t size;
+    const std::uint8_t* data = nullptr;
+    std::size_t size = 0;
+
+    constexpr const_bytes() = default;
+    constexpr const_bytes(const std::uint8_t* d, std::size_t s) : data(d), size(s) {}
+    constexpr const_bytes(bytes b) : data(b.data), size(b.size) {} // mutable -> read-only
 };
 
 // Build a view. (nullptr, n) normalises to the empty view so the helpers below

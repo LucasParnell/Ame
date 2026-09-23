@@ -10,12 +10,15 @@
 // and listed in userland/manifest.v0, so its startup is observable in the boot
 // log as `[I] app.hello: example application ready`.
 
+#include "mochi/arena.h"
 #include "mochi/boot.h"
 #include "mochi/boot_log.h"
 #include "mochi/endpoint.h"
 #include "mochi/log.h"
 #include "mochi/nameservice.h"
 #include "mochi/syscall.h"
+#include "libk/bytes.h"
+#include "libk/str.h"
 #include "midix/abi/protocols/fs.h"
 #include "midix/abi/protocols/nameservice.h"
 
@@ -31,14 +34,9 @@ constexpr fs_handle_t kRootHandle = 1;
 // Bounded waits: an example must never wedge the boot if a peer is slow.
 constexpr uint32_t kWaitSpins = 200000;
 
-static RingPage* map_ring(const MxBootInfo* boot, const char* name, mx_vaddr_t va,
-                          uint32_t* order) {
-    const MxBootEntry* entry = mochi::boot::find_type(boot, name, MX_BOOT_ENTRY_RING);
-    if (!entry || entry->handle == MX_NULL_HANDLE) return nullptr;
-    if (mx_map_page(entry->handle, va, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) return nullptr;
-    if (order) *order = entry->aux0 ? static_cast<uint32_t>(entry->aux0) : MX_DEFAULT_RING_ORDER;
-    return reinterpret_cast<RingPage*>(va);
-}
+// Backing store for the example's arena (mochi/arena.h): a fixed region, in the
+// spirit of a mapped CAP_ARENA, with no heap anywhere.
+alignas(16) unsigned char g_arena_mem[256];
 
 // Build an SPSC endpoint from the BootInfo names a manifest session grants.
 static bool wire(const MxBootInfo* boot,
@@ -47,8 +45,8 @@ static bool wire(const MxBootInfo* boot,
                  const char* tx_db_name, const char* rx_db_name,
                  mochi::SpscEndpoint* out) {
     uint32_t order = MX_DEFAULT_RING_ORDER;
-    RingPage* tx = map_ring(boot, tx_name, tx_va, &order);
-    RingPage* rx = map_ring(boot, rx_name, rx_va, nullptr);
+    RingPage* tx = mochi::boot::map_ring(boot, tx_name, tx_va, MX_DEFAULT_RING_ORDER, &order);
+    RingPage* rx = mochi::boot::map_ring(boot, rx_name, rx_va, MX_DEFAULT_RING_ORDER, nullptr);
     const mx_handle_t tx_db = mochi::boot::handle(boot, tx_db_name);
     const mx_handle_t rx_db = mochi::boot::handle(boot, rx_db_name);
     if (!tx || !rx || tx_db == MX_NULL_HANDLE || rx_db == MX_NULL_HANDLE) return false;
@@ -78,9 +76,8 @@ static uint32_t fs_root_entry_count(const mochi::SpscEndpoint& fs) {
         if (fs.try_recv(&slot)) {
             if (slot.type == FS_READDIR_REPLY && slot.length >= sizeof(FsReaddirReply)) {
                 FsReaddirReply reply{};
-                for (uint32_t i = 0; i < sizeof(reply); ++i) {
-                    reinterpret_cast<uint8_t*>(&reply)[i] = slot.payload[i];
-                }
+                (void)libk::copy_n(libk::as_bytes(&reply, sizeof(reply)),
+                                   libk::as_bytes(slot.payload, sizeof(reply)), sizeof(reply));
                 return reply.status == MX_OK ? reply.entry_count : 0;
             }
             if (slot.type == FS_ERROR) return 0;
@@ -98,6 +95,14 @@ extern "C" [[noreturn]] void _start() {
     // init's dependency ordering.
     mochi::boot::ready(boot);
     mochi::log_raw_marker("example application ready\n");
+
+    // Demonstrate arena-backed allocation: the example service sub-allocates its
+    // scratch from a fixed region (mochi/arena.h) rather than a heap.
+    mochi::Arena arena(g_arena_mem, sizeof(g_arena_mem));
+    if (char* line = arena.alloc<char>(64)) {
+        (void)libk::str::copy_into(line, 64, "arena: scratch from a fixed region\n");
+        mochi::log_raw_marker(line);
+    }
 
     // Declared `uses` session: nameservice.  Resolve a peer, then log whether
     // the round trip succeeded.  Failure is reported, not fatal.

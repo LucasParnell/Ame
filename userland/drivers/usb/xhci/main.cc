@@ -9,6 +9,7 @@
 
 #include "mochi/syscall.h"
 #include "libk/bytes.h"
+#include "libk/integer.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
@@ -280,7 +281,7 @@ static void port_clear_changes(uint8_t port) {
 }
 
 static uint64_t align_up(uint64_t value, uint64_t align) {
-    return (value + align - 1ull) & ~(align - 1ull);
+    return static_cast<uint64_t>(libk::align_up(value, align));
 }
 
 static void* dma_alloc(uint64_t size, uint64_t align) {

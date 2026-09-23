@@ -36,6 +36,8 @@ using mochi::va::msh::kVaTermInput;
 using mochi::va::msh::kVaTermOutput;
 using mochi::va::msh::kVaFsCmdRing;
 using mochi::va::msh::kVaFsReplyRing;
+using mochi::va::msh::kVaSvcCmdRing;
+using mochi::va::msh::kVaSvcReplyRing;
 using mochi::va::msh::kVaSvcRegistry;
 
 inline constexpr uint32_t kDefaultOrder      = MX_DEFAULT_RING_ORDER;

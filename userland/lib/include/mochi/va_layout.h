@@ -112,6 +112,8 @@ constexpr uint64_t kVaTermInput   = 0x2000'0000ull;
 constexpr uint64_t kVaTermOutput  = 0x2002'0000ull;
 constexpr uint64_t kVaFsCmdRing   = 0x2004'0000ull;
 constexpr uint64_t kVaFsReplyRing = 0x2006'0000ull;
+constexpr uint64_t kVaSvcCmdRing   = 0x2007'0000ull;
+constexpr uint64_t kVaSvcReplyRing = 0x2008'0000ull;
 constexpr uint64_t kVaSvcRegistry = 0x2010'0000ull;
 }
 

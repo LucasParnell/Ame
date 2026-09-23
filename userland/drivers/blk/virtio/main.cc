@@ -4,6 +4,8 @@
 // polls completions, matching the rest of the current driver bring-up.
 
 #include "mochi/syscall.h"
+#include "libk/bytes.h"
+#include "libk/integer.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
@@ -132,12 +134,11 @@ static void barrier() {
 }
 
 static mx_u64_t align_up(mx_u64_t value, mx_u64_t align) {
-    return (value + align - 1u) & ~(align - 1u);
+    return static_cast<mx_u64_t>(libk::align_up(value, align));
 }
 
 static void zero_mem(void* ptr, mx_u64_t size) {
-    auto* p = static_cast<mx_u8_t*>(ptr);
-    for (mx_u64_t i = 0; i < size; ++i) p[i] = 0;
+    libk::fill(libk::as_bytes(ptr, static_cast<std::size_t>(size)), 0);
 }
 
 static void* dma_alloc(mx_u64_t size, mx_u64_t align) {

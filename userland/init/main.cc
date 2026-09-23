@@ -16,6 +16,7 @@
 // init is policy. The kernel does not know service names (spec §11).
 
 #include "mochi/syscall.h"
+#include "libk/bytes.h"
 #include "libk/str.h"
 #include "midix/abi/session.h"
 #include "mochi/boot.h"
@@ -254,7 +255,8 @@ static const uint8_t* archive_find(const uint8_t* base, const char* wanted,
     bundle.data = base;
     bundle.size = g_bundle_size;
     const auto* src = reinterpret_cast<const uint8_t*>(base);
-    for (uint32_t i = 0; i < sizeof(bundle.header); ++i) reinterpret_cast<uint8_t*>(&bundle.header)[i] = src[i];
+    (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)),
+                       libk::as_bytes(src, sizeof(bundle.header)), sizeof(bundle.header));
     if (bundle.header.bundle_size != g_bundle_size || bundle.header.object_count > midix::format::kMaxObjects) return nullptr;
     for (uint32_t i = 1; i < bundle.header.object_count; ++i) {
         MxBundleObject obj; const char* name;
@@ -1241,9 +1243,7 @@ static bool supervise_services() {
 }
 
 static void copy_bytes_local(void* dst, const void* src, uint32_t len) {
-    auto* d = static_cast<uint8_t*>(dst);
-    const auto* p = static_cast<const uint8_t*>(src);
-    for (uint32_t i = 0; i < len; ++i) d[i] = p[i];
+    (void)libk::copy_n(libk::as_bytes(dst, len), libk::as_bytes(src, len), len);
 }
 
 static void shutdown_system_now() {

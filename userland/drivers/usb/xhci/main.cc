@@ -8,6 +8,7 @@
 // left for the next hardening pass.
 
 #include "mochi/syscall.h"
+#include "libk/bytes.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
@@ -169,14 +170,13 @@ static void barrier() {
 }
 
 static void zero_mem(void* ptr, uint64_t size) {
-    auto* bytes = static_cast<uint8_t*>(ptr);
-    for (uint64_t i = 0; i < size; ++i) bytes[i] = 0;
+    libk::fill(libk::as_bytes(ptr, static_cast<std::size_t>(size)), 0);
 }
 
 static void copy_mem(void* dst, const void* src, uint64_t size) {
-    auto* d = static_cast<uint8_t*>(dst);
-    const auto* s = static_cast<const uint8_t*>(src);
-    for (uint64_t i = 0; i < size; ++i) d[i] = s[i];
+    (void)libk::copy_n(libk::as_bytes(dst, static_cast<std::size_t>(size)),
+                       libk::as_bytes(src, static_cast<std::size_t>(size)),
+                       static_cast<std::size_t>(size));
 }
 
 static uint16_t load_u16(const uint8_t* p) {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/build-switch-payload.sh — compatibility wrapper for the old Switch
-# package command.  Ame is now staged as an L4T/U-Boot ARM64 Image, not as a
+# package command. Ame is staged as an L4T/U-Boot bootm package, not as a
 # direct Hekate `payload=` RCM payload.
 #
 # Usage:

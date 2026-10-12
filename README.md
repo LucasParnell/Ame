@@ -136,6 +136,24 @@ Packaging checks the kernel's linked entry point and ARM64 image header against
 board configuration. Package validation does not constitute physical-device
 testing.
 
+The Switch package uses `boot.scr` and legacy `bootm` images: the Switchroot
+U-Boot inspected on the test SD card has neither `sysboot` nor `booti`, so an
+extlinux entry naming the raw `Image` cannot launch Ame. Install with
+`scripts/build-hekate-package.sh --build-dir out/switch --no-configure --no-build /Volumes/SD_NAME`
+to retire the old Ame extlinux entry as well. Keep `bl31.bin` and `bl33.bin` in
+`ame/l4t/`, and Hekate's shared SC7/BPMP firmware in `bootloader/sys/l4t/`.
+See [Switch boot investigation](docs/SWITCH_BOOT.md) for the evidence and remaining
+hardware check.
+The installer validates BL31's linked address against the board's Hekate
+firmware profile. To build a matching secure monitor from pinned Switchroot
+source, run `scripts/build-switch-atf.sh`, then pass
+`--bl31 build-switch/atf/bl31.bin` to the package command. This replaces BL31
+only for Ame; it also generates the DTB firmware reservations from that profile.
+For a freeze before any Ame output, add `--handoff-probe` when building and
+installing to include a separate **More Configs → Ame handoff probe** entry.
+It deliberately stops on magenta if the ATF-to-BL33 handoff succeeds and the
+active display can be written. See the investigation notes for interpretation.
+
 ## Source map and limitations
 
 - `kernel/`: capabilities, scheduling, memory, IPC, platform boot, and VMs.

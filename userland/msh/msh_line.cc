@@ -13,11 +13,9 @@ static uint32_t g_history_head = 0;
 
 uint32_t build_prompt(char* out, uint32_t cap) {
     if (!out || cap == 0) return 0;
-    uint32_t n = 0;
-    append_str(out, cap, &n, "msh:");
-    append_str(out, cap, &n, g.cwd);
-    append_str(out, cap, &n, "$ ");
-    return n;
+    libk::str::Buffer prompt(out, cap);
+    prompt.format("msh:%s$ ", g.cwd);
+    return static_cast<uint32_t>(prompt.length);
 }
 
 static void history_push(const char* line) {
@@ -26,7 +24,7 @@ static void history_push(const char* line) {
         const uint32_t last = (g_history_head + kHistoryMax - 1u) % kHistoryMax;
         if (streq(g_history[last], line)) return;
     }
-    copy_str(g_history[g_history_head], kLineMax, line);
+    libk::str::copy_into(g_history[g_history_head], kLineMax, line);
     g_history_head = (g_history_head + 1u) % kHistoryMax;
     if (g_history_count < kHistoryMax) ++g_history_count;
 }
@@ -134,13 +132,13 @@ static bool split_for_completion(const char* line, uint32_t len,
         while (i < len && is_space(line[i])) ++i;
         if (i >= len) { *at_token_start = true; break; }
         if (*token_count >= 4) break;
-        uint32_t n = 0;
-        while (i < len && !is_space(line[i])) append_char(tokens[*token_count], 96, &n, line[i++]);
+        libk::str::Buffer token(tokens[*token_count]);
+        while (i < len && !is_space(line[i])) token.append(line[i++]);
         ++*token_count;
         *at_token_start = (i < len && is_space(line[i]));
     }
     if (!*at_token_start && *token_count > 0) {
-        copy_str(prefix_out, prefix_cap, tokens[*token_count - 1]);
+        libk::str::copy_into(prefix_out, prefix_cap, tokens[*token_count - 1]);
         tokens[*token_count - 1][0] = '\0';
         --*token_count;
     }
@@ -169,12 +167,7 @@ static bool try_complete_line(char* line, uint32_t cap, uint32_t* len_io, uint32
     };
 
     if (kind == CompleteFirstToken) {
-        add_literal("help"); add_literal("exit"); add_literal("echo"); add_literal("printf");
-        add_literal("clear"); add_literal("set"); add_literal("unset"); add_literal("pwd");
-        add_literal("cd"); add_literal("ls"); add_literal("cat"); add_literal("bootinfo");
-        add_literal("svc"); add_literal("cap"); add_literal("arena"); add_literal("ring");
-        add_literal("doorbell"); add_literal("vm"); add_literal("shutdown"); add_literal("reboot");
-        add_literal("mkdir"); add_literal("rm"); add_literal("touch");
+        for (uint32_t i = 0; i < kBuiltinCount; ++i) add_literal(kBuiltins[i].name);
     } else if (kind == CompleteSvcVerb) {
         add_literal("list"); add_literal("tree"); add_literal("groups"); add_literal("deps");
         add_literal("log"); add_literal("start"); add_literal("stop"); add_literal("restart");
@@ -254,7 +247,7 @@ bool read_line(char* out, uint32_t cap) {
         if (nav >= static_cast<int32_t>(g_history_count)) nav = static_cast<int32_t>(g_history_count) - 1;
         const char* entry = history_get(g_history_count - 1u - static_cast<uint32_t>(nav));
         if (!entry) return;
-        copy_str(out, cap, entry);
+        libk::str::copy_into(out, cap, entry);
         len = slen(out);
         cursor = len;
         history_nav = nav;
@@ -263,14 +256,14 @@ bool read_line(char* out, uint32_t cap) {
 
     // Up / down through history: shared by the arrow keys and ^P / ^N.
     const auto history_prev = [&] {
-        if (history_nav < 0) copy_str(live_line, sizeof(live_line), out);
+        if (history_nav < 0) libk::str::copy_into(live_line, sizeof(live_line), out);
         load_history(history_nav < 0 ? 0 : history_nav + 1);
     };
     const auto history_next = [&] {
         if (history_nav > 0) {
             load_history(history_nav - 1);
         } else if (history_nav == 0) {
-            copy_str(out, cap, live_line);
+            libk::str::copy_into(out, cap, live_line);
             len = slen(out);
             cursor = len;
             history_nav = -1;

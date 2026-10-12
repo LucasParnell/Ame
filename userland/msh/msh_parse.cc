@@ -19,8 +19,8 @@ EnvVar* find_var(const char* name) {
 static const char* get_var(const char* name) {
     if (streq(name, "?")) {
         static char last[16];
-        (void)libk::snprintf(last, sizeof(last), "%llu",
-                             static_cast<unsigned long long>(g.last_status < 0 ? -g.last_status : g.last_status));
+        (void)libk::snprintf(last, sizeof(last), "%lld",
+                             static_cast<long long>(g.last_status));
         return last;
     }
     if (streq(name, "PWD")) return g.cwd;
@@ -29,20 +29,22 @@ static const char* get_var(const char* name) {
 }
 
 bool set_var(const char* name, const char* value) {
-    if (!name || !name[0]) return false;
+    if (!name || !name[0] || libk::str::length_n(name, kVarNameMax) >= kVarNameMax) return false;
+    if (!value) value = "";
+    if (libk::str::length_n(value, kVarValueMax) >= kVarValueMax) return false;
     EnvVar* v = find_var(name);
     if (!v) {
         for (uint32_t i = 0; i < kVarMax; ++i) {
             if (!g.vars[i].used) {
                 v = &g.vars[i];
                 v->used = true;
-                copy_str(v->name, sizeof(v->name), name);
+                libk::str::copy_into(v->name, sizeof(v->name), name);
                 break;
             }
         }
     }
     if (!v) return false;
-    copy_str(v->value, sizeof(v->value), value ? value : "");
+    libk::str::copy_into(v->value, sizeof(v->value), value ? value : "");
     return true;
 }
 
@@ -64,6 +66,7 @@ bool parse_line(const char* line, ParsedLine* out) {
     if (!out) return false;
     out->count = 0;
     uint32_t i = 0;
+    uint32_t arguments = 0;
     while (line && line[i]) {
         while (is_space(line[i])) ++i;
         if (!line[i]) break;
@@ -71,13 +74,14 @@ bool parse_line(const char* line, ParsedLine* out) {
         if (out->count >= kTokenMax) return false;
 
         Token& t = out->tokens[out->count];
-        memzero(&t, sizeof(t));
-        uint32_t n = 0;
+        libk::zero(t);
+        libk::str::Buffer text(t.text);
 
         // A control operator is its own token: ; && ||.
         const auto control = [&](const char* op, uint32_t advance) {
+            arguments = 0;
             t.control = true;
-            append_str(t.text, sizeof(t.text), &n, op);
+            text.append(op);
             i += advance;
             ++out->count;
         };
@@ -105,31 +109,39 @@ bool parse_line(const char* line, ParsedLine* out) {
                 continue;
             }
             if (!single && c == '\\' && line[i + 1]) {
-                append_char(t.text, sizeof(t.text), &n, line[i + 1]);
+                text.append(line[i + 1]);
                 i += 2;
                 continue;
             }
             if (!single && c == '$') {
                 ++i;
-                char name[32];
-                uint32_t nn = 0;
+                char name[kVarNameMax];
+                libk::str::Buffer variable(name);
                 if (line[i] == '?') {
-                    append_char(name, sizeof(name), &nn, '?');
+                    variable.append('?');
                     ++i;
                 } else {
-                    while (is_name_char(line[i]) && nn + 1 < sizeof(name)) {
-                        append_char(name, sizeof(name), &nn, line[i]);
+                    while (is_name_char(line[i])) {
+                        variable.append(line[i]);
                         ++i;
                     }
                 }
-                append_str(t.text, sizeof(t.text), &n, get_var(name));
+                if (variable.truncated) {
+                    putln("msh: variable name too long");
+                    return false;
+                }
+                text.append(get_var(name));
                 continue;
             }
-            append_char(t.text, sizeof(t.text), &n, c);
+            text.append(c);
             ++i;
         }
         if (single || dbl) {
             putln("msh: unmatched quote");
+            return false;
+        }
+        if (text.truncated || ++arguments > kArgMax) {
+            putln(text.truncated ? "msh: expanded word too long" : "msh: too many arguments");
             return false;
         }
         ++out->count;
@@ -157,7 +169,10 @@ int execute_simple(int argc, char** argv) {
     // Leading assignments in a simple command mutate shell vars for now.
     uint32_t first = 0;
     while (first < static_cast<uint32_t>(argc) && token_is_assignment(argv[first])) {
-        (void)set_var_from_assignment(argv[first]);
+        if (!set_var_from_assignment(argv[first])) {
+            putln("msh: cannot store variable");
+            return 1;
+        }
         ++first;
     }
     if (first >= static_cast<uint32_t>(argc)) return 0;
@@ -173,7 +188,13 @@ int execute_simple(int argc, char** argv) {
 }
 
 int execute_parsed(ParsedLine* p) {
-    if (!p) return 1;
+    if (!p || p->count > kTokenMax) return 1;
+    // Validate the whole command before dispatch: never execute a shortened argv.
+    uint32_t words = 0;
+    for (uint32_t i = 0; i < p->count; ++i) {
+        if (p->tokens[i].control) words = 0;
+        else if (++words > kArgMax) return 1;
+    }
     int status = 0;
     char* argv[kArgMax];
     int argc = 0;
@@ -189,7 +210,7 @@ int execute_parsed(ParsedLine* p) {
         const bool at_end = i == p->count;
         const bool control = !at_end && p->tokens[i].control;
         if (!at_end && !control) {
-            if (argc < static_cast<int>(kArgMax)) argv[argc++] = p->tokens[i].text;
+            argv[argc++] = p->tokens[i].text;
             continue;
         }
         flush();

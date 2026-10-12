@@ -3,6 +3,7 @@
 // Spec ref: §8 V0 Boot Flow (step 9), §7.1 Init
 
 #include "anko/cap.h"
+#include "anko/boot_trace.h"
 #include "anko/hw_info.h"
 #include "anko/irq.h"
 #include "anko/pci.h"
@@ -35,6 +36,7 @@ namespace drivers::pci_probe {
         bool     found;
     };
     XhciInfo find_xhci();
+    bool enable_xhci_bus_master(const XhciInfo& info);
     MmioRange* alloc_xhci_mmio(const XhciInfo& info);
     IrqLine* alloc_xhci_irq(const XhciInfo& info);
 } // namespace drivers::pci_probe
@@ -104,6 +106,9 @@ void issue_boot_caps(Process& init_proc,
     auto& cpus = boot->entries[boot->entry_count++];
     cpus.type = MX_BOOT_ENTRY_VALUE; cpus.aux0 = smp::cpu_count();
     libk::memcpy(cpus.name, "cpu.count", 10);
+    auto& cpu_mask = boot->entries[boot->entry_count++];
+    cpu_mask.type = MX_BOOT_ENTRY_VALUE; cpu_mask.aux0 = sched::online_cpu_mask();
+    libk::memcpy(cpu_mask.name, "cpu.mask", 9);
 
     // 1) manifest cap
     grant("manifest", CAP_PAGE, manifest, RIGHT_READ | RIGHT_MAP);
@@ -236,10 +241,12 @@ void issue_boot_caps(Process& init_proc,
         constexpr usize kXhciDmaPages = 16;
         auto* xhci_mmio = static_cast<MmioRange*>(
             mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
-        const PhysAddr xhci_dma_phys = mm::alloc_pages_contiguous(kXhciDmaPages);
+        const PhysAddr xhci_dma_phys = mm::alloc_pages_contiguous_aligned(kXhciDmaPages, 16);
         auto* xhci_dma = static_cast<Arena*>(
             mm::heap_alloc(sizeof(Arena), alignof(Arena)));
         if (xhci_mmio && xhci_dma_phys && xhci_dma) {
+            if (!mm::register_noncached_range(xhci_dma_phys, kXhciDmaPages * PAGE_SIZE))
+                panic("xhci DMA memory attributes failed");
             xhci_mmio->phys_base    = kXusbBase;
             xhci_mmio->size         = kXusbSize;
             xhci_mmio->attr         = MX_MMIO_DEVICE_nGnRnE;
@@ -295,10 +302,12 @@ void issue_boot_caps(Process& init_proc,
         if (xhci.found) {
             MmioRange* xhci_mmio = drivers::pci_probe::alloc_xhci_mmio(xhci);
             IrqLine* xhci_irq    = drivers::pci_probe::alloc_xhci_irq(xhci);
-            const PhysAddr xhci_dma_phys = mm::alloc_pages_contiguous(kXhciDmaPages);
+            const PhysAddr xhci_dma_phys = mm::alloc_pages_contiguous_aligned(kXhciDmaPages, 16);
             Arena* xhci_dma = static_cast<Arena*>(
                 mm::heap_alloc(sizeof(Arena), alignof(Arena)));
             if (xhci_mmio && xhci_irq && xhci_dma_phys && xhci_dma) {
+                if (!mm::register_noncached_range(xhci_dma_phys, kXhciDmaPages * PAGE_SIZE))
+                    panic("xhci DMA memory attributes failed");
                 libk::memset(reinterpret_cast<void*>(xhci_dma_phys), 0,
                              kXhciDmaPages * PAGE_SIZE);
                 xhci_dma->base_va   = 0;
@@ -309,19 +318,25 @@ void issue_boot_caps(Process& init_proc,
                 xhci_dma->flags     = kArenaFlagExposePhys;
                 libk::memset(xhci_dma->pad, 0, sizeof(xhci_dma->pad));
 
-                grant("xhci.mmio", CAP_MMIO, xhci_mmio,
-                           RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
-                grant("xhci.irq", CAP_IRQ, xhci_irq,
-                           RIGHT_READ | RIGHT_WRITE | RIGHT_DUP);
-                grant("xhci.dma", CAP_ARENA, xhci_dma,
-                           RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
-                // Phase C: once the SMMU enforces translation the native xHCI
-                // needs a context too; register its wired DMA arena (IOVA == PA)
-                // at its stream id so the native USB path keeps working.
-                if (iommu::smmuv3_ready()) {
-                    (void)iommu::register_native_dma_arena(
+                bool dma_ready = true;
+                if (iommu::backend_for({pci::kSegment, xhci.requester_id})) {
+                    dma_ready = iommu::register_native_dma_arena(
                         iommu::IommuDeviceId{pci::kSegment, xhci.requester_id}, xhci_dma_phys,
-                        static_cast<u64>(kXhciDmaPages) * PAGE_SIZE);
+                        static_cast<u64>(kXhciDmaPages) * PAGE_SIZE) == E_OK;
+                }
+#ifndef ANKO_BUILD_DEV
+                else dma_ready = false;
+#endif
+                if (!dma_ready || !drivers::pci_probe::enable_xhci_bus_master(xhci)) {
+                    ANKO_LOG_ERROR("kernel/init", "xhci DMA activation denied; controller remains offline");
+                } else {
+
+                    grant("xhci.mmio", CAP_MMIO, xhci_mmio,
+                          RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
+                    grant("xhci.irq", CAP_IRQ, xhci_irq,
+                          RIGHT_READ | RIGHT_WRITE | RIGHT_DUP);
+                    grant("xhci.dma", CAP_ARENA, xhci_dma,
+                          RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
                 }
             } else {
                 ANKO_LOG_WARN("kernel/init", "xhci cap object allocation failed");
@@ -474,6 +489,7 @@ Process* spawn_service(const char* service_name, PrincipalClass principal, u32 s
 }
 
 void create_init_process() {
+    ANKO_BOOT_CHECKPOINT(BundleBegin);
     PhysAddr initrd_base = 0;
     usize initrd_size = 0;
 
@@ -482,21 +498,25 @@ void create_init_process() {
         panic("no external system bundle");
     }
     if (!init_archive(initrd_base, initrd_size)) panic("system bundle authentication failed");
+    ANKO_BOOT_CHECKPOINT(BundleAuthenticated);
 
     const void* manifest_blob = nullptr;
     usize manifest_size = 0;
     if (!archive_get("manifest.json", &manifest_blob, &manifest_size)) panic("missing authenticated manifest");
 
+    ANKO_BOOT_CHECKPOINT(InitSpawnBegin);
     Process* init_proc = spawn_service("init", PRINCIPAL_NATIVE_TRUSTED, /*supervisor=*/0);
     if (!init_proc) {
         ANKO_LOG_ERROR("kernel/init", "spawn failed");
         return;
     }
+    ANKO_BOOT_CHECKPOINT(InitSpawnDone);
     issue_boot_caps(*init_proc,
                     static_cast<PhysAddr>(reinterpret_cast<u64>(manifest_blob)),
                     manifest_size,
                     initrd_base,
                     initrd_size);
+    ANKO_BOOT_CHECKPOINT(InitCapsDone);
     ANKO_LOG_INFO("kernel/init", "init queued");
 }
 

@@ -8,6 +8,7 @@
 #include "sched_internal.h"
 
 namespace sched {
+u64 cpu_ipi_handled_count(u32 cpu) { return cpu < kMaxCpus ? libk::metric_load(eki_for_cpu(cpu).ipis_handled) : 0; }
 
 using libk::metric_load;
 

@@ -32,6 +32,8 @@ static_assert(sizeof(MxRingPage) == 0x100, "ring page header must be 256 bytes")
 constexpr mx_u32_t MX_RING_INLINE_PAYLOAD = 48;
 constexpr mx_u32_t MX_RING_HEADER_SIZE = 0x100;
 constexpr mx_u32_t MX_DEFAULT_RING_ORDER = 6;
+constexpr mx_u32_t MX_RING_ORDER_MIN = 4;  // kernel allocation bounds
+constexpr mx_u32_t MX_RING_ORDER_MAX = 10;
 
 static_assert(MX_RING_HEADER_SIZE == sizeof(MxRingPage),
               "ring header size must equal the fixed ring page header");

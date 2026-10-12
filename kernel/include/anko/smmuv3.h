@@ -95,7 +95,7 @@ bool smmuv3_debug_ste(u32 sid, u32 out[16]);
 // "wired arena registered at the driver's stream ID" model. It is a scoped
 // mapping of kernel-owned pages, never an identity map of RAM.
 // ---------------------------------------------------------------------------
-SysError register_native_dma_arena(IommuDeviceId device, PhysAddr base, u64 size);
+// The registrar itself is backend-independent and declared in anko/iommu.h.
 
 // ---------------------------------------------------------------------------
 // Opt-in hostile-DMA selftest (§8.14)

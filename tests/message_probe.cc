@@ -4,7 +4,6 @@
 #include "mochi/message.h"
 
 #include <cassert>
-#include <cstring>
 
 namespace {
 
@@ -46,11 +45,21 @@ int main() {
     assert(!mochi::message_put(nullptr, 1u, sent));
     assert(!mochi::message_get(slot, static_cast<Ping*>(nullptr), 0x1234u));
 
-    // The encoder writes the whole payload, not just the low bytes.
+    // Oversized wire lengths are invalid even when T itself fits.
+    const mx_u32_t oversized[] = {MX_RING_INLINE_PAYLOAD + 1, ~mx_u32_t{0}};
+    for (auto length : oversized) {
+        slot.length = length;
+        assert(!mochi::message_get(slot, &other, 0x1234u));
+        assert(other.seq == 99u && other.payload == 99u);
+    }
+
+    // Encoding clears stale bytes beyond the declared payload.
     MxRingSlot dirty{};
-    dirty.payload[sizeof(Ping)] = 0xAAu;
+    libk::fill(libk::as_bytes(dirty.payload), 0xAAu);
     assert(mochi::message_put(&dirty, 0x5u, sent));
-    assert(dirty.payload[sizeof(Ping)] == 0xAAu);
+    for (unsigned i = sizeof(Ping); i < MX_RING_INLINE_PAYLOAD; ++i) {
+        assert(dirty.payload[i] == 0);
+    }
 
     return 0;
 }

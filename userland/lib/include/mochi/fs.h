@@ -8,32 +8,11 @@
 
 namespace mochi::fs {
 
-static inline void copy_bytes(void* dst, const void* src, mx_u32_t len) {
-    (void)libk::copy_n(libk::as_bytes(dst, len), libk::as_bytes(src, len), len);
-}
-
-static inline mx_u32_t bounded_strlen(const char* s, mx_u32_t limit) {
-    return static_cast<mx_u32_t>(libk::str::length_n(s, limit));
-}
-
-static inline void copy_inline_name(char* dst, mx_u32_t dst_len,
-                                    const char* src, mx_u8_t* out_len) {
-    mx_u32_t n = 0;
-    if (src) {
-        while (n + 1 < dst_len && src[n]) {
-            dst[n] = src[n];
-            ++n;
-        }
-    }
-    if (dst_len != 0) dst[n] = '\0';
-    if (out_len) *out_len = static_cast<mx_u8_t>(n);
-}
-
-template <typename T>
-static inline bool payload_from_slot(const RingSlot& slot, T* out) {
-    if (!out || slot.length < sizeof(T)) return false;
-    copy_bytes(out, slot.payload, sizeof(T));
-    return true;
+// Inline names reserve one byte for NUL; the wire length excludes it.
+template <mx_size_t N>
+static inline mx_u8_t copy_inline_name(char (&dst)[N], const char* src) {
+    static_assert(N - 1 <= 0xFF, "inline name length must fit its wire field");
+    return static_cast<mx_u8_t>(libk::str::copy_into(dst, N, src));
 }
 
 struct Client {
@@ -46,9 +25,10 @@ struct Client {
     bool try_open(mx_u32_t parent_inode, const char* name, mx_u32_t flags,
                   FsOpenReply* out) const {
         FsOpenRequest req{};
+        if (!name || libk::str::length_n(name, sizeof(req.name)) >= sizeof(req.name)) return false;
         req.parent_inode = parent_inode;
         req.flags = flags;
-        copy_inline_name(req.name, sizeof(req.name), name, &req.name_len);
+        req.name_len = copy_inline_name(req.name, name);
         if (!ep.try_send(FS_OPEN, &req, sizeof(req))) return false;
         return wait_open_reply(out);
     }
@@ -56,9 +36,10 @@ struct Client {
     bool wait_open(mx_u32_t parent_inode, const char* name, mx_u32_t flags,
                    FsOpenReply* out) const {
         FsOpenRequest req{};
+        if (!name || libk::str::length_n(name, sizeof(req.name)) >= sizeof(req.name)) return false;
         req.parent_inode = parent_inode;
         req.flags = flags;
-        copy_inline_name(req.name, sizeof(req.name), name, &req.name_len);
+        req.name_len = copy_inline_name(req.name, name);
         if (!ep.send_spinning(FS_OPEN, &req, sizeof(req))) return false;
         return wait_open_reply(out);
     }
@@ -83,8 +64,8 @@ struct Client {
         req.handle = handle;
         req.offset = offset;
         req.length = length;
-        if (length > FS_INLINE_WRITE_MAX) return false;
-        if (data && length != 0) copy_bytes(req.payload, data, length);
+        if (length > FS_INLINE_WRITE_MAX || (!data && length)) return false;
+        if (data) (void)libk::copy_n(libk::as_bytes(req.payload), libk::as_bytes(data, length), length);
         if (!ep.try_send(FS_WRITE, &req, sizeof(req))) return false;
         return wait_write_reply(out);
     }
@@ -98,8 +79,8 @@ struct Client {
     bool try_snapshot(mx_u32_t flags, const char* label, FsSnapshotReply* out) const {
         FsSnapshotRequest req{};
         req.flags = flags;
-        const mx_u32_t n = bounded_strlen(label, sizeof(req.label));
-        for (mx_u32_t i = 0; i < n; ++i) req.label[i] = static_cast<mx_u8_t>(label[i]);
+        const auto n = libk::str::length_n(label, sizeof(req.label));
+        (void)libk::copy_n(libk::as_bytes(req.label), libk::as_bytes(label, n), n);
         if (!ep.try_send(FS_SNAPSHOT, &req, sizeof(req))) return false;
         return wait_snapshot_reply(out);
     }
@@ -133,7 +114,7 @@ struct Client {
     }
 
     bool wait_read_reply(FsReadReply* out) const {
-        return wait_reply(FS_READ_REPLY, out);
+        return wait_reply(FS_READ_REPLY, out) && out->length_read <= sizeof(out->inline_data);
     }
 
     bool wait_write_reply(FsWriteReply* out) const {
@@ -155,15 +136,8 @@ struct Client {
     bool wait_status_reply(mx_u32_t type, mx_i32_t* out) const {
         RingSlot slot{};
         while (ep.wait_recv(&slot)) {
-            if (slot.type == type && slot.length >= sizeof(mx_i32_t)) {
-                mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_BAD_PROTOCOL);
-                copy_bytes(&status, slot.payload, sizeof(status));
-                if (out) *out = status;
-                return true;
-            }
-            if (slot.type == FS_ERROR && slot.length >= sizeof(mx_i32_t)) {
-                mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_BAD_PROTOCOL);
-                copy_bytes(&status, slot.payload, sizeof(status));
+            mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_BAD_PROTOCOL);
+            if ((slot.type == type || slot.type == FS_ERROR) && message_get(slot, &status)) {
                 if (out) *out = status;
                 return true;
             }
@@ -175,14 +149,11 @@ struct Client {
     bool wait_reply(mx_u32_t type, T* out) const {
         RingSlot slot{};
         while (ep.wait_recv(&slot)) {
-            if (slot.type == type && payload_from_slot(slot, out)) return true;
-            if (slot.type == FS_ERROR && slot.length >= sizeof(mx_i32_t)) {
-                mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_BAD_PROTOCOL);
-                copy_bytes(&status, slot.payload, sizeof(status));
+            if (message_get(slot, out, type)) return true;
+            mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_BAD_PROTOCOL);
+            if (message_get(slot, &status, FS_ERROR)) {
                 if (out) {
-                    for (mx_u32_t i = 0; i < sizeof(T); ++i) {
-                        reinterpret_cast<mx_u8_t*>(out)[i] = 0;
-                    }
+                    libk::zero(*out);
                     out->status = status;
                 }
                 return true;
@@ -232,7 +203,7 @@ struct Server {
 
     template <typename T>
     bool send_reply(const RingSlot& req, mx_u32_t type, const T& reply) const {
-        return send_payload(req, type, &reply, sizeof(reply));
+        return send_payload(req, type, &reply, message_size<T>());
     }
 };
 
@@ -252,11 +223,16 @@ struct BlkClient {
         req.sector_count = sector_count;
         req.arena_cap = arena_cap;
         req.arena_offset = arena_offset;
-        if (!ep.send_spinning(type, &req, sizeof(req))) return false;
+        if (!out) return false;
+        const bool sent = deadline_ns
+            ? ep.send_bounded(type, &req, sizeof(req), deadline_ns)
+            : ep.send_spinning(type, &req, sizeof(req));
+        if (!sent) return false;
         RingSlot slot{};
         for (;;) {
             if (ep.try_recv(&slot)) {
-                if (slot.type == BLK_REPLY && payload_from_slot(slot, out)) return true;
+                if (message_get(slot, out, BLK_REPLY)) return true;
+                if (deadline_ns != 0 && mx_clock_ns() >= deadline_ns) return false;
                 continue;
             }
             if (deadline_ns == 0 || mx_clock_ns() >= deadline_ns) return false;

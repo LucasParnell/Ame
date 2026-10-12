@@ -3,6 +3,7 @@
 // Spec ref: §5.8 IPC, §9 V0 IPC Ring Layout
 
 #include "anko/ipc.h"
+#include "midix/abi/ring.h"
 #include "anko/mm.h"
 #include "anko/cap.h"
 #include "anko/sched.h"
@@ -22,9 +23,6 @@ void init() {
     // V0 keeps ring objects heap-allocated; no global registry required.
 }
 
-static constexpr u32 kRingOrderMin = 4;   // 16 slots
-static constexpr u32 kRingOrderMax = 10;  // 1024 slots
-
 static cap::Ref resolve_ring_entry(u32 pid, CapHandle ring_cap, u32 need_rights) {
     auto p = sched::find_process(pid);
     if (!p || !p->cap_table) return nullptr;
@@ -37,7 +35,7 @@ static cap::Ref resolve_ring_entry(u32 pid, CapHandle ring_cap, u32 need_rights)
 
 Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
     (void)flags;
-    if (order < kRingOrderMin || order > kRingOrderMax) return nullptr;
+    if (order < MX_RING_ORDER_MIN || order > MX_RING_ORDER_MAX) return nullptr;
 
     auto owner = sched::find_process(pid);
     if (!owner || !owner->cap_table) return nullptr;

@@ -8,8 +8,33 @@
 #include "midix/abi/protocols/usb.h"
 #include "mochi/message.h"
 #include "mochi/ring.h"
+#include "mochi/endpoint.h"
+#include "midix/abi/protocols/usb_transfer.h"
 
 namespace mochi::usb {
+
+// Scoped class -> controller transfer endpoint. Setup/delegation is cold;
+// active try_* operations use the ordinary resident SPSC ring contract.
+struct TransferClient : SpscEndpoint {
+    bool try_submit(const MxUsbSubmit& request) const {
+        return valid() && tx().try_push_msg(MX_USB_TRANSFER_SUBMIT, request);
+    }
+    bool try_control(const MxUsbControlSubmit& request) const {
+        return valid() && tx().try_push_msg(MX_USB_TRANSFER_CONTROL, request);
+    }
+    bool try_cancel(mx_u64_t request_id) const {
+        return valid() && tx().try_push_msg(MX_USB_TRANSFER_CANCEL, MxUsbCancel{request_id});
+    }
+    bool try_completion(MxUsbCompletion* out) const {
+        return valid() && rx().try_pop_msg(MX_USB_TRANSFER_COMPLETE, out);
+    }
+};
+
+struct TransferServer : SpscEndpoint {
+    bool try_complete(const MxUsbCompletion& completion) const {
+        return valid() && tx().try_push_msg(MX_USB_TRANSFER_COMPLETE, completion);
+    }
+};
 
 // xHCI driver -> HID decoder.
 struct BootKeyboardReportSink : Ring {
@@ -25,18 +50,11 @@ struct BootKeyboardReportSink : Ring {
 // HID decoder <- xHCI driver.
 struct BootKeyboardReportSource : Ring {
     bool try_read(UsbBootKeyboardReport* out) const {
-        if (!out) return false;
-        RingSlot slot{};
-        return try_pop(&slot) && message_get(slot, out, USB_MSG_BOOT_KEYBOARD_REPORT);
+        return try_pop_msg(USB_MSG_BOOT_KEYBOARD_REPORT, out);
     }
 
     bool wait_read(UsbBootKeyboardReport* out) const {
-        if (!out || !valid()) return false;
-        for (;;) {
-            RingSlot slot{};
-            if (!wait_pop(&slot)) return false;
-            if (message_get(slot, out, USB_MSG_BOOT_KEYBOARD_REPORT)) return true;
-        }
+        return wait_pop_msg(USB_MSG_BOOT_KEYBOARD_REPORT, out);
     }
 };
 

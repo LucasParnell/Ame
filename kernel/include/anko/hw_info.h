@@ -67,6 +67,7 @@ struct HwInfo {
 extern HwInfo g_hw;
 
 namespace platform {
+const HwInfo& get_board_fallback();
 // Fill g_hw from the DTB at dtb_phys; falls back to board constants on error.
 // Must be called before mm::phys_init().
 void probe(PhysAddr dtb_phys);

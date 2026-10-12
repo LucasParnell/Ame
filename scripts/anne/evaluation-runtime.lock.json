@@ -1,0 +1,501 @@
+{
+  "schema": 1,
+  "alpine_branch": "v3.22",
+  "architecture": "aarch64",
+  "minirootfs": {
+    "file": "alpine-minirootfs-3.22.6-aarch64.tar.gz",
+    "sha256": "821565fa8f3953eefd12497b166b4b50add2f7c57fb312e75862f5867e06fefe"
+  },
+  "packages": [
+    {
+      "name": "qemu-system-aarch64",
+      "version": "10.0.0-r1",
+      "repository": "community",
+      "size": 7864759,
+      "sha256": "408b667f6cd2b79f49ad539ae393d8f667f3d6e8f51ea86597af6f3df861b486",
+      "license": "GPL-2.0-only AND LGPL-2.1-only",
+      "origin": "qemu",
+      "source_commit": "8868cb03ba29ca98b76c2b32e3e2d965dc848e53"
+    },
+    {
+      "name": "qemu",
+      "version": "10.0.0-r1",
+      "repository": "community",
+      "size": 3982167,
+      "sha256": "67091743e1e38e202563da62f91e3a974fd7f2bbcf04aa614a78665e9f84a65d",
+      "license": "GPL-2.0-only AND LGPL-2.1-only",
+      "origin": "qemu",
+      "source_commit": "8868cb03ba29ca98b76c2b32e3e2d965dc848e53"
+    },
+    {
+      "name": "busybox",
+      "version": "1.37.0-r20",
+      "repository": "main",
+      "size": 524951,
+      "sha256": "9d25af67564c92a4a4c603462efdbcd23019e90b8785f1ebcad640cbb1551c93",
+      "license": "GPL-2.0-only",
+      "origin": "busybox",
+      "source_commit": "2e97d754a30d558f15524b8e422303c8a96832df"
+    },
+    {
+      "name": "musl",
+      "version": "1.2.5-r12",
+      "repository": "main",
+      "size": 418039,
+      "sha256": "ac281d1e7f9e9c447c51e309317b975f48be6edaf3ab91ae73b959cf86703782",
+      "license": "MIT",
+      "origin": "musl",
+      "source_commit": "1546f29a1fd233db15464ce000b6247ed71b31e7"
+    },
+    {
+      "name": "libaio",
+      "version": "0.3.113-r2",
+      "repository": "main",
+      "size": 4769,
+      "sha256": "880061548b50e588de848dfa70adbf127203315db50f355ed2418e0a7515483d",
+      "license": "LGPL-2.1-or-later",
+      "origin": "libaio",
+      "source_commit": "4efcc59469af67dcd537e43b9a410a019803d643"
+    },
+    {
+      "name": "libbpf",
+      "version": "1.5.1-r0",
+      "repository": "main",
+      "size": 161349,
+      "sha256": "b30cf64d0e355caa46ac162679df8447f1b70f9f991cc6a331e491c976b12e6b",
+      "license": "LGPL-2.1-only OR BSD-2-Clause",
+      "origin": "libbpf",
+      "source_commit": "4346481df1941cc4576501650e680702d9cb97f9"
+    },
+    {
+      "name": "libelf",
+      "version": "0.193-r0",
+      "repository": "main",
+      "size": 44640,
+      "sha256": "cbc2cbd52e27a381f17892392417fecfbeaba354479d3acd923cf57967d1b25a",
+      "license": "GPL-3.0-or-later AND ( GPL-2.0-or-later OR LGPL-3.0-or-later )",
+      "origin": "elfutils",
+      "source_commit": "dc9603691bcc8473911a223cfd0f3e713e6a5e2c"
+    },
+    {
+      "name": "zlib",
+      "version": "1.3.2-r1",
+      "repository": "main",
+      "size": 54452,
+      "sha256": "2d274cb1b2a36d0e8347d802e6dea8648cab952ea5fae1989ab72e725842a2c3",
+      "license": "Zlib",
+      "origin": "zlib",
+      "source_commit": "121fc97db0e7c59db704891b6d7ef83ae5df2cc2"
+    },
+    {
+      "name": "zstd-libs",
+      "version": "1.5.7-r0",
+      "repository": "main",
+      "size": 362854,
+      "sha256": "a0e92d2225941a514eb0b2325b137fe6444ef9171627aae8129b74a6ad934ac4",
+      "license": "BSD-3-Clause OR GPL-2.0-or-later",
+      "origin": "zstd",
+      "source_commit": "fc7fd35c7bf99156ae31962877c074f679f45b73"
+    },
+    {
+      "name": "capstone",
+      "version": "5.0.6-r0",
+      "repository": "community",
+      "size": 983363,
+      "sha256": "c65bdc98f8e9919d8652cdf842f40b337ac5cf2738bb7353f726006b91335f85",
+      "license": "BSD-3-Clause-Clear",
+      "origin": "capstone",
+      "source_commit": "f83d3233425822edd0c546260286def33a367d08"
+    },
+    {
+      "name": "libdw",
+      "version": "0.193-r0",
+      "repository": "main",
+      "size": 233561,
+      "sha256": "9a5a7809a65f262efcab0fc40cf7c4f39654313ba586b75e511ef87bdbaf4a51",
+      "license": "GPL-3.0-or-later AND ( GPL-2.0-or-later OR LGPL-3.0-or-later )",
+      "origin": "elfutils",
+      "source_commit": "dc9603691bcc8473911a223cfd0f3e713e6a5e2c"
+    },
+    {
+      "name": "libbz2",
+      "version": "1.0.8-r6",
+      "repository": "main",
+      "size": 35391,
+      "sha256": "1d588037cc45108acafdbb1507e9f683019a8816fb74d9aba9b0a2dc099463c4",
+      "license": "bzip2-1.0.6",
+      "origin": "bzip2",
+      "source_commit": "33283848034c9885d984c8e8697c645c57324938"
+    },
+    {
+      "name": "musl-fts",
+      "version": "1.2.7-r6",
+      "repository": "main",
+      "size": 7645,
+      "sha256": "7b97efd27c2626c05304a8520732966c9b6e0fc746bd39a14918c55da6495676",
+      "license": "BSD-3-Clause",
+      "origin": "musl-fts",
+      "source_commit": "6e686b44f1f50828d099f6968aec968874f43499"
+    },
+    {
+      "name": "xz-libs",
+      "version": "5.8.4-r0",
+      "repository": "main",
+      "size": 117354,
+      "sha256": "8a64b55223f29e24f934ccbc8167d535b913bf923dab5e14de7946a7c36091a7",
+      "license": "GPL-2.0-or-later AND 0BSD AND Public-Domain AND LGPL-2.1-or-later",
+      "origin": "xz",
+      "source_commit": "4ad8da6dc8e2b7ed46653b9844835babc3a166ae"
+    },
+    {
+      "name": "glib",
+      "version": "2.84.4-r0",
+      "repository": "main",
+      "size": 1989367,
+      "sha256": "339817d41dc00fd898e8a24dc4a36b8e04608c3fd8642ecc97b00b6f5581e8bc",
+      "license": "LGPL-2.1-or-later",
+      "origin": "glib",
+      "source_commit": "9a0d606dfb2af556b9b96a9e8bb511b2bd0ddbed"
+    },
+    {
+      "name": "libffi",
+      "version": "3.4.8-r0",
+      "repository": "main",
+      "size": 17599,
+      "sha256": "9391f60a14c146655deaf65115563bc8dcd749cf0f93ec567e6443f2ed7d3bfc",
+      "license": "MIT",
+      "origin": "libffi",
+      "source_commit": "be5e49159a2ccca93a3290af3d8ab25443523363"
+    },
+    {
+      "name": "libintl",
+      "version": "0.24.1-r0",
+      "repository": "main",
+      "size": 41977,
+      "sha256": "17bacc149386d7dcb2ed4488afddc2dba644081cbc134b5839fbbe5e1b875bf9",
+      "license": "LGPL-2.1-or-later",
+      "origin": "gettext",
+      "source_commit": "215a26431d1b09c56cb2a9ffe10175feb9518fd8"
+    },
+    {
+      "name": "libmount",
+      "version": "2.41.6-r1",
+      "repository": "main",
+      "size": 122515,
+      "sha256": "1165810277d292a5986824447229c146bbb355f1641cea66b0741bbd891cc3e6",
+      "license": "LGPL-2.1-or-later",
+      "origin": "util-linux",
+      "source_commit": "b91fb14e28957c6f5a13c02eb9ec136c82ebd50e"
+    },
+    {
+      "name": "libblkid",
+      "version": "2.41.6-r1",
+      "repository": "main",
+      "size": 93842,
+      "sha256": "76a8fbfae2ab5ff50c7f30e22812c403a2d9375de85a0a0f2c288ab906d24fb4",
+      "license": "LGPL-2.1-or-later",
+      "origin": "util-linux",
+      "source_commit": "b91fb14e28957c6f5a13c02eb9ec136c82ebd50e"
+    },
+    {
+      "name": "libeconf",
+      "version": "0.6.3-r0",
+      "repository": "main",
+      "size": 25257,
+      "sha256": "cdd4311aff72d53056134468b68a68f22829f995627b434d2f88960884319de9",
+      "license": "MIT",
+      "origin": "libeconf",
+      "source_commit": "1e0aa723fba50417893fe5f6cf72f76d044b8192"
+    },
+    {
+      "name": "pcre2",
+      "version": "10.46-r0",
+      "repository": "main",
+      "size": 295514,
+      "sha256": "62fdc4a3d6b48ca211cf6480c5da55664b489ec2b192ca8942e5b1d60ebe9496",
+      "license": "BSD-3-Clause",
+      "origin": "pcre2",
+      "source_commit": "a22c8c27a78e00ea7cf03e09c6033a6336ee22a2"
+    },
+    {
+      "name": "gnutls",
+      "version": "3.8.13-r0",
+      "repository": "main",
+      "size": 905141,
+      "sha256": "66a9bdc03d6943321847063d29dab193a59aa431c78aa874cfd3c746b0650737",
+      "license": "LGPL-2.1-or-later",
+      "origin": "gnutls",
+      "source_commit": "8895a0a20cd0ed5097571821bb72f7ec4ec256b9"
+    },
+    {
+      "name": "gmp",
+      "version": "6.3.0-r3",
+      "repository": "main",
+      "size": 223215,
+      "sha256": "0d2eb1079b1b5692e9e6652ff0e269caeb9c812f483e34c88d461c03bcf75460",
+      "license": "LGPL-3.0-or-later OR GPL-2.0-or-later",
+      "origin": "gmp",
+      "source_commit": "187e3f7791d3390e18bc06969a5f34c385fd883e"
+    },
+    {
+      "name": "nettle",
+      "version": "3.10.2-r0",
+      "repository": "main",
+      "size": 356695,
+      "sha256": "be9d47dd38b2f9649a18cd1a3096d3d131427aadfdd95dd380f7d762e6f4036a",
+      "license": "GPL-2.0-or-later OR LGPL-3.0-or-later",
+      "origin": "nettle",
+      "source_commit": "d1a58b83bd3186946ce6c0d5e1ee2bf9a8592bec"
+    },
+    {
+      "name": "libidn2",
+      "version": "2.3.7-r0",
+      "repository": "main",
+      "size": 105191,
+      "sha256": "9ddc248988707da96752077d05bacbda751d46cc1f7aa1460b3a40c4fbf66a6e",
+      "license": "GPL-2.0-or-later OR LGPL-3.0-or-later",
+      "origin": "libidn2",
+      "source_commit": "1cdcdd0eccbee1f60078417a7aaf83f92f6e6754"
+    },
+    {
+      "name": "libunistring",
+      "version": "1.3-r0",
+      "repository": "main",
+      "size": 739708,
+      "sha256": "6b6631284b25fa28bb9e63f9d423145e96d0f7aeb55a592f5cd5d54fb39380f7",
+      "license": "GPL-2.0-or-later OR LGPL-3.0-or-later",
+      "origin": "libunistring",
+      "source_commit": "22200a467cea998010743cc288889dbde0496d4a"
+    },
+    {
+      "name": "p11-kit",
+      "version": "0.26.2-r0",
+      "repository": "main",
+      "size": 363721,
+      "sha256": "401078e81e024616fc61b7f631baeefe33b43865c638a12be5b8e9b20d1e1f88",
+      "license": "BSD-3-Clause",
+      "origin": "p11-kit",
+      "source_commit": "63236622fcbb6476e5727bb6213fcd48fe7ff6fc"
+    },
+    {
+      "name": "libtasn1",
+      "version": "4.21.0-r0",
+      "repository": "main",
+      "size": 34072,
+      "sha256": "c348eb9a293bbf1ff2d922fe200b525088e0038c0dd5154b68a4b22753e9385f",
+      "license": "LGPL-2.1-or-later",
+      "origin": "libtasn1",
+      "source_commit": "720f0a85f776c2020d1c4f420b849673cfc1213f"
+    },
+    {
+      "name": "libjpeg-turbo",
+      "version": "3.1.0-r0",
+      "repository": "main",
+      "size": 257837,
+      "sha256": "166c4fd2b1e1df9ed757b3edadb9cb1c6e5c6dc93a1fe6bc4546bc88d0834a91",
+      "license": "BSD-3-Clause AND IJG AND Zlib",
+      "origin": "libjpeg-turbo",
+      "source_commit": "a78c772b57d3dd6b70cdfd239493112b396a0485"
+    },
+    {
+      "name": "lzo",
+      "version": "2.10-r5",
+      "repository": "main",
+      "size": 73932,
+      "sha256": "4a031a091b2c2756df771678fc20469ff1ace0512124117cc7c2cc6d4d92f0f2",
+      "license": "GPL-2.0-or-later",
+      "origin": "lzo",
+      "source_commit": "9c7716c2221405ce7810ba3eaaa1f62d2e646c20"
+    },
+    {
+      "name": "numactl",
+      "version": "2.0.18-r0",
+      "repository": "main",
+      "size": 21216,
+      "sha256": "ccf946ba49b04da45f8b7a71e51bca68d5201a4139a588901023cf3186c6e5ab",
+      "license": "LGPL-2.1-only",
+      "origin": "numactl",
+      "source_commit": "1800f4f0060aa17fbe10686a0a66161b216c5bf9"
+    },
+    {
+      "name": "pixman",
+      "version": "0.46.4-r0",
+      "repository": "main",
+      "size": 185631,
+      "sha256": "35128ab74fdcdc1cd1edc3621905a9520396b332ac756cc01e0df3a2471756c7",
+      "license": "MIT",
+      "origin": "pixman",
+      "source_commit": "43db2f639237fba90ef09320e83f847561d9b0fc"
+    },
+    {
+      "name": "libpng",
+      "version": "1.6.59-r0",
+      "repository": "main",
+      "size": 97807,
+      "sha256": "93132da4155e062e12347aca01a761491b8fc40a1ffa955bd588d911550f2bdf",
+      "license": "Libpng",
+      "origin": "libpng",
+      "source_commit": "e95748873fa2f7e0e54cf27557fe0deff27b6c80"
+    },
+    {
+      "name": "libsasl",
+      "version": "2.1.28-r8",
+      "repository": "main",
+      "size": 77970,
+      "sha256": "8890805a3f602303b5c15573ef9ee8392808504b5940daa0df9934440b1b82c8",
+      "license": "BSD-3-Clause-Attribution AND BSD-4-Clause",
+      "origin": "cyrus-sasl",
+      "source_commit": "0ba5902c3e39ed5dab7e5afc9a41ad3e2ff88f15"
+    },
+    {
+      "name": "gdbm",
+      "version": "1.24-r0",
+      "repository": "main",
+      "size": 33055,
+      "sha256": "dd9525bc443d995b86bc0671f6ac4384cff9e3e3d28822ac6279d08796ed7acc",
+      "license": "GPL-3.0-or-later",
+      "origin": "gdbm",
+      "source_commit": "cf76e1b436494c60e0c188400007dbf78bbff5f0"
+    },
+    {
+      "name": "libseccomp",
+      "version": "2.6.1-r0",
+      "repository": "main",
+      "size": 51807,
+      "sha256": "ee817c130535b72e5b0a63b211f9d2fbbaa493a319f78e9da5e30359991e5180",
+      "license": "LGPL-2.1-or-later",
+      "origin": "libseccomp",
+      "source_commit": "e3356745807c5f5c6ea51d528dc8b2d5c1fa54bd"
+    },
+    {
+      "name": "libslirp",
+      "version": "4.8.0-r0",
+      "repository": "community",
+      "size": 60178,
+      "sha256": "11e9b3a526e75f3f90a0ed843e3d69d7e2c07303a2f147daa67e6be46650dd39",
+      "license": "BSD-3-Clause",
+      "origin": "libslirp",
+      "source_commit": "09cc7a4d32ef5b15399fcddae45117f162046fe9"
+    },
+    {
+      "name": "snappy",
+      "version": "1.2.2-r0",
+      "repository": "main",
+      "size": 24339,
+      "sha256": "9a57ce8876f4840b16b858b94a4ad1f2b31e4faf49aaf170376acbf2e480e189",
+      "license": "BSD-3-Clause",
+      "origin": "snappy",
+      "source_commit": "80871bcad6fe1a49274344d6c8ab140ce1bab014"
+    },
+    {
+      "name": "libstdc++",
+      "version": "14.2.0-r6",
+      "repository": "main",
+      "size": 906209,
+      "sha256": "0d2f054057a4f932e985a129eccb79908b40964185139a0a609aed3032aba064",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "origin": "gcc",
+      "source_commit": "fbf60319be3bbaf6dd32ef55cc6fb7189e05c266"
+    },
+    {
+      "name": "libgcc",
+      "version": "14.2.0-r6",
+      "repository": "main",
+      "size": 67013,
+      "sha256": "ba1835eec3ad8a120efd3d5020e561d53553a0513763a08f509e3ce6d4baa9ca",
+      "license": "GPL-2.0-or-later AND LGPL-2.1-or-later",
+      "origin": "gcc",
+      "source_commit": "fbf60319be3bbaf6dd32ef55cc6fb7189e05c266"
+    },
+    {
+      "name": "liburing",
+      "version": "2.9-r0",
+      "repository": "main",
+      "size": 12005,
+      "sha256": "fd94adf963411e907d62e644fe184f672bef95dd1568c55642ae77421be93621",
+      "license": "LGPL-2.1-or-later OR MIT",
+      "origin": "liburing",
+      "source_commit": "74dc3af19617d07c4afdc730c7dc68d0933dc532"
+    },
+    {
+      "name": "vde2-libs",
+      "version": "2.3.3-r4",
+      "repository": "community",
+      "size": 38389,
+      "sha256": "c5f45c58602c40e5cbce477b5f4104adc7ddbd069586282aaf4e5afc2e768952",
+      "license": "GPL",
+      "origin": "vde2",
+      "source_commit": "e8a4b7000d35775a3e63df09e1a8f2903f6d8fcd"
+    },
+    {
+      "name": "xen-libs",
+      "version": "4.20.4-r1",
+      "repository": "main",
+      "size": 622886,
+      "sha256": "8e58262eb0ea3a2fb4a01f87c933a523047aed4280c48a42b52345b0ef09d52d",
+      "license": "GPL-2.0-only",
+      "origin": "xen",
+      "source_commit": "c4dc80c54512181a6c01739933aecb1c5f262b74"
+    },
+    {
+      "name": "e2fsprogs-libs",
+      "version": "1.47.2-r2",
+      "repository": "main",
+      "size": 215550,
+      "sha256": "43118bb26b5b631affeca249dc394055b14240f40a1754b093322bf9f1623344",
+      "license": "GPL-2.0-or-later AND LGPL-2.0-or-later AND BSD-3-Clause AND MIT",
+      "origin": "e2fsprogs",
+      "source_commit": "13f83cd1a99fa6ea58c6f8c3538971f2fb9ac634"
+    },
+    {
+      "name": "libcom_err",
+      "version": "1.47.2-r2",
+      "repository": "main",
+      "size": 6583,
+      "sha256": "f0f5ea8a160fe0ff6d0b18eff222f80a6a83eb1ca6abb913db7a902d5bd25c43",
+      "license": "GPL-2.0-or-later AND LGPL-2.0-or-later AND BSD-3-Clause AND MIT",
+      "origin": "e2fsprogs",
+      "source_commit": "13f83cd1a99fa6ea58c6f8c3538971f2fb9ac634"
+    },
+    {
+      "name": "libfdt",
+      "version": "1.7.2-r0",
+      "repository": "main",
+      "size": 19350,
+      "sha256": "4f6f7651c0cdee877236dc0adc1f0de02dfaf897acd89ae055f67a78d32b7c47",
+      "license": "GPL-2.0-or-later OR BSD-2-Clause",
+      "origin": "dtc",
+      "source_commit": "38185ad0ba8f73bb6633a39f0f9ee730e7a2b755"
+    },
+    {
+      "name": "libnl3",
+      "version": "3.11.0-r0",
+      "repository": "main",
+      "size": 332493,
+      "sha256": "a9c411442b128defbf88f9aac7abe21ee99736ce41d811cf5ce204bd3c6a2134",
+      "license": "LGPL-2.1-or-later",
+      "origin": "libnl3",
+      "source_commit": "4084996615c2a6601e26eedde99e3ae66e7d6ab7"
+    },
+    {
+      "name": "libuuid",
+      "version": "2.41.6-r1",
+      "repository": "main",
+      "size": 15458,
+      "sha256": "24e944e8270c0626a0c2083bcdd4f3ee636923ca1f86fc32caa22c5462ce26b9",
+      "license": "BSD-3-Clause",
+      "origin": "util-linux",
+      "source_commit": "b91fb14e28957c6f5a13c02eb9ec136c82ebd50e"
+    },
+    {
+      "name": "yajl",
+      "version": "2.1.0-r9",
+      "repository": "main",
+      "size": 15146,
+      "sha256": "34a2fb7671a29f19166d051318c866e60f4687184fe73939b6b08325d11b68a8",
+      "license": "MIT",
+      "origin": "yajl",
+      "source_commit": "9c7716c2221405ce7810ba3eaaa1f62d2e646c20"
+    }
+  ]
+}

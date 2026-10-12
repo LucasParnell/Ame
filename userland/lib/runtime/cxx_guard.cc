@@ -19,8 +19,8 @@
 
 namespace {
 
-constexpr uint8_t kGuardInitialised = 1;   // byte 0
-constexpr uint8_t kGuardInProgress = 2;    // byte 1
+constexpr uint64_t kGuardInitialised = 1;   // byte 0
+constexpr uint64_t kGuardInProgress = 1ull << 8;    // byte 1
 
 inline void cpu_relax() {
     __asm__ __volatile__("yield" ::: "memory");
@@ -33,18 +33,18 @@ extern "C" {
 // Returns non-zero when the caller must run the initialiser, zero when another
 // thread already completed it. Atomic so concurrent first-use is safe.
 int __cxa_guard_acquire(uint64_t* guard) {
-    auto* flags = reinterpret_cast<uint8_t*>(guard);
+    auto* flags = guard;
     for (;;) {
-        const uint8_t state = __atomic_load_n(flags, __ATOMIC_ACQUIRE);
+        const uint64_t state = __atomic_load_n(flags, __ATOMIC_ACQUIRE);
         if ((state & kGuardInitialised) != 0) return 0;
         if ((state & kGuardInProgress) != 0) {
             cpu_relax();
             continue;
         }
-        uint8_t expected = state;
+        uint64_t expected = state;
         // Claim the in-progress bit; another thread may have claimed it first.
         if (__atomic_compare_exchange_n(flags, &expected,
-                                        static_cast<uint8_t>(state | kGuardInProgress), false,
+                                        static_cast<uint64_t>(state | kGuardInProgress), false,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             return 1;
         }
@@ -53,17 +53,17 @@ int __cxa_guard_acquire(uint64_t* guard) {
 
 // Publishes the fully constructed object to every other thread.
 void __cxa_guard_release(uint64_t* guard) {
-    auto* flags = reinterpret_cast<uint8_t*>(guard);
-    uint8_t state = __atomic_load_n(flags, __ATOMIC_RELAXED);
-    __atomic_store_n(flags, static_cast<uint8_t>(state | kGuardInitialised), __ATOMIC_RELEASE);
+    auto* flags = guard;
+    uint64_t state = __atomic_load_n(flags, __ATOMIC_RELAXED);
+    __atomic_store_n(flags, static_cast<uint64_t>(state | kGuardInitialised), __ATOMIC_RELEASE);
 }
 
 // The initialiser failed (it must not have thrown in a freestanding build, but
 // the ABI requires the hook): drop the claim so a later call retries.
 void __cxa_guard_abort(uint64_t* guard) {
-    auto* flags = reinterpret_cast<uint8_t*>(guard);
-    uint8_t state = __atomic_load_n(flags, __ATOMIC_RELAXED);
-    __atomic_store_n(flags, static_cast<uint8_t>(state & ~kGuardInProgress), __ATOMIC_RELEASE);
+    auto* flags = guard;
+    uint64_t state = __atomic_load_n(flags, __ATOMIC_RELAXED);
+    __atomic_store_n(flags, static_cast<uint64_t>(state & ~kGuardInProgress), __ATOMIC_RELEASE);
 }
 
 } // extern "C"

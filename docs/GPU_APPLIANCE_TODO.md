@@ -123,7 +123,7 @@ narrative below is retained for context.
 - `userland/init/main.cc`: read `"gpu.function"`/`"gpu.irq"` from BootInfo (near the other
   `mochi::boot::handle` reads, ~line 1245) and `grant_to(svc, …, "gpu.function"/"gpu.irq")` in the
   `dango.manager` branch (~line 727, next to `vm.root`).
-- `userland/manifest.v0` + its JSON caps: add the new cap tokens to the `dango.manager` entry
+- `userland/system.json` + its JSON caps: add the new cap tokens to the `dango.manager` entry
   (currently `caps = ["vm"]`).
 - `userland/dango/manager/main.cc`: after `sys_vm_create`/`sys_vcpu_create` (~lines 653/744) and before
   the first `sys_vcpu_run`, run the E.1 construction contract: `sys_vm_assign_device` →

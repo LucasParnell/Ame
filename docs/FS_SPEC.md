@@ -163,7 +163,7 @@ struct InodeLeafEntry {
     u64  size;                     // bytes
     u64  extent_tree_root;         // root block of per-inode extent B+tree
     u32  nlink;
-    u32  mode;                     // POSIX permission bits
+    u32  legacy_mode;              // ignored; new images write zero
     u64  ctime_ns;
     u64  mtime_ns;
     u8   reserved[16];
@@ -404,7 +404,7 @@ struct FsOpenReply {               // 48 bytes
     u64  size;
     u16  type;
     u16  inode_class;
-    u32  mode;
+    u32  access;                   // FsAccess for the returned session handle
     u8   reserved[16];
 };
 static_assert(sizeof(FsOpenReply) == 48);
@@ -480,7 +480,7 @@ static_assert(sizeof(FsReaddirReply) == 16);
 struct FsMkdirRequest {            // 48 bytes
     u32  parent_inode;
     u32  flags;                    // FS_INODE_CLASS_CONTENT_STORE=1, _USER_DATA=2
-    u32  mode;
+    u32  reserved0;                // zero; inherit directory authority
     u8   name_len;
     u8   pad[3];
     char name[32];
@@ -968,12 +968,9 @@ Tier migration is background work; no client-visible latency in V0.
 
 ## 11. Manifest & Service Registration
 
-Add to `userland/manifest.v0`:
-
-```
-drv.blk.virtio  drv.blk.virtio  trusted  always  mmio
-io.fs           io.fs           trusted  always  blk
-```
+`userland/system.json` declares `drv.blk.virtio` and `io.fs`, their startup
+ordering, and the shared block endpoint's ring and doorbell grants. Board
+profiles select the services to package; see [System descriptor](SYSTEM_DESCRIPTOR.md).
 
 `io.fs` registers with nameservice as `"io.fs"`. Clients resolve via nameservice to
 obtain an `MxEndpointDesc` containing the cmd/reply ring caps and doorbells.
@@ -1018,7 +1015,7 @@ obtain an `MxEndpointDesc` containing the cmd/reply ring caps and doorbells.
 | `userland/fs/tiering.h` | `TierDesc`, placement policy |
 | `userland/drivers/blk/virtio/main.cc` | virtio-mmio init, wired DMA arena, queue management |
 | `userland/CMakeLists.txt` | Add `io.fs` + `drv.blk.virtio` targets |
-| `userland/manifest.v0` | Add manifest entries |
+| `userland/system.json` | Add manifest entries |
 
 ---
 
@@ -1040,3 +1037,24 @@ FS V1 smoke OK
 
 Later milestones add `FS zero-copy OK`, `FS snapshot flush OK`, and
 `FS journal replay OK`.
+
+### Handle access (protocol version 2)
+
+AmeFS has no Unix owner/group/other permission model. Authority comes from the
+client's granted filesystem session and its session-owned handles. `FsOpenReply.access`
+reports `FS_ACCESS_READ`/`WRITE` for files and `FS_ACCESS_ENUMERATE`/`MODIFY` for
+directories. `MODIFY` permits creation, removal, and renaming of children; it does
+not make immutable content writable. A copied access mask is not a capability.
+
+Opening a directory retains the parent's mutation restriction. Live `/tmp` and
+`/data` are mount authorities supplied at the live root; resolving a snapshot's
+root cannot cross into those live mounts. Content-store inodes, disk-backed boot
+files, and snapshots never grant mutation access. Existing directory opens retain
+their behavior: `FS_OPEN_READ` enumerates a directory and inherits its parent's
+mutation authority. This is not an owner-based permission request.
+
+The V1 disk inode and durable checkpoint layouts are unchanged. Their former
+mode word is retained as `legacy_mode`, ignored when loading old records, and
+written as zero in new records. Runtime inodes no longer carry an unused mode.
+Protocol V2 reuses the old open-reply word for handle access and reserves the old
+mkdir word (must be zero); clients and server must be rebuilt together.

@@ -3,6 +3,7 @@
 #include "midix/format/json.h"
 #include "midix/format/signature.h"
 #include "libk/string.h"
+#include "libk/str.h"
 
 namespace midix::format {
 namespace {
@@ -339,6 +340,20 @@ const char* verify_bundle(const mx_u8_t* data, mx_size_t size,
     // Publish the view only after its signature and every object have passed.
     out = candidate;
     return nullptr;
+}
+
+bool find_object(const Bundle& bundle, const char* wanted, MxBundleObject& out) {
+    if (!wanted || bundle.header.object_count > kMaxObjects) return false;
+    for (mx_u32_t i = 0; i < bundle.header.object_count; ++i) {
+        MxBundleObject candidate{};
+        const char* name = nullptr;
+        if (!object(bundle, i, candidate, name)) return false;
+        if (libk::str::equal(name, wanted)) {
+            out = candidate;
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace midix::format

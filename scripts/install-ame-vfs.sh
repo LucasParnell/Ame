@@ -34,9 +34,6 @@ require_file() {
 KERNEL="${BUILD_DIR}/kernel/anko"
 USERLAND_DIR="${BUILD_DIR}/userland"
 USERLAND_MANIFEST="${USERLAND_DIR}/manifest.v0"
-if [[ ! -f "${USERLAND_MANIFEST}" ]]; then
-    USERLAND_MANIFEST="${ROOT}/userland/manifest.v0"
-fi
 SYSTEM_MANIFEST="${BUILD_DIR}/manifest.json"
 SYSTEM_BUNDLE="${BUILD_DIR}/system.mxb"
 INITRD="${BUILD_DIR}/initrd.mxb"

@@ -56,7 +56,26 @@ function(mochi_service name src load_base)
     )
 endfunction()
 
-mochi_service(init          init/main.cc       0x10010000)
+set(MOCHI_SYSTEM_DESCRIPTOR "${CMAKE_CURRENT_SOURCE_DIR}/system.json")
+# A board keeps its own profile by default. An explicit override permits local
+# bring-up of a new board's service policy on QEMU without claiming its hardware.
+set(MOCHI_SYSTEM_PROFILE "" CACHE STRING "Mochi service profile override (empty uses ANKO_BOARD)")
+set_property(CACHE MOCHI_SYSTEM_PROFILE PROPERTY STRINGS "" qemu-virt switch-t210 huawei-anne)
+set(MOCHI_SELECTED_PROFILE "${ANKO_BOARD}")
+if(MOCHI_SYSTEM_PROFILE)
+    set(MOCHI_SELECTED_PROFILE "${MOCHI_SYSTEM_PROFILE}")
+endif()
+set(MOCHI_CHANNEL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/system_channels.h")
+add_custom_command(
+    OUTPUT ${MOCHI_CHANNEL_HEADER}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/mx/system_descriptor.py
+            --descriptor ${MOCHI_SYSTEM_DESCRIPTOR}
+            --channel-header ${MOCHI_CHANNEL_HEADER}
+    DEPENDS ${MOCHI_SYSTEM_DESCRIPTOR} ${CMAKE_SOURCE_DIR}/scripts/mx/system_descriptor.py
+    VERBATIM
+)
+mochi_service(init "init/main.cc;${MOCHI_CHANNEL_HEADER}" 0x10010000)
+target_include_directories(init PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 mochi_service(nameservice   nameservice/main.cc 0x10100000)
 mochi_service(io.console    console/main.cc    0x10200000)
 mochi_service(demo.pong     demo/pong/main.cc  0x10300000)
@@ -92,6 +111,13 @@ if(DEFINED ANKO_XHCI_NORESET AND ANKO_XHCI_NORESET)
     target_compile_definitions(drv.usb.xhci PRIVATE ANKO_XHCI_NORESET=1)
 endif()
 mochi_service(drv.usb.hid     drivers/usb/hid/main.cc    0x10B00000)
+option(MOCHI_USB_TRACE_INPUT "Development-only USB input regression diagnostics" OFF)
+if(MOCHI_USB_TRACE_INPUT)
+    if(NOT ANKO_BUILD_DEV)
+        message(FATAL_ERROR "MOCHI_USB_TRACE_INPUT is development-only")
+    endif()
+    target_compile_definitions(drv.usb.hid PRIVATE MOCHI_USB_TRACE_INPUT=1)
+endif()
 mochi_service(ui.input        drivers/input/main.cc      0x10C00000)
 mochi_service(drv.blk.virtio  drivers/blk/virtio/main.cc 0x10D00000)
 # io.fs is split into cohesive modules behind fs/fs_internal.h.
@@ -115,11 +141,7 @@ set(MSH_SOURCES
 )
 mochi_service(msh "${MSH_SOURCES}" 0x10F00000)
 mochi_service(app.hello   app/hello/main.cc       0x11400000)
-
-set(MOCHI_BOOT_MANIFEST "${ANKO_BOOT_MANIFEST}")
-if(NOT MOCHI_BOOT_MANIFEST)
-    set(MOCHI_BOOT_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/manifest.v0")
-endif()
+mochi_service(test.anne_smp ${CMAKE_SOURCE_DIR}/tests/kernel/anne_smp.cc 0x11500000)
 
 set(DANGO_LINUX_ARTIFACT_DIR "" CACHE PATH "Optional prebuilt Dango Linux artifact directory")
 set(DANGO_LINUX_PROFILE "hello" CACHE STRING "Dango Linux profile: hello or gpu")
@@ -284,18 +306,21 @@ endif()
 add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/system.mxb
            ${CMAKE_BINARY_DIR}/manifest.json
+           ${CMAKE_CURRENT_BINARY_DIR}/manifest.v0
     ${DANGO_LINUX_ARCHIVE_COMMANDS}
     COMMAND ${CMAKE_COMMAND} -E env
             AME_SIGNING_KEY=${AME_SIGNING_KEY}
             AME_BUILD_DEV=$<BOOL:${ANKO_BUILD_DEV}>
             ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/mx/mksystem.py
             --build-dir ${CMAKE_BINARY_DIR}
-            --legacy-manifest ${MOCHI_BOOT_MANIFEST}
+            --descriptor ${MOCHI_SYSTEM_DESCRIPTOR}
+            --profile ${MOCHI_SELECTED_PROFILE}
             --manifest-output ${CMAKE_BINARY_DIR}/manifest.json
             --output ${CMAKE_BINARY_DIR}/system.mxb
             ${DANGO_LINUX_BUNDLE_OBJECT_ARGS}
     DEPENDS ${MOCHI_MXI_FILES}
-            ${MOCHI_BOOT_MANIFEST}
+            ${MOCHI_SYSTEM_DESCRIPTOR}
+            ${CMAKE_SOURCE_DIR}/scripts/mx/system_descriptor.py
             ${CMAKE_SOURCE_DIR}/scripts/mx/mksystem.py
             ${CMAKE_SOURCE_DIR}/scripts/mx/mxpack.py
             ${CMAKE_SOURCE_DIR}/scripts/mx/signing.py
@@ -309,7 +334,8 @@ add_custom_command(
 add_custom_target(mochi_system ALL
     DEPENDS
         ${CMAKE_BINARY_DIR}/system.mxb
-        ${CMAKE_BINARY_DIR}/manifest.json)
+        ${CMAKE_BINARY_DIR}/manifest.json
+        ${CMAKE_CURRENT_BINARY_DIR}/manifest.v0)
 
 # Regression processes are built explicitly and never included in system.mxb.
 if(ANKO_BUILD_DEV)

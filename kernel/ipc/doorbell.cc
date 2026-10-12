@@ -17,6 +17,7 @@
 #include "anko/cap.h"
 #include "anko/mm.h"
 #include "anko/panic.h"
+#include "anko/interrupt_mask.h"
 #include "libk/metric.h"
 #include "libk/string.h"
 #include "../sched/sched_internal.h"
@@ -51,7 +52,7 @@ static inline u64 local_irq_save_disable() {
 }
 
 static inline void local_irq_restore(u64 daif) {
-    asm volatile("msr DAIF, %0" :: "r"(daif) : "memory");
+    asm volatile("msr DAIF, %0" :: "r"(kernel::host_interrupt_state(daif)) : "memory");
 }
 
 static void lock(Doorbell* db) {

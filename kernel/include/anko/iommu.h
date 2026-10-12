@@ -3,13 +3,14 @@
 //
 // Spec ref: AME GPU DRIVER APPLIANCE SPEC §8.3–8.6, §8.10, §8.15.
 //
-// The generic core owns device-DMA isolation policy: which host pages a device
+// The generic core enforces device-DMA isolation mechanisms: which host pages a device
 // assignment may reach, with which permissions, and in what order translations
 // are torn down. It is deliberately architecture-independent — the GPU
 // appliance must not know whether isolation comes from ARM SMMUv3, AMD-Vi,
-// Intel VT-d, or another mechanism. A backend supplies IommuBackendOps; Phase B
-// ships a no-op default so the core runs and is testable without SMMU hardware,
-// and the SMMUv3 backend (Phase C, kernel/iommu/smmuv3.cc) replaces it.
+// Intel VT-d, or another mechanism. Backends supply descriptor data, address
+// limits and hardware hooks. The current walker supports three levels and a
+// 4 KiB granule. The null backend is an explicit software model, never proof
+// of DMA containment. Allocation and sharing policy remain with the owner.
 //
 // Properties enforced here:
 //   * default deny — an unmapped IOVA faults; there is no identity-DMA
@@ -28,6 +29,7 @@
 #include "anko/spinlock.h"
 #include "anko/syscall.h" // SysError, E_*
 #include "anko/types.h"
+#include "anko/iommu_pt.h"
 
 namespace iommu {
 
@@ -63,12 +65,14 @@ struct IommuMap {
 };
 static_assert(sizeof(IommuMap) == 32);
 
-// DMA class of a guest mapping (§8.4), independent of CPU stage-2 permissions.
-enum class VmDmaClass : u8 {
+// DMA ownership class, independent of CPU permissions and native/VM transport.
+enum class DmaClass : u8 {
     None,         // never reachable by assigned devices
     ApplianceRam, // private RAM owned entirely by this appliance
     SharedGpu,    // explicitly shared GPU buffer/arena
+    NativeDevice, // pinned memory owned by one native device domain
 };
+using VmDmaClass = DmaClass; // preserve existing Dango source and numeric values
 
 // Device permissions a memory class permits. A mapping's requested perms must
 // be a non-empty subset of this set, so a mapping can neither exceed its class
@@ -77,6 +81,7 @@ constexpr u32 dma_class_perms(VmDmaClass cls) {
     switch (cls) {
     case VmDmaClass::ApplianceRam:
     case VmDmaClass::SharedGpu:
+    case VmDmaClass::NativeDevice:
         return static_cast<u32>(DmaPerm::Read) | static_cast<u32>(DmaPerm::Write);
     case VmDmaClass::None:
         break;
@@ -117,8 +122,8 @@ struct IommuOwnerOps {
 
 struct IommuDomain;
 
-// Backend hooks (§8.8). Every hook is optional: a null pointer is a no-op that
-// succeeds, which is exactly how the core runs on a platform with no IOMMU.
+// Backend hooks (§8.8). Hardware backends must supply every hook and explicit
+// geometry. Optional hooks are confined to the software model used in tests.
 // The SMMUv3 backend (Phase C) fills them in:
 //   publish_page_table_range — clean/flush page-table cache lines so freshly
 //                              written descriptors are visible to the IOMMU;
@@ -134,19 +139,33 @@ struct IommuBackendOps {
     SysError (*sync_command_stream)(void* ctx);
     // Bind a requester to a domain (its translation context) and unbind it back
     // to the default-deny state. These run inside domain_attach/domain_detach
-    // after the core's binding table is updated; the backend programs the
+    // before the core commits its binding table; the backend programs the
     // architecture-specific stream entry so that a requester whose context is
     // not (yet) installed faults instead of bypassing translation. A null
-    // pointer is a no-op success (the platform has no programmable IOMMU).
+    // detach must invalidate cached configuration; the core then synchronises.
     SysError (*attach_stream)(void* ctx, IommuDeviceId device, IommuDomain* domain);
     SysError (*detach_stream)(void* ctx, IommuDeviceId device);
     void* ctx;
+    const IommuTableFormat* table_format; // stable for the backend's lifetime
+    u8 iova_bits; // 1..39; zero selects 39 only in a software model
+    u8 pa_bits;   // 12..48; zero selects 48 only in a software model
+    bool hardware; // verified translation backend, not a mock/no-op
+    bool (*ready)(void* ctx); // hardware routes stop authorizing DMA after failure
 };
 
 // The no-op backend: all hooks absent, so every operation succeeds without
 // touching hardware. Selected by default so the core is unit-testable off
 // target; Phase C installs the SMMUv3 backend in its place.
 const IommuBackendOps& null_backend();
+
+// Cold platform routing: disjoint stream ranges in a device-ID namespace.
+// A PCI segment or SoC namespace must describe actual wiring, not mere SMMU
+// presence. Registration is fixed-capacity and permanent; ops/format live for
+// the kernel lifetime. No match returns nullptr and denies direct DMA.
+struct IommuRoute { u32 segment; u32 first_stream; u32 stream_count; };
+constexpr u32 kMaxIommuBackends = 4;
+SysError register_backend(IommuRoute route, const IommuBackendOps& backend);
+const IommuBackendOps* backend_for(IommuDeviceId device);
 
 // ---------------------------------------------------------------------------
 // Capacity (compile-time, fixed; no hot-path allocation)
@@ -202,6 +221,7 @@ struct IommuDomain {
     u64 attached_mask_;
     PhysAddr root_table_;
     PhysAddr tables_[kMaxDomainTables];
+    u8 table_flags_[kMaxDomainTables]; // dirty/retired columns; cold mutation only
     IommuOwnerOps owner_;
     IommuBackendOps backend_;
     SpinLock lock_;
@@ -215,8 +235,9 @@ struct IommuDomain {
 // pointer (as returned by domain_create / stream_domain / quarantine_domain).
 // ---------------------------------------------------------------------------
 
-// Install translations for every map. All-or-nothing: on any validation or
-// allocation failure nothing is installed and the domain is unchanged.
+// Validate the whole batch before mutation. Publication/completion failures
+// quarantine the domain and retain attempted mappings, tables and page pins.
+// The owner must not recycle those pages until domain teardown succeeds.
 SysError domain_map_batch(IommuDomain& domain, const IommuMap* maps, u32 count);
 
 // Remove translations previously installed by domain_map_batch. Each record's
@@ -227,6 +248,8 @@ SysError domain_unmap_batch(IommuDomain& domain, const IommuMap* maps, u32 count
 
 // Force the backend command stream to complete.
 SysError domain_sync(IommuDomain& domain);
+// Stop new work without pretending that hardware translations disappeared.
+void domain_quarantine(IommuDomain& domain);
 
 // Bind a requester/stream ID to this domain. Fails with E_BUSY if it is already
 // bound to a different active domain. Rebinding away from the quarantine domain
@@ -260,6 +283,14 @@ SysError domain_create(u64 authorized_object, const IommuOwnerOps& owner,
 // then are the host pages released to their owner. If the backend cannot prove
 // invalidation, the domain is quarantined and the pages stay pinned.
 void domain_destroy(IommuDomain* domain);
+
+// Register kernel-pinned native memory at a verified route (IOVA == PA).
+// No route returns E_NOTIMPL; this API never reports unisolated DMA as success.
+SysError register_native_dma_arena(IommuDeviceId device, PhysAddr base, u64 size);
+// Deny the stream, retire translations and reclaim the registration only when
+// completion is proven. E_FAULT retains all records and pins for a later retry.
+// The caller owns physical allocation and frees it only after E_OK.
+SysError unregister_native_dma_arenas(IommuDeviceId device);
 
 IommuDomain* domain_by_index(u32 index);
 

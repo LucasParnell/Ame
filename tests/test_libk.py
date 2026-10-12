@@ -17,11 +17,28 @@ class Libk(unittest.TestCase):
                 'clang++', '-std=c++23', '-O1', '-g',
                 '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I' + str(ROOT / 'lib/include'),
-                str(ROOT / 'tests/libk_probe.cc'), '-o', probe],
+                str(ROOT / 'tests/libk_probe.cc'), str(ROOT / 'lib/libk/printf.cc'), '-o', probe],
                 capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([probe], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_zero_rejects_pointer_and_nontrivial_object(self):
+        cases = {
+            'pointer': ('int* p = nullptr; libk::zero(p);',
+                        'zero a pointee or provide the storage size'),
+            'nontrivial': ('struct T { ~T() {} }; T t; libk::zero(t);',
+                           'zero requires trivially copyable storage'),
+        }
+        for name, (body, diagnostic) in cases.items():
+            with self.subTest(name=name):
+                result = subprocess.run([
+                    'clang++', '-std=c++23', '-fsyntax-only', '-x', 'c++',
+                    '-I' + str(ROOT / 'lib/include'), '-'],
+                    input='#include "libk/bytes.h"\nvoid probe() { ' + body + ' }',
+                    capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(diagnostic, result.stderr)
 
 
 if __name__ == '__main__':

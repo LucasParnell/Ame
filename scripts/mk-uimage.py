@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a U-Boot legacy uImage wrapper for Ame's ARM64 Image."""
+"""Create U-Boot legacy kernel, ramdisk and single-component script images."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ IH_ARCH_ARM64 = 22
 IMAGE_TYPES = {
     "kernel": 2,
     "ramdisk": 3,
+    "script": 6,
 }
 IH_COMP_NONE = 0
 IH_NMLEN = 32
@@ -78,6 +79,12 @@ def main() -> int:
     args = parser.parse_args()
 
     data = args.input.read_bytes()
+    if args.type == "script":
+        if not data:
+            parser.error("a boot script must not be empty")
+        # U-Boot source() expects a zero-terminated table of component sizes
+        # before the text, even for a script containing only one component.
+        data = struct.pack(">II", len(data), 0) + data
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(
         build_header(data, args.load, args.entry, IMAGE_TYPES[args.type], args.name) + data

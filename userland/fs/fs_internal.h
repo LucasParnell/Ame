@@ -15,7 +15,7 @@
 // (see also docs/FS_SPEC.md and docs/CLEANUP_STATUS.md item 5):
 //
 //   * The disk root is READ-ONLY. Every disk-backed handle is opened read-only
-//     (fs_disk alloc_disk_handle sets read_only), and FS_OPEN_WRITE/CREATE/TRUNC
+//     (disk handles carry no mutation access), and FS_OPEN_WRITE/CREATE/TRUNC
 //     are rejected with MX_ERR_PERM before the request can reach the disk
 //     B+tree. Redirecting/overlaying the root read-only means a client can never
 //     mutate the signed disk image through io.fs.
@@ -35,6 +35,9 @@
 //     volume and FS_SYNC returns MX_ERR_NOT_IMPLEMENTED. See fs_durable.cc.
 
 #include "libk/bytes.h"
+#include "libk/hash.h"
+#include "libk/integer.h"
+#include "libk/text.h"
 #include "libk/str.h"
 #include "mochi/va_layout.h"
 #include "mochi/syscall.h"
@@ -83,23 +86,6 @@ constexpr mx_u32_t kHandleIndexMask = (1u << kHandleIndexBits) - 1;
 constexpr mx_u32_t kFirstClientHandle = 2;
 constexpr mx_u32_t kMaxHandleGeneration = (1u << 24) - 1;
 
-// CRC-32/IEEE (reflected 0xEDB88320 polynomial). Portability format for data
-// that leaves the service: the on-disk superblock, GPT, durable records, and
-// disk extent tags all use it.
-constexpr mx_u32_t kCrc32IeeeInit = 0xFFFF'FFFFu;
-constexpr mx_u32_t kCrc32IeeePoly = 0xEDB8'8320u;
-
-// FNV-1a 32-bit hash. The in-memory extent content tag
-// (ExtentState::content_hash32) uses this, not CRC-32: it is checked only
-// against memory the service already owns, and it is a single multiply-add per
-// byte on the write path.
-constexpr mx_u32_t kFnv1a32OffsetBasis = 2166136261u;
-constexpr mx_u32_t kFnv1a32Prime = 16777619u;
-
-// ---------------------------------------------------------------------------
-// In-memory state records. Members are ordered so the common scans touch the
-// smallest fields first.
-// ---------------------------------------------------------------------------
 struct ExtentState {
     bool used;
     mx_u64_t logical_block;
@@ -116,7 +102,6 @@ struct InodeState {
     mx_u32_t parent_inode;
     mx_u16_t type;
     mx_u16_t inode_class;
-    mx_u32_t mode;
     mx_u32_t nlink;
     mx_u64_t size;
     char name[kNameBytes];
@@ -149,10 +134,9 @@ struct OpenHandle {
     mx_u64_t owner_generation;
     mx_u32_t inode_number;
     mx_u64_t snapshot_id;
-    bool read_only;
+    mx_u32_t access; // FsAccess; checked by the operation handlers
     mx_u16_t type;
     mx_u16_t inode_class;
-    mx_u32_t mode;
     mx_u64_t size;
     mx_u64_t tree_root;
 };
@@ -184,58 +168,24 @@ extern mx_u64_t g_session_generation;
 // ---------------------------------------------------------------------------
 // Small freestanding helpers, shared by every module.
 // ---------------------------------------------------------------------------
-static inline void zero_bytes(void* ptr, mx_u64_t len) {
-    libk::fill(libk::as_bytes(ptr, static_cast<std::size_t>(len)), 0);
-}
-
-static inline void fs_copy_bytes(void* dst, const void* src, mx_u64_t len) {
-    (void)libk::copy_n(libk::as_bytes(dst, static_cast<std::size_t>(len)),
-                       libk::as_bytes(src, static_cast<std::size_t>(len)),
-                       static_cast<std::size_t>(len));
-}
-
 static inline mx_u32_t str_len(const char* s, mx_u32_t limit) {
     return static_cast<mx_u32_t>(libk::str::length_n(s, limit));
 }
 
+// Compare a terminated inode name to a counted protocol name.
 static inline bool name_eq(const char* a, const char* b, mx_u8_t b_len) {
-    for (mx_u32_t i = 0; i < b_len; ++i) {
-        if (a[i] != b[i]) {
-            return false;
-        }
-    }
-    return a[b_len] == '\0';
+    return b_len <= kMaxName && a && b &&
+           libk::str::length_n(a, b_len + 1) == b_len &&
+           libk::str::equal_n(a, b, b_len);
 }
 
-static inline void copy_name(char* dst, const char* src, mx_u8_t len) {
-    mx_u32_t n = len;
-    if (n > kMaxName) {
-        n = kMaxName;
-    }
-    for (mx_u32_t i = 0; i < n; ++i) {
-        dst[i] = src[i];
-    }
-    dst[n] = '\0';
+static inline void copy_name(char (&dst)[kNameBytes], const char* src, mx_u8_t len) {
+    libk::str::Buffer name(dst);
+    name.append(src, len);
 }
 
 static inline mx_u32_t min_u32(mx_u32_t a, mx_u32_t b) {
     return a < b ? a : b;
-}
-
-// Map a named boot ring at a fixed VA. Shared by the session and block paths.
-static inline RingPage* map_ring_from_boot(const MxBootInfo* boot, const char* name, mx_vaddr_t va,
-                                           mx_u32_t* out_order) {
-    const MxBootEntry* entry = mochi::boot::find_type(boot, name, MX_BOOT_ENTRY_RING);
-    if (!entry || entry->handle == MX_NULL_HANDLE) {
-        return nullptr;
-    }
-    if (mx_map_page(entry->handle, va, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) {
-        return nullptr;
-    }
-    if (out_order) {
-        *out_order = entry->aux0 ? static_cast<mx_u32_t>(entry->aux0) : kRingOrder;
-    }
-    return reinterpret_cast<RingPage*>(va);
 }
 
 // ---------------------------------------------------------------------------
@@ -247,12 +197,6 @@ static inline RingPage* map_ring_from_boot(const MxBootInfo* boot, const char* n
 //   * fnv1a32_block — FNV-1a over a block the service still owns, i.e. the
 //     in-memory extent content tag.
 // ---------------------------------------------------------------------------
-mx_u32_t crc32_ieee(const mx_u8_t* data, mx_u64_t len);
-// Running (pre-complement) CRC-32 update. Seed the first call with
-// kCrc32IeeeInit and complement the final value; crc32_ieee() is exactly that
-// for one buffer. Used by the durable store to fold a CRC over non-contiguous
-// blocks.
-mx_u32_t crc32_ieee_update(mx_u32_t state, const mx_u8_t* data, mx_u64_t len);
 mx_u32_t name_hash32(const char* name, mx_u8_t len);
 mx_u32_t fnv1a32_block(const mx_u8_t* data);
 // Record that metadata changed since the last committed checkpoint. The reason
@@ -263,7 +207,7 @@ void mark_metadata_dirty();
 
 InodeState* live_inode(mx_u32_t inode_number);
 InodeState* alloc_inode(mx_u16_t type, mx_u16_t inode_class, mx_u32_t parent_inode,
-                        const char* name, mx_u8_t name_len, mx_u32_t mode);
+                        const char* name, mx_u8_t name_len);
 const InodeState* find_child(mx_u64_t snapshot_id, mx_u32_t parent_inode, const char* name,
                              mx_u8_t name_len);
 InodeState* find_live_child(mx_u32_t parent_inode, const char* name, mx_u8_t name_len);

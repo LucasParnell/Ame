@@ -435,8 +435,33 @@ int main() {
     assert(mx_vk_slot_decode(&no_arena, VK_SESSION_ERROR, sizeof(err), &err) == 0);
     assert(err.status == MX_ERR_SERVICE_UNAVAILABLE);
 
+    // Invalid memory ranges do not publish malformed command records.
+    assert(!a.recorder().copy_buffer(src, ~mx_u64_t{0}, dst, 0, 1));
+    assert(!a.recorder().fill_buffer(src, src.size, 1, 0));
+    assert(!a.recorder().bind_vertex_buffer(src, src.size + 1));
+    assert(!a.recorder().bind_render_target(src, ~mx_u32_t{0}, 2, 16));
+    assert(a.arena_at(~mx_u64_t{0}) == nullptr);
+    assert(!a.open(0, kArenaBytes, 8, 4));
+    Memory recycled{};
+    assert(a.free(dst));
+    assert(a.alloc(64, 0, MX_VK_MEMORY_TYPE_HOST_VISIBLE, &recycled));
+    assert(recycled.id != dst.id && !a.free(dst));
+    assert(!a.alloc(64, 3, MX_VK_MEMORY_TYPE_HOST_VISIBLE, &dst));
+    assert(!a.alloc(64, 0x80000000u, MX_VK_MEMORY_TYPE_HOST_VISIBLE, &dst));
+    assert(!a.free(image)); // swapchain owns its image storage
+    Memory acquired_one{}, acquired_two{}, blocked{};
+    assert(a.swapchain_acquire(swapchain, nullptr, &acquired_one, nullptr));
+    assert(a.swapchain_acquire(swapchain, nullptr, &acquired_two, nullptr));
+    assert(acquired_one.id != acquired_two.id);
+    assert(!a.swapchain_acquire(swapchain, nullptr, &blocked, nullptr));
+    const auto old_session = a.session_id();
+
     // --- Teardown -----------------------------------------------------------
     assert(a.close() && b.close() && c.close() && d.close());
+    assert(a.open(0, kArenaBytes, 8, 4));
+    assert(a.session_id() != old_session);
+    assert(!a.free(src));
+    assert(a.close());
     assert(ref.submit_calls == 2);
     assert(ref.present_calls == 1);
 

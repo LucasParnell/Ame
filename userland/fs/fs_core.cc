@@ -36,33 +36,12 @@ static const char kHelloData[] = "Midix io.fs V1: ordered CoW extents and inline
 // ---------------------------------------------------------------------------
 // Checksums.
 // ---------------------------------------------------------------------------
-mx_u32_t crc32_ieee_update(mx_u32_t state, const mx_u8_t* data, mx_u64_t len) {
-    mx_u32_t crc = state;
-    for (mx_u64_t i = 0; i < len; ++i) {
-        crc ^= data[i];
-        for (mx_u32_t bit = 0; bit < kBitsPerByte; ++bit) {
-            const mx_u32_t mask = 0u - (crc & 1u);
-            crc = (crc >> 1) ^ (kCrc32IeeePoly & mask);
-        }
-    }
-    return crc;
-}
-
-mx_u32_t crc32_ieee(const mx_u8_t* data, mx_u64_t len) {
-    return ~crc32_ieee_update(kCrc32IeeeInit, data, len);
-}
-
 mx_u32_t name_hash32(const char* name, mx_u8_t len) {
-    return crc32_ieee(reinterpret_cast<const mx_u8_t*>(name), len);
+    return libk::crc32_ieee(libk::as_bytes(name, len));
 }
 
 mx_u32_t fnv1a32_block(const mx_u8_t* data) {
-    mx_u32_t hash = kFnv1a32OffsetBasis;
-    for (mx_u32_t i = 0; i < kBlockSize; ++i) {
-        hash ^= data[i];
-        hash *= kFnv1a32Prime;
-    }
-    return hash;
+    return libk::fnv1a32(libk::as_bytes(data, kBlockSize));
 }
 
 void mark_metadata_dirty() {
@@ -82,12 +61,9 @@ InodeState* live_inode(mx_u32_t inode_number) {
 }
 
 static PhysRefState* phys_ref(mx_u64_t phys_block) {
-    for (mx_u32_t i = 0; i < kMaxPhysBlocks; ++i) {
-        if (g_phys_refs[i].used && g_phys_refs[i].phys_block == phys_block) {
-            return &g_phys_refs[i];
-        }
-    }
-    return nullptr;
+    if (phys_block >= kMaxPhysBlocks) return nullptr;
+    auto& ref = g_phys_refs[phys_block];
+    return ref.used && ref.phys_block == phys_block ? &ref : nullptr;
 }
 
 mx_i32_t inc_phys_ref(mx_u64_t phys_block) {
@@ -111,8 +87,8 @@ void dec_phys_ref(mx_u64_t phys_block) {
     --ref->refcount;
     mark_metadata_dirty();
     if (ref->refcount == 0) {
-        zero_bytes(g_data_blocks[phys_block], kBlockSize);
-        zero_bytes(ref, sizeof(*ref));
+        libk::zero(g_data_blocks[phys_block], kBlockSize);
+        libk::zero(*ref);
         mark_metadata_dirty();
     }
 }
@@ -127,7 +103,7 @@ static mx_i32_t alloc_phys_block(mx_u64_t* out_phys) {
         g_phys_refs[i].length_blocks = 1;
         g_phys_refs[i].refcount = 1;
         g_phys_refs[i].flags = 0;
-        zero_bytes(g_data_blocks[i], kBlockSize);
+        libk::zero(g_data_blocks[i], kBlockSize);
         if (out_phys) {
             *out_phys = i;
         }
@@ -144,7 +120,7 @@ const ExtentState* find_extent_const(const InodeState& inode, mx_u64_t logical_b
             continue;
         }
         if (logical_block >= extent.logical_block &&
-            logical_block < extent.logical_block + extent.length_blocks) {
+            logical_block - extent.logical_block < extent.length_blocks) {
             return &extent;
         }
     }
@@ -208,7 +184,7 @@ static mx_i32_t ensure_writable_block(InodeState& inode, mx_u64_t logical_block,
         if (rc != MX_OK) {
             return rc;
         }
-        fs_copy_bytes(g_data_blocks[new_phys], g_data_blocks[extent->phys_block], kBlockSize);
+        libk::copy_exact(libk::as_bytes(g_data_blocks[new_phys]), libk::as_bytes(g_data_blocks[extent->phys_block]));
         dec_phys_ref(extent->phys_block);
         extent->phys_block = new_phys;
         extent->generation = g_generation;
@@ -223,19 +199,19 @@ static mx_i32_t ensure_writable_block(InodeState& inode, mx_u64_t logical_block,
 }
 
 InodeState* alloc_inode(mx_u16_t type, mx_u16_t inode_class, mx_u32_t parent_inode,
-                        const char* name, mx_u8_t name_len, mx_u32_t mode) {
+                        const char* name, mx_u8_t name_len) {
+    if (g_next_inode == 0 || name_len > kMaxName || (!name && name_len)) return nullptr;
     for (mx_u32_t i = 0; i < kMaxInodes; ++i) {
         if (g_inodes[i].used) {
             continue;
         }
         InodeState& inode = g_inodes[i];
-        zero_bytes(&inode, sizeof(inode));
+        libk::zero(inode);
         inode.used = true;
         inode.inode_number = g_next_inode++;
         inode.parent_inode = parent_inode;
         inode.type = type;
         inode.inode_class = inode_class;
-        inode.mode = mode;
         inode.nlink = 1;
         inode.size = 0;
         copy_name(inode.name, name, name_len);
@@ -247,25 +223,12 @@ InodeState* alloc_inode(mx_u16_t type, mx_u16_t inode_class, mx_u32_t parent_ino
 
 const InodeState* find_child(mx_u64_t snapshot_id, mx_u32_t parent_inode, const char* name,
                              mx_u8_t name_len) {
-    if (snapshot_id) {
-        const SnapshotState* snap = snapshot_by_id(snapshot_id);
-        if (!snap) {
-            return nullptr;
-        }
-        for (mx_u32_t i = 0; i < kMaxInodes; ++i) {
-            const InodeState& inode = snap->inodes[i];
-            if (inode.used && inode.parent_inode == parent_inode &&
-                name_eq(inode.name, name, name_len)) {
-                return &inode;
-            }
-        }
-        return nullptr;
-    }
-
+    const SnapshotState* snap = snapshot_id ? snapshot_by_id(snapshot_id) : nullptr;
+    if (snapshot_id && !snap) return nullptr;
+    const InodeState* table = snap ? snap->inodes : g_inodes;
     for (mx_u32_t i = 0; i < kMaxInodes; ++i) {
-        const InodeState& inode = g_inodes[i];
-        if (inode.used && inode.parent_inode == parent_inode &&
-            name_eq(inode.name, name, name_len)) {
+        const auto& inode = table[i];
+        if (inode.used && inode.parent_inode == parent_inode && name_eq(inode.name, name, name_len)) {
             return &inode;
         }
     }
@@ -273,14 +236,7 @@ const InodeState* find_child(mx_u64_t snapshot_id, mx_u32_t parent_inode, const 
 }
 
 InodeState* find_live_child(mx_u32_t parent_inode, const char* name, mx_u8_t name_len) {
-    for (mx_u32_t i = 0; i < kMaxInodes; ++i) {
-        InodeState& inode = g_inodes[i];
-        if (inode.used && inode.parent_inode == parent_inode &&
-            name_eq(inode.name, name, name_len)) {
-            return &inode;
-        }
-    }
-    return nullptr;
+    return const_cast<InodeState*>(find_child(0, parent_inode, name, name_len));
 }
 
 void release_inode_extents(InodeState& inode) {
@@ -289,7 +245,7 @@ void release_inode_extents(InodeState& inode) {
             continue;
         }
         dec_phys_ref(inode.extents[i].phys_block);
-        zero_bytes(&inode.extents[i], sizeof(inode.extents[i]));
+        libk::zero(inode.extents[i]);
     }
 }
 
@@ -380,6 +336,10 @@ mx_i32_t write_bytes_unbounded(InodeState& inode, mx_u64_t offset, const mx_u8_t
         return static_cast<mx_i32_t>(MX_ERR_PERM);
     }
 
+    mx_u64_t end = 0;
+    if (!data && len) return MX_ERR_INVALID;
+    if (!libk::checked_add(offset, len, &end)) return MX_ERR_OVERFLOW;
+    if (len == 0) return MX_OK;
     mx_u32_t written = 0;
     while (written < len) {
         const mx_u64_t abs = offset + written;
@@ -391,7 +351,8 @@ mx_i32_t write_bytes_unbounded(InodeState& inode, mx_u64_t offset, const mx_u8_t
         if (rc != MX_OK) {
             return rc;
         }
-        fs_copy_bytes(g_data_blocks[phys] + block_off, data + written, chunk);
+        libk::copy_n(libk::slice(libk::as_bytes(g_data_blocks[phys]), block_off, chunk),
+                     libk::as_bytes(data + written, len - written), chunk);
         ExtentState* extent = find_extent(inode, logical_block);
         if (!extent) {
             return static_cast<mx_i32_t>(MX_ERR_FAULT);
@@ -400,8 +361,8 @@ mx_i32_t write_bytes_unbounded(InodeState& inode, mx_u64_t offset, const mx_u8_t
         written += chunk;
     }
 
-    if (offset + len > inode.size) {
-        inode.size = offset + len;
+    if (end > inode.size) {
+        inode.size = end;
     }
     ++g_generation;
     mark_metadata_dirty();
@@ -434,11 +395,11 @@ static void init_file_content(InodeState& inode, const char* data, mx_u32_t len)
 // Formatting and arena registration.
 // ---------------------------------------------------------------------------
 void format_memory_fs() {
-    zero_bytes(g_inodes, sizeof(g_inodes));
-    zero_bytes(g_phys_refs, sizeof(g_phys_refs));
-    zero_bytes(g_snapshots, sizeof(g_snapshots));
-    zero_bytes(g_handles, sizeof(g_handles));
-    zero_bytes(g_data_blocks, sizeof(g_data_blocks));
+    libk::zero(g_inodes);
+    libk::zero(g_phys_refs);
+    libk::zero(g_snapshots);
+    libk::zero(g_handles);
+    libk::zero(g_data_blocks);
     g_next_inode = kRootInode + 1;
     g_generation = 1;
     g_last_snapshot_id = 0;
@@ -451,30 +412,28 @@ void format_memory_fs() {
     root.parent_inode = 0;
     root.type = FS_INODE_DIR;
     root.inode_class = FS_CLASS_USER_DATA;
-    root.mode = 0755;
     root.nlink = 1;
     copy_name(root.name, "", 0);
 
     g_handles[kRootHandle].used = true;
     g_handles[kRootHandle].inode_number = kRootInode;
     g_handles[kRootHandle].snapshot_id = 0;
-    g_handles[kRootHandle].read_only = true;
+    g_handles[kRootHandle].access = fs_handle_access(FS_INODE_DIR, false);
     g_handles[kRootHandle].type = FS_INODE_DIR;
 
     // /tmp is created only in the in-memory table. It is the volatile mount: the
     // disk root stays read-only and never sees these inodes.
-    (void)alloc_inode(FS_INODE_DIR, FS_CLASS_USER_DATA, kRootInode, kTmpMountName, kTmpMountNameLen,
-                      0755);
+    (void)alloc_inode(FS_INODE_DIR, FS_CLASS_USER_DATA, kRootInode, kTmpMountName, kTmpMountNameLen);
 
     // /data is the durable user volume. It always exists; whether it survives a
     // reboot depends on a writable disk region (see fs_durable.cc).
     auto* data = alloc_inode(FS_INODE_DIR, FS_CLASS_USER_DATA, kRootInode, kDataMountName,
-                             kDataMountNameLen, 0755);
+                             kDataMountNameLen);
     g_data_inode = data ? data->inode_number : 0;
 
     InodeState* hello =
         alloc_inode(FS_INODE_FILE, FS_CLASS_CONTENT_STORE, kRootInode, kHelloName,
-                    static_cast<mx_u8_t>(str_len(kHelloName, sizeof(kHelloName))), 0444);
+                    static_cast<mx_u8_t>(str_len(kHelloName, sizeof(kHelloName))));
     if (hello) {
         init_file_content(*hello, kHelloData, static_cast<mx_u32_t>(sizeof(kHelloData) - 1));
     }

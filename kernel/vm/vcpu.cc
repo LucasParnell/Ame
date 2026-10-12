@@ -203,7 +203,7 @@ void guest_console_putchar(char c) {
     // Forward to the kernel console (g_console_ops).
     // kGuestUartBase (0x09040000 = QEMU secure UART) is only present with
     // -machine virt,secure=on; without it, direct MMIO causes an external abort.
-    drivers::uart::putchar_thunk(c);
+    console::putchar(c);
 }
 
 void pl011_write(u64 offset, u64 value) {

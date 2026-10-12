@@ -2,8 +2,8 @@
 
 /* U-Boot / BL33 / control DTB live here; do not allocate into this range. */
 /memreserve/ 0x00000000A8000000 0x0000000004000000;
-/* BL31 TZDRAM carveout: last 64 MiB of 4 GiB DRAM (0x80000000 + 4 GiB - 64 MiB). */
-/memreserve/ 0x000000017C000000 0x0000000004000000;
+/* Hekate firmware carveouts, generated from the same profile as BL31. */
+/include/ "firmware-reservations.dtsi"
 
 / {
     compatible = "ame,nintendo-switch", "nintendo,switch", "nvidia,tegra210";

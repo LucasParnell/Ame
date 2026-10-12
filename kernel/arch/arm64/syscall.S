@@ -1,4 +1,5 @@
 // kernel/arch/arm64/syscall.S — SVC entry and exit.
+#include "anko/interrupt_mask.h"
 
 .section .text.syscall, "ax"
 .global syscall_entry
@@ -88,6 +89,9 @@ syscall_entry:
     ldr     x10, [sp, #256]
     ldr     x11, [sp, #264]
     msr     ELR_EL1,  x9
+#if ANKO_HOST_FIQ_MASK
+    orr     x10, x10, #ANKO_HOST_FIQ_MASK
+#endif
     msr     SPSR_EL1, x10
     msr     SP_EL0,   x11
 
@@ -150,6 +154,9 @@ irq_entry:
     ldr     x10, [sp, #256]
     ldr     x11, [sp, #264]
     msr     ELR_EL1,  x9
+#if ANKO_HOST_FIQ_MASK
+    orr     x10, x10, #ANKO_HOST_FIQ_MASK
+#endif
     msr     SPSR_EL1, x10
     msr     SP_EL0,   x11
 
@@ -208,6 +215,9 @@ irq_entry_kernel:
     ldr     x10, [sp, #256]
     ldr     x11, [sp, #264]
     msr     ELR_EL1,  x9
+#if ANKO_HOST_FIQ_MASK
+    orr     x10, x10, #ANKO_HOST_FIQ_MASK
+#endif
     msr     SPSR_EL1, x10
     msr     SP_EL0,   x11
 

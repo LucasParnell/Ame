@@ -13,6 +13,7 @@
 #include "anko/console.h"
 #include "anko/fat_log.h"
 #include "anko/hw_info.h"
+#include "libk/framebuffer.h"
 #include "anko/ipc.h"
 #include "anko/irq.h"
 #include "anko/iommu.h"
@@ -28,8 +29,15 @@
 #include "anko/fdt.h"
 #include "libk/string.h"
 #include "libk/printf.h"
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+#include "boot_diagnostics.h"
+#include "debug_io.h"
+#endif
+#include "anko/boot_trace.h"
+#if defined(ANKO_ANNE_DISPLAY_CAPTURE) || defined(ANKO_ANNE_FRAMEBUFFER)
+#include "display_diagnostics.h"
+#endif
 
-namespace drivers::uart  { void putchar_thunk(char c); }
 namespace drivers::gic   { void init(PhysAddr dist_base, PhysAddr cpu_base); }
 namespace drivers::timer { void init(u32 irq_id); }
 namespace mm             { void phys_init(PhysAddr ram_base, usize ram_size);
@@ -119,21 +127,18 @@ void reserve_dtb_regions(PhysAddr dtb_phys) {
     }
 }
 
-// Paint the full T210 framebuffer with `color` (XRGB8888) as a boot-stage
-// progress indicator.  No-op on QEMU (has_t210_dc = false).
-// Stage palette: red=entry.S, green=probe done, blue=GIC+timer done.
+// Blue precedes SD initialization; white follows GIC/timer initialization.
 static void fb_stage(u32 color) {
-    if (!g_hw.has_t210_dc || !g_hw.t210_dc_fb_phys) return;
-    auto* fb = reinterpret_cast<volatile u32*>(g_hw.t210_dc_fb_phys);
-    const u64 pixels = static_cast<u64>(g_hw.t210_dc_fb_width) *
-                       static_cast<u64>(g_hw.t210_dc_fb_height);
-    for (u64 i = 0; i < pixels; ++i) fb[i] = color;
+    if (!g_hw.has_t210_dc) return;
+    libk::framebuffer_fill({g_hw.t210_dc_fb_phys, g_hw.t210_dc_fb_width,
+                           g_hw.t210_dc_fb_height}, color | 0xff000000u);
     asm volatile("dsb sy" ::: "memory");
 }
 
 } // namespace
 
 extern "C" [[noreturn]] void kernel_main() {
+    ANKO_BOOT_CHECKPOINT(KernelMain);
     {
         const u64 boot_cpu_id = 0;
         asm volatile("msr TPIDR_EL1, %0\n"
@@ -160,9 +165,29 @@ extern "C" [[noreturn]] void kernel_main() {
         : "r"(&vectors)
         : "memory");
 
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    console::set_secondary_sink(anne::boot_log_putchar);
+#endif
+    ANKO_BOOT_CHECKPOINT(ConsoleReady);
     anko::log::early_init();
-    libk::set_putchar(drivers::uart::putchar_thunk);
+    libk::set_putchar(console::putchar);
     ANKO_LOG_INFO("kernel/boot", "anko booting");
+
+    // -----------------------------------------------------------------------
+    // Phase 1: probe DTB → update g_hw with discovered addresses/devices.
+    // Must happen before phys_init so ram_base/ram_size are correct.
+    // -----------------------------------------------------------------------
+    // Reject unaligned DTB (can happen if U-Boot relocates it onto an odd boundary).
+    ANKO_LOGF_INFO("kernel/probe", "dtb_phys=0x%llx align=%u", (unsigned long long)g_dtb_phys, (unsigned)(g_dtb_phys & 3));
+    if (g_dtb_phys & 3) g_dtb_phys = 0;
+
+    ANKO_BOOT_CHECKPOINT(ProbeBegin);
+    platform::probe(g_dtb_phys);
+    ANKO_BOOT_CHECKPOINT(ProbeDone);
+    // probe() painted the screen green if has_t210_dc.  Paint blue now to
+    // signal we returned from probe() and are continuing init.
+    fb_stage(0x000000FFu); // blue XRGB
+    console::bind(g_hw.console_kind, g_hw.console_base);
 
     // -----------------------------------------------------------------------
     // SD card log: initialise SDMMC1 and locate /ame/log/boot.log.
@@ -177,18 +202,6 @@ extern "C" [[noreturn]] void kernel_main() {
     }
 #endif
 
-    // -----------------------------------------------------------------------
-    // Phase 1: probe DTB → update g_hw with discovered addresses/devices.
-    // Must happen before phys_init so ram_base/ram_size are correct.
-    // -----------------------------------------------------------------------
-    // Reject unaligned DTB (can happen if U-Boot relocates it onto an odd boundary).
-    ANKO_LOGF_INFO("kernel/probe", "dtb_phys=0x%llx align=%u", (unsigned long long)g_dtb_phys, (unsigned)(g_dtb_phys & 3));
-    if (g_dtb_phys & 3) g_dtb_phys = 0;
-
-    platform::probe(g_dtb_phys);
-    // probe() painted the screen green if has_t210_dc.  Paint blue now to
-    // signal we returned from probe() and are continuing init.
-    fb_stage(0x000000FFu); // blue XRGB
     ANKO_LOGF_INFO("kernel/probe",
                    "boot_el=%u ram=0x%llx+0x%llx console=0x%llx gic=0x%llx/0x%llx fwcfg=%d pcie=%d "
                    "vblk=%d virtio_n=%u smmu=%d smmu_base=0x%llx",
@@ -205,7 +218,23 @@ extern "C" [[noreturn]] void kernel_main() {
                    g_hw.has_smmu,
                    static_cast<unsigned long long>(g_hw.smmu_base));
 
+    ANKO_BOOT_CHECKPOINT(PhysicalBegin);
     mm::phys_init(g_hw.ram_base, g_hw.ram_size);
+    ANKO_BOOT_CHECKPOINT(PhysicalDone);
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+#ifdef ANKO_ANNE_WATCHDOG
+    mm::reserve_phys_range(anne::watchdog::kBase, PAGE_SIZE);
+#endif
+    mm::reserve_phys_range(anne::kFirmwareFiqSource, PAGE_SIZE);
+    mm::reserve_phys_range(anne::kDebugRamBase, anne::kDebugRamBytes);
+    mm::reserve_phys_range(anne::kDebugPmicBase, PAGE_SIZE);
+    mm::reserve_phys_range(anne::kDebugSctrlBase, PAGE_SIZE);
+#if defined(ANKO_ANNE_DISPLAY_CAPTURE) || defined(ANKO_ANNE_FRAMEBUFFER)
+    mm::reserve_phys_range(anne::native_display::kDssBase, anne::native_display::kDssBytes);
+    mm::reserve_phys_range(anne::native_display::kCrgBase, PAGE_SIZE);
+    mm::reserve_phys_range(anne::native_display::kLogoBase, anne::native_display::kLogoBytes);
+#endif
+#endif
     if (g_dtb_phys && libk::be32(reinterpret_cast<const void*>(g_dtb_phys)) == fdt::kMagic) {
         const u32 dtb_size = libk::be32(reinterpret_cast<const u8*>(g_dtb_phys) + 4);
         mm::reserve_phys_range(g_dtb_phys, dtb_size);
@@ -225,8 +254,13 @@ extern "C" [[noreturn]] void kernel_main() {
             mm::reserve_phys_range(g_hw.t210_dc_fb_phys, fb_size);
         }
     }
+    ANKO_BOOT_CHECKPOINT(ReservationsDone);
+    ANKO_BOOT_CHECKPOINT(HeapBegin);
     mm::heap_init();
+    ANKO_BOOT_CHECKPOINT(HeapDone);
+    ANKO_BOOT_CHECKPOINT(MmuBegin);
     mm::vm_init();
+    ANKO_BOOT_CHECKPOINT(MmuDone);
 
     // -----------------------------------------------------------------------
     // Phase C: bring the SMMUv3 up into a default-deny state before any
@@ -235,6 +269,7 @@ extern "C" [[noreturn]] void kernel_main() {
     // and the generic IOMMU core stays on its null backend.  It runs before the
     // GIC and timer are armed, so the selftest sees no concurrent fault drain.
     // -----------------------------------------------------------------------
+    ANKO_BOOT_CHECKPOINT(IommuBegin);
     {
         const SysError rc = iommu::smmuv3_bring_up();
         if (g_hw.has_smmu) {
@@ -245,8 +280,11 @@ extern "C" [[noreturn]] void kernel_main() {
         iommu::smmuv3_selftest_if_testdev();
 #endif
     }
+    ANKO_BOOT_CHECKPOINT(IommuDone);
+    ANKO_BOOT_CHECKPOINT(GicBegin);
     drivers::gic::init(g_hw.gic_dist_base, g_hw.gic_cpu_base);
-#ifdef ANKO_BUILD_DEV
+    ANKO_BOOT_CHECKPOINT(GicDone);
+#if defined(ANKO_BUILD_DEV) && !defined(ANKO_BOARD_HUAWEI_ANNE)
     // End-to-end IRQ delivery check: raise a spare SPI and confirm it reaches a
     // doorbell. Runs with IRQs masked, before the timer is armed, so it cannot
     // perturb the timer or IPI paths.
@@ -256,22 +294,30 @@ extern "C" [[noreturn]] void kernel_main() {
         ANKO_LOG_ERROR("kernel/gic", "irq delivery selftest FAILED");
     }
 #endif
+    ANKO_BOOT_CHECKPOINT(TimerBegin);
     drivers::timer::init(g_hw.timer_irq);
+    ANKO_BOOT_CHECKPOINT(TimerDone);
     fb_stage(0x00FFFFFFu); // white: GIC + timer done
 #ifdef ANKO_BOARD_SWITCH_T210
     fat_log::flush(); // persist log up to this point
 #endif
 
     cap::init();
+    ANKO_BOOT_CHECKPOINT(CapsDone);
     ipc::init();
+    ANKO_BOOT_CHECKPOINT(IpcDone);
     vm::init();
+    ANKO_BOOT_CHECKPOINT(VmDone);
     sched::init();
+    ANKO_BOOT_CHECKPOINT(SchedulerDone);
     smp::init(g_dtb_phys);
+    ANKO_BOOT_CHECKPOINT(SmpDone);
     // Phase D proof: no-op unless a dev build boots with an SMMUv3 and the
     // iommu-testdev reference device. Runs before init so the assignment routes
     // and vGIC state are exercised against a quiet machine.
     vm::vm_device_selftest_if_testdev();
     kernel::init::create_init_process();
     ANKO_LOG_INFO("kernel/boot", "scheduler ready");
+    ANKO_BOOT_CHECKPOINT(SchedulerEnter);
     sched::enter();
 }

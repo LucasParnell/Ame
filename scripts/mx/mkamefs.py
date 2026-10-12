@@ -81,7 +81,7 @@ def pack_internal_entry(max_key: int, child_block: int) -> bytes:
 
 
 def pack_inode_entry(inode_number: int, inode_type: int, inode_class: int,
-                     size: int, root_block: int, nlink: int, mode: int) -> bytes:
+                     size: int, root_block: int, nlink: int) -> bytes:
     return struct.pack("<IHHQQIIQQ16s",
                        inode_number,
                        inode_type,
@@ -89,7 +89,7 @@ def pack_inode_entry(inode_number: int, inode_type: int, inode_class: int,
                        size,
                        root_block,
                        nlink,
-                       mode,
+                       0,  # retired Unix mode field; access belongs to handles
                        0,
                        0,
                        bytes(16))
@@ -273,24 +273,23 @@ def chunks(items, size: int):
 
 
 class Node:
-    def __init__(self, name: str, inode_type: int, mode: int,
+    def __init__(self, name: str, inode_type: int,
                  src: Path | None = None):
         self.name = name
         self.inode_type = inode_type
-        self.mode = mode
         self.src = src
         self.children: list[Node] = []
         self.inode = 0
         self.size = 0
         self.root_block = 0
 
-    def add_dir(self, name: str, mode: int = 0o555) -> "Node":
-        child = Node(name, FS_INODE_DIR, mode)
+    def add_dir(self, name: str) -> "Node":
+        child = Node(name, FS_INODE_DIR)
         self.children.append(child)
         return child
 
-    def add_file(self, name: str, src: Path, mode: int = 0o444) -> "Node":
-        child = Node(name, FS_INODE_FILE, mode, src)
+    def add_file(self, name: str, src: Path) -> "Node":
+        child = Node(name, FS_INODE_FILE, src)
         self.children.append(child)
         return child
 
@@ -307,13 +306,10 @@ def assign_inodes(root: Node) -> None:
 
 
 def build_tree(build_dir: Path, include_initrd: bool) -> tuple[Node, str]:
-    repo_root = Path(__file__).resolve().parents[2]
     kernel = build_dir / "kernel" / "anko"
     kernel_bin = build_dir / "kernel" / "anko.bin"
     userland_dir = build_dir / "userland"
     manifest = userland_dir / "manifest.v0"
-    if not manifest.is_file():
-        manifest = repo_root / "userland" / "manifest.v0"
     manifest_json = build_dir / "manifest.json"
     system_bundle = build_dir / "system.mxb"
     initrd = build_dir / "initrd.mxb"
@@ -326,7 +322,7 @@ def build_tree(build_dir: Path, include_initrd: bool) -> tuple[Node, str]:
     if include_initrd and not initrd.is_file():
         raise FileNotFoundError(initrd)
 
-    root = Node("", FS_INODE_DIR, 0o555)
+    root = Node("", FS_INODE_DIR)
     ame = root.add_dir("ame")
     kernel_dir = ame.add_dir("kernel")
     userland = ame.add_dir("userland")
@@ -435,8 +431,7 @@ def create_image(args: argparse.Namespace) -> None:
                                      inode_class,
                                      node.size,
                                      node.root_block,
-                                     nlink,
-                                     node.mode),
+                                     nlink),
                 ))
             inode_root = image.build_btree(inode_entries)
 
@@ -564,7 +559,7 @@ def read_btree_entries(f, root_block: int, visited: set[int] | None = None) -> l
 def print_paths(f, inode_root: int) -> None:
     inodes = {}
     for entry in read_btree_entries(f, inode_root):
-        inode_number, inode_type, inode_class, size, root_block, nlink, mode, _, _, _ = \
+        inode_number, inode_type, inode_class, size, root_block, nlink, _legacy_mode, _, _, _ = \
             struct.unpack("<IHHQQIIQQ16s", entry)
         if inode_number:
             inodes[inode_number] = {
@@ -573,7 +568,6 @@ def print_paths(f, inode_root: int) -> None:
                 "size": size,
                 "root": root_block,
                 "nlink": nlink,
-                "mode": mode,
             }
 
     def visit(inode: int, path: str) -> None:

@@ -12,6 +12,7 @@ set_source_files_properties(${AME_CRYPTO_DIR}/monocypher.c ${AME_CRYPTO_DIR}/mon
 add_library(ame_format STATIC
     ${CMAKE_SOURCE_DIR}/shared/format/integrity.cc
     ${CMAKE_SOURCE_DIR}/shared/format/bundle.cc
+    ${CMAKE_SOURCE_DIR}/shared/format/archive.cc
     ${CMAKE_SOURCE_DIR}/shared/format/signature.cc
     ${CMAKE_SOURCE_DIR}/shared/format/image.cc
     ${AME_CRYPTO_DIR}/monocypher.c ${AME_CRYPTO_DIR}/monocypher-ed25519.c)

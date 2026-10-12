@@ -143,7 +143,7 @@ See [Phase E delivery](../DELIVERY/gpu-appliance-phase-e.md),
 | fw_cfg (QEMU, ramfb) | Implemented | `kernel/drivers/fwcfg.cc`; boot: `fwcfg: ramfb 1024x768` | — |
 | Kernel-side PCI scan (temporary) | Partial | `kernel/drivers/pci_probe.cc`; boot: `pci_probe: xhci found bus=0 dev=2 bar0=0x10000000 … irq=0` | Documented temporary shortcut; replaced by `drv.pci` (not yet) |
 | SDMMC1 (Switch boot log) | Implemented (build only) | `kernel/drivers/sdmmc/sdmmc.cc`; `kernel/init/fat_log.cc` (PIO only) | Switch only; no physical-device run |
-| Hardware IRQ bind/ack | **Not implemented** | `kernel/syscall/dispatch.cc`: `SYS_IRQ_BIND_DOORBELL` and `SYS_IRQ_ACK` both `return err(E_NOTIMPL)` | All userspace drivers poll |
+| Hardware IRQ bind/ack | Implemented mechanism | `SYS_IRQ_BIND_DOORBELL`, `SYS_IRQ_ACK`, `kernel/drivers/gic/irq_table.cc`; host binding/teardown probe | Native xHCI still polls; its PCI IRQ mapping is not wired end to end |
 
 ---
 
@@ -163,7 +163,7 @@ See [Phase E delivery](../DELIVERY/gpu-appliance-phase-e.md),
 ## 2. Mochi userland
 
 Sources under `userland/`; each service is a freestanding ELF packed into the signed
-`system.mxb` bundle. Boot order and capabilities come from `userland/manifest.v0`.
+`system.mxb` bundle. Boot order and capabilities come from `userland/system.json`.
 
 ### 2.1 init / supervision
 
@@ -220,7 +220,7 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | Service | Status | Evidence | Limitations |
 |---------|--------|----------|-------------|
 | `drv.pci` | **Not implemented (placeholder)** | `userland/drivers/pci/main.cc`; boot: `drv.pci: placeholder — M10 not yet implemented` | Kernel-side `pci_probe.cc` is the temporary stand-in |
-| `drv.usb.xhci` | Implemented (polling) | `userland/drivers/usb/xhci/main.cc`; boot: `drv.usb.xhci: controller ready`, `drv.usb.xhci: keyboard ready` | Polls the event ring; IRQ routing/ack not wired |
+| `drv.usb.xhci` | Implemented legacy keyboard path (polling) | Shared bounded descriptor/ring helpers; non-cacheable DMA pool; gated bus mastering; `scripts/test/usb-input.py` validates repeated keys/releases/modifiers | General transfer ledger and host/controller/gadget v1 contracts are implemented separately and not yet wired into live services; Huawei backend remains pending |
 | `drv.usb.hid` | Implemented (polling) | `userland/drivers/usb/hid/main.cc`; boot: `drv.usb.hid: ready` | Boot-keyboard reports only |
 | `ui.input` | Implemented | `userland/drivers/input/main.cc`; boot: `ui.input: ready` | US boot-keyboard layout normalization only |
 | `drv.blk.virtio` | Implemented (device-dependent) | `userland/drivers/blk/virtio/main.cc`; no-disk boot: `mmio bank has no virtio-blk`, `no-device mode`; disk boots: `virtio-blk device detected`, `BLK read OK` | `BLK_WRITE`/`BLK_FLUSH` are exercised by the durability check (the no-device path still runs in the default boot) |
@@ -293,7 +293,7 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | Dango auth regression as a guest | `dango.auth_probe` runs as a native probe (`authority check passed`), not inside a guest | Enable guest path above |
 | Switch hardware acceptance | No physical device | Flash and boot the staging package on a T210 console |
 | Supervision as a long soak | The restart path is asserted by a bounded fixture | Extend the fixture / soak run |
-| Hardware IRQ delivery | `SYS_IRQ_*` return `E_NOTIMPL`; drivers poll | Implement GIC delivery + teardown |
+| xHCI hardware IRQ delivery | Kernel bind/ack exists; native USB driver still polls | Resolve PCI INTx mapping and integrate deadline-aware backend sleep |
 
 | Scheduler conformance suite | No dedicated test | Add scheduler-specific tests |
 

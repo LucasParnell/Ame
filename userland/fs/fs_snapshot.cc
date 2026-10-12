@@ -76,11 +76,11 @@ void handle_snapshot(const mochi::fs::Server& fs, const RingSlot& slot) {
             continue;
         }
         SnapshotState& snap = g_snapshots[i];
-        zero_bytes(&snap, sizeof(snap));
+        libk::zero(snap);
         snap.used = true;
         snap.snapshot_id = g_generation++;
         snap.parent_snapshot_id = g_last_snapshot_id;
-        fs_copy_bytes(snap.inodes, g_inodes, sizeof(g_inodes));
+        libk::copy_exact(libk::as_bytes(snap.inodes), libk::as_bytes(g_inodes));
         pin_snapshot_extents(snap);
         g_last_snapshot_id = snap.snapshot_id;
         reply.status = MX_OK;
@@ -96,8 +96,8 @@ void handle_snapshot(const mochi::fs::Server& fs, const RingSlot& slot) {
 void handle_snapshot_mount(const mochi::fs::Server& fs, const RingSlot& slot) {
     FsSnapshotMntReply reply{};
     reply.status = static_cast<mx_i32_t>(MX_ERR_INVALID);
-    if (slot.length >= sizeof(FsSnapshotMntRequest)) {
-        const auto& req = *reinterpret_cast<const FsSnapshotMntRequest*>(slot.payload);
+    FsSnapshotMntRequest req{};
+    if (mochi::message_get(slot, &req)) {
         if (snapshot_by_id(req.snapshot_id)) {
             reply.dir_handle = alloc_handle(kRootInode, req.snapshot_id, true);
             reply.status = reply.dir_handle ? MX_OK : static_cast<mx_i32_t>(MX_ERR_NOMEM);
@@ -110,13 +110,12 @@ void handle_snapshot_mount(const mochi::fs::Server& fs, const RingSlot& slot) {
 
 void handle_snapshot_drop(const mochi::fs::Server& fs, const RingSlot& slot) {
     mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_INVALID);
-    if (slot.length >= sizeof(mx_u64_t)) {
-        mx_u64_t snapshot_id = 0;
-        fs_copy_bytes(&snapshot_id, slot.payload, sizeof(snapshot_id));
+    mx_u64_t snapshot_id = 0;
+    if (mochi::message_get(slot, &snapshot_id)) {
         SnapshotState* snap = snapshot_by_id(snapshot_id);
         if (snap) {
             unpin_snapshot_extents(*snap);
-            zero_bytes(snap, sizeof(*snap));
+            libk::zero(*snap);
             status = MX_OK;
         } else {
             status = static_cast<mx_i32_t>(MX_ERR_NOT_FOUND);

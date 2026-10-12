@@ -21,6 +21,10 @@
 namespace mochi::va {
 
 constexpr uint64_t kPage = 0x1000;
+// Header bytes count too: the largest ring exceeds 64 KiB. Every configurable
+// ring window reserves the full kernel-supported geometry, rounded to a VA slot.
+constexpr uint64_t kRingWindow = libk::align_up(mx_ring_page_bytes(MX_RING_ORDER_MAX), 0x10000ull);
+static_assert(kRingWindow >= mx_ring_page_bytes(MX_RING_ORDER_MAX));
 
 // Windows every service maps the same way.
 constexpr uint64_t kBootInfo = 0x1000'0000ull; // BootInfo arena (cap slot 0)
@@ -65,12 +69,24 @@ constexpr Windows plan() {
     Windows w{};
     w.uart          = p.reserve(kPage);
     w.log_ring_base = p.reserve(kLogRingSpan);
-    w.mirror_ring   = p.reserve(kPage);
+    w.mirror_ring   = p.reserve(kRingWindow);
     return w;
 }
 constexpr Windows kWindows = plan();
 
 } // namespace console
+
+// Per-client session windows shared by io.fs and nameservice (private in each
+// process). One stride reserves the request and reply mapping separately.
+namespace sessions {
+constexpr uint64_t kDirectory = 0x2700'0000ull;
+constexpr uint64_t kRingBase = 0x2800'0000ull;
+constexpr uint64_t kReplyOffset = 0x1'0000ull;
+constexpr uint64_t kSlotStride = 2 * kReplyOffset;
+static_assert(mx_ring_page_bytes(MX_DEFAULT_RING_ORDER) <= kReplyOffset);
+constexpr uint64_t request(uint32_t slot) { return kRingBase + slot * kSlotStride; }
+constexpr uint64_t reply(uint32_t slot) { return request(slot) + kReplyOffset; }
+}
 
 // --- nameservice -----------------------------------------------------------
 namespace nameservice {
@@ -86,7 +102,7 @@ constexpr uint64_t kVaInitrd         = 0x2400'0000ull;
 constexpr uint64_t kVaInitLogRing    = kVaInitrd + DANGO_INITRD_VA_SPAN;
 constexpr uint64_t kVaConsoleConfig  = kVaInitLogRing + 0x2'0000ull;
 constexpr uint64_t kVaSvcCtlReqRing  = kVaInitLogRing + 0x7'0000ull;
-constexpr uint64_t kVaSvcCtlReplyRing = kVaInitLogRing + 0x8'0000ull;
+constexpr uint64_t kVaSvcCtlReplyRing = kVaSvcCtlReqRing + kRingWindow;
 constexpr uint64_t kVaBootInfoBase   = kVaInitLogRing + 0x10'0000'0ull;
 constexpr uint64_t kVaSvcRegistry    = kVaInitLogRing + 0x20'0000'0ull;
 constexpr uint64_t kVaSessions       = kVaSvcRegistry + 0x1'0000ull;
@@ -112,8 +128,8 @@ constexpr uint64_t kVaTermInput   = 0x2000'0000ull;
 constexpr uint64_t kVaTermOutput  = 0x2002'0000ull;
 constexpr uint64_t kVaFsCmdRing   = 0x2004'0000ull;
 constexpr uint64_t kVaFsReplyRing = 0x2006'0000ull;
-constexpr uint64_t kVaSvcCmdRing   = 0x2007'0000ull;
-constexpr uint64_t kVaSvcReplyRing = 0x2008'0000ull;
+constexpr uint64_t kVaSvcCmdRing   = kVaFsReplyRing + kRingWindow;
+constexpr uint64_t kVaSvcReplyRing = kVaSvcCmdRing + kRingWindow;
 constexpr uint64_t kVaSvcRegistry = 0x2010'0000ull;
 }
 
@@ -122,7 +138,7 @@ namespace fs {
 constexpr uint64_t kVaBootInfo     = kBootInfo;
 constexpr uint64_t kVaLogRing      = kLogRing;
 constexpr uint64_t kVaBlkReqRing   = 0x2002'0000ull;
-constexpr uint64_t kVaBlkReplyRing = 0x2003'0000ull;
+constexpr uint64_t kVaBlkReplyRing = kVaBlkReqRing + kRingWindow;
 constexpr uint64_t kVaBlkDma       = 0x2100'0000ull;
 }
 
@@ -142,7 +158,7 @@ namespace blk {
 constexpr uint64_t kVaBootInfo    = kBootInfo;
 constexpr uint64_t kVaLogRing     = kLogRing;
 constexpr uint64_t kVaReqRing     = 0x2000'0000ull;
-constexpr uint64_t kVaReplyRing   = 0x2001'0000ull;
+constexpr uint64_t kVaReplyRing   = kVaReqRing + kRingWindow;
 constexpr uint64_t kVaVirtioMmio  = 0x2100'0000ull;
 constexpr uint64_t kVaVirtioDma   = 0x2200'0000ull;
 }
@@ -154,6 +170,7 @@ constexpr uint64_t kVaLogRing   = kLogRing;
 constexpr uint64_t kVaHidRing   = 0x1900'0000ull;
 constexpr uint64_t kVaXhciMmio  = 0x2000'0000ull;
 constexpr uint64_t kVaXhciDma   = 0x2100'0000ull;
+constexpr uint64_t kVaXhciState = 0x2200'0000ull; // cacheable CPU state; never device DMA
 }
 
 // --- drv.usb.hid -----------------------------------------------------------
@@ -161,7 +178,7 @@ namespace hid {
 constexpr uint64_t kVaBootInfo  = kBootInfo;
 constexpr uint64_t kVaLogRing   = kLogRing;
 constexpr uint64_t kVaXhciRing  = 0x1900'0000ull;
-constexpr uint64_t kVaInputRing = 0x1901'0000ull;
+constexpr uint64_t kVaInputRing = kVaXhciRing + kRingWindow;
 }
 
 // --- ui.input --------------------------------------------------------------
@@ -169,7 +186,7 @@ namespace input {
 constexpr uint64_t kVaBootInfo = kBootInfo;
 constexpr uint64_t kVaLogRing  = kLogRing;
 constexpr uint64_t kVaHidRing  = 0x1900'0000ull;
-constexpr uint64_t kVaTtyRing  = 0x1901'0000ull;
+constexpr uint64_t kVaTtyRing  = kVaHidRing + kRingWindow;
 }
 
 // --- drv.pci ---------------------------------------------------------------
@@ -195,15 +212,15 @@ constexpr uint64_t kVaConsoleRing = 0x2000'0000ull;
 // --- demo.ping / demo.pong -------------------------------------------------
 namespace demo_ping {
 constexpr uint64_t kVaSendRing      = 0x2000'0000ull;
-constexpr uint64_t kVaRecvRing      = 0x2001'0000ull;
-constexpr uint64_t kVaConsoleRing   = 0x2002'0000ull;
-constexpr uint64_t kVaNsRequestRing = 0x2003'0000ull;
-constexpr uint64_t kVaNsReplyRing   = 0x2004'0000ull;
+constexpr uint64_t kVaRecvRing      = kVaSendRing + kRingWindow;
+constexpr uint64_t kVaConsoleRing   = kVaRecvRing + kRingWindow;
+constexpr uint64_t kVaNsRequestRing = kVaConsoleRing + kRingWindow;
+constexpr uint64_t kVaNsReplyRing   = kVaNsRequestRing + kRingWindow;
 }
 namespace demo_pong {
 constexpr uint64_t kVaRecvRing = 0x2000'0000ull;
-constexpr uint64_t kVaSendRing = 0x2001'0000ull;
-constexpr uint64_t kVaLogRing  = 0x2002'0000ull;
+constexpr uint64_t kVaSendRing = kVaRecvRing + kRingWindow;
+constexpr uint64_t kVaLogRing  = kVaSendRing + kRingWindow;
 }
 
 // --- app.hello -------------------------------------------------------------

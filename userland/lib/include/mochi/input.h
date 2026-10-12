@@ -26,18 +26,11 @@ struct EventSink : Ring {
 // Read the event stream (tty.fb0 <- ui.input).
 struct EventSource : Ring {
     bool try_read(InputEvent* out) const {
-        if (!out) return false;
-        RingSlot slot{};
-        return try_pop(&slot) && message_get(slot, out, INPUT_MSG_EVENT);
+        return try_pop_msg(INPUT_MSG_EVENT, out);
     }
 
     bool wait_read(InputEvent* out) const {
-        if (!out || !valid()) return false;
-        for (;;) {
-            RingSlot slot{};
-            if (!wait_pop(&slot)) return false;
-            if (message_get(slot, out, INPUT_MSG_EVENT)) return true;
-        }
+        return wait_pop_msg(INPUT_MSG_EVENT, out);
     }
 };
 

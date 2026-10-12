@@ -83,7 +83,7 @@ public:
     bool pipeline_barrier();
 
 private:
-    mx_u8_t* reserve(mx_u32_t header_bytes);
+    mx_u8_t* reserve(mx_u32_t opcode, mx_u32_t record_bytes);
 
     mx_u8_t* region_ = nullptr;
     mx_u32_t capacity_ = 0;
@@ -131,7 +131,7 @@ public:
 
     // Absolute pointer for an arena offset (null when the arena is unmapped).
     mx_u8_t* arena_at(mx_u64_t arena_offset) const {
-        return arena_base_ ? arena_base_ + arena_offset : nullptr;
+        return arena_base_ && arena_offset < arena_bytes_ ? arena_base_ + arena_offset : nullptr;
     }
 
 private:

@@ -1,7 +1,11 @@
 // userland/dango/manager/main.cc — Linux appliance construction and channel probe.
 
 #include "mochi/syscall.h"
+#include "mochi/handle.h"
+#include "libk/integer.h"
 #include "libk/str.h"
+#include "libk/num.h"
+#include "midix/format/archive.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
@@ -37,11 +41,6 @@ constexpr uint32_t kLinuxRunnerHomeCpu = 1;
 // notification path, not the runner.  SCHED_BAND_VM_FAIR is the budgeted VM band.
 constexpr uint32_t kLinuxRunnerSchedBand = dango::SCHED_BAND_VM_FAIR;
 using namespace mochi::va::dango_manager;
-// The appliance bundle is staged in guest RAM, so that is the honest bound on
-// how large it can be: the libc (lavapipe) guest's bundle is ~200 MiB, far past
-// the old fixed 64 MiB cap that made the manager report every artifact missing.
-constexpr uint64_t kInitrdScanLimit = DANGO_RAM_SIZE;
-
 // Phase J: host-side VAs for the native GPU service. The request/reply rings and
 // the shared framebuffer window (`fb.memory`, shared read-only with this
 // process) sit alongside the channel VAs declared in dango/layout.h; the
@@ -62,27 +61,6 @@ static_assert(dango::windows_disjoint(kVaGpuReqRing, dango::kPageSize, dango::kC
                   dango::windows_disjoint(kVaFbWindow, dango::kPageSize, dango::kStagingHostVa,
                                           dango::kPageSize),
               "native GPU service VAs must not overlap the channel/staging VAs");
-
-struct TarHeader {
-    char name[100];
-    char mode[8];
-    char uid[8];
-    char gid[8];
-    char size[12];
-    char mtime[12];
-    char checksum[8];
-    char typeflag;
-    char linkname[100];
-    char magic[6];
-    char version[2];
-    char uname[32];
-    char gname[32];
-    char devmajor[8];
-    char devminor[8];
-    char prefix[155];
-    char pad[12];
-};
-static_assert(sizeof(TarHeader) == 512);
 
 struct LinuxArtifacts {
     const uint8_t* manifest;
@@ -110,22 +88,6 @@ static CapHandle as_cap(int64_t v) {
     return v > 0 ? static_cast<CapHandle>(v) : kNullCap;
 }
 
-template <typename T>
-static T* wait_map(CapHandle cap, int64_t expected_type, uint64_t va, uint32_t rights) {
-    while (true) {
-        if (sys_cap_identify(cap) == expected_type) {
-            if (sys_map_page(cap, va, rights) == 0) return reinterpret_cast<T*>(va);
-        }
-        sys_yield();
-    }
-}
-
-static void wait_cap(CapHandle cap, int64_t expected_type) {
-    while (sys_cap_identify(cap) != expected_type) {
-        sys_yield();
-    }
-}
-
 static void console_log(const char* msg) {
     mochi::log_raw_marker(msg);
 }
@@ -142,10 +104,6 @@ static void dango_counter(const char* key, uint64_t value) {
     mochi::log_counter(key, value);
 }
 
-static uint64_t status_magnitude(int64_t rc) {
-    return rc < 0 ? static_cast<uint64_t>(-rc) : static_cast<uint64_t>(rc);
-}
-
 [[noreturn]] static void fail(const char* msg) {
     // Keep failures visible even if the console service is blocked.
     sys_debug_puts(msg, slen(msg));
@@ -157,22 +115,11 @@ static bool aligned(uint64_t v) {
     return (v & (dango::kPageSize - 1)) == 0;
 }
 
-static bool checked_add(uint64_t a, uint64_t b, uint64_t* out) {
-    const uint64_t r = a + b;
-    if (r < a) return false;
-    *out = r;
-    return true;
-}
-
-static uint64_t round_up_page(uint64_t value) {
-    return (value + dango::kPageSize - 1) & ~(dango::kPageSize - 1);
-}
-
 static bool overlaps(uint64_t a_base, uint64_t a_size, uint64_t b_base, uint64_t b_size) {
     uint64_t a_end = 0;
     uint64_t b_end = 0;
-    if (!checked_add(a_base, a_size, &a_end)) return true;
-    if (!checked_add(b_base, b_size, &b_end)) return true;
+    if (!libk::checked_add(a_base, a_size, &a_end)) return true;
+    if (!libk::checked_add(b_base, b_size, &b_end)) return true;
     return a_base < b_end && a_end > b_base;
 }
 
@@ -180,8 +127,8 @@ static bool contains(uint64_t outer_base, uint64_t outer_size,
                      uint64_t inner_base, uint64_t inner_size) {
     uint64_t outer_end = 0;
     uint64_t inner_end = 0;
-    if (!checked_add(outer_base, outer_size, &outer_end)) return false;
-    if (!checked_add(inner_base, inner_size, &inner_end)) return false;
+    if (!libk::checked_add(outer_base, outer_size, &outer_end)) return false;
+    if (!libk::checked_add(inner_base, inner_size, &inner_end)) return false;
     return inner_base >= outer_base && inner_end <= outer_end && inner_end >= inner_base;
 }
 
@@ -204,121 +151,6 @@ static bool validate_layout(const dango::VmLayout& layout) {
     if (overlaps(layout.dtb_base, layout.dtb_size, layout.channel_base, layout.channel_size)) return false;
     if (overlaps(layout.mmio_base, layout.mmio_size, layout.channel_base, layout.channel_size)) return false;
     return true;
-}
-
-static bool block_zero(const uint8_t* data) {
-    for (uint32_t i = 0; i < 512; ++i) {
-        if (data[i] != 0) return false;
-    }
-    return true;
-}
-
-static uint64_t octal_value(const char* s, uint32_t len) {
-    uint64_t value = 0;
-    for (uint32_t i = 0; i < len; ++i) {
-        const char c = s[i];
-        if (c == '\0' || c == ' ') break;
-        if (c < '0' || c > '7') continue;
-        value = (value << 3) + static_cast<uint64_t>(c - '0');
-    }
-    return value;
-}
-
-static bool streq(const char* a, const char* b) {
-    return libk::str::equal(a, b);
-}
-
-static bool tar_name_matches(const TarHeader* h, const char* wanted) {
-    char full[160];
-    uint32_t n = 0;
-    if (h->prefix[0]) {
-        for (uint32_t i = 0; i < sizeof(h->prefix) && h->prefix[i] && n + 1 < sizeof(full); ++i) {
-            full[n++] = h->prefix[i];
-        }
-        if (n + 1 < sizeof(full)) full[n++] = '/';
-    }
-    for (uint32_t i = 0; i < sizeof(h->name) && h->name[i] && n + 1 < sizeof(full); ++i) {
-        full[n++] = h->name[i];
-    }
-    full[n] = '\0';
-    return streq(full, wanted);
-}
-
-static const uint8_t* tar_find(const uint8_t* base, const char* name, uint64_t* out_size) {
-    if (!base || !name || !out_size) return nullptr;
-
-    uint64_t off = 0;
-    while (off + sizeof(TarHeader) <= kInitrdScanLimit) {
-        const auto* h = reinterpret_cast<const TarHeader*>(base + off);
-        if (block_zero(base + off)) return nullptr;
-        const uint64_t size = octal_value(h->size, sizeof(h->size));
-        const uint64_t data_off = off + sizeof(TarHeader);
-        const uint64_t rounded = (size + 511ull) & ~511ull;
-        if (data_off + rounded < data_off || data_off + rounded > kInitrdScanLimit) return nullptr;
-        if ((h->typeflag == '\0' || h->typeflag == '0') && tar_name_matches(h, name)) {
-            *out_size = size;
-            return base + data_off;
-        }
-        off = data_off + rounded;
-    }
-    return nullptr;
-}
-
-static bool range_within_bytes(uint64_t off, uint64_t len, uint64_t total) {
-    const uint64_t end = off + len;
-    return end >= off && end <= total;
-}
-
-static bool bundle_name_eq(const uint8_t* strings, uint64_t strings_size,
-                           uint32_t name_offset, const char* wanted) {
-    if (!strings || !wanted || name_offset >= strings_size) return false;
-    uint64_t pos = name_offset;
-    uint32_t i = 0;
-    while (pos < strings_size && strings[pos] && wanted[i]) {
-        if (static_cast<char>(strings[pos]) != wanted[i]) return false;
-        ++pos;
-        ++i;
-    }
-    return pos < strings_size && strings[pos] == '\0' && wanted[i] == '\0';
-}
-
-static const uint8_t* bundle_find(const uint8_t* base, const char* name, uint64_t* out_size) {
-    if (!base || !name || !out_size) return nullptr;
-    const auto* h = reinterpret_cast<const MxBundleHeader*>(base);
-    if (h->magic != MX_BUNDLE_MAGIC ||
-        h->version != MX_BUNDLE_VERSION ||
-        h->object_count > 64 ||
-        h->bundle_size == 0 ||
-        h->bundle_size > kInitrdScanLimit) {
-        return nullptr;
-    }
-    const uint64_t object_table_size = static_cast<uint64_t>(h->object_count) * sizeof(MxBundleObject);
-    if (!range_within_bytes(h->object_table_offset, object_table_size, h->bundle_size) ||
-        !range_within_bytes(h->string_table_offset, h->string_table_size, h->bundle_size)) {
-        return nullptr;
-    }
-    const auto* objects = reinterpret_cast<const MxBundleObject*>(base + h->object_table_offset);
-    const uint8_t* strings = base + h->string_table_offset;
-    for (uint32_t i = 0; i < h->object_count; ++i) {
-        const MxBundleObject& obj = objects[i];
-        if (!bundle_name_eq(strings, h->string_table_size, obj.name_offset, name)) continue;
-        if (!range_within_bytes(obj.offset, obj.size, h->bundle_size)) return nullptr;
-        *out_size = obj.size;
-        return base + obj.offset;
-    }
-    return nullptr;
-}
-
-static const uint8_t* archive_find(const uint8_t* base, const char* name, uint64_t* out_size) {
-    if (!base) return nullptr;
-    const auto* h = reinterpret_cast<const MxBundleHeader*>(base);
-    if (h->magic == MX_BUNDLE_MAGIC) return bundle_find(base, name, out_size);
-    return tar_find(base, name, out_size);
-}
-
-
-static bool ascii_space(char c) {
-    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
 static bool key_at(const uint8_t* data, uint64_t size, uint64_t off, const char* key) {
@@ -344,7 +176,7 @@ static const uint8_t* manifest_value(const uint8_t* data, uint64_t size,
         while (i < size && data[i] != '=') ++i;
         if (i >= size) return nullptr;
         ++i;
-        while (i < size && ascii_space(static_cast<char>(data[i]))) ++i;
+        while (i < size && libk::str::is_space(static_cast<char>(data[i]))) ++i;
         if (i >= size) return nullptr;
         if (data[i] == '"') {
             const uint64_t start = ++i;
@@ -354,7 +186,7 @@ static const uint8_t* manifest_value(const uint8_t* data, uint64_t size,
             return data + start;
         }
         const uint64_t start = i;
-        while (i < size && !ascii_space(static_cast<char>(data[i])) && data[i] != '#') ++i;
+        while (i < size && !libk::str::is_space(static_cast<char>(data[i])) && data[i] != '#') ++i;
         *out_len = i - start;
         return data + start;
     }
@@ -370,35 +202,10 @@ static bool token_equals(const uint8_t* p, uint64_t len, const char* s) {
     return i == len && s[i] == '\0';
 }
 
-static bool parse_u64_token(const uint8_t* p, uint64_t len, uint64_t* out) {
-    if (!p || !out || len == 0) return false;
-    uint64_t i = 0;
-    uint32_t base = 10;
-    if (len >= 2 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-        base = 16;
-        i = 2;
-    }
-    if (i >= len) return false;
-    uint64_t value = 0;
-    for (; i < len; ++i) {
-        const char c = static_cast<char>(p[i]);
-        uint32_t digit = 0;
-        if (c >= '0' && c <= '9') digit = static_cast<uint32_t>(c - '0');
-        else if (base == 16 && c >= 'a' && c <= 'f') digit = static_cast<uint32_t>(c - 'a' + 10);
-        else if (base == 16 && c >= 'A' && c <= 'F') digit = static_cast<uint32_t>(c - 'A' + 10);
-        else return false;
-        if (digit >= base) return false;
-        if (value > (~0ull - digit) / base) return false;
-        value = value * base + digit;
-    }
-    *out = value;
-    return true;
-}
-
 static bool manifest_u64(const LinuxArtifacts& artifacts, const char* key, uint64_t* out) {
     uint64_t len = 0;
     const uint8_t* value = manifest_value(artifacts.manifest, artifacts.manifest_size, key, &len);
-    return parse_u64_token(value, len, out);
+    return libk::num::parse_u64(reinterpret_cast<const char*>(value), len, out);
 }
 
 static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
@@ -425,7 +232,7 @@ static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
         return false;
     }
 
-    layout.dtb_size = round_up_page(artifacts->dtb_size);
+    if (!libk::checked_align_up(artifacts->dtb_size, dango::kPageSize, &layout.dtb_size)) return false;
     if (layout.dtb_size < dango::kDtbSize) layout.dtb_size = dango::kDtbSize;
     layout.mmio_base = dango::kMmioBase;
     layout.mmio_size = dango::kMmioSize;
@@ -438,7 +245,7 @@ static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
     uint64_t entry_pc = 0;
     if (entry && token_equals(entry, entry_len, "kernel_load")) {
         entry_pc = layout.kernel_load;
-    } else if (!entry || !parse_u64_token(entry, entry_len, &entry_pc)) {
+    } else if (!entry || !libk::num::parse_u64(reinterpret_cast<const char*>(entry), entry_len, &entry_pc)) {
         return false;
     }
 
@@ -461,16 +268,30 @@ static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
     return true;
 }
 
-static bool discover_linux_artifacts(const uint8_t* archive, LinuxArtifacts* out) {
-    if (!archive || !out) {
+static bool discover_linux_artifacts(libk::const_bytes archive, LinuxArtifacts* out) {
+    if (!archive.data || !out) {
         dango_log("linux artifact discovery failed: boot archive unavailable\n");
         return false;
     }
     LinuxArtifacts artifacts{};
-    artifacts.manifest = archive_find(archive, "linux/manifest.toml", &artifacts.manifest_size);
-    artifacts.image = archive_find(archive, "linux/Image", &artifacts.image_size);
-    artifacts.initramfs = archive_find(archive, "linux/initramfs.cpio", &artifacts.initramfs_size);
-    artifacts.dtb = archive_find(archive, "linux/dango-linux.dtb", &artifacts.dtb_size);
+    struct Artifact {
+        const char* name;
+        const uint8_t** data;
+        uint64_t* size;
+    };
+    const Artifact files[] = {
+        {"linux/manifest.toml", &artifacts.manifest, &artifacts.manifest_size},
+        {"linux/Image", &artifacts.image, &artifacts.image_size},
+        {"linux/initramfs.cpio", &artifacts.initramfs, &artifacts.initramfs_size},
+        {"linux/dango-linux.dtb", &artifacts.dtb, &artifacts.dtb_size},
+    };
+    for (const auto& file : files) {
+        libk::const_bytes contents;
+        if (midix::format::archive_find(archive, file.name, &contents)) {
+            *file.data = contents.data;
+            *file.size = contents.size;
+        }
+    }
 
     bool missing = false;
     if (!artifacts.manifest) {
@@ -495,27 +316,7 @@ static bool discover_linux_artifacts(const uint8_t* archive, LinuxArtifacts* out
         dango_log("linux artifact discovery failed: manifest invalid or size mismatch\n");
         return false;
     }
-    out->manifest = artifacts.manifest;
-    out->manifest_size = artifacts.manifest_size;
-    out->image = artifacts.image;
-    out->image_size = artifacts.image_size;
-    out->initramfs = artifacts.initramfs;
-    out->initramfs_size = artifacts.initramfs_size;
-    out->dtb = artifacts.dtb;
-    out->dtb_size = artifacts.dtb_size;
-    out->layout.ram_base = artifacts.layout.ram_base;
-    out->layout.ram_size = artifacts.layout.ram_size;
-    out->layout.kernel_load = artifacts.layout.kernel_load;
-    out->layout.initramfs_load = artifacts.layout.initramfs_load;
-    out->layout.dtb_base = artifacts.layout.dtb_base;
-    out->layout.dtb_size = artifacts.layout.dtb_size;
-    out->layout.mmio_base = artifacts.layout.mmio_base;
-    out->layout.mmio_size = artifacts.layout.mmio_size;
-    out->layout.channel_base = artifacts.layout.channel_base;
-    out->layout.channel_size = artifacts.layout.channel_size;
-    out->entry = artifacts.entry;
-    out->gpu_profile = artifacts.gpu_profile;
-    out->lavapipe_guest = artifacts.lavapipe_guest;
+    *out = artifacts;
     return true;
 }
 
@@ -657,17 +458,6 @@ static bool gpu_wait(RingPage* rx, CapHandle g2h_db, uint32_t opcode, RingSlot* 
 // Decode one reply payload. The payload is 8-byte aligned inside the slot (it
 // starts at offset 16 of a 64-byte slot) and every MxGpu* struct is at most the
 // 48-byte inline budget, so the struct can be read in place.
-template <typename T>
-static bool gpu_reply(const RingSlot& slot, T* out) {
-    static_assert(sizeof(T) <= 48, "GPU reply must fit one ring payload");
-    if (slot.length < sizeof(T)) return false;
-    *out = *reinterpret_cast<const T*>(slot.payload);
-    return true;
-}
-
-// Fill the staging window with the bootstrap bar pattern, one scanout row per
-// syscall. The row lives in .bss: a service thread gets a small stack, and the
-// pixel layout is then computed once instead of per row.
 static bool gpu_fill_bars(CapHandle staging) {
     static uint8_t row[kGpuScanoutStride];
     const uint32_t bar_pixels = kGpuScanoutWidth / kGpuBarCount;
@@ -743,7 +533,7 @@ static void gpu_bootstrap_client(CapHandle channel, RingPage* tx, RingPage* rx,
     MxGpuHelloReply hello_reply{};
     if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_HELLO, &hello, sizeof(hello), &seq,
                      &slot) ||
-        !gpu_reply(slot, &hello_reply) || hello_reply.status != MX_OK) {
+        !mochi::message_get(slot, &hello_reply) || hello_reply.status != MX_OK) {
         fail("gpu client FAILED: hello\n");
     }
     if (hello_reply.major != MX_GPU_VERSION_MAJOR ||
@@ -767,7 +557,7 @@ static void gpu_bootstrap_client(CapHandle channel, RingPage* tx, RingPage* rx,
     MxGpuEnumOutputsReply outputs_reply{};
     if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_ENUM_OUTPUTS, &outputs,
                      sizeof(outputs), &seq, &slot) ||
-        !gpu_reply(slot, &outputs_reply) || outputs_reply.status != MX_OK ||
+        !mochi::message_get(slot, &outputs_reply) || outputs_reply.status != MX_OK ||
         outputs_reply.output_count != 1) {
         dango_counter("gpu.outputs.count", outputs_reply.output_count);
         fail("gpu client FAILED: outputs\n");
@@ -783,7 +573,7 @@ static void gpu_bootstrap_client(CapHandle channel, RingPage* tx, RingPage* rx,
     MxGpuGetModesReply modes_reply{};
     if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_GET_MODES, &modes,
                      sizeof(modes), &seq, &slot) ||
-        !gpu_reply(slot, &modes_reply) || modes_reply.status != MX_OK) {
+        !mochi::message_get(slot, &modes_reply) || modes_reply.status != MX_OK) {
         fail("gpu client FAILED: modes\n");
     }
     if (modes_reply.width != kGpuScanoutWidth || modes_reply.height != kGpuScanoutHeight ||
@@ -810,7 +600,7 @@ static void gpu_bootstrap_client(CapHandle channel, RingPage* tx, RingPage* rx,
     MxGpuBufferRegisterReply buffer_reply{};
     if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_BUFFER_REGISTER, &buffer,
                      sizeof(buffer), &seq, &slot) ||
-        !gpu_reply(slot, &buffer_reply) || buffer_reply.status != MX_OK ||
+        !mochi::message_get(slot, &buffer_reply) || buffer_reply.status != MX_OK ||
         buffer_reply.buffer_id == 0) {
         fail("gpu client FAILED: buffer register\n");
     }
@@ -827,7 +617,7 @@ static void gpu_bootstrap_client(CapHandle channel, RingPage* tx, RingPage* rx,
     MxGpuSetModeReply set_mode_reply{};
     if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_SET_MODE, &set_mode,
                      sizeof(set_mode), &seq, &slot) ||
-        !gpu_reply(slot, &set_mode_reply) || set_mode_reply.status != MX_OK) {
+        !mochi::message_get(slot, &set_mode_reply) || set_mode_reply.status != MX_OK) {
         fail("gpu client FAILED: set mode\n");
     }
 
@@ -842,16 +632,16 @@ static void gpu_bootstrap_client(CapHandle channel, RingPage* tx, RingPage* rx,
     MxGpuPresentReply present_reply{};
     if (!gpu_request(tx, rx, h2g_db, g2h_db, channel, GPU_PRESENT, &present,
                      sizeof(present), &seq, &slot) ||
-        !gpu_reply(slot, &present_reply) || present_reply.status != MX_OK) {
+        !mochi::message_get(slot, &present_reply) || present_reply.status != MX_OK) {
         fail("gpu client FAILED: present enqueue\n");
     }
     // The completion notification is a separate, unsolicited frame: it carries
     // no request of its own, so its `seq` is the GPU_PRESENT token it completes.
     MxGpuPresentComplete complete{};
     if (!gpu_wait(rx, g2h_db, GPU_PRESENT_COMPLETE, &slot) || slot.seq != seq ||
-        !gpu_reply(slot, &complete) || complete.status != MX_OK ||
+        !mochi::message_get(slot, &complete) || complete.status != MX_OK ||
         complete.buffer_id != buffer_reply.buffer_id) {
-        dango_counter("gpu.present.status", status_magnitude(complete.status));
+        dango_counter("gpu.present.status", libk::magnitude(complete.status));
         fail("gpu client FAILED: present complete\n");
     }
     dango_counter("gpu.buffer.id", buffer_reply.buffer_id);
@@ -919,13 +709,13 @@ static bool gpu_service_present(void* ctx_ptr, const MxGpuDamageRect& damage, ui
     MxGpuPresentReply reply{};
     if (!gpu_request(ctx.tx, ctx.rx, ctx.h2g_db, ctx.g2h_db, ctx.channel, GPU_PRESENT,
                      &present, sizeof(present), &seq, &slot) ||
-        !gpu_reply(slot, &reply) || reply.status != MX_OK) {
+        !mochi::message_get(slot, &reply) || reply.status != MX_OK) {
         dango_counter("gpu.service.present_fail", 1);
         return false;
     }
     MxGpuPresentComplete complete{};
     if (!gpu_wait(ctx.rx, ctx.g2h_db, GPU_PRESENT_COMPLETE, &slot) || slot.seq != seq ||
-        !gpu_reply(slot, &complete) || complete.status != MX_OK) {
+        !mochi::message_get(slot, &complete) || complete.status != MX_OK) {
         dango_counter("gpu.service.complete_fail", 1);
         return false;
     }
@@ -954,7 +744,7 @@ static void runner_entry(uint64_t vcpu_arg) {
         const int64_t rc = sys_vcpu_run(vcpu, &budget, &result);
         if (!logged_first_return) {
             dango_log("vm runner first vcpu_run returned\n");
-            dango_counter("vcpu.first_rc", status_magnitude(rc));
+            dango_counter("vcpu.first_rc", libk::magnitude(rc));
             dango_counter("vcpu.first_exit_reason", result.exit_reason);
             dango_counter("vcpu.first_last_esr", result.last_esr);
             logged_first_return = true;
@@ -967,7 +757,7 @@ static void runner_entry(uint64_t vcpu_arg) {
         }
         if (rc < 0) {
             dango_log("vm runner stopped: vcpu_run syscall error\n");
-            dango_counter("vcpu.rc", status_magnitude(rc));
+            dango_counter("vcpu.rc", libk::magnitude(rc));
             dango_counter("vcpu.exit_reason", result.exit_reason);
             dango_counter("vcpu.last_esr", result.last_esr);
             dango::VcpuInfo info{};
@@ -1010,16 +800,16 @@ extern "C" [[noreturn]] void _start() {
     const CapHandle kLayoutDoneDoorbell = mochi::boot::require_handle(boot, "dango.layout_done.db");
     const CapHandle kBootInitrd = mochi::boot::require_handle(boot, "boot.initrd");
 
-    auto* log_ring = wait_map<RingPage>(kConsoleRing, dango::CAP_SHARED_RING,
+    auto* log_ring = mochi::cap_map_when<RingPage>(kConsoleRing, dango::CAP_SHARED_RING,
                                         kVaConsoleRing,
                                         dango::RIGHT_READ | dango::RIGHT_WRITE);
-    wait_cap(kConsoleDoorbell, dango::CAP_DOORBELL);
+    mochi::cap_wait_type(kConsoleDoorbell, dango::CAP_DOORBELL);
     mochi::log_set_sink(log_ring, DANGO_CH_DEFAULT_RING_ORDER, kConsoleDoorbell, "dango.manager");
-    wait_cap(kVmRoot, dango::CAP_VM_ROOT);
-    wait_cap(kDoneDoorbell, dango::CAP_DOORBELL);
-    wait_cap(kAuthGateDoorbell, dango::CAP_DOORBELL);
-    wait_cap(kLayoutDoneDoorbell, dango::CAP_DOORBELL);
-    const uint8_t* boot_archive = wait_map<uint8_t>(kBootInitrd, dango::CAP_PAGE,
+    mochi::cap_wait_type(kVmRoot, dango::CAP_VM_ROOT);
+    mochi::cap_wait_type(kDoneDoorbell, dango::CAP_DOORBELL);
+    mochi::cap_wait_type(kAuthGateDoorbell, dango::CAP_DOORBELL);
+    mochi::cap_wait_type(kLayoutDoneDoorbell, dango::CAP_DOORBELL);
+    const uint8_t* boot_archive = mochi::cap_map_when<uint8_t>(kBootInitrd, dango::CAP_PAGE,
                                                     kVaBootInitrd,
                                                     dango::RIGHT_READ);
 
@@ -1028,25 +818,14 @@ extern "C" [[noreturn]] void _start() {
     // Phase J: map the native GPU service endpoint and the shared framebuffer
     // window. Both are optional -- a boot without the appliance never enters the
     // service loop and the manager keeps its previous idle behaviour.
-    RingPage* gpu_requests = nullptr;
-    RingPage* gpu_replies = nullptr;
-    uint32_t gpu_order = MX_DEFAULT_RING_ORDER;
-    const CapHandle gpu_req_db = mochi::boot::handle(boot, "gpu.cmd.doorbell");
-    const CapHandle gpu_reply_db = mochi::boot::handle(boot, "gpu.reply.doorbell");
-    const MxBootEntry* gpu_req_entry =
-        mochi::boot::find_type(boot, "gpu.cmd.ring", MX_BOOT_ENTRY_RING);
-    const MxBootEntry* gpu_reply_entry =
-        mochi::boot::find_type(boot, "gpu.reply.ring", MX_BOOT_ENTRY_RING);
-    if (gpu_req_entry && gpu_reply_entry && gpu_req_db && gpu_reply_db &&
-        sys_map_page(gpu_req_entry->handle, kVaGpuReqRing,
-                     dango::RIGHT_READ | dango::RIGHT_WRITE) == 0 &&
-        sys_map_page(gpu_reply_entry->handle, kVaGpuReplyRing,
-                     dango::RIGHT_READ | dango::RIGHT_WRITE) == 0) {
-        gpu_requests = reinterpret_cast<RingPage*>(kVaGpuReqRing);
-        gpu_replies = reinterpret_cast<RingPage*>(kVaGpuReplyRing);
-        gpu_order = gpu_req_entry->aux0 ? static_cast<uint32_t>(gpu_req_entry->aux0)
-                                        : MX_DEFAULT_RING_ORDER;
-    }
+    const auto gpu_endpoint = mochi::boot::map_endpoint(
+        boot, {"gpu.reply.ring", kVaGpuReplyRing, "gpu.reply.doorbell"},
+        {"gpu.cmd.ring", kVaGpuReqRing, "gpu.cmd.doorbell"});
+    RingPage* gpu_requests = gpu_endpoint.rx_ring;
+    RingPage* gpu_replies = gpu_endpoint.tx_ring;
+    const uint32_t gpu_order = gpu_endpoint.order;
+    const CapHandle gpu_req_db = gpu_endpoint.rx_doorbell;
+    const CapHandle gpu_reply_db = gpu_endpoint.tx_doorbell;
     const uint8_t* fb_window = nullptr;
     const CapHandle fb_window_cap = mochi::boot::handle(boot, "fb.memory");
     if (fb_window_cap && sys_cap_identify(fb_window_cap) == kCapTypeMmio &&
@@ -1056,7 +835,9 @@ extern "C" [[noreturn]] void _start() {
 
     dango_log("manager starting\n");
     LinuxArtifacts linux{};
-    const bool have_linux = discover_linux_artifacts(boot_archive, &linux);
+    MxCapInfo archive_info{};
+    if (mx_cap_info(kBootInitrd, &archive_info) != MX_OK) fail("boot archive metadata unavailable\n");
+    const bool have_linux = discover_linux_artifacts(libk::as_bytes(boot_archive, archive_info.size), &linux);
     if (have_linux) {
         dango_log("linux artifacts ready\n");
         dango_counter("linux.entry", linux.entry);
@@ -1271,14 +1052,14 @@ extern "C" [[noreturn]] void _start() {
     const int64_t vcpu_sched_bind_rc = sys_vcpu_bind_sched_context(vcpu, vcpu_sched_ctx);
     if (vcpu_sched_bind_rc != 0) {
         dango_counter("vcpu.sched_bind_rc",
-                      static_cast<uint64_t>(vcpu_sched_bind_rc < 0 ? -vcpu_sched_bind_rc : vcpu_sched_bind_rc));
+                      libk::magnitude(vcpu_sched_bind_rc));
         fail("vcpu scheduler bind failed\n");
     }
     const int64_t vcpu_core_mask_rc =
         sys_vcpu_set_core_mask(vcpu, vcpu_sched.core_mask, vcpu_sched.home_cpu);
     if (vcpu_core_mask_rc != 0) {
         dango_counter("vcpu.core_mask_rc",
-                      static_cast<uint64_t>(vcpu_core_mask_rc < 0 ? -vcpu_core_mask_rc : vcpu_core_mask_rc));
+                      libk::magnitude(vcpu_core_mask_rc));
         fail("vcpu scheduler core mask failed\n");
     }
 
@@ -1372,19 +1153,19 @@ extern "C" [[noreturn]] void _start() {
             const int64_t runner_affinity_rc = sys_thread_set_affinity(runner_th, vcpu_sched.core_mask);
             if (runner_affinity_rc != 0) {
                 dango_counter("vm.runner.affinity_rc",
-                              static_cast<uint64_t>(runner_affinity_rc < 0 ? -runner_affinity_rc : runner_affinity_rc));
+                              libk::magnitude(runner_affinity_rc));
                 fail("vcpu runner affinity failed\n");
             }
             const int64_t runner_bind_rc = sys_sched_context_bind_thread(runner_th, vcpu_sched_ctx);
             if (runner_bind_rc != 0) {
                 dango_counter("vm.runner.sched_bind_rc",
-                              static_cast<uint64_t>(runner_bind_rc < 0 ? -runner_bind_rc : runner_bind_rc));
+                              libk::magnitude(runner_bind_rc));
                 fail("vcpu runner scheduler bind failed\n");
             }
             const int64_t runner_resume_rc = sys_thread_resume(runner_th);
             if (runner_resume_rc != 0) {
                 dango_counter("vm.runner.resume_rc",
-                              static_cast<uint64_t>(runner_resume_rc < 0 ? -runner_resume_rc : runner_resume_rc));
+                              libk::magnitude(runner_resume_rc));
                 fail("vcpu runner resume failed\n");
             }
             dango_log("vm runner started async\n");

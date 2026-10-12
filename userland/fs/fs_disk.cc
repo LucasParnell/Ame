@@ -6,16 +6,13 @@
 // image, so the mounted root cannot be mutated.
 
 #include "fs_internal.h"
+#include "libk/endian.h"
 #include "mochi/log.h"
-
-
-
 
 constexpr mx_u16_t kBTreeInternal = 1;
 constexpr mx_u16_t kBTreeLeaf = 2;
-constexpr mx_u32_t kBTreeMaxEntries =
-    63; // internal/leaf entries per node (64-byte entries, 64-byte header)
 constexpr mx_u32_t kBTreeEntrySize = 64;          // every tree entry occupies one 64-byte slot
+constexpr mx_u32_t kBTreeMaxEntries = (kBlockSize - sizeof(BTreeNodeHeader)) / kBTreeEntrySize;
 constexpr mx_u32_t kBTreeMaxDepth = 8;            // bound on a single descent before giving up
 constexpr mx_u32_t kBTreeInternalChildOffset = 8; // BTreeInternalEntry.child_block
 constexpr mx_u32_t kDiskBlockCacheEntries = 32;
@@ -74,19 +71,6 @@ bool disk_mounted() {
     return g_disk_mounted;
 }
 
-static mx_u32_t load_le32(const mx_u8_t* p) {
-    return static_cast<mx_u32_t>(p[0]) | (static_cast<mx_u32_t>(p[1]) << 8) |
-           (static_cast<mx_u32_t>(p[2]) << 16) | (static_cast<mx_u32_t>(p[3]) << 24);
-}
-
-static mx_u64_t load_le64(const mx_u8_t* p) {
-    mx_u64_t v = 0;
-    for (mx_u32_t i = 0; i < 8; ++i) {
-        v |= static_cast<mx_u64_t>(p[i]) << (i * 8);
-    }
-    return v;
-}
-
 // ---------------------------------------------------------------------------
 // Block cache.
 // ---------------------------------------------------------------------------
@@ -97,7 +81,7 @@ static bool disk_cache_lookup(mx_u64_t block, mx_u8_t* out) {
             continue;
         }
         entry.age = ++g_disk_cache_clock;
-        fs_copy_bytes(out, entry.data, kBlockSize);
+        libk::copy_exact(libk::as_bytes(out, kBlockSize), libk::as_bytes(entry.data));
         return true;
     }
     return false;
@@ -123,7 +107,7 @@ static void disk_cache_store(mx_u64_t block, const mx_u8_t* data) {
     entry.valid = true;
     entry.block = block;
     entry.age = ++g_disk_cache_clock;
-    fs_copy_bytes(entry.data, data, kBlockSize);
+    libk::copy_exact(libk::as_bytes(entry.data), libk::as_bytes(data, kBlockSize));
 }
 
 static void disk_cache_invalidate(mx_u64_t block) {
@@ -163,8 +147,22 @@ static bool disk_read_sectors(mx_u64_t sector, mx_u32_t sector_count, mx_u8_t* o
     if (reply.status != MX_OK || reply.sectors_transferred != sector_count) {
         return false;
     }
-    fs_copy_bytes(out, g_blk_dma + BLK_DMA_CLIENT_OFFSET, byte_count);
+    libk::copy_exact(libk::as_bytes(out, byte_count),
+                     libk::as_bytes(g_blk_dma + BLK_DMA_CLIENT_OFFSET, byte_count));
     return true;
+}
+
+// Resolve an fs block inside the mounted partition without wrapping either
+// multiplication or addition. Also used before a cache lookup.
+static bool disk_sector_for_block(mx_u64_t block, mx_u64_t* sector) {
+    if (g_disk_total_blocks != 0 && block >= g_disk_total_blocks) return false;
+    mx_u64_t relative = 0;
+    if (!libk::checked_mul(block, kSectorsPerFsBlock, &relative)) return false;
+    if (g_disk_partition_sectors != 0 &&
+        (relative > g_disk_partition_sectors ||
+         kSectorsPerFsBlock > g_disk_partition_sectors - relative)) return false;
+    return libk::checked_add(g_disk_base_sector, relative, sector) &&
+           libk::checked_add(*sector, kSectorsPerFsBlock - 1, nullptr);
 }
 
 // Write one fs block through the block service. Mirrors disk_read_block's
@@ -174,16 +172,11 @@ bool disk_write_block(mx_u64_t block, const mx_u8_t* data) {
     if (!g_blk_available || !g_blk_dma || !data) {
         return false;
     }
-    if (g_disk_total_blocks != 0 && block >= g_disk_total_blocks) {
-        return false;
-    }
-    const mx_u64_t sector = g_disk_base_sector + block * kSectorsPerFsBlock;
-    if (g_disk_partition_sectors != 0 &&
-        (sector < g_disk_base_sector ||
-         sector + kSectorsPerFsBlock > g_disk_base_sector + g_disk_partition_sectors)) {
-        return false;
-    }
-    fs_copy_bytes(g_blk_dma + BLK_DMA_CLIENT_OFFSET, data, kBlockSize);
+    mx_u64_t sector = 0;
+    if (!disk_sector_for_block(block, &sector)) return false;
+    if (!libk::copy_exact(libk::slice(libk::as_bytes(g_blk_dma, g_blk_dma_size),
+                                     BLK_DMA_CLIENT_OFFSET, kBlockSize),
+                           libk::as_bytes(data, kBlockSize))) return false;
     BlkReply reply{};
     if (!g_blk_client.request(BLK_WRITE, sector, kSectorsPerFsBlock, MX_NULL_HANDLE,
                               BLK_DMA_CLIENT_OFFSET, &reply, mx_clock_ns() + kBlkReplyTimeoutNs)) {
@@ -201,17 +194,10 @@ bool disk_read_block(mx_u64_t block, mx_u8_t* out) {
     if (!g_blk_available || !g_blk_dma || !out) {
         return false;
     }
-    if (g_disk_total_blocks != 0 && block >= g_disk_total_blocks) {
-        return false;
-    }
+    mx_u64_t sector = 0;
+    if (!disk_sector_for_block(block, &sector)) return false;
     if (disk_cache_lookup(block, out)) {
         return true;
-    }
-    const mx_u64_t sector = g_disk_base_sector + block * kSectorsPerFsBlock;
-    if (g_disk_partition_sectors != 0 &&
-        (sector < g_disk_base_sector ||
-         sector + kSectorsPerFsBlock > g_disk_base_sector + g_disk_partition_sectors)) {
-        return false;
     }
     if (!disk_read_sectors(sector, kSectorsPerFsBlock, out)) {
         return false;
@@ -232,44 +218,48 @@ enum class DiskTree : mx_u32_t {
 static mx_u64_t disk_entry_key(const mx_u8_t* entry, DiskTree tree) {
     switch (tree) {
     case DiskTree::Inode:
-        return load_le32(entry);
+        return libk::load_le<mx_u32_t>(entry);
     case DiskTree::Extent:
     case DiskTree::Directory:
-        return load_le64(entry);
+        return libk::load_le<mx_u64_t>(entry);
     }
     return 0;
 }
 
-static bool disk_btree_find(mx_u64_t root, mx_u64_t key, DiskTree tree,
+enum class DiskLookup { Found, Missing, Invalid };
+
+static DiskLookup disk_btree_find(mx_u64_t root, mx_u64_t key, DiskTree tree,
                             mx_u8_t out_entry[kBTreeEntrySize]) {
+    if (!root) return DiskLookup::Missing;
     mx_u64_t block = root;
     for (mx_u32_t depth = 0; depth < kBTreeMaxDepth; ++depth) {
         if (block == 0 || !disk_read_block(block, g_disk_block)) {
-            return false;
+            return DiskLookup::Invalid;
         }
         const auto* header = reinterpret_cast<const BTreeNodeHeader*>(g_disk_block);
         if (header->entry_count > kBTreeMaxEntries) {
-            return false;
+            return DiskLookup::Invalid;
         }
         if (header->node_type == kBTreeInternal) {
             mx_u64_t child = 0;
             const mx_u8_t* entries = g_disk_block + sizeof(BTreeNodeHeader);
             for (mx_u32_t i = 0; i < header->entry_count; ++i) {
                 const mx_u8_t* entry = entries + (i * kBTreeEntrySize);
-                const mx_u64_t max_key = load_le64(entry);
+                const mx_u64_t max_key = libk::load_le<mx_u64_t>(entry);
                 if (key <= max_key) {
-                    child = load_le64(entry + kBTreeInternalChildOffset);
+                    child = libk::load_le<mx_u64_t>(entry + kBTreeInternalChildOffset);
+                    if (!child) return DiskLookup::Invalid;
                     break;
                 }
             }
             if (child == 0) {
-                return false;
+                return DiskLookup::Missing;
             }
             block = child;
             continue;
         }
         if (header->node_type != kBTreeLeaf) {
-            return false;
+            return DiskLookup::Invalid;
         }
 
         const mx_u8_t* entries = g_disk_block + sizeof(BTreeNodeHeader);
@@ -277,16 +267,17 @@ static bool disk_btree_find(mx_u64_t root, mx_u64_t key, DiskTree tree,
             const mx_u8_t* entry = entries + (i * kBTreeEntrySize);
             const mx_u64_t entry_key = disk_entry_key(entry, tree);
             if (entry_key == key) {
-                fs_copy_bytes(out_entry, entry, kBTreeEntrySize);
-                return true;
+                libk::copy_exact(libk::as_bytes(out_entry, kBTreeEntrySize),
+                                 libk::as_bytes(entry, kBTreeEntrySize));
+                return DiskLookup::Found;
             }
             if (entry_key > key) {
-                return false;
+                return DiskLookup::Missing;
             }
         }
-        return false;
+        return DiskLookup::Missing;
     }
-    return false;
+    return DiskLookup::Invalid;
 }
 
 bool disk_inode(mx_u32_t inode_number, InodeLeafEntry* out) {
@@ -294,21 +285,21 @@ bool disk_inode(mx_u32_t inode_number, InodeLeafEntry* out) {
         return false;
     }
     alignas(8) mx_u8_t entry[kBTreeEntrySize];
-    if (!disk_btree_find(g_disk_inode_root, inode_number, DiskTree::Inode, entry)) {
+    if (disk_btree_find(g_disk_inode_root, inode_number, DiskTree::Inode, entry) != DiskLookup::Found) {
         return false;
     }
-    fs_copy_bytes(out, entry, sizeof(InodeLeafEntry));
+    libk::copy_exact(libk::as_bytes(out, sizeof(*out)), libk::as_bytes(entry));
     return out->inode_number == inode_number;
 }
 
 bool disk_dir_lookup(const InodeLeafEntry& dir, mx_u32_t parent_inode, const char* name,
                      mx_u8_t name_len, InodeLeafEntry* out_inode) {
-    if (dir.type != FS_INODE_DIR || name_len == 0 || !out_inode) {
+    if (dir.type != FS_INODE_DIR || name_len == 0 || name_len > kMaxName || !name || !out_inode) {
         return false;
     }
     alignas(8) mx_u8_t entry[kBTreeEntrySize];
     const mx_u64_t key = (static_cast<mx_u64_t>(parent_inode) << 32) | name_hash32(name, name_len);
-    if (!disk_btree_find(dir.extent_tree_root, key, DiskTree::Directory, entry)) {
+    if (disk_btree_find(dir.extent_tree_root, key, DiskTree::Directory, entry) != DiskLookup::Found) {
         return false;
     }
     const auto* dirent = reinterpret_cast<const DirLeafEntry*>(entry);
@@ -323,43 +314,47 @@ bool disk_dir_lookup(const InodeLeafEntry& dir, mx_u32_t parent_inode, const cha
     return disk_inode(dirent->child_inode, out_inode);
 }
 
-static bool disk_btree_nth_entry(mx_u64_t root, mx_u32_t target, mx_u32_t* cursor,
-                                 mx_u8_t out_entry[kBTreeEntrySize]) {
-    if (root == 0 || !cursor || !out_entry) {
-        return false;
-    }
-    if (!disk_read_block(root, g_disk_block)) {
-        return false;
-    }
-    const auto* header = reinterpret_cast<const BTreeNodeHeader*>(g_disk_block);
-    if (header->entry_count > kBTreeMaxEntries) {
-        return false;
-    }
-    const mx_u8_t* entries = g_disk_block + sizeof(BTreeNodeHeader);
-    if (header->node_type == kBTreeLeaf) {
-        for (mx_u32_t i = 0; i < header->entry_count; ++i) {
-            if (*cursor == target) {
-                fs_copy_bytes(out_entry, entries + (i * kBTreeEntrySize), kBTreeEntrySize);
-                return true;
+static DiskLookup disk_btree_nth_entry(mx_u64_t root, mx_u32_t target, mx_u32_t* cursor,
+                                       mx_u8_t out_entry[kBTreeEntrySize]) {
+    if (!cursor || !out_entry) return DiskLookup::Invalid;
+    if (!root) return DiskLookup::Missing;
+    struct Frame { mx_u64_t block; mx_u32_t next_child; };
+    Frame path[kBTreeMaxDepth]{{root, 0}};
+    mx_u32_t depth = 1;
+    mx_u64_t visits = 0;
+    while (depth) {
+        auto& frame = path[depth - 1];
+        // Reload the parent after descending: g_disk_block is shared scratch,
+        // so pointers into it cannot survive a child read.
+        if (!disk_read_block(frame.block, g_disk_block)) return DiskLookup::Invalid;
+        const auto& header = *reinterpret_cast<const BTreeNodeHeader*>(g_disk_block);
+        if (header.entry_count > kBTreeMaxEntries) return DiskLookup::Invalid;
+        const auto* entries = g_disk_block + sizeof(BTreeNodeHeader);
+        if (header.node_type == kBTreeLeaf) {
+            for (mx_u32_t i = 0; i < header.entry_count; ++i) {
+                if (*cursor == target) {
+                    (void)libk::copy_exact(libk::as_bytes(out_entry, kBTreeEntrySize),
+                                           libk::as_bytes(entries + i * kBTreeEntrySize, kBTreeEntrySize));
+                    return DiskLookup::Found;
+                }
+                if (*cursor == ~mx_u32_t{0}) return DiskLookup::Invalid;
+                ++*cursor;
             }
-            ++(*cursor);
-        }
-        return false;
+            --depth;
+        } else if (header.node_type == kBTreeInternal) {
+            if (frame.next_child == header.entry_count) { --depth; continue; }
+            const auto child = libk::load_le<mx_u64_t>(
+                entries + frame.next_child++ * kBTreeEntrySize + kBTreeInternalChildOffset);
+            if (!child || depth == kBTreeMaxDepth || ++visits > g_disk_total_blocks) {
+                return DiskLookup::Invalid;
+            }
+            for (mx_u32_t i = 0; i < depth; ++i) {
+                if (path[i].block == child) return DiskLookup::Invalid;
+            }
+            path[depth++] = {child, 0};
+        } else return DiskLookup::Invalid;
     }
-    if (header->node_type != kBTreeInternal) {
-        return false;
-    }
-
-    // Depth-first in child order so ordinals line up with the leaf walk. The
-    // child pointer is read on the way down; no per-frame child table is needed.
-    for (mx_u32_t i = 0; i < header->entry_count; ++i) {
-        const mx_u64_t child =
-            load_le64(entries + (i * kBTreeEntrySize) + kBTreeInternalChildOffset);
-        if (disk_btree_nth_entry(child, target, cursor, out_entry)) {
-            return true;
-        }
-    }
-    return false;
+    return DiskLookup::Missing;
 }
 
 // ---------------------------------------------------------------------------
@@ -380,7 +375,8 @@ mx_i32_t disk_read_file(const OpenHandle& handle, mx_u64_t offset, mx_u32_t leng
         reply->length_read = 0;
         return MX_OK;
     }
-    const mx_u32_t remaining = static_cast<mx_u32_t>(handle.size - offset);
+    const auto available = handle.size - offset;
+    const auto remaining = static_cast<mx_u32_t>(available < FS_INLINE_READ_MAX ? available : FS_INLINE_READ_MAX);
     const mx_u32_t n = min_u32(length, min_u32(remaining, FS_INLINE_READ_MAX));
     mx_u32_t copied = 0;
     while (copied < n) {
@@ -389,8 +385,10 @@ mx_i32_t disk_read_file(const OpenHandle& handle, mx_u64_t offset, mx_u32_t leng
         const mx_u32_t block_off = static_cast<mx_u32_t>(abs % kBlockSize);
         const mx_u32_t chunk = min_u32(n - copied, kBlockSize - block_off);
         alignas(8) mx_u8_t entry[kBTreeEntrySize];
-        if (!disk_btree_find(handle.tree_root, logical_block, DiskTree::Extent, entry)) {
-            zero_bytes(reply->inline_data + copied, chunk);
+        const auto lookup = disk_btree_find(handle.tree_root, logical_block, DiskTree::Extent, entry);
+        if (lookup == DiskLookup::Invalid) return MX_ERR_FAULT;
+        if (lookup == DiskLookup::Missing) {
+            libk::zero(reply->inline_data + copied, chunk);
             copied += chunk;
             continue;
         }
@@ -399,10 +397,11 @@ mx_i32_t disk_read_file(const OpenHandle& handle, mx_u64_t offset, mx_u32_t leng
             !disk_read_block(extent->phys_block, g_disk_block)) {
             return static_cast<mx_i32_t>(MX_ERR_FAULT);
         }
-        if (extent->data_crc32 != 0 && crc32_ieee(g_disk_block, kBlockSize) != extent->data_crc32) {
+        if (extent->data_crc32 != 0 && libk::crc32_ieee(libk::as_bytes(g_disk_block, kBlockSize)) != extent->data_crc32) {
             return static_cast<mx_i32_t>(MX_ERR_FAULT);
         }
-        fs_copy_bytes(reply->inline_data + copied, g_disk_block + block_off, chunk);
+        libk::copy_n(libk::slice(libk::as_bytes(reply->inline_data), copied, chunk),
+                     libk::slice(libk::as_bytes(g_disk_block), block_off, chunk), chunk);
         copied += chunk;
     }
     reply->length_read = n;
@@ -419,12 +418,15 @@ mx_i32_t disk_readdir(const OpenHandle& handle, const FsReaddirRequest& req,
     }
     mx_u32_t cursor = 0;
     alignas(8) mx_u8_t entry[kBTreeEntrySize];
-    if (!disk_btree_nth_entry(handle.tree_root, req.cookie, &cursor, entry)) {
+    const auto lookup = disk_btree_nth_entry(handle.tree_root, req.cookie, &cursor, entry);
+    if (lookup == DiskLookup::Invalid) return MX_ERR_FAULT;
+    if (lookup == DiskLookup::Missing) {
         reply->flags = FS_READDIR_EOF;
         reply->entry_count = cursor;
         return MX_OK;
     }
     const auto* dirent = reinterpret_cast<const DirLeafEntry*>(entry);
+    if (dirent->name_len > sizeof(dirent->name) || req.cookie == ~mx_u32_t{0}) return MX_ERR_FAULT;
     reply->flags = FS_READDIR_HAS_ENTRY;
     reply->next_cookie = req.cookie + 1;
     reply->inode_number = dirent->child_inode;
@@ -440,7 +442,9 @@ mx_i32_t disk_readdir(const OpenHandle& handle, const FsReaddirRequest& req,
     }
     mx_u32_t after = 0;
     mx_u8_t ignored[kBTreeEntrySize];
-    if (!disk_btree_nth_entry(handle.tree_root, req.cookie + 1, &after, ignored)) {
+    const auto next = disk_btree_nth_entry(handle.tree_root, req.cookie + 1, &after, ignored);
+    if (next == DiskLookup::Invalid) return MX_ERR_FAULT;
+    if (next == DiskLookup::Missing) {
         reply->flags |= FS_READDIR_EOF;
     }
     reply->entry_count = after;
@@ -456,14 +460,13 @@ fs_handle_t alloc_disk_handle(const InodeLeafEntry& inode) {
             continue;
         }
         OpenHandle& h = g_handles[i];
-        zero_bytes(&h, sizeof(h));
+        libk::zero(h);
         h.used = true;
         h.disk_backed = true;
         h.inode_number = inode.inode_number;
-        h.read_only = true;
+        h.access = fs_handle_access(inode.type, false);
         h.type = inode.type;
         h.inode_class = inode.inode_class;
-        h.mode = inode.mode;
         h.size = inode.size;
         h.tree_root = inode.extent_tree_root;
         return handle_token(i);
@@ -505,20 +508,20 @@ static bool select_ameroot_partition() {
         }
     }
 
-    const mx_u32_t header_size = load_le32(g_disk_block + kGptHeaderSizeOffset);
-    const mx_u32_t header_crc = load_le32(g_disk_block + kGptHeaderCrcOffset);
+    const mx_u32_t header_size = libk::load_le<mx_u32_t>(g_disk_block + kGptHeaderSizeOffset);
+    const mx_u32_t header_crc = libk::load_le<mx_u32_t>(g_disk_block + kGptHeaderCrcOffset);
     if (header_size < kGptMinHeaderSize || header_size > kGptMaxHeaderSize) {
         return false;
     }
-    g_disk_block[16] = g_disk_block[17] = g_disk_block[18] = g_disk_block[19] = 0;
-    if (crc32_ieee(g_disk_block, header_size) != header_crc) {
+    libk::zero(libk::slice(libk::as_bytes(g_disk_block), kGptHeaderCrcOffset, sizeof(header_crc)));
+    if (libk::crc32_ieee(libk::as_bytes(g_disk_block, header_size)) != header_crc) {
         return false;
     }
 
-    const mx_u64_t entries_lba = load_le64(g_disk_block + kGptEntriesLbaOffset);
-    const mx_u32_t entry_count = load_le32(g_disk_block + kGptEntryCountOffset);
-    const mx_u32_t entry_size = load_le32(g_disk_block + kGptEntrySizeOffset);
-    const mx_u32_t entries_crc = load_le32(g_disk_block + kGptEntriesCrcOffset);
+    const mx_u64_t entries_lba = libk::load_le<mx_u64_t>(g_disk_block + kGptEntriesLbaOffset);
+    const mx_u32_t entry_count = libk::load_le<mx_u32_t>(g_disk_block + kGptEntryCountOffset);
+    const mx_u32_t entry_size = libk::load_le<mx_u32_t>(g_disk_block + kGptEntrySizeOffset);
+    const mx_u32_t entries_crc = libk::load_le<mx_u32_t>(g_disk_block + kGptEntriesCrcOffset);
     if (entry_count == 0 || entry_size < kGptMinEntrySize || entry_size > kGptMaxEntrySize) {
         return false;
     }
@@ -532,7 +535,7 @@ static bool select_ameroot_partition() {
     if (!disk_read_sectors(entries_lba, entries_sectors, g_gpt_entries)) {
         return false;
     }
-    if (crc32_ieee(g_gpt_entries, entries_bytes) != entries_crc) {
+    if (libk::crc32_ieee(libk::as_bytes(g_gpt_entries, entries_bytes)) != entries_crc) {
         return false;
     }
 
@@ -548,8 +551,8 @@ static bool select_ameroot_partition() {
         if (!gpt_name_eq(entry + kGptEntryNameOffset, kAmerootPartitionName)) {
             continue;
         }
-        const mx_u64_t first = load_le64(entry + kGptEntryFirstLbaOffset);
-        const mx_u64_t last = load_le64(entry + kGptEntryLastLbaOffset);
+        const mx_u64_t first = libk::load_le<mx_u64_t>(entry + kGptEntryFirstLbaOffset);
+        const mx_u64_t last = libk::load_le<mx_u64_t>(entry + kGptEntryLastLbaOffset);
         if (first == 0 || last < first) {
             return false;
         }
@@ -585,7 +588,7 @@ static bool mount_disk_fs() {
     g_disk_first_data = sb->first_data_block;
     g_disk_mounted = true;
     InodeLeafEntry root;
-    zero_bytes(&root, sizeof(root));
+    libk::zero(root);
     if (!disk_inode(kRootInode, &root) || root.type != FS_INODE_DIR) {
         g_disk_mounted = false;
         return false;
@@ -606,11 +609,6 @@ mx_i32_t disk_flush() {
                               mx_clock_ns() + kBlkReplyTimeoutNs)) {
         return static_cast<mx_i32_t>(MX_ERR_BUSY);
     }
-    // A device that cannot flush is still a device that accepted the writes;
-    // the write-back path treats NOT_IMPLEMENTED as "no cache to drain".
-    if (reply.status == static_cast<mx_i32_t>(MX_ERR_NOT_IMPLEMENTED)) {
-        return MX_OK;
-    }
     return reply.status;
 }
 
@@ -629,13 +627,15 @@ bool disk_durable_region(mx_u64_t* start_block, mx_u64_t* block_count) {
     if (g_disk_journal_start < 2) {
         return false; // never overlap the superblock/checkpoint
     }
-    if (g_disk_journal_start + g_disk_journal_blocks > g_disk_total_blocks) {
+    mx_u64_t end = 0;
+    if (!libk::checked_add(g_disk_journal_start, g_disk_journal_blocks, &end) ||
+        end > g_disk_total_blocks) {
         return false;
     }
     if (g_disk_first_data == 0) {
         return false;
     }
-    if (g_disk_journal_start + g_disk_journal_blocks > g_disk_first_data) {
+    if (end > g_disk_first_data) {
         return false;
     }
     if (start_block) {
@@ -651,22 +651,12 @@ bool disk_durable_region(mx_u64_t* start_block, mx_u64_t* block_count) {
 // Boot wiring for the block backend and the optional disk mount.
 // ---------------------------------------------------------------------------
 void fs_disk_init(const MxBootInfo* boot) {
-    mx_u32_t blk_req_order = kRingOrder;
-    mx_u32_t blk_reply_order = kRingOrder;
-    RingPage* blk_req = map_ring_from_boot(boot, "blk.req.ring", kVaBlkReqRing, &blk_req_order);
-    RingPage* blk_reply =
-        map_ring_from_boot(boot, "blk.reply.ring", kVaBlkReplyRing, &blk_reply_order);
-    const CapHandle blk_req_db = mochi::boot::handle(boot, "blk.req.doorbell");
-    const CapHandle blk_reply_db = mochi::boot::handle(boot, "blk.reply.doorbell");
-    if (blk_req && blk_reply && blk_req_db != MX_NULL_HANDLE && blk_reply_db != MX_NULL_HANDLE) {
-        g_blk_client = {{blk_req, blk_reply, blk_req_order, blk_req_db, blk_reply_db}};
-        g_blk_available = g_blk_client.valid();
-        mochi::log_raw_marker("io.fs: block endpoint ready\n");
-    } else {
-        g_blk_client = {};
-        g_blk_available = false;
-        mochi::log_raw_marker("io.fs: no block endpoint; running memory backend\n");
-    }
+    g_blk_client.ep = mochi::boot::map_endpoint(boot,
+        {"blk.req.ring", kVaBlkReqRing, "blk.req.doorbell"},
+        {"blk.reply.ring", kVaBlkReplyRing, "blk.reply.doorbell"});
+    g_blk_available = g_blk_client.valid();
+    mochi::log_raw_marker(g_blk_available ? "io.fs: block endpoint ready\n"
+        : "io.fs: no block endpoint; running memory backend\n");
 
     const mx_handle_t blk_dma = mochi::boot::handle(boot, "virtio.blk.dma");
     MxCapInfo dma_info{};

@@ -13,6 +13,9 @@
 #include "anko/vm.h"
 #include "anko/log.h"
 #include "anko/panic.h"
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+#include "boot_diagnostics.h"
+#endif
 #include "libk/metric.h"
 #include "libk/printf.h"
 #include "libk/string.h"
@@ -150,6 +153,10 @@ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
     Thread* ct = sched::current();
     const u32 ec = static_cast<u32>((esr >> 26) & 0x3fu);
     const u32 iss = static_cast<u32>(esr & 0x01ff'ffffu);
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    anne::boot_user_fault(esr, tf ? tf->elr : 0, far, tf ? tf->sp_el0 : 0,
+                          p ? p->pid : 0, ct ? ct->tid : 0);
+#endif
 
     if (ec == 0x3c) {
         // BRK from EL0 is used by supervised demo services as an intentional
@@ -221,6 +228,9 @@ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
 
 extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
                                       u64 a3, u64 a4, u64 a5) {
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    anne::boot_syscall(nr);
+#endif
     (void)a5;
     metric_inc(g_syscall_count);
 
@@ -883,7 +893,11 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         if (!user_range_ok(ua, a0, len)) return err(E_FAULT);
         const char* s = reinterpret_cast<const char*>(a0);
         metric_inc(g_debug_puts_count);
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+        anne::boot_log_write(s, len);
+#else
         for (u64 i = 0; i < len; ++i) libk::putchar(s[i]);
+#endif
         return ok(E_OK);
     }
 
@@ -1085,7 +1099,8 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
                             ? arena->phys_base
                             : arena->base_va;
             info.size = arena->size;
-            info.attr = 0;
+            info.attr = mm::range_is_noncached(arena->phys_base, arena->size)
+                            ? MX_ARENA_MEMORY_NONCACHEABLE : MX_ARENA_MEMORY_WRITE_BACK;
             info.flags = arena->flags & ~(kArenaFlagExposePhys | kArenaFlagOwnsPages);
             info.aux0 = arena->owner_pid;
             break;

@@ -10,38 +10,51 @@
 // cannot fit one slot belongs in a shared arena, not here (the static_assert
 // says so at compile time rather than truncating at run time).
 
+#include "libk/bytes.h"
 #include "midix/abi/ring.h"
 
 namespace mochi {
 
-// Encode `msg` into `slot` as a message of `type`. The slot's inline payload is
-// written in full; `seq` is left for the ring producer to stamp.
+inline bool message_valid(const MxRingSlot& slot) {
+    return slot.length <= MX_RING_INLINE_PAYLOAD;
+}
+
+// Validate the wire representation once for every typed sender and decoder.
 template <typename T>
-inline bool message_put(MxRingSlot* slot, mx_u32_t type, const T& msg) {
+constexpr mx_u32_t message_size() {
+    static_assert(__is_trivially_copyable(T), "inline messages must be trivially copyable");
     static_assert(sizeof(T) <= MX_RING_INLINE_PAYLOAD,
                   "message exceeds the inline ring payload; put it in an arena");
+    return static_cast<mx_u32_t>(sizeof(T));
+}
+
+// Encode `msg` into `slot` as a message of `type`. The slot's inline payload is
+// written in full, including a zeroed tail; seq starts at zero. Ring publication
+// stamps its own sequence. Callers must initialise all transmitted fields and
+// padding within T; these helpers copy its object representation.
+template <typename T>
+inline bool message_put(MxRingSlot* slot, mx_u32_t type, const T& msg) {
+    constexpr mx_u32_t size = message_size<T>();
     if (!slot) return false;
     slot->type = type;
-    slot->length = static_cast<mx_u32_t>(sizeof(T));
+    slot->length = size;
     slot->seq = 0;
-    const auto* src = reinterpret_cast<const mx_u8_t*>(static_cast<const void*>(&msg));
-    for (mx_u32_t i = 0; i < sizeof(T); ++i) slot->payload[i] = src[i];
+    const auto payload = libk::as_bytes(slot->payload);
+    (void)libk::copy_n(payload, libk::as_bytes(&msg, size), size);
+    (void)libk::zero(libk::slice(payload, size, payload.size - size));
     return true;
 }
 
 // Decode `slot` into `out`. `expect` is the required opcode, or 0 to accept any
 // opcode. Returns false and leaves `out` untouched if the opcode does not match
-// or the inline payload is shorter than the message.
+// or the length is shorter than T or larger than the inline payload.
 template <typename T>
 inline bool message_get(const MxRingSlot& slot, T* out, mx_u32_t expect = 0) {
-    static_assert(sizeof(T) <= MX_RING_INLINE_PAYLOAD,
-                  "message exceeds the inline ring payload; put it in an arena");
+    constexpr mx_u32_t size = message_size<T>();
     if (!out) return false;
     if (expect != 0 && slot.type != expect) return false;
-    if (slot.length < sizeof(T)) return false;
-    auto* dst = reinterpret_cast<mx_u8_t*>(static_cast<void*>(out));
-    for (mx_u32_t i = 0; i < sizeof(T); ++i) dst[i] = slot.payload[i];
-    return true;
+    if (slot.length < size || !message_valid(slot)) return false;
+    return libk::copy_n(libk::as_bytes(out, size), libk::as_bytes(slot.payload), size);
 }
 
 } // namespace mochi

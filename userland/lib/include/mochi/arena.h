@@ -12,6 +12,7 @@
 // pure and host-testable (tests/test_arena.py).
 
 #include "libk/integer.h"
+#include "libk/bytes.h"
 #include "midix/abi/types.h"
 
 namespace mochi {
@@ -20,7 +21,7 @@ class Arena {
 public:
     constexpr Arena() = default;
     Arena(void* base, mx_size_t size)
-        : base_(static_cast<mx_u8_t*>(base)), size_(size) {}
+        : base_(static_cast<mx_u8_t*>(base)), size_(base ? size : 0) {}
 
     bool valid() const { return base_ != nullptr; }
     void* base() const { return base_; }
@@ -34,9 +35,17 @@ public:
     void* alloc(mx_size_t size, mx_size_t align = 16) {
         if (!base_) return nullptr;
         if (align == 0) align = 16;
-        if ((align & (align - 1)) != 0) return nullptr; // not a power of two
-        const mx_size_t start = static_cast<mx_size_t>(libk::align_up(offset_, align));
+        // Align the address, not only the offset: callers may provide a slice
+        // whose base does not already have the requested alignment.
+        mx_u64_t address = 0;
+        mx_u64_t aligned = 0;
+        if (!libk::checked_add(reinterpret_cast<mx_u64_t>(base_), offset_, &address) ||
+            !libk::checked_align_up(address, align, &aligned)) return nullptr;
+        const mx_size_t padding = aligned - address;
+        if (padding > remaining()) return nullptr;
+        const mx_size_t start = offset_ + padding;
         if (start > size_ || size > size_ - start) return nullptr;
+        if (!libk::checked_add(aligned, size, nullptr)) return nullptr;
         offset_ = start + size;
         if (offset_ > high_water_) high_water_ = offset_;
         return base_ + start;
@@ -47,7 +56,17 @@ public:
     template <typename T>
     T* alloc(mx_size_t count = 1, mx_size_t align = alignof(T)) {
         if (count == 0 || count > (~static_cast<mx_size_t>(0)) / sizeof(T)) return nullptr;
+        if (align == 0) align = 16;
+        if ((align & (align - 1)) != 0) return nullptr;
+        if (align < alignof(T)) align = alignof(T);
         return static_cast<T*>(alloc(sizeof(T) * count, align));
+    }
+
+    // DMA queues and protocol buffers require zeroed storage, including padding.
+    void* alloc_zeroed(mx_size_t size, mx_size_t align = 16) {
+        void* block = alloc(size, align);
+        if (block) libk::zero(block, size);
+        return block;
     }
 
     // Rewind to empty. Keeps base/size and the high-water mark.

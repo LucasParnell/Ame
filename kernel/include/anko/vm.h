@@ -1,4 +1,5 @@
 #pragma once
+#include "midix/abi/vm.h"
 // anko/vm.h — Dango VM scaffolding.
 //
 // Dango creates capability-mediated VM objects, memory objects, stage-2
@@ -120,20 +121,10 @@ enum VcpuBlockReason : u32 {
     VCPU_BLOCK_GUEST_OFF = 2,
 };
 
-struct VcpuRunBudget {
-    u64 budget_ns;
-    u64 deadline_ns;
-    u32 max_exits;
-    u32 flags;
-};
+using VcpuRunBudget = MxVcpuRunBudget;
 static_assert(__is_trivially_constructible(VcpuRunBudget));
 
-struct VcpuRunResult {
-    u32 exit_reason;
-    u32 exit_batch_count;
-    u64 last_esr;
-    u64 used_ns;
-};
+using VcpuRunResult = MxVcpuRunResult;
 static_assert(__is_trivially_constructible(VcpuRunResult));
 
 enum VmChannelEndpoint : u32 {
@@ -527,17 +518,7 @@ struct SharedArena {
 };
 
 // Guest-visible geometry of an attachment (SYS_VM_SHARED_MEMORY_INSPECT).
-struct SharedArenaInfo {
-    u32 shared_id;
-    u32 owner_vm_id;
-    u32 rights;
-    u32 flags;
-    u64 guest_pa_base;
-    u64 size;
-    u32 dma_class; // iommu::VmDmaClass
-    u32 mapped_stage2;
-    PhysAddr host_phys_base;
-};
+using SharedArenaInfo = MxSharedArenaInfo;
 
 struct Vm {
     object::Record* lifetime;
@@ -569,67 +550,13 @@ struct Vm {
     u64 channel_generation;
 };
 
-struct VmInfo {
-    u32 vm_id;
-    u32 owner_pid;
-    u32 state;
-    u32 memory_count;
-    u32 vcpu_count;
-    u32 channel_count;
-    u32 reserved;
-    u64 guest_ram_bytes;
-    u64 mapped_regions;
-    u64 flags;
-    u64 stage2_mapped_pages;
-    // Mapping records backing those pages: with 2 MiB blocks a fully mapped RAM
-    // region reports far fewer records than pages, which is how a caller can tell
-    // the block path is actually in use rather than silently falling back.
-    u64 stage2_mapped_records;
-    u64 stage2_built;
-    u64 stage2_active;
-};
+using VmInfo = MxVmInfo;
 
-struct VmMemoryInfo {
-    u32 mem_id;
-    u32 owner_vm_id;
-    u32 rights;
-    u32 flags;
-    PhysAddr host_phys_base;
-    VirtAddr host_va;
-    u64 size;
-    u64 guest_pa_base;
-    u64 mapped_size;
-    u64 mapped_stage2;
-    bool shared_staging;
-    u8 pad[7];
-};
+using VmMemoryInfo = MxVmMemoryInfo;
 
-struct VcpuInfo {
-    u32 vcpu_id;
-    u32 owner_vm_id;
-    u32 state;
-    u32 reserved;
-    u64 entry_pc;
-    u64 arg0;
-    u64 arg1;
-    u64 run_count;
-    u64 last_exit_reason;
-    u32 sched_context_id;
-    u32 runner_tid;
-    u64 core_mask;
-    u32 home_cpu;
-    u32 blocked_reason;
-};
+using VcpuInfo = MxVcpuInfo;
 
-struct VmChannelInfo {
-    u32 channel_id;
-    u32 owner_vm_id;
-    u32 order;
-    u32 flags;
-    u64 messages_host_to_guest;
-    u64 messages_guest_to_host;
-    u64 endpoint_present_mask;
-};
+using VmChannelInfo = MxVmChannelInfo;
 
 void init();
 VmRoot* root_object();

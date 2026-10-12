@@ -8,8 +8,7 @@ namespace {
 bool mochi_push(void* ctx, const MxVkFrame& slot) {
     auto* ship = static_cast<MochiShip*>(ctx);
     return ship && ship->request_ring &&
-           ring_try_push(ship->request_ring, ship->order, slot.type, slot.payload, slot.length,
-                         ship->request_doorbell);
+           ring_try_push_frame(ship->request_ring, ship->order, slot, ship->request_doorbell);
 }
 
 bool mochi_pop(void* ctx, MxVkFrame* out) {
@@ -23,12 +22,7 @@ bool mochi_pop(void* ctx, MxVkFrame* out) {
 bool mochi_wait(void* ctx) {
     auto* ship = static_cast<MochiShip*>(ctx);
     if (!ship || !ship->reply_ring) return false;
-    const mx_u64_t counter = sys_doorbell_read(ship->reply_doorbell);
-    ship->reply_ring->flags.doorbell_counter_snapshot = counter;
-    __atomic_store_n(&ship->reply_ring->flags.receiver_about_to_sleep, 1u, __ATOMIC_RELEASE);
-    const mx_i64_t rc = sys_wait_doorbell(ship->reply_doorbell, counter);
-    __atomic_store_n(&ship->reply_ring->flags.receiver_about_to_sleep, 0u, __ATOMIC_RELEASE);
-    return rc >= 0;
+    return ring_wait_readable(ship->reply_ring, ship->order, ship->reply_doorbell);
 }
 
 } // namespace

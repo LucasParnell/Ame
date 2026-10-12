@@ -10,18 +10,6 @@
 namespace drv::gpu::linux {
 namespace {
 
-// Read a reply payload in place. The payload is 8-byte aligned inside the slot
-// and every message struct fits the 48-byte inline budget, so it can be read
-// directly; a short slot is a protocol error, never a partial read.
-template <typename T>
-bool decode(const RingSlot& slot, T* out) {
-    static_assert(sizeof(T) <= MX_GPU_SERVICE_INLINE_PAYLOAD,
-                  "GPU service message must fit one ring payload");
-    if (slot.length < sizeof(T)) return false;
-    *out = *reinterpret_cast<const T*>(slot.payload);
-    return true;
-}
-
 // Clamp an untrusted damage rectangle to the window. Returns a zero-area
 // rectangle when the request lies entirely outside.
 MxGpuDamageRect clamp_damage(const MxGpuDamageRect& rect, uint32_t width, uint32_t height) {
@@ -66,7 +54,7 @@ void Client::poll() {
         switch (slot.type) {
         case GPU_SERVICE_INFO_REPLY: {
             MxGpuServiceInfoReply reply{};
-            if (!decode(slot, &reply) || reply.status != MX_OK ||
+            if (!mochi::message_get(slot, &reply) || reply.status != MX_OK ||
                 (reply.flags & MX_GPU_SERVICE_FLAG_LIVE) == 0) return fail();
             // The service must scan out exactly the window this client renders
             // for; a mismatch means the two ends disagree about the binding.
@@ -80,7 +68,7 @@ void Client::poll() {
         }
         case GPU_SERVICE_REGISTER_STAGING_REPLY: {
             MxGpuServiceRegisterStagingReply reply{};
-            if (!decode(slot, &reply) || reply.status != MX_OK || reply.buffer_id == 0) {
+            if (!mochi::message_get(slot, &reply) || reply.status != MX_OK || reply.buffer_id == 0) {
                 return fail();
             }
             if (state_ == ClientState::AwaitRegister) {
@@ -91,7 +79,7 @@ void Client::poll() {
         }
         case GPU_SERVICE_PRESENT_COMPLETE: {
             MxGpuServicePresentComplete reply{};
-            if (!decode(slot, &reply) || reply.status != MX_OK) return fail();
+            if (!mochi::message_get(slot, &reply) || reply.status != MX_OK) return fail();
             break;
         }
         case GPU_SERVICE_ERROR:
@@ -178,8 +166,7 @@ bool Server::reply(uint32_t type, const void* payload, uint32_t length) {
 // itself, so the service does not re-encode them).
 bool Server::reply_frame(const MxVkFrame& frame) {
     return endpoint_.valid() &&
-           ring_try_push(endpoint_.reply_ring, endpoint_.order, frame.type, frame.payload,
-                         frame.length, endpoint_.reply_doorbell);
+           ring_try_push_frame(endpoint_.reply_ring, endpoint_.order, frame, endpoint_.reply_doorbell);
 }
 
 void Server::error(uint32_t opcode, mx_status_t status, uint64_t detail) {
@@ -228,7 +215,7 @@ bool Server::serve_once(PresentFn present, void* ctx) {
     }
     case GPU_SERVICE_REGISTER_STAGING: {
         MxGpuServiceRegisterStagingRequest request{};
-        if (!decode(slot, &request)) {
+        if (!mochi::message_get(slot, &request)) {
             error(GPU_SERVICE_REGISTER_STAGING, MX_ERR_BAD_PROTOCOL, slot.length);
             break;
         }
@@ -255,7 +242,7 @@ bool Server::serve_once(PresentFn present, void* ctx) {
     }
     case GPU_SERVICE_PRESENT: {
         MxGpuServicePresentRequest request{};
-        if (!decode(slot, &request)) {
+        if (!mochi::message_get(slot, &request)) {
             error(GPU_SERVICE_PRESENT, MX_ERR_BAD_PROTOCOL, slot.length);
             break;
         }

@@ -15,7 +15,6 @@
 #include "mochi/va_layout.h"
 
 using namespace mochi::va::input;
-constexpr uint32_t kRingOrder = MX_DEFAULT_RING_ORDER;
 
 static mochi::input::EventSource g_hid{};
 static mochi::input::EventSink g_tty{};
@@ -89,23 +88,9 @@ extern "C" [[noreturn]] void _start() {
     MxBootInfo* boot = mochi::boot::map(kVaBootInfo);
     (void)mochi::log_map_from_boot(boot, kVaLogRing, "ui.input");
 
-    const mx_handle_t hid_ring = mochi::boot::handle(boot, "hid.input.ring");
-    if (hid_ring != MX_NULL_HANDLE &&
-        mx_map_page(hid_ring, kVaHidRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        g_hid.ring = reinterpret_cast<RingPage*>(kVaHidRing);
-    }
-    g_hid.order = kRingOrder;
-    g_hid.doorbell = mochi::boot::handle(boot, "hid.input.doorbell");
+    g_hid = {mochi::boot::map_ring(boot, {"hid.input.ring", kVaHidRing, "hid.input.doorbell"})};
 
-    const mx_handle_t tty_ring = mochi::boot::handle(boot, "input.tty.ring");
-    if (tty_ring != MX_NULL_HANDLE &&
-        mx_map_page(tty_ring, kVaTtyRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        g_tty.ring = reinterpret_cast<RingPage*>(kVaTtyRing);
-    }
-    g_tty.order = kRingOrder;
-    g_tty.doorbell = mochi::boot::handle(boot, "input.tty.doorbell");
+    g_tty = {mochi::boot::map_ring(boot, {"input.tty.ring", kVaTtyRing, "input.tty.doorbell"})};
 
     mochi::log_raw_marker("ui.input: ready\n");
 

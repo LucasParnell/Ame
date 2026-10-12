@@ -1,31 +1,16 @@
 // userland/dango/auth_probe/main.cc — negative VM-root authority test.
 
 #include "mochi/syscall.h"
+#include "mochi/handle.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
 #include "dango/vm.h"
 #include "mochi/va_layout.h"
 
-constexpr uint32_t kRingOrder = 6;
+constexpr uint32_t kRingOrder = MX_DEFAULT_RING_ORDER;
 using namespace mochi::va::dango_auth_probe;
 
-
-template <typename T>
-static T* wait_map(CapHandle cap, int64_t expected_type, uint64_t va, uint32_t rights) {
-    while (true) {
-        if (sys_cap_identify(cap) == expected_type) {
-            if (sys_map_page(cap, va, rights) == 0) return reinterpret_cast<T*>(va);
-        }
-        sys_yield();
-    }
-}
-
-static void wait_cap(CapHandle cap, int64_t expected_type) {
-    while (sys_cap_identify(cap) != expected_type) {
-        sys_yield();
-    }
-}
 
 static void console_log(const char* msg) {
     mochi::log_raw_marker(msg);
@@ -43,13 +28,13 @@ extern "C" [[noreturn]] void _start() {
     const CapHandle kRestrictedVmRoot = mochi::boot::require_handle(boot, "vm.root.restricted");
     const CapHandle kAuthGateDoorbell = mochi::boot::require_handle(boot, "dango.auth_gate.db");
 
-    auto* log_ring = wait_map<RingPage>(kConsoleRing, dango::CAP_SHARED_RING,
+    auto* log_ring = mochi::cap_map_when<RingPage>(kConsoleRing, dango::CAP_SHARED_RING,
                                         kVaConsoleRing,
                                         dango::RIGHT_READ | dango::RIGHT_WRITE);
-    wait_cap(kConsoleDoorbell, dango::CAP_DOORBELL);
+    mochi::cap_wait_type(kConsoleDoorbell, dango::CAP_DOORBELL);
     mochi::log_set_sink(log_ring, kRingOrder, kConsoleDoorbell, "dango.auth_probe");
-    wait_cap(kRestrictedVmRoot, dango::CAP_VM_ROOT);
-    wait_cap(kAuthGateDoorbell, dango::CAP_DOORBELL);
+    mochi::cap_wait_type(kRestrictedVmRoot, dango::CAP_VM_ROOT);
+    mochi::cap_wait_type(kAuthGateDoorbell, dango::CAP_DOORBELL);
 
     const int64_t rc = sys_vm_create(kRestrictedVmRoot, 0);
     if (rc != dango::E_PERM) fail("authority check failed\n");

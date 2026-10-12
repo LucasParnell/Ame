@@ -1,0 +1,265 @@
+{
+  "schema": 1,
+  "board": "huawei-anne",
+  "stage": "native-eight-core-services-verified",
+  "target": {
+    "family": "Huawei P20 Lite 2018",
+    "codename": "anne",
+    "model": "ANE-LX1",
+    "firmware": "ANE-LX1 8.0.0.151(C782)"
+  },
+  "recovery": {
+    "installed": true,
+    "evidence": "ADB recovery transport, anne device property, root shell, and TWRP version confirmed",
+    "image_version": "3.7.0_9-0",
+    "image_sha256": "ed275a0e6ed8f1b9c86d7e552b02b9e2ac26b77a312811784996b69f13b24efe",
+    "boot_verified": true,
+    "version": "3.7.0_9-0",
+    "inspection_report_sha256": "7748adfe2cb8277c4a37b28b11dd4252307a9930be8db9d3b0867aca275a35d1",
+    "kernel": "4.4.23+",
+    "architecture": "aarch64",
+    "selinux": "Enforcing"
+  },
+  "bootloader": {
+    "reported_unlocked": true,
+    "verified_unlocked": true,
+    "mode": "recovery-adb",
+    "usb_transport_observed": true,
+    "query_status": "confirmed-after-usb-reset",
+    "frp_screen_status": null,
+    "usb_product": "Fastboot2.0",
+    "usb_vendor_id": "0x18d1",
+    "usb_product_id": "0xd00d"
+  },
+  "native_boot": {
+    "status": "native-anko-eight-core-services-verified",
+    "method": "direct-unlocked-huawei-bootloader",
+    "entry_el": 1,
+    "load_base": "0x00480000",
+    "text_offset": "0x00080000",
+    "ram_regions": null,
+    "uart": {
+      "source": "captured /aliases/serial0 and stock bootargs",
+      "base": "0xfdf02000",
+      "native_access_verified": false
+    },
+    "interrupt_controller": {
+      "kind": "GICv2",
+      "distributor": "0xe82b1000",
+      "cpu_interface": "0xe82b2000",
+      "native_access_verified": true
+    },
+    "timer_irq": 30,
+    "handoff_verified": true,
+    "recovery_return_verified": true,
+    "blocker": "Native eight-core EL1 Anko, MMU, timer IRQs/IPIs, init, signed MXB, eight pinned Ressha workers and service readiness are verified. Correct native red/blue/green LED sequence is physically confirmed. Framebuffer, native USB and longer-running stability remain unverified.",
+    "allocator_first_bank_limit_bytes": 134217728,
+    "native_image_sha256": "104514e6eac19ae1a7a8f0030e24fdb27c87fc641e454be283aae7c2e5063bcf",
+    "temporary_fastboot_boot": "unsupported-command-not-allowed",
+    "flash_acknowledged": true,
+    "reboot_acknowledged": true,
+    "stock_kernel_restore_required": false,
+    "persistent_console": {
+      "base": "0x34860000",
+      "bytes": 524288,
+      "source": "runtime DTB and stock ramoops module parameters",
+      "retention_verified": true,
+      "retention_evidence": "Five identical 2916-byte AMEANKO1 traces recovered after the full kernel reset at service readiness, stock restoration and TWRP startup; earlier five AMEFL6 probe records also retained."
+    },
+    "first_anko_test": "inconclusive; stock kernel restored and verified; persistent log empty",
+    "entry_probe_image_sha256": "c4189801a41ea090619297161697c55a2ad298497f488b64978d801d9922c975",
+    "entry_probe_result": "no visible output; stock kernel restored and exact partition checksum verified; TWRP working",
+    "avb_packaging": {
+      "stock_effective_partition_bytes": 25161728,
+      "physical_partition_bytes": 25165824,
+      "footer_offset": "0x017fefc0",
+      "development_signature_locally_verified": true,
+      "first_two_test_images_omitted_avb": true,
+      "bootloader_acceptance_verified": true
+    },
+    "avb_entry_probe_image_sha256": "5310e1efee4f624cdc39bbd11aa8df7bfce0f36f7478ded114b37a0f6a8eb119",
+    "avb_entry_probe_result": "stuck on unlocked bootloader splash; original kernel checksum and TWRP boot verified afterward",
+    "probe_v6": {
+      "native_image_sha256": "f3a0279d583881666d8dd6c902b5a2ea6e25ec6208b1c716e0ad9f3593d64e91",
+      "execution_verified": true,
+      "physical_led_observation": "red, purple, purple, reboot",
+      "hold_durations_seconds": {
+        "red": 3.0001057291666666,
+        "blue_stage": 3.00010625,
+        "green_stage": 3.0001046875
+      },
+      "recorded_fault": false,
+      "reset_notes": 1,
+      "persistent_record_copies": 5,
+      "framebuffer_result": "paint=skip",
+      "counter_hz": 1920000,
+      "cntfrq_reported_hz": 16384,
+      "stock_restore_verified": true
+    },
+    "full_anko_trace_v1": {
+      "native_image_sha256": "71beeb1cb359aa9d20c67542fee21079d2109f6dfc2282b21a3573f1c64a17bd",
+      "physical_led_observation": "red, purple for a while, then purple again but stays there",
+      "requested_stage_locations": {
+        "red": "entry",
+        "blue": "kernel_main",
+        "green": "scheduler.enter"
+      },
+      "persistent_record_copies": 0,
+      "dfx_record_found": false,
+      "fault_confirmed": false,
+      "stock_restore_verified": true,
+      "next_capture_seconds": 10
+    },
+    "full_anko_trace_v2": {
+      "native_image_sha256": "104514e6eac19ae1a7a8f0030e24fdb27c87fc641e454be283aae7c2e5063bcf",
+      "kernel_elf_sha256": "97ba9597c55eece1030fd54329b4200f9f31b57c1ec8654e7b6fab73fb63363e",
+      "execution_verified": true,
+      "entry_el": 1,
+      "mmu_enable_verified": true,
+      "first_timer_irq_verified": true,
+      "init_el0_verified": true,
+      "signed_bundle_authenticated": true,
+      "services": [
+        "nameservice",
+        "io.console"
+      ],
+      "services_ready_verified": true,
+      "last_checkpoint": 36,
+      "persistent_record_copies": 5,
+      "record_bytes": 2916,
+      "identical_copies": true,
+      "kernel_faults": 0,
+      "userspace_faults": 0,
+      "panics": 0,
+      "capture_reset_reason": "services.ready",
+      "counter_hz": 1920000,
+      "stock_restore_verified": true,
+      "test_scope": "one-core bounded startup capture; longer-running stability, framebuffer and USB remain untested"
+    },
+    "normal_logged_package": {
+      "path": "out/anne-native-smp-led-package-v3",
+      "native_image_sha256": "476fbe9790ea6579d01b272481b1fa5ff74f93f1c9aecbaf695d1fd05053ab63",
+      "capture_seconds": 0,
+      "host_cpu_capacity": 8,
+      "services": [
+        "nameservice",
+        "io.console"
+      ],
+      "flashed": false,
+      "physical_green_verified": true,
+      "verification_scope": "same LED code physically verified in the v3 bounded SMP capture; exact normal image remains unflashed"
+    },
+    "smp_capture_v2": {
+      "package": "out/anne-smp-capture-package-v2",
+      "native_image_sha256": "22c047bdb2f5a495513ac61685c0581950ad373bdcde5e928e4462f8434ab332",
+      "entry_el": 1,
+      "online_cpus": 8,
+      "online_mask": "ff",
+      "physical_affinities": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "100",
+        "101",
+        "102",
+        "103"
+      ],
+      "psci_cpu_on_successes": 7,
+      "pinned_worker_assignments_verified": 8,
+      "per_core_timer_and_ipi_verified": true,
+      "services_ready_verified": true,
+      "persistent_record_copies": 5,
+      "kernel_faults": 0,
+      "userspace_faults": 0,
+      "panics": 0,
+      "capture_reset_reason": "services.ready",
+      "physical_led_observation": "red, purple, purple, reboot",
+      "stock_restore_verified": true,
+      "scope": "bounded native startup and eight pinned workers; long-term stability unverified"
+    },
+    "normal_logged_package_previous": {
+      "path": "out/anne-native-logged-package",
+      "native_image_sha256": "609ea9ef8cc68915573e900b825fba3fdeb7b62288a8171e3f60cc93e1e09c0a",
+      "capture_seconds": 0,
+      "flashed": false
+    },
+    "led_fix_capture_v3": {
+      "package": "out/anne-smp-capture-package-v3",
+      "native_image_sha256": "29b68ea01c854587c51693dd2c348f86921c209ceb6a5d580c0c4bbc2cff728d",
+      "physical_led_observation": "red, blue, green, reboot",
+      "green_at": "services.ready",
+      "native_green_verified": true,
+      "output_control_low_bits": 0,
+      "stock_restore_verified": true,
+      "persistent_record_copies": 0,
+      "readback_result": "No AMEANKO1 record retained; physical LED confirmation succeeded"
+    }
+  },
+  "observed_hardware": {
+    "source": "captured running recovery DTB and Linux sysfs; register access by Anko untested",
+    "dtb_sha256": "0052d5d005e2cac6212f22fe616a669eba5f562eb78dcc29a82ea0668febb517",
+    "ram_banks": [
+      {
+        "base": "0x00400000",
+        "size": "0x7fc00000"
+      },
+      {
+        "base": "0x80000000",
+        "size": "0x60000000"
+      },
+      {
+        "base": "0x100000000",
+        "size": "0x20000000"
+      }
+    ],
+    "ram_reservations_applied": false,
+    "gic": {
+      "compatible": "arm,cortex-a9-gic",
+      "distributor": "0xe82b1000",
+      "cpu_interface": "0xe82b2000"
+    },
+    "timer": {
+      "compatible": "arm,armv8-timer",
+      "clock_hz": 1920000,
+      "nonsecure_physical_irq": 30
+    },
+    "psci_method": "smc",
+    "framebuffer": {
+      "name": "hisifb0",
+      "virtual_width": 1080,
+      "virtual_height": 4560,
+      "stride_bytes": 4320,
+      "bits_per_pixel": 32,
+      "physical_address": null
+    },
+    "input": {
+      "touch": "huawei,ts_kit",
+      "volume_keys": "hisi_gpio_key",
+      "power": "hisi_on"
+    },
+    "panel_model": "BOE_OTM1911A 5P84 VIDEO TFT 1080 x 2280"
+  },
+  "recovery_evaluation": {
+    "execution": "qemu-tcg-in-twrp",
+    "qemu_version": "10.0.0",
+    "guest_board": "qemu-virt",
+    "mochi_profile": "huawei-anne",
+    "entry_el": 1,
+    "services_ready": true,
+    "emulator_stopped": true,
+    "display": "headless",
+    "log_sha256": "e42025ddd5c7bec2af4c996efe62410a51843b1683c06ccc21ef5a7e2dca4fe9",
+    "result_sha256": "94d9efda16f71089df2d5dbc28059d9f43f8ea8e60c8562bfd3203c5967bdf4d"
+  },
+  "boot_backups": {
+    "scope": [
+      "kernel",
+      "ramdisk",
+      "recovery_ramdisk",
+      "dts"
+    ],
+    "manifest_sha256": "14f167b52a99fba1db824a46f68d82d8c476c89dc5fc507eea846048a22913ef",
+    "original_pre_twrp_recovery_available": false
+  }
+}

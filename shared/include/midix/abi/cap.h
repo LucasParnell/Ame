@@ -40,6 +40,13 @@ struct MxCapInfo {
 };
 static_assert(sizeof(MxCapInfo) == 40, "MxCapInfo must stay small");
 
+// CAP_ARENA's attr reports the actual CPU memory type. Ordering barriers do
+// not make a write-back arena suitable for a non-coherent DMA engine.
+enum MxArenaMemoryAttr : mx_u32_t {
+    MX_ARENA_MEMORY_WRITE_BACK = 0,
+    MX_ARENA_MEMORY_NONCACHEABLE = 1,
+};
+
 enum MxRights : mx_rights_t {
     MX_RIGHT_READ     = 1u << 0,
     MX_RIGHT_WRITE    = 1u << 1,

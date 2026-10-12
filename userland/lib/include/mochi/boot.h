@@ -8,12 +8,13 @@
 #include "libk/str.h"
 #include "midix/abi/boot.h"
 #include "midix/abi/cap.h"
-#include "mochi/ring.h"
+#include "mochi/endpoint.h"
+#include "mochi/va_layout.h"
 #include "mochi/syscall.h"
 
 namespace mochi::boot {
 
-constexpr mx_vaddr_t kDefaultBootInfoVa = 0x1000'0000ull;
+constexpr mx_vaddr_t kDefaultBootInfoVa = va::kBootInfo;
 
 constexpr CapHandle cap_slot(uint32_t idx) {
     return (static_cast<CapHandle>(1) << 32) | idx;
@@ -35,14 +36,7 @@ static inline bool valid(const MxBootInfo* info) {
         return false;
     }
     for (uint16_t i = 0; i < info->entry_count; ++i) {
-        bool terminated = false;
-        for (uint32_t n = 0; n < MX_BOOT_NAME_MAX; ++n) {
-            if (!info->entries[i].name[n]) {
-                terminated = true;
-                break;
-            }
-        }
-        if (!terminated) {
+        if (libk::str::length_n(info->entries[i].name, MX_BOOT_NAME_MAX) == MX_BOOT_NAME_MAX) {
             return false;
         }
         for (uint16_t j = 0; j < i; ++j) {
@@ -118,11 +112,42 @@ static inline RingPage* map_ring(const MxBootInfo* info, const char* name, mx_va
                                  uint32_t default_order, uint32_t* order_out = nullptr) {
     const MxBootEntry* entry = find_type(info, name, MX_BOOT_ENTRY_RING);
     if (!entry || entry->handle == MX_NULL_HANDLE) return nullptr;
+    const auto order = entry->aux0 ? entry->aux0 : default_order;
+    if (order >= sizeof(mx_u32_t) * 8) return nullptr;
     if (mx_map_page(entry->handle, va, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) return nullptr;
-    if (order_out) {
-        *order_out = entry->aux0 ? static_cast<uint32_t>(entry->aux0) : default_order;
-    }
+    if (order_out) *order_out = static_cast<uint32_t>(order);
     return reinterpret_cast<RingPage*>(va);
+}
+
+// Declarative mapping inputs; addresses and protocol names remain service policy.
+struct RingMapping {
+    const char* name;
+    mx_vaddr_t address;
+    const char* doorbell;
+    uint32_t default_order = MX_DEFAULT_RING_ORDER;
+};
+
+inline Ring map_ring(const MxBootInfo* info, const RingMapping& mapping) {
+    Ring result{};
+    result.doorbell = handle(info, mapping.doorbell);
+    result.ring = map_ring(info, mapping.name, mapping.address,
+                           mapping.default_order, &result.order);
+    return result;
+}
+
+// Map both halves, requiring the one geometry SpscEndpoint represents. On
+// partial failure release only mappings created here and return an empty view.
+inline SpscEndpoint map_endpoint(const MxBootInfo* info, const RingMapping& tx_spec,
+                                 const RingMapping& rx_spec) {
+    if (tx_spec.address == rx_spec.address) return {};
+    const Ring tx = map_ring(info, tx_spec);
+    const Ring rx = map_ring(info, rx_spec);
+    if (tx.valid() && rx.valid() && tx.order == rx.order && tx.doorbell && rx.doorbell) {
+        return {tx.ring, rx.ring, tx.order, tx.doorbell, rx.doorbell};
+    }
+    if (tx.ring) (void)sys_unmap_page(tx_spec.address);
+    if (rx.ring) (void)sys_unmap_page(rx_spec.address);
+    return {};
 }
 
 // Services publish readiness only after their endpoints and local state exist.

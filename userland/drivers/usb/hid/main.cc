@@ -13,79 +13,32 @@
 #include "mochi/boot_log.h"
 #include "mochi/input.h"
 #include "mochi/usb.h"
+#include "midix/usb/hid_boot.h"
 #include "mochi/va_layout.h"
 
 using namespace mochi::va::hid;
-constexpr uint32_t kRingOrder = MX_DEFAULT_RING_ORDER;
 
 static mochi::usb::BootKeyboardReportSource g_xhci{};
 static mochi::input::EventSink g_input{};
-static UsbBootKeyboardReport g_prev{};
+static midix::usb::BootKeyboardDecoder g_decoder{};
 
-static bool key_present(const uint8_t keys[6], uint8_t key) {
-    if (key == 0 || key == 1) return true;
-    for (uint32_t i = 0; i < 6; ++i) {
-        if (keys[i] == key) return true;
+static void drain_input() {
+    while (const auto* event = g_decoder.event()) {
+        if (!g_input.try_send(*event)) return;
+#ifdef MOCHI_USB_TRACE_INPUT
+        mochi::log_counter(event->type == INPUT_KEY_DOWN ? "usb.hid.key_down" : "usb.hid.key_up", event->keycode);
+#endif
+        (void)g_decoder.advance();
     }
-    return false;
-}
-
-static bool send_input_event(uint32_t type, uint32_t keycode,
-                             uint32_t modifiers, uint32_t unicode) {
-    const InputEvent event{type, keycode, modifiers, unicode};
-    return g_input.send_spinning(event);
-}
-
-static void emit_modifier_changes(uint8_t prev, uint8_t current) {
-    const uint8_t changed = static_cast<uint8_t>(prev ^ current);
-    for (uint32_t bit = 0; bit < 8; ++bit) {
-        const uint8_t mask = static_cast<uint8_t>(1u << bit);
-        if ((changed & mask) == 0) continue;
-        const uint32_t type = (current & mask) ? INPUT_KEY_DOWN : INPUT_KEY_UP;
-        (void)send_input_event(type, 0xE0u + bit, current, 0);
-    }
-}
-
-static void handle_report(const UsbBootKeyboardReport& report) {
-    emit_modifier_changes(g_prev.modifiers, report.modifiers);
-
-    for (uint32_t i = 0; i < 6; ++i) {
-        const uint8_t key = g_prev.keys[i];
-        if (key != 0 && key != 1 && !key_present(report.keys, key)) {
-            (void)send_input_event(INPUT_KEY_UP, key, report.modifiers, 0);
-        }
-    }
-
-    for (uint32_t i = 0; i < 6; ++i) {
-        const uint8_t key = report.keys[i];
-        if (key == 0 || key == 1 || key_present(g_prev.keys, key)) continue;
-        (void)send_input_event(INPUT_KEY_DOWN, key, report.modifiers, 0);
-    }
-
-    g_prev = report;
 }
 
 extern "C" [[noreturn]] void _start() {
     MxBootInfo* boot = mochi::boot::map(kVaBootInfo);
     (void)mochi::log_map_from_boot(boot, kVaLogRing, "drv.usb.hid");
 
-    const mx_handle_t xhci_ring = mochi::boot::handle(boot, "xhci.hid.ring");
-    if (xhci_ring != MX_NULL_HANDLE &&
-        mx_map_page(xhci_ring, kVaXhciRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        g_xhci.ring = reinterpret_cast<RingPage*>(kVaXhciRing);
-    }
-    g_xhci.order = kRingOrder;
-    g_xhci.doorbell = mochi::boot::handle(boot, "xhci.hid.doorbell");
+    g_xhci = {mochi::boot::map_ring(boot, {"xhci.hid.ring", kVaXhciRing, "xhci.hid.doorbell"})};
 
-    const mx_handle_t input_ring = mochi::boot::handle(boot, "hid.input.ring");
-    if (input_ring != MX_NULL_HANDLE &&
-        mx_map_page(input_ring, kVaInputRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        g_input.ring = reinterpret_cast<RingPage*>(kVaInputRing);
-    }
-    g_input.order = kRingOrder;
-    g_input.doorbell = mochi::boot::handle(boot, "hid.input.doorbell");
+    g_input = {mochi::boot::map_ring(boot, {"hid.input.ring", kVaInputRing, "hid.input.doorbell"})};
 
     mochi::log_raw_marker("drv.usb.hid: ready\n");
 
@@ -97,11 +50,16 @@ extern "C" [[noreturn]] void _start() {
         }
 
         UsbBootKeyboardReport report{};
-        while (g_xhci.try_read(&report)) {
-            handle_report(report);
+        drain_input();
+        if (g_decoder.pending()) { mx_yield(); continue; }
+        while (!g_decoder.pending() && g_xhci.try_read(&report)) {
+            (void)g_decoder.prepare(libk::as_bytes(&report, sizeof(report)));
+            drain_input();
         }
+        if (g_decoder.pending()) { mx_yield(); continue; }
         if (g_xhci.wait_read(&report)) {
-            handle_report(report);
+            (void)g_decoder.prepare(libk::as_bytes(&report, sizeof(report)));
+            drain_input();
         } else {
             mx_yield();
         }

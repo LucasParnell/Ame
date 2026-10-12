@@ -7,7 +7,7 @@
 // through the nameservice and enumerates the filesystem root.
 //
 // It is registered with mochi_service(app.hello ...) in userland/CMakeLists.txt
-// and listed in userland/manifest.v0, so its startup is observable in the boot
+// and listed in userland/system.json, so its startup is observable in the boot
 // log as `[I] app.hello: example application ready`.
 
 #include "mochi/arena.h"
@@ -36,28 +36,15 @@ constexpr uint32_t kWaitSpins = 200000;
 // sys_arena_register (architecture §8) and only then sub-allocates from it.
 alignas(4096) unsigned char g_arena_mem[4096];
 
-// Build an SPSC endpoint from the BootInfo names a manifest session grants.
-static bool wire(const MxBootInfo* boot,
-                 const char* tx_name, mx_vaddr_t tx_va,
-                 const char* rx_name, mx_vaddr_t rx_va,
-                 const char* tx_db_name, const char* rx_db_name,
-                 mochi::SpscEndpoint* out) {
-    uint32_t order = MX_DEFAULT_RING_ORDER;
-    RingPage* tx = mochi::boot::map_ring(boot, tx_name, tx_va, MX_DEFAULT_RING_ORDER, &order);
-    RingPage* rx = mochi::boot::map_ring(boot, rx_name, rx_va, MX_DEFAULT_RING_ORDER, nullptr);
-    const mx_handle_t tx_db = mochi::boot::handle(boot, tx_db_name);
-    const mx_handle_t rx_db = mochi::boot::handle(boot, rx_db_name);
-    if (!tx || !rx || tx_db == MX_NULL_HANDLE || rx_db == MX_NULL_HANDLE) return false;
-    *out = mochi::SpscEndpoint{tx, rx, order, tx_db, rx_db};
-    return out->valid();
-}
-
 static bool nameservice_resolve(const mochi::SpscEndpoint& ns, const char* name) {
     if (!mochi::nameservice::try_resolve_request(ns, name)) return false;
     RingSlot slot{};
     for (uint32_t spins = 0; spins < kWaitSpins; ++spins) {
         if (ns.try_recv(&slot)) {
-            if (slot.type == MSG_NS_RESOLVE_REPLY) return true;
+            MxEndpointDesc endpoint{};
+            if (mochi::message_get(slot, &endpoint, MSG_NS_RESOLVE_REPLY)) {
+                return endpoint.magic == MX_ENDPOINT_MAGIC && endpoint.version == MX_ENDPOINT_VERSION;
+            }
             if (slot.type == MSG_NS_ERROR) return false;
         }
         sys_yield();
@@ -72,10 +59,8 @@ static uint32_t fs_root_entry_count(const mochi::SpscEndpoint& fs) {
     RingSlot slot{};
     for (uint32_t spins = 0; spins < kWaitSpins; ++spins) {
         if (fs.try_recv(&slot)) {
-            if (slot.type == FS_READDIR_REPLY && slot.length >= sizeof(FsReaddirReply)) {
-                FsReaddirReply reply{};
-                (void)libk::copy_n(libk::as_bytes(&reply, sizeof(reply)),
-                                   libk::as_bytes(slot.payload, sizeof(reply)), sizeof(reply));
+            FsReaddirReply reply{};
+            if (mochi::message_get(slot, &reply, FS_READDIR_REPLY)) {
                 return reply.status == MX_OK ? reply.entry_count : 0;
             }
             if (slot.type == FS_ERROR) return 0;
@@ -97,7 +82,11 @@ extern "C" [[noreturn]] void _start() {
     // Demonstrate arena-backed allocation: register the region with the kernel
     // (so it is a snapshot-accounted arena, not ambient memory), then
     // sub-allocate the example's scratch from it.
-    (void)sys_arena_register(reinterpret_cast<uint64_t>(g_arena_mem), sizeof(g_arena_mem), 0);
+    if (sys_arena_register(reinterpret_cast<uint64_t>(g_arena_mem), sizeof(g_arena_mem), 0) < 0) {
+        mochi::log_write(mochi::LogLevel::Error, "arena registration failed\n");
+        mx_exit(MX_ERR_NOMEM);
+        while (true) mx_yield();
+    }
     mochi::Arena arena(g_arena_mem, sizeof(g_arena_mem));
     if (char* line = arena.alloc<char>(64)) {
         (void)libk::str::copy_into(line, 64, "arena: scratch from a registered region\n");
@@ -106,17 +95,18 @@ extern "C" [[noreturn]] void _start() {
 
     // Declared `uses` session: nameservice.  Resolve a peer, then log whether
     // the round trip succeeded.  Failure is reported, not fatal.
-    mochi::SpscEndpoint ns{};
-    const bool ns_wired = wire(boot, "ns.tx", kVaNsTx, "ns.rx", kVaNsRx,
-                               "ns.server.db", "ns.reply.db", &ns);
+    const auto ns = mochi::boot::map_endpoint(boot,
+        {"ns.tx", kVaNsTx, "ns.server.db"}, {"ns.rx", kVaNsRx, "ns.reply.db"});
+    const bool ns_wired = ns.valid();
     mochi::log_raw_marker(ns_wired && nameservice_resolve(ns, "io.fs")
         ? "nameservice: resolved io.fs\n"
         : "nameservice: session unavailable\n");
 
     // Declared `uses` session: io.fs.  Enumerate the root directory.
-    mochi::SpscEndpoint fs_session{};
-    if (wire(boot, "fs.cmd.ring", kVaFsTx, "fs.reply.ring", kVaFsRx,
-             "fs.cmd.doorbell", "fs.reply.doorbell", &fs_session)) {
+    const auto fs_session = mochi::boot::map_endpoint(boot,
+        {"fs.cmd.ring", kVaFsTx, "fs.cmd.doorbell"},
+        {"fs.reply.ring", kVaFsRx, "fs.reply.doorbell"});
+    if (fs_session.valid()) {
         mochi::log_counter("metric.app.hello.root.entries", fs_root_entry_count(fs_session));
     } else {
         mochi::log_raw_marker("fs: session unavailable\n");

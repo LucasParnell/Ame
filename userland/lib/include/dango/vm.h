@@ -1,4 +1,5 @@
 #pragma once
+#include "midix/abi/vm.h"
 
 #include <cstdint>
 #include "midix/abi/status.h"
@@ -120,88 +121,20 @@ enum VcpuExitReason : uint32_t {
     VCPU_EXIT_HOST_PREEMPTED = 6,
 };
 
-struct VcpuRunBudget {
-    uint64_t budget_ns;
-    uint64_t deadline_ns;
-    uint32_t max_exits;
-    uint32_t flags;
-};
+using VcpuRunBudget = MxVcpuRunBudget;
 
-struct VcpuRunResult {
-    uint32_t exit_reason;
-    uint32_t exit_batch_count;
-    uint64_t last_esr;
-    uint64_t used_ns;
-};
+using VcpuRunResult = MxVcpuRunResult;
 
-struct VmInfo {
-    uint32_t vm_id;
-    uint32_t owner_pid;
-    uint32_t state;
-    uint32_t memory_count;
-    uint32_t vcpu_count;
-    uint32_t channel_count;
-    uint32_t reserved;
-    uint64_t guest_ram_bytes;
-    uint64_t mapped_regions;
-    uint64_t flags;
-    uint64_t stage2_mapped_pages;
-    // Mapping records backing those pages: far fewer than pages once RAM is
-    // block-mapped, so a caller can prove the block path is in use.
-    uint64_t stage2_mapped_records;
-    uint64_t stage2_built;
-    uint64_t stage2_active;
-};
+using VmInfo = MxVmInfo;
 
-struct VmMemoryInfo {
-    uint32_t mem_id;
-    uint32_t owner_vm_id;
-    uint32_t rights;
-    uint32_t flags;
-    uint64_t host_phys_base;
-    uint64_t host_va;
-    uint64_t size;
-    uint64_t guest_pa_base;
-    uint64_t mapped_size;
-    uint64_t mapped_stage2;
-    bool shared_staging; // MX_VM_MEMORY_FLAG_SHARED_STAGING object
-    uint8_t pad[7];
-};
+using VmMemoryInfo = MxVmMemoryInfo;
 
-struct VcpuInfo {
-    uint32_t vcpu_id;
-    uint32_t owner_vm_id;
-    uint32_t state;
-    uint32_t reserved;
-    uint64_t entry_pc;
-    uint64_t arg0;
-    uint64_t arg1;
-    uint64_t run_count;
-    uint64_t last_exit_reason;
-};
+using VcpuInfo = MxVcpuInfo;
 
-struct VmChannelInfo {
-    uint32_t channel_id;
-    uint32_t owner_vm_id;
-    uint32_t order;
-    uint32_t flags;
-    uint64_t messages_host_to_guest;
-    uint64_t messages_guest_to_host;
-    uint64_t endpoint_present_mask;
-};
+using VmChannelInfo = MxVmChannelInfo;
 
 // Phase L: geometry and DMA class of an attached shared region
 // (SYS_VM_SHARED_MEMORY_INSPECT). `dma_class` is a VM_DMA_CLASS_* value.
-struct SharedArenaInfo {
-    uint32_t shared_id;
-    uint32_t owner_vm_id;
-    uint32_t rights;
-    uint32_t flags;
-    uint64_t guest_pa_base;
-    uint64_t size;
-    uint32_t dma_class;
-    uint32_t mapped_stage2;
-    uint64_t host_phys_base;
-};
+using SharedArenaInfo = MxSharedArenaInfo;
 
 } // namespace dango

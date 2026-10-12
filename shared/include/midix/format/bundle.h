@@ -14,4 +14,6 @@ struct Bundle {
 const char* verify_bundle(const mx_u8_t* data, mx_size_t size, const mx_u8_t (*keys)[32],
                           mx_size_t key_count, Bundle& out);
 bool object(const Bundle& bundle, mx_u32_t index, MxBundleObject& out, const char*& name);
+// Structural lookup in an already authenticated bundle; no output on failure.
+bool find_object(const Bundle& bundle, const char* wanted, MxBundleObject& out);
 } // namespace midix::format

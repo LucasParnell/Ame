@@ -4,6 +4,7 @@
 
 #include "libk/bytes.h"
 #include "libk/num.h"
+#include "libk/integer.h"
 #include "libk/printf.h"
 #include "libk/str.h"
 
@@ -65,28 +66,6 @@ bool svc_exists(const char* name) {
     return false;
 }
 
-void memzero(void* p, uint64_t len) {
-    libk::fill(libk::as_bytes(p, static_cast<std::size_t>(len)), 0);
-}
-
-void copy_str(char* dst, uint32_t cap, const char* src) {
-    (void)libk::str::copy_into(dst, cap, src);
-}
-
-void append_char(char* dst, uint32_t cap, uint32_t* n, char c) {
-    if (!dst || !n || cap == 0) return;
-    if (*n + 1 < cap) {
-        dst[*n] = c;
-        ++*n;
-        dst[*n] = '\0';
-    }
-}
-
-void append_str(char* dst, uint32_t cap, uint32_t* n, const char* s) {
-    if (!s) s = "";
-    while (*s) append_char(dst, cap, n, *s++);
-}
-
 bool is_space(char c) {
     return libk::str::is_space(c);
 }
@@ -112,10 +91,6 @@ uint64_t parse_u64(const char* s, bool* ok) {
     if (ok) *ok = valid;
     return value;
 }
-
-
-
-
 
 void put_bytes(const char* data, uint32_t len) {
     if (!data || len == 0) return;
@@ -152,7 +127,7 @@ void put_status(mx_status_t s) {
     put("err(");
     if (s < 0) {
         put("-");
-        put_dec(static_cast<uint64_t>(-s));
+        put_dec(libk::magnitude(s));
     } else {
         put_dec(static_cast<uint64_t>(s));
     }

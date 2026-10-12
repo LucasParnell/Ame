@@ -13,7 +13,7 @@
 #include "midix/abi/protocols/blk.h"
 
 constexpr mx_u32_t MX_PROTOCOL_FS  = 0x46530000u; // 'FS\0\0'
-constexpr mx_u16_t MX_FS_VERSION = 1;
+constexpr mx_u16_t MX_FS_VERSION = 2;
 
 using fs_handle_t = mx_u32_t;
 using mx_cap_handle_t = mx_handle_t;
@@ -35,6 +35,22 @@ enum FsInodeClass : mx_u16_t {
     FS_CLASS_CONTENT_STORE = 1,
     FS_CLASS_USER_DATA     = 2,
 };
+
+// Access describes this session-owned handle, never Unix owner/group bits.
+// The service grants it from the parent handle, inode class, and mount policy.
+// Possessing these bits without the matching handle/session grants no authority.
+enum FsAccess : mx_u32_t {
+    FS_ACCESS_READ = 1u << 0,
+    FS_ACCESS_WRITE = 1u << 1,
+    FS_ACCESS_ENUMERATE = 1u << 2,
+    FS_ACCESS_MODIFY = 1u << 3, // create, remove, or rename directory children
+};
+
+constexpr mx_u32_t fs_handle_access(mx_u16_t type, bool writable) {
+    return type == FS_INODE_DIR
+        ? FS_ACCESS_ENUMERATE | (writable ? FS_ACCESS_MODIFY : 0u)
+        : FS_ACCESS_READ | (writable ? FS_ACCESS_WRITE : 0u);
+}
 
 enum FsExtentFlags : mx_u16_t {
     FS_EXTENT_COLD   = 1u << 0,
@@ -179,7 +195,7 @@ struct InodeLeafEntry {
     mx_u64_t size;
     mx_u64_t extent_tree_root;
     mx_u32_t nlink;
-    mx_u32_t mode;
+    mx_u32_t legacy_mode; // ignored on read; new disk records write zero
     mx_u64_t ctime_ns;
     mx_u64_t mtime_ns;
     mx_u8_t reserved[16];
@@ -255,7 +271,7 @@ struct FsOpenReply {
     mx_u64_t size;
     mx_u16_t type;
     mx_u16_t inode_class;
-    mx_u32_t mode;
+    mx_u32_t access; // FsAccess granted to the returned handle
     mx_u8_t reserved[16];
 };
 static_assert(sizeof(FsOpenReply) == 48, "FS open reply must fit one payload");
@@ -322,7 +338,7 @@ static_assert(sizeof(FsReaddirReply) == 48, "FS readdir reply must fit one paylo
 struct FsMkdirRequest {
     mx_u32_t parent_inode;
     mx_u32_t flags;
-    mx_u32_t mode;
+    mx_u32_t reserved0; // zero; access is inherited from the parent handle
     mx_u8_t name_len;
     mx_u8_t pad[3];
     char name[32];

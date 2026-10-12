@@ -16,29 +16,28 @@
 
 namespace drivers::uart {
 
-static volatile u32* g_base = reinterpret_cast<volatile u32*>(platform::kUartBase);
+static volatile u32* g_base;
 
 static void pl011_putchar(char c) {
     // Wait for TX FIFO to drain enough for one byte.
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    // Keep an unavailable serial output from blocking the persistent console.
+    u32 tries = 0;
+#endif
     while (g_base[platform::kUartFR / 4] & platform::kUartFR_TXFF) {
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+        if (++tries == 100000) return;
+#else
         // spin
+#endif
     }
     g_base[platform::kUartDR / 4] = static_cast<u32>(static_cast<unsigned char>(c));
 }
-
-// putchar kept as a non-static alias for the panic path and puts().
-void putchar(char c) { pl011_putchar(c); }
 
 static void pl011_early_init(PhysAddr base) {
     // QEMU virt already configures the PL011 (8N1, 115200). We just record
     // the base. On real hardware we will program LCR/IBRD/FBRD here.
     g_base = reinterpret_cast<volatile u32*>(base);
-}
-
-void early_init(PhysAddr base) { pl011_early_init(base); }
-
-void puts(const char* s) {
-    while (*s) putchar(*s++);
 }
 
 extern const ConsoleOps kPl011Ops = { pl011_early_init, pl011_putchar };

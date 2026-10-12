@@ -120,7 +120,7 @@ int cmd_unset(int argc, char** argv) {
     if (argc < 2) return 0;
     for (int a = 1; a < argc; ++a) {
         EnvVar* v = find_var(argv[a]);
-        if (v) memzero(v, sizeof(*v));
+        if (v) libk::zero(*v);
     }
     return 0;
 }

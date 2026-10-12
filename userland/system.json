@@ -1,0 +1,1067 @@
+{
+  "schema": 2,
+  "resources": [
+    {
+      "name": "uart",
+      "boot": "uart.mmio"
+    },
+    {
+      "name": "vm",
+      "boot": "vm.root"
+    },
+    {
+      "name": "mmio",
+      "boot": "device.mmio"
+    },
+    {
+      "name": "blk",
+      "boot": "virtio.blk"
+    },
+    {
+      "name": "shell",
+      "boot": "terminal"
+    },
+    {
+      "name": "gpu.function",
+      "boot": "gpu.function"
+    },
+    {
+      "name": "gpu.irq",
+      "boot": "gpu.irq"
+    }
+  ],
+  "channels": [
+    {
+      "name": "init_log_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "console_mirror_ring",
+      "kind": "ring",
+      "order": 10
+    },
+    {
+      "name": "console_mirror_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "ring_ping_to_pong",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "ring_pong_to_ping",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "db_pong",
+      "kind": "doorbell"
+    },
+    {
+      "name": "db_ping",
+      "kind": "doorbell"
+    },
+    {
+      "name": "db_ipc_done",
+      "kind": "doorbell"
+    },
+    {
+      "name": "ns_request_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "ns_reply_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "db_nameservice",
+      "kind": "doorbell"
+    },
+    {
+      "name": "db_ns_reply",
+      "kind": "doorbell"
+    },
+    {
+      "name": "db_dango_done",
+      "kind": "doorbell"
+    },
+    {
+      "name": "db_dango_auth_gate",
+      "kind": "doorbell"
+    },
+    {
+      "name": "db_dango_layout_done",
+      "kind": "doorbell"
+    },
+    {
+      "name": "fb_cmd_ring",
+      "kind": "ring",
+      "order": 10
+    },
+    {
+      "name": "fb_reply_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "fb_cmd_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "fb_reply_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "xhci_hid_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "xhci_hid_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "hid_input_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "hid_input_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "input_tty_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "input_tty_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "blk_req_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "blk_reply_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "blk_req_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "blk_reply_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "fs_cmd_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "fs_reply_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "fs_cmd_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "fs_reply_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "term_input_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "term_output_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "term_input_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "term_output_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "svc_ctl_req_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "svc_ctl_reply_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "svc_ctl_req_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "svc_ctl_reply_db",
+      "kind": "doorbell"
+    }
+  ],
+  "checks": [
+    {
+      "name": "ipc",
+      "service": "demo.ping"
+    },
+    {
+      "name": "blk",
+      "service": "drv.blk.virtio"
+    },
+    {
+      "name": "fs",
+      "service": "io.fs"
+    }
+  ],
+  "services": [
+    {
+      "name": "nameservice",
+      "object": "nameservice",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "never",
+      "stage": "base",
+      "start_after": [
+        "io.console"
+      ],
+      "caps": [],
+      "provides": [
+        "nameservice"
+      ],
+      "uses": [],
+      "bindings": []
+    },
+    {
+      "name": "io.console",
+      "object": "io.console",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "base",
+      "start_after": [],
+      "caps": [
+        "uart"
+      ],
+      "affinity": 1,
+      "provides": [
+        "console"
+      ],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "console_mirror_ring",
+          "name": "tty.mirror.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "console_mirror_db",
+          "name": "tty.mirror.doorbell",
+          "rights": [
+            "notify"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "demo.pong",
+      "object": "demo.pong",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "always",
+      "stage": "base",
+      "start_after": [
+        "io.console"
+      ],
+      "caps": [],
+      "affinity": 1,
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "ring_ping_to_pong",
+          "name": "ipc.rx",
+          "rights": [
+            "read",
+            "write",
+            "map",
+            "duplicate"
+          ]
+        },
+        {
+          "channel": "ring_pong_to_ping",
+          "name": "ipc.tx",
+          "rights": [
+            "read",
+            "write",
+            "map",
+            "duplicate"
+          ]
+        },
+        {
+          "channel": "db_pong",
+          "name": "ipc.self.db",
+          "rights": [
+            "wait",
+            "notify",
+            "duplicate"
+          ]
+        },
+        {
+          "channel": "db_ping",
+          "name": "ipc.peer.db",
+          "rights": [
+            "wait",
+            "notify",
+            "duplicate"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "demo.ping",
+      "object": "demo.ping",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "never",
+      "stage": "base",
+      "start_after": [
+        "nameservice",
+        "demo.pong"
+      ],
+      "caps": [],
+      "affinity": 0,
+      "provides": [],
+      "uses": [
+        "nameservice"
+      ],
+      "bindings": [
+        {
+          "channel": "ring_ping_to_pong",
+          "name": "ipc.tx",
+          "rights": [
+            "read",
+            "write",
+            "map",
+            "duplicate"
+          ]
+        },
+        {
+          "channel": "ring_pong_to_ping",
+          "name": "ipc.rx",
+          "rights": [
+            "read",
+            "write",
+            "map",
+            "duplicate"
+          ]
+        },
+        {
+          "channel": "db_pong",
+          "name": "ipc.peer.db",
+          "rights": [
+            "wait",
+            "notify",
+            "duplicate"
+          ]
+        },
+        {
+          "channel": "db_ping",
+          "name": "ipc.self.db",
+          "rights": [
+            "wait",
+            "notify",
+            "duplicate"
+          ]
+        },
+        {
+          "channel": "db_ipc_done",
+          "name": "ipc.done",
+          "rights": [
+            "notify",
+            "duplicate"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "dango.manager",
+      "object": "dango.manager",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "never",
+      "stage": "vm",
+      "start_after": [
+        "io.console"
+      ],
+      "caps": [
+        "vm",
+        "gpu.function",
+        "gpu.irq"
+      ],
+      "affinity": 1,
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "db_dango_done",
+          "name": "dango.done.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "db_dango_auth_gate",
+          "name": "dango.auth_gate.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "db_dango_layout_done",
+          "name": "dango.layout_done.db",
+          "rights": [
+            "notify"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "dango.auth_probe",
+      "object": "dango.auth_probe",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "never",
+      "stage": "vm",
+      "start_after": [
+        "dango.manager"
+      ],
+      "caps": [],
+      "affinity": 0,
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "db_dango_auth_gate",
+          "name": "dango.auth_gate.db",
+          "rights": [
+            "notify"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "io.framebuffer",
+      "object": "io.framebuffer",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "io.console"
+      ],
+      "caps": [
+        "mmio"
+      ],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "fb_cmd_ring",
+          "name": "fb.cmd.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "fb_reply_ring",
+          "name": "fb.reply.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "fb_cmd_db",
+          "name": "fb.cmd.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "fb_reply_db",
+          "name": "fb.reply.doorbell",
+          "rights": [
+            "notify"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "tty.fb0",
+      "object": "tty.fb0",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "io.framebuffer"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "fb_cmd_ring",
+          "name": "fb.cmd.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "fb_reply_ring",
+          "name": "fb.reply.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "console_mirror_ring",
+          "name": "console.mirror.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "input_tty_ring",
+          "name": "input.tty.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "term_input_ring",
+          "name": "term.input.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "term_output_ring",
+          "name": "term.output.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "fb_cmd_db",
+          "name": "fb.cmd.doorbell",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "fb_reply_db",
+          "name": "fb.reply.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "console_mirror_db",
+          "name": "console.mirror.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "input_tty_db",
+          "name": "input.tty.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "term_input_db",
+          "name": "term.input.doorbell",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "term_output_db",
+          "name": "term.output.doorbell",
+          "rights": [
+            "wait"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "drv.pci",
+      "object": "drv.pci",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "io.console"
+      ],
+      "caps": [
+        "mmio"
+      ],
+      "provides": [],
+      "uses": [],
+      "bindings": []
+    },
+    {
+      "name": "drv.usb.xhci",
+      "object": "drv.usb.xhci",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "io.console"
+      ],
+      "caps": [
+        "mmio"
+      ],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "xhci_hid_ring",
+          "name": "xhci.hid.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "xhci_hid_db",
+          "name": "xhci.hid.doorbell",
+          "rights": [
+            "notify"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "drv.usb.hid",
+      "object": "drv.usb.hid",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "drv.usb.xhci"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "xhci_hid_ring",
+          "name": "xhci.hid.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "hid_input_ring",
+          "name": "hid.input.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "xhci_hid_db",
+          "name": "xhci.hid.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "hid_input_db",
+          "name": "hid.input.doorbell",
+          "rights": [
+            "notify"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ui.input",
+      "object": "ui.input",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "drv.usb.hid"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "hid_input_ring",
+          "name": "hid.input.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "input_tty_ring",
+          "name": "input.tty.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "hid_input_db",
+          "name": "hid.input.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "input_tty_db",
+          "name": "input.tty.doorbell",
+          "rights": [
+            "notify"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "drv.blk.virtio",
+      "object": "drv.blk.virtio",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "storage",
+      "start_after": [
+        "io.console"
+      ],
+      "caps": [
+        "mmio"
+      ],
+      "provides": [
+        "blk"
+      ],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "blk_req_ring",
+          "name": "blk.req.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "blk_reply_ring",
+          "name": "blk.reply.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "blk_req_db",
+          "name": "blk.req.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "blk_reply_db",
+          "name": "blk.reply.doorbell",
+          "rights": [
+            "notify"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "io.fs",
+      "object": "io.fs",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "storage",
+      "start_after": [
+        "drv.blk.virtio"
+      ],
+      "caps": [
+        "blk"
+      ],
+      "provides": [
+        "fs"
+      ],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "blk_req_ring",
+          "name": "blk.req.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "blk_reply_ring",
+          "name": "blk.reply.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "blk_req_db",
+          "name": "blk.req.doorbell",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "blk_reply_db",
+          "name": "blk.reply.doorbell",
+          "rights": [
+            "wait"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "msh",
+      "object": "msh",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "storage",
+      "start_after": [
+        "io.fs",
+        "tty.fb0"
+      ],
+      "caps": [
+        "shell"
+      ],
+      "provides": [
+        "shell"
+      ],
+      "uses": [
+        "fs"
+      ],
+      "bindings": [
+        {
+          "channel": "term_input_ring",
+          "name": "term.input.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "term_input_db",
+          "name": "term.input.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "term_output_ring",
+          "name": "term.output.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "term_output_db",
+          "name": "term.output.doorbell",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "svc_ctl_req_ring",
+          "name": "svc.cmd.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "svc_ctl_req_db",
+          "name": "svc.cmd.doorbell",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "svc_ctl_reply_ring",
+          "name": "svc.reply.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "svc_ctl_reply_db",
+          "name": "svc.reply.doorbell",
+          "rights": [
+            "wait"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "app.hello",
+      "object": "app.hello",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "always",
+      "stage": "late",
+      "start_after": [
+        "nameservice",
+        "io.fs"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [
+        "fs",
+        "nameservice"
+      ],
+      "bindings": []
+    },
+    {
+      "name": "test.anne_smp",
+      "object": "test.anne_smp",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "never",
+      "stage": "base",
+      "start_after": [
+        "nameservice",
+        "io.console"
+      ],
+      "caps": [],
+      "affinity": 0,
+      "provides": [],
+      "uses": [],
+      "bindings": []
+    }
+  ],
+  "profiles": {
+    "qemu-virt": [
+      "nameservice",
+      "io.console",
+      "demo.pong",
+      "demo.ping",
+      "dango.manager",
+      "dango.auth_probe",
+      "io.framebuffer",
+      "tty.fb0",
+      "drv.pci",
+      "drv.usb.xhci",
+      "drv.usb.hid",
+      "ui.input",
+      "drv.blk.virtio",
+      "io.fs",
+      "msh",
+      "app.hello"
+    ],
+    "switch-t210": [
+      "nameservice",
+      "io.console",
+      "io.framebuffer",
+      "tty.fb0"
+    ],
+    "huawei-anne": [
+      "nameservice",
+      "io.console"
+    ],
+    "huawei-anne-smp": [
+      "nameservice",
+      "io.console",
+      "test.anne_smp"
+    ]
+  },
+  "endpoints": [
+    {
+      "name": "demo.ipc",
+      "rings": [
+        "ring_ping_to_pong",
+        "ring_pong_to_ping"
+      ]
+    },
+    {
+      "name": "block",
+      "rings": [
+        "blk_req_ring",
+        "blk_reply_ring"
+      ]
+    },
+    {
+      "name": "service.control",
+      "rings": [
+        "svc_ctl_req_ring",
+        "svc_ctl_reply_ring"
+      ]
+    }
+  ]
+}

@@ -1,9 +1,9 @@
 #pragma once
-// libk/str.h — bounded string helpers.
+// libk/str.h — C-string helpers with explicit destination capacities.
 //
-// C strings can overrun on a missing terminator, so the copy/compare helpers
-// here always take an explicit bound. `length`/`equal` stop at the first NUL;
-// use the `_n` forms when the text may cross a trust boundary without one.
+// length/equal/starts_with require NUL-terminated input. Use the _n forms for
+// unterminated buffers. Copy functions bound writes by the destination capacity;
+// the source must be readable up to its NUL or the stated scan limit.
 //
 // Freestanding: <cstddef> only.
 
@@ -63,7 +63,7 @@ inline bool is_ascii_printable(char c) { return c >= 32 && c <= 126; }
 
 // Copy `src` into dst[0..cap) with a NUL terminator when it fits; truncates
 // otherwise. Returns characters copied (excluding the terminator). Never writes
-// past `cap` (unless cap == 0, which writes nothing).
+// past `cap`; cap == 0 writes nothing. Reads at most cap - 1 source characters.
 inline std::size_t copy_into(char* dst, std::size_t cap, const char* src) {
     if (!dst || cap == 0) return 0;
     std::size_t i = 0;
@@ -78,11 +78,11 @@ inline std::size_t copy_into(char* dst, std::size_t cap, const char* src) {
 }
 
 // Checked replacement for strcpy: false (dst untouched) unless `src` fits with
-// its terminator.
+// its terminator. Reads at most cap source characters.
 inline bool copy_exact_fit(char* dst, std::size_t cap, const char* src) {
     if (!dst || cap == 0) return false;
-    const std::size_t n = length(src);
-    if (n + 1 > cap) return false;
+    const std::size_t n = length_n(src, cap);
+    if (n == cap) return false;
     for (std::size_t i = 0; i < n; ++i) dst[i] = src[i];
     dst[n] = '\0';
     return true;

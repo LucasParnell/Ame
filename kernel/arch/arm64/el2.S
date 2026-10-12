@@ -64,7 +64,8 @@
 .equ CTX_GUEST_AFSR0_EL1, 688
 .equ CTX_GUEST_AFSR1_EL1, 696
 
-.equ EL2_RUN_STATE_MAX_CPUS, 4
+#include "midix/abi/cpu_limits.h"
+.equ EL2_RUN_STATE_MAX_CPUS, MX_HOST_MAX_CPUS
 
 .macro EL2_VEC target
     .balign 128
@@ -72,8 +73,7 @@
 .endm
 
 .macro LOAD_EL2_RUN_STATE_SLOT slot_reg, tmp_reg
-    mrs     \tmp_reg, MPIDR_EL1
-    and     \tmp_reg, \tmp_reg, #0xff
+    mrs     \tmp_reg, TPIDR_EL2
     cmp     \tmp_reg, #EL2_RUN_STATE_MAX_CPUS
     b.lo    1f
     mov     \tmp_reg, xzr
@@ -578,7 +578,7 @@ g_el2_run_state:
 g_el2_stacks:
     // 4 CPUs * 16 KiB.  Stack top for CPU n is:
     //   g_el2_stacks + (n + 1) * 16384
-    .skip 65536
+    .skip (MX_HOST_MAX_CPUS * 16384)
 
 // Compatibility symbol: top of the whole EL2 stack area.
 .global __el2_stack_top

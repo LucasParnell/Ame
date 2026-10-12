@@ -28,7 +28,6 @@ constexpr uint32_t kCols = 128;
 constexpr uint32_t kRows = 48;
 constexpr uint32_t kCellW = 8;
 constexpr uint32_t kCellH = 16;
-constexpr uint32_t kRingOrder = MX_DEFAULT_RING_ORDER;
 constexpr uint32_t kFg = 0xE6F1FF;
 constexpr uint32_t kBg = 0x001020;
 
@@ -150,7 +149,7 @@ static void fb_draw_text_run(uint32_t row, uint32_t col, const char* data, uint3
         cmd.scale_y = 1;
         for (uint32_t i = 0; i < chunk; ++i) {
             const char ch = data[off + i];
-            cmd.text[i] = (ch >= 32 && ch <= 126) ? ch : '?';
+            cmd.text[i] = libk::str::is_ascii_printable(ch) ? ch : '?';
         }
         (void)fb_send(FB_DRAW_TEXT, &cmd, sizeof(cmd));
         off += chunk;
@@ -214,13 +213,10 @@ static void tty_newline() {
     } else {
         // Scroll: shift rows up.
         for (uint32_t r = 0; r + 1 < kRows; ++r) {
-            for (uint32_t c = 0; c < kCols; ++c) {
-                g_tty.cells[r][c] = g_tty.cells[r + 1][c];
-            }
+            (void)libk::copy_exact(libk::as_bytes(g_tty.cells[r]),
+                                    libk::as_bytes(g_tty.cells[r + 1]));
         }
-        for (uint32_t c = 0; c < kCols; ++c) {
-            g_tty.cells[kRows - 1][c] = ' ';
-        }
+        libk::fill(libk::as_bytes(g_tty.cells[kRows - 1]), ' ');
         tty_scroll_pixels_up_one_row();
     }
 }
@@ -253,12 +249,8 @@ static void tty_write_char(char ch) {
     if (g_tty.cursor_x >= kCols) tty_newline();
     const uint32_t row = g_tty.cursor_y;
     const uint32_t col = g_tty.cursor_x++;
-    g_tty.cells[row][col] = (ch >= 32 && ch <= 126) ? ch : '?';
+    g_tty.cells[row][col] = libk::str::is_ascii_printable(ch) ? ch : '?';
     fb_draw_cell(row, col);
-}
-
-static bool tty_is_printable(char ch) {
-    return ch >= 32 && ch <= 126;
 }
 
 static void tty_write_printable_run(const char* s, uint32_t len) {
@@ -275,9 +267,8 @@ static void tty_write_printable_run(const char* s, uint32_t len) {
             chunk = static_cast<uint32_t>(kFbDrawTextMaxChars);
         }
 
-        for (uint32_t i = 0; i < chunk; ++i) {
-            g_tty.cells[row][col + i] = s[off + i];
-        }
+        (void)libk::copy_n(libk::slice(libk::as_bytes(g_tty.cells[row]), col, room),
+                           libk::as_bytes(s + off, len - off), chunk);
         fb_draw_text_run(row, col, s + off, chunk);
         g_tty.cursor_x += chunk;
         off += chunk;
@@ -288,9 +279,9 @@ static void tty_write(const char* s, uint32_t len) {
     tty_cursor_hide();
     uint32_t i = 0;
     while (i < len) {
-        if (tty_is_printable(s[i])) {
+        if (libk::str::is_ascii_printable(s[i])) {
             uint32_t run = 0;
-            while ((i + run) < len && tty_is_printable(s[i + run])) ++run;
+            while ((i + run) < len && libk::str::is_ascii_printable(s[i + run])) ++run;
             tty_write_printable_run(s + i, run);
             i += run;
         } else {
@@ -431,79 +422,18 @@ extern "C" [[noreturn]] void _start() {
 
     (void)mochi::log_map_from_boot(boot, kVaLogRing, "tty.fb0");
 
-    const MxBootEntry* fb_cmd =
-        mochi::boot::find_type(boot, "fb.cmd.ring", MX_BOOT_ENTRY_RING);
-    RingPage* fb_cmd_ring = nullptr;
-    RingPage* fb_reply_ring = nullptr;
-    uint32_t fb_cmd_order = kRingOrder;
-    uint32_t fb_reply_order = kRingOrder;
-    if (fb_cmd && fb_cmd->handle != MX_NULL_HANDLE &&
-        mx_map_page(fb_cmd->handle, kVaFbCmdRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        fb_cmd_ring = reinterpret_cast<RingPage*>(kVaFbCmdRing);
-        fb_cmd_order = fb_cmd->aux0
-            ? static_cast<uint32_t>(fb_cmd->aux0)
-            : kRingOrder;
-    }
-    const MxBootEntry* fb_reply =
-        mochi::boot::find_type(boot, "fb.reply.ring", MX_BOOT_ENTRY_RING);
-    if (fb_reply && fb_reply->handle != MX_NULL_HANDLE &&
-        mx_map_page(fb_reply->handle, kVaFbReplyRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        fb_reply_ring = reinterpret_cast<RingPage*>(kVaFbReplyRing);
-        fb_reply_order = fb_reply->aux0
-            ? static_cast<uint32_t>(fb_reply->aux0)
-            : kRingOrder;
-    }
     g_fb = {
-        {fb_cmd_ring, fb_cmd_order, mochi::boot::handle(boot, "fb.cmd.doorbell")},
-        {fb_reply_ring, fb_reply_order, mochi::boot::handle(boot, "fb.reply.doorbell")},
+        mochi::boot::map_ring(boot, {"fb.cmd.ring", kVaFbCmdRing, "fb.cmd.doorbell"}),
+        mochi::boot::map_ring(boot, {"fb.reply.ring", kVaFbReplyRing, "fb.reply.doorbell"}),
     };
-
-    const MxBootEntry* mirror =
-        mochi::boot::find_type(boot, "console.mirror.ring", MX_BOOT_ENTRY_RING);
-    if (mirror && mirror->handle != MX_NULL_HANDLE &&
-        mx_map_page(mirror->handle, kVaMirrorRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        g_mirror.ring = reinterpret_cast<RingPage*>(kVaMirrorRing);
-        g_mirror.order = mirror->aux0
-            ? static_cast<uint32_t>(mirror->aux0)
-            : kRingOrder;
-    }
-    g_mirror.doorbell = mochi::boot::handle(boot, "console.mirror.doorbell");
-
-    const mx_handle_t input = mochi::boot::handle(boot, "input.tty.ring");
-    if (input != MX_NULL_HANDLE &&
-        mx_map_page(input, kVaInputRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        g_input.ring = reinterpret_cast<RingPage*>(kVaInputRing);
-    }
-    g_input.order = kRingOrder;
-    g_input.doorbell = mochi::boot::handle(boot, "input.tty.doorbell");
-
-    const MxBootEntry* shell_input =
-        mochi::boot::find_type(boot, "term.input.ring", MX_BOOT_ENTRY_RING);
-    if (shell_input && shell_input->handle != MX_NULL_HANDLE &&
-        mx_map_page(shell_input->handle, kVaShellInputRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        g_shell_input.ring = reinterpret_cast<RingPage*>(kVaShellInputRing);
-        g_shell_input.order = shell_input->aux0
-            ? static_cast<uint32_t>(shell_input->aux0)
-            : kRingOrder;
-        g_shell_input.doorbell = mochi::boot::handle(boot, "term.input.doorbell");
-    }
-
-    const MxBootEntry* shell_output =
-        mochi::boot::find_type(boot, "term.output.ring", MX_BOOT_ENTRY_RING);
-    if (shell_output && shell_output->handle != MX_NULL_HANDLE &&
-        mx_map_page(shell_output->handle, kVaShellOutputRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        g_shell_output.ring = reinterpret_cast<RingPage*>(kVaShellOutputRing);
-        g_shell_output.order = shell_output->aux0
-            ? static_cast<uint32_t>(shell_output->aux0)
-            : kRingOrder;
-        g_shell_output.doorbell = mochi::boot::handle(boot, "term.output.doorbell");
-    }
+    g_mirror = {mochi::boot::map_ring(boot,
+        {"console.mirror.ring", kVaMirrorRing, "console.mirror.doorbell"})};
+    g_input = {mochi::boot::map_ring(boot,
+        {"input.tty.ring", kVaInputRing, "input.tty.doorbell"})};
+    g_shell_input = {mochi::boot::map_ring(boot,
+        {"term.input.ring", kVaShellInputRing, "term.input.doorbell"})};
+    g_shell_output = {mochi::boot::map_ring(boot,
+        {"term.output.ring", kVaShellOutputRing, "term.output.doorbell"})};
     g_shell_attached = g_shell_input.valid() && g_shell_output.valid();
     if (g_shell_attached) {
         mochi::log_raw_marker("tty.fb0: shell terminal attached\n");
@@ -511,11 +441,7 @@ extern "C" [[noreturn]] void _start() {
         mochi::log_raw_marker("tty.fb0: shell terminal not attached; local echo fallback\n");
     }
 
-    for (uint32_t r = 0; r < kRows; ++r) {
-        for (uint32_t c = 0; c < kCols; ++c) {
-            g_tty.cells[r][c] = ' ';
-        }
-    }
+    libk::fill(libk::as_bytes(g_tty.cells), ' ');
 
     fb_clear_screen();
     mochi::log_raw_marker("tty.fb0: ready\n");

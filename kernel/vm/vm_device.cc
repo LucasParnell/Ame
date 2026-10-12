@@ -110,8 +110,18 @@ void appliance_release(void*, PhysAddr, u64) {
     // owner unpins the pages at VM teardown, after this domain is destroyed.
 }
 
-const iommu::IommuBackendOps& active_iommu_backend() {
-    return iommu::smmuv3_ready() ? iommu::smmuv3_backend() : iommu::null_backend();
+const iommu::IommuBackendOps* assignment_backend(const VmDeviceAssignment& assignment) {
+    const iommu::IommuBackendOps* backend = nullptr;
+    for (u32 i = 0; i < assignment.fn_count; ++i) {
+        const auto& fn = assignment.fns[i].info;
+        const auto* route = iommu::backend_for({static_cast<u32>(fn.segment), fn.requester_id});
+        // One domain spans only one translation controller. Multiple routed
+        // controllers need separate domains, not a shared root by assumption.
+        if (!route || (backend && (backend->ctx != route->ctx ||
+            backend->attach_stream != route->attach_stream))) return nullptr;
+        backend = route;
+    }
+    return backend;
 }
 
 // Walk the host capability list for MSI (0x05) / MSI-X (0x11) and return the
@@ -445,12 +455,14 @@ SysError step_quiesce(VmDeviceAssignment* a) {
 }
 
 SysError step_domain(VmDeviceAssignment* a) {
+    const auto* backend = assignment_backend(*a);
+    if (!backend) return E_NOTIMPL;
     iommu::IommuOwnerOps owner{};
     owner.query = appliance_owner_query;
     owner.release = appliance_release;
     owner.ctx = a;
     const SysError rc =
-        iommu::domain_create(a->authorized_object_, owner, active_iommu_backend(), &a->dma_domain);
+        iommu::domain_create(a->authorized_object_, owner, *backend, &a->dma_domain);
     if (rc != E_OK) {
         return rc;
     }
@@ -790,7 +802,8 @@ SysError device_secure_attach(Process& caller, CapHandle vm_cap, const pci::Host
         return rc;
     }
 
-    if (!iommu::smmuv3_ready()) return E_NOTIMPL;
+    if (!iommu::backend_for({static_cast<u32>(host_fn.info.segment), host_fn.info.requester_id}))
+        return E_NOTIMPL;
     if (flags & ~kAssignFlagAssignBars) return E_INVALID;
 
     // Derive the isolation group from the inventory and require the named

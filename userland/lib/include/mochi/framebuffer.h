@@ -55,18 +55,11 @@ struct Client {
     }
 
     bool try_read_info(FbInfo* out) const {
-        if (!out) return false;
-        RingSlot slot{};
-        return reply.try_pop(&slot) && message_get(slot, out, FB_INFO);
+        return reply.try_pop_msg(FB_INFO, out);
     }
 
     bool wait_read_info(FbInfo* out) const {
-        if (!out || !reply.valid()) return false;
-        for (;;) {
-            RingSlot slot{};
-            if (!reply.wait_pop(&slot)) return false;
-            if (message_get(slot, out, FB_INFO)) return true;
-        }
+        return reply.wait_pop_msg(FB_INFO, out);
     }
 };
 

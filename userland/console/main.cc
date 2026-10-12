@@ -39,7 +39,13 @@ struct Uart {
         regs[kDr] = static_cast<uint32_t>(static_cast<unsigned char>(c));
     }
     void write(const char* data, uint32_t len) const {
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+        // Initial native bring-up keeps userland logs in the persistent kernel
+        // console so they can be read after restoring the shared Huawei kernel.
+        sys_debug_puts(data, len);
+#else
         for (uint32_t i = 0; i < len; ++i) put(data[i]);
+#endif
     }
     // One line in the shared log format.
     void line(mochi::LogLevel level, const char* component, const char* msg) const {
@@ -96,6 +102,7 @@ struct EmitSlot {
     const mochi::terminal::OutputSink& mirror;
 
     void operator()(const RingSlot& slot) const {
+        if (!mochi::message_valid(slot)) return;
         const char* bytes = reinterpret_cast<const char*>(slot.payload);
         uart.write(bytes, slot.length);
         (void)mirror.try_write_bytes(bytes, slot.length);

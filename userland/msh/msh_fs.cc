@@ -53,30 +53,30 @@ static bool normalize_path(const char* input, char* out, uint32_t out_cap) {
         if (!path_collect(g.cwd, parts, &count)) return false;
     }
     if (!path_collect(input, parts, &count)) return false;
-    uint32_t n = 0;
-    append_char(out, out_cap, &n, '/');
+    libk::str::Buffer path(out, out_cap);
+    path.append('/');
     for (uint32_t i = 0; i < count; ++i) {
-        if (i != 0) append_char(out, out_cap, &n, '/');
-        append_str(out, out_cap, &n, parts[i]);
+        if (i != 0) path.append('/');
+        path.append(parts[i]);
     }
-    return n < out_cap;
+    return !path.truncated;
 }
 
 static bool split_parent_name(const char* path, char* parent, uint32_t parent_cap,
                               char* name, uint32_t name_cap) {
+    if (!parent || parent_cap == 0 || !name || name_cap == 0) return false;
     char norm[kPathMax];
     if (!normalize_path(path, norm, sizeof(norm))) return false;
     if (streq(norm, "/")) return false;
     uint32_t last = 0;
     for (uint32_t i = 0; norm[i]; ++i) if (norm[i] == '/') last = i;
     if (last == 0) {
-        copy_str(parent, parent_cap, "/");
-        copy_str(name, name_cap, norm + 1);
+        libk::str::copy_into(parent, parent_cap, "/");
+        libk::str::copy_into(name, name_cap, norm + 1);
     } else {
-        uint32_t n = 0;
-        for (uint32_t i = 0; i < last && n + 1 < parent_cap; ++i) parent[n++] = norm[i];
-        parent[n] = '\0';
-        copy_str(name, name_cap, norm + last + 1);
+        libk::str::Buffer prefix(parent, parent_cap);
+        if (!prefix.append(norm, last)) return false;
+        libk::str::copy_into(name, name_cap, norm + last + 1);
     }
     return name[0] != '\0';
 }
@@ -99,7 +99,7 @@ static void close_resolved(const ResolvedPath& r) {
 static bool resolve_normalized(const char* normalized, mx_u32_t flags, ResolvedPath* out) {
     if (!normalized || !out || !g.have_fs) return false;
     *out = {};
-    copy_str(out->normalized, sizeof(out->normalized), normalized);
+    libk::str::copy_into(out->normalized, sizeof(out->normalized), normalized);
     if (streq(normalized, "/")) {
         out->handle = kRootHandle;
         out->inode = kRootHandle;
@@ -156,24 +156,6 @@ static bool resolve_path(const char* path, mx_u32_t flags, ResolvedPath* out) {
     return resolve_normalized(norm, flags, out);
 }
 
-static bool wait_status_reply(mx_u32_t type, mx_i32_t* out) {
-    RingSlot slot{};
-    while (g.fs.ep.wait_recv(&slot)) {
-        if (slot.type == type && slot.length >= sizeof(mx_i32_t)) {
-            mx_i32_t status = MX_ERR_BAD_PROTOCOL;
-            mochi::fs::copy_bytes(&status, slot.payload, sizeof(status));
-            if (out) *out = status;
-            return true;
-        }
-        if (slot.type == FS_ERROR && slot.length >= sizeof(mx_i32_t)) {
-            mx_i32_t status = MX_ERR_BAD_PROTOCOL;
-            mochi::fs::copy_bytes(&status, slot.payload, sizeof(status));
-            if (out) *out = status;
-            return true;
-        }
-    }
-    return false;
-}
 
 int cmd_cd(int argc, char** argv) {
     if (!g.have_fs) return notimpl("cd io.fs");
@@ -189,7 +171,7 @@ int cmd_cd(int argc, char** argv) {
         return 1;
     }
     if (g.cwd_handle != 1 && g.cwd_handle != r.handle) (void)g.fs.try_close(g.cwd_handle);
-    copy_str(g.cwd, sizeof(g.cwd), r.normalized);
+    libk::str::copy_into(g.cwd, sizeof(g.cwd), r.normalized);
     g.cwd_handle = r.handle;
     set_var("PWD", g.cwd);
     return 0;
@@ -222,15 +204,20 @@ int cmd_ls(int argc, char** argv) {
         }
         RingSlot slot{};
         FsReaddirReply reply{};
+        reply.status = MX_ERR_DEAD;
         bool got = false;
         while (g.fs.ep.wait_recv(&slot)) {
-            if (slot.type == FS_READDIR_REPLY && slot.length >= sizeof(FsReaddirReply)) {
-                mochi::fs::copy_bytes(&reply, slot.payload, sizeof(reply));
+            if (mochi::message_get(slot, &reply, FS_READDIR_REPLY)) {
                 got = true;
                 break;
             }
-            if (slot.type == FS_ERROR) break;
+            if (slot.type == FS_ERROR) {
+                reply.status = MX_ERR_BAD_PROTOCOL;
+                (void)mochi::message_get(slot, &reply.status, FS_ERROR);
+                break;
+            }
         }
+        if (got && reply.name_len > sizeof(reply.name)) reply.status = MX_ERR_BAD_PROTOCOL;
         if (!got || reply.status != MX_OK) {
             put("msh: ls: "); put_status(reply.status); put("\n");
             close_resolved(r);
@@ -277,6 +264,12 @@ int cmd_cat(int argc, char** argv) {
             close_resolved(r);
             return 1;
         }
+        if (read.length_read > sizeof(read.inline_data) ||
+            !libk::checked_add(off, read.length_read, nullptr)) {
+            putln("msh: cat: invalid read range");
+            close_resolved(r);
+            return 1;
+        }
         if (read.length_read == 0) break;
         put_bytes(reinterpret_cast<const char*>(read.inline_data), read.length_read);
         off += read.length_read;
@@ -298,17 +291,17 @@ int cmd_mkdir(int argc, char** argv) {
         }
         ResolvedPath parent{};
         if (!resolve_path(parent_path, FS_OPEN_READ, &parent) || parent.type != FS_INODE_DIR) {
+            close_resolved(parent);
             put("mkdir: parent missing: "); putln(parent_path); rc = 1; continue;
         }
         FsMkdirRequest req{};
         req.parent_inode = parent.handle;
-        req.mode = 0755;
         uint32_t n = slen(name);
         if (n > sizeof(req.name)) n = sizeof(req.name);
         req.name_len = static_cast<mx_u8_t>(n);
         (void)libk::copy_n(libk::as_bytes(req.name, n), libk::as_bytes(name, n), n);
         mx_i32_t status = MX_ERR_BAD_PROTOCOL;
-        if (!g.fs.ep.send_spinning(FS_MKDIR, &req, sizeof(req)) || !wait_status_reply(FS_MKDIR_REPLY, &status)) {
+        if (!g.fs.ep.send_spinning(FS_MKDIR, &req, sizeof(req)) || !g.fs.wait_status_reply(FS_MKDIR_REPLY, &status)) {
             status = MX_ERR_BAD_PROTOCOL;
         }
         close_resolved(parent);
@@ -338,7 +331,7 @@ int cmd_rm(int argc, char** argv) {
         req.name_len = static_cast<mx_u8_t>(n);
         (void)libk::copy_n(libk::as_bytes(req.name, n), libk::as_bytes(name, n), n);
         mx_i32_t status = MX_ERR_BAD_PROTOCOL;
-        if (!g.fs.ep.send_spinning(FS_UNLINK, &req, sizeof(req)) || !wait_status_reply(FS_UNLINK_REPLY, &status)) {
+        if (!g.fs.ep.send_spinning(FS_UNLINK, &req, sizeof(req)) || !g.fs.wait_status_reply(FS_UNLINK_REPLY, &status)) {
             status = MX_ERR_BAD_PROTOCOL;
         }
         close_resolved(parent);
@@ -371,4 +364,3 @@ int cmd_touch(int argc, char** argv) {
     }
     return rc;
 }
-

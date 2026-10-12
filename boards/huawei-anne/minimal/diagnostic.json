@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "revision": 6,
+  "record_tag": "AMEFL6",
+  "counter_hz": 1920000,
+  "led_hold_seconds": 3,
+  "led_stages": ["red", "blue", "green"],
+  "fault_led": "white",
+  "reset_retry_led": "green blink",
+  "reset": "v5 LPM3 NMI pulse",
+  "readback": "Huawei DFX retained AMEFL6 records"
+}

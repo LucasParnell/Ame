@@ -15,39 +15,19 @@ Shell g{};
 char g_line[kLineMax];
 ParsedLine g_parsed{};
 
-// Map a manifest-granted endpoint: a tx/rx ring pair and their doorbells. Both
-// rings must share an order (SpscEndpoint has a single order field).
-static bool boot_map_endpoint(const MxBootInfo* boot,
-                              const char* tx_name, mx_vaddr_t tx_va, const char* tx_db,
-                              const char* rx_name, mx_vaddr_t rx_va, const char* rx_db,
-                              mochi::SpscEndpoint* out) {
-    uint32_t tx_order = kDefaultOrder;
-    uint32_t rx_order = kDefaultOrder;
-    RingPage* tx = mochi::boot::map_ring(boot, tx_name, tx_va, kDefaultOrder, &tx_order);
-    RingPage* rx = mochi::boot::map_ring(boot, rx_name, rx_va, kDefaultOrder, &rx_order);
-    const mx_handle_t tx_doorbell = mochi::boot::handle(boot, tx_db);
-    const mx_handle_t rx_doorbell = mochi::boot::handle(boot, rx_db);
-    if (!tx || !rx || tx_order != rx_order || tx_doorbell == MX_NULL_HANDLE ||
-        rx_doorbell == MX_NULL_HANDLE) {
-        return false;
-    }
-    *out = mochi::SpscEndpoint{tx, rx, tx_order, tx_doorbell, rx_doorbell};
-    return out->valid();
-}
-
 static bool boot_map_term(const MxBootInfo* boot) {
-    g.have_terminal = boot_map_endpoint(boot,
-                                        "term.output.ring", kVaTermOutput, "term.output.doorbell",
-                                        "term.input.ring", kVaTermInput, "term.input.doorbell",
-                                        &g.term.endpoint);
+    g.term.endpoint = mochi::boot::map_endpoint(boot,
+        {"term.output.ring", kVaTermOutput, "term.output.doorbell"},
+        {"term.input.ring", kVaTermInput, "term.input.doorbell"});
+    g.have_terminal = g.term.endpoint.valid();
     return g.have_terminal;
 }
 
 static bool boot_map_fs(const MxBootInfo* boot) {
-    g.have_fs = boot_map_endpoint(boot,
-                                  "fs.cmd.ring", kVaFsCmdRing, "fs.cmd.doorbell",
-                                  "fs.reply.ring", kVaFsReplyRing, "fs.reply.doorbell",
-                                  &g.fs.ep);
+    g.fs.ep = mochi::boot::map_endpoint(boot,
+        {"fs.cmd.ring", kVaFsCmdRing, "fs.cmd.doorbell"},
+        {"fs.reply.ring", kVaFsReplyRing, "fs.reply.doorbell"});
+    g.have_fs = g.fs.ep.valid();
     return g.have_fs;
 }
 
@@ -62,10 +42,10 @@ static bool boot_map_svc_registry(const MxBootInfo* boot) {
 }
 
 static bool boot_map_svcctl(const MxBootInfo* boot) {
-    g.have_svcctl = boot_map_endpoint(boot,
-                                      "svc.cmd.ring", kVaSvcCmdRing, "svc.cmd.doorbell",
-                                      "svc.reply.ring", kVaSvcReplyRing, "svc.reply.doorbell",
-                                      &g.svcctl.ep);
+    g.svcctl.ep = mochi::boot::map_endpoint(boot,
+        {"svc.cmd.ring", kVaSvcCmdRing, "svc.cmd.doorbell"},
+        {"svc.reply.ring", kVaSvcReplyRing, "svc.reply.doorbell"});
+    g.have_svcctl = g.svcctl.ep.valid();
     return g.have_svcctl;
 }
 
@@ -79,7 +59,7 @@ extern "C" [[noreturn]] void _start() {
     g.running = true;
     g.last_status = 0;
     g.cwd_handle = 1;
-    copy_str(g.cwd, sizeof(g.cwd), "/");
+    libk::str::copy_into(g.cwd, sizeof(g.cwd), "/");
     set_var("PWD", "/");
     set_var("SHELL", "msh");
 

@@ -8,41 +8,43 @@
 // transport regression.
 
 #include "dango/vulkan.h"
+#include "libk/bytes.h"
+#include "libk/integer.h"
 
 namespace dango::vk {
 namespace {
-
-// Write `n` bytes of a zeroed record body without a memcpy dependency (the
-// freestanding userland links no libc).
-void zero_range(mx_u8_t* dst, mx_u32_t n) {
-    for (mx_u32_t i = 0; i < n; ++i) dst[i] = 0;
+bool memory_range(const Memory& memory, mx_u64_t offset, mx_u64_t size, mx_u64_t* absolute) {
+    return memory.valid() && offset <= memory.size && size <= memory.size - offset &&
+           libk::checked_add(memory.arena_offset, offset, absolute) &&
+           libk::checked_add(memory.arena_offset, memory.size, nullptr);
 }
-
 } // namespace
 
 // --- CommandRecorder (the ame_remote marshalling) --------------------------
 
-mx_u8_t* CommandRecorder::reserve(mx_u32_t record_bytes) {
-    if (!region_) return nullptr;
-    const mx_u32_t aligned =
-        (size_ + (MX_VK_COMMAND_ALIGNMENT - 1)) & ~(MX_VK_COMMAND_ALIGNMENT - 1);
-    if (record_bytes == 0 || record_bytes > capacity_ || aligned > capacity_ - record_bytes) {
+mx_u8_t* CommandRecorder::reserve(mx_u32_t opcode, mx_u32_t record_bytes) {
+    mx_u64_t aligned = 0;
+    if (!region_ || (reinterpret_cast<mx_u64_t>(region_) % MX_VK_COMMAND_ALIGNMENT) != 0 ||
+        !libk::checked_align_up(size_, MX_VK_COMMAND_ALIGNMENT, &aligned) ||
+        record_bytes < sizeof(MxVkCommandHeader) || record_bytes > capacity_ ||
+        aligned > capacity_ - record_bytes) {
         overflow_ = true;
         return nullptr;
     }
-    zero_range(region_ + aligned, record_bytes);
-    size_ = aligned + record_bytes;
-    return region_ + aligned;
+    auto* record = region_ + aligned;
+    libk::zero(record, record_bytes);
+    auto* header = reinterpret_cast<MxVkCommandHeader*>(record);
+    header->opcode = opcode;
+    header->size = record_bytes;
+    size_ = static_cast<mx_u32_t>(aligned) + record_bytes;
+    return record;
 }
 
 bool CommandRecorder::fill_buffer(const Memory& dst, mx_u64_t offset, mx_u64_t size,
                                   mx_u32_t value) {
-    if (!dst.valid()) return false;
-    auto* record = reinterpret_cast<MxVkCmdFillBuffer*>(reserve(sizeof(MxVkCmdFillBuffer)));
+    if (!memory_range(dst, offset, size, nullptr)) return false;
+    auto* record = reinterpret_cast<MxVkCmdFillBuffer*>(reserve(VK_CMD_FILL_BUFFER, sizeof(MxVkCmdFillBuffer)));
     if (!record) return false;
-    record->header.opcode = VK_CMD_FILL_BUFFER;
-    record->header.size = sizeof(MxVkCmdFillBuffer);
-    record->header.flags = 0;
     record->dest_arena_offset = dst.arena_offset;
     record->offset = offset;
     record->size = size;
@@ -52,24 +54,20 @@ bool CommandRecorder::fill_buffer(const Memory& dst, mx_u64_t offset, mx_u64_t s
 
 bool CommandRecorder::copy_buffer(const Memory& src, mx_u64_t src_offset, const Memory& dst,
                                   mx_u64_t dst_offset, mx_u64_t size) {
-    if (!src.valid() || !dst.valid()) return false;
-    auto* record = reinterpret_cast<MxVkCmdCopyBuffer*>(reserve(sizeof(MxVkCmdCopyBuffer)));
+    mx_u64_t source = 0, destination = 0;
+    if (!memory_range(src, src_offset, size, &source) ||
+        !memory_range(dst, dst_offset, size, &destination)) return false;
+    auto* record = reinterpret_cast<MxVkCmdCopyBuffer*>(reserve(VK_CMD_COPY_BUFFER, sizeof(MxVkCmdCopyBuffer)));
     if (!record) return false;
-    record->header.opcode = VK_CMD_COPY_BUFFER;
-    record->header.size = sizeof(MxVkCmdCopyBuffer);
-    record->header.flags = 0;
-    record->src_arena_offset = src.arena_offset + src_offset;
-    record->dst_arena_offset = dst.arena_offset + dst_offset;
+    record->src_arena_offset = source;
+    record->dst_arena_offset = destination;
     record->size = size;
     return true;
 }
 
 bool CommandRecorder::dispatch(mx_u32_t group_x, mx_u32_t group_y, mx_u32_t group_z) {
-    auto* record = reinterpret_cast<MxVkCmdDispatch*>(reserve(sizeof(MxVkCmdDispatch)));
+    auto* record = reinterpret_cast<MxVkCmdDispatch*>(reserve(VK_CMD_DISPATCH, sizeof(MxVkCmdDispatch)));
     if (!record) return false;
-    record->header.opcode = VK_CMD_DISPATCH;
-    record->header.size = sizeof(MxVkCmdDispatch);
-    record->header.flags = 0;
     record->group_x = group_x;
     record->group_y = group_y;
     record->group_z = group_z;
@@ -77,27 +75,24 @@ bool CommandRecorder::dispatch(mx_u32_t group_x, mx_u32_t group_y, mx_u32_t grou
 }
 
 bool CommandRecorder::bind_vertex_buffer(const Memory& buffer, mx_u64_t offset) {
-    if (!buffer.valid()) return false;
+    mx_u64_t absolute = 0;
+    if (!memory_range(buffer, offset, 0, &absolute)) return false;
     auto* record =
-        reinterpret_cast<MxVkCmdBindVertexBuffer*>(reserve(sizeof(MxVkCmdBindVertexBuffer)));
+        reinterpret_cast<MxVkCmdBindVertexBuffer*>(reserve(VK_CMD_BIND_VERTEX_BUFFER, sizeof(MxVkCmdBindVertexBuffer)));
     if (!record) return false;
-    record->header.opcode = VK_CMD_BIND_VERTEX_BUFFER;
-    record->header.size = sizeof(MxVkCmdBindVertexBuffer);
-    record->header.flags = 0;
-    record->arena_offset = buffer.arena_offset + offset;
-    record->size_bytes = buffer.size;
+    record->arena_offset = absolute;
+    record->size_bytes = buffer.size - offset;
     return true;
 }
 
 bool CommandRecorder::bind_render_target(const Memory& target, mx_u32_t width, mx_u32_t height,
                                          mx_u32_t stride) {
-    if (!target.valid()) return false;
+    const mx_u64_t row_bytes = static_cast<mx_u64_t>(width) * sizeof(mx_u32_t);
+    const mx_u64_t bytes = static_cast<mx_u64_t>(stride) * height;
+    if (!width || !height || stride < row_bytes || !memory_range(target, 0, bytes, nullptr)) return false;
     auto* record =
-        reinterpret_cast<MxVkCmdBindRenderTarget*>(reserve(sizeof(MxVkCmdBindRenderTarget)));
+        reinterpret_cast<MxVkCmdBindRenderTarget*>(reserve(VK_CMD_BIND_RENDER_TARGET, sizeof(MxVkCmdBindRenderTarget)));
     if (!record) return false;
-    record->header.opcode = VK_CMD_BIND_RENDER_TARGET;
-    record->header.size = sizeof(MxVkCmdBindRenderTarget);
-    record->header.flags = 0;
     record->arena_offset = target.arena_offset;
     record->width = width;
     record->height = height;
@@ -107,11 +102,8 @@ bool CommandRecorder::bind_render_target(const Memory& target, mx_u32_t width, m
 
 bool CommandRecorder::draw(mx_u32_t vertex_count, mx_u32_t instance_count,
                            mx_u64_t color_xrgb8888) {
-    auto* record = reinterpret_cast<MxVkCmdDraw*>(reserve(sizeof(MxVkCmdDraw)));
+    auto* record = reinterpret_cast<MxVkCmdDraw*>(reserve(VK_CMD_DRAW, sizeof(MxVkCmdDraw)));
     if (!record) return false;
-    record->header.opcode = VK_CMD_DRAW;
-    record->header.size = sizeof(MxVkCmdDraw);
-    record->header.flags = 0;
     record->vertex_count = vertex_count;
     record->instance_count = instance_count;
     record->color_xrgb8888 = color_xrgb8888;
@@ -119,11 +111,8 @@ bool CommandRecorder::draw(mx_u32_t vertex_count, mx_u32_t instance_count,
 }
 
 bool CommandRecorder::pipeline_barrier() {
-    auto* record = reinterpret_cast<MxVkCommandHeader*>(reserve(sizeof(MxVkCommandHeader)));
+    auto* record = reinterpret_cast<MxVkCommandHeader*>(reserve(VK_CMD_PIPELINE_BARRIER, sizeof(MxVkCommandHeader)));
     if (!record) return false;
-    record->opcode = VK_CMD_PIPELINE_BARRIER;
-    record->size = sizeof(MxVkCommandHeader);
-    record->flags = 0;
     return true;
 }
 
@@ -131,14 +120,15 @@ bool CommandRecorder::pipeline_barrier() {
 
 bool SessionClient::call(mx_u32_t opcode, const void* payload, mx_u32_t bytes,
                          mx_u32_t expect_reply, MxVkFrame* out) {
-    if (!transport_.push || !transport_.pop) return false;
+    if (!out || !transport_.push || !transport_.pop) return false;
     MxVkFrame request{};
     mx_vk_slot_encode(&request, opcode, ++seq_, payload, bytes);
     if (!transport_.push(transport_.ctx, request)) return false;
     for (mx_u32_t spins = 0; spins < kRequestSpinLimit; ++spins) {
         MxVkFrame reply{};
         if (transport_.pop(transport_.ctx, &reply)) {
-            if (reply.type == expect_reply || reply.type == VK_SESSION_ERROR) {
+            if (reply.seq == request.seq &&
+                (reply.type == expect_reply || reply.type == VK_SESSION_ERROR)) {
                 *out = reply;
                 return true;
             }
@@ -152,6 +142,7 @@ bool SessionClient::call(mx_u32_t opcode, const void* payload, mx_u32_t bytes,
 
 bool SessionClient::open(mx_u32_t client_id, mx_u32_t arena_bytes, mx_u32_t max_objects,
                          mx_u32_t max_outstanding) {
+    if (open_ok_) return false;
     MxVkSessionOpenRequest request{};
     request.major = MX_VK_SESSION_VERSION_MAJOR;
     request.minor = MX_VK_SESSION_VERSION_MINOR;
@@ -171,7 +162,9 @@ bool SessionClient::open(mx_u32_t client_id, mx_u32_t arena_bytes, mx_u32_t max_
     if ((reply.flags & MX_VK_SESSION_FLAG_ARENA_READY) && transport_.map_arena) {
         arena_base_ = transport_.map_arena(transport_.ctx, reply.session_id, reply.arena_bytes);
     }
-    recorder_.begin(arena_base_, arena_base_ ? MX_VK_COMMAND_REGION_BYTES : 0u);
+    const mx_u32_t command_bytes = arena_bytes_ < MX_VK_COMMAND_REGION_BYTES
+        ? arena_bytes_ : MX_VK_COMMAND_REGION_BYTES;
+    recorder_.begin(arena_base_, arena_base_ ? command_bytes : 0u);
     open_ok_ = true;
     return true;
 }
@@ -182,7 +175,7 @@ bool SessionClient::close() {
     request.session_id = info_.session_id;
     MxVkSessionCloseReply reply{};
     const bool ok = call_into(VK_SESSION_CLOSE, &request, sizeof(request), VK_SESSION_CLOSE_REPLY,
-                              &reply);
+                              &reply) && reply.status == MX_OK;
     open_ok_ = false;
     arena_base_ = nullptr;
     arena_bytes_ = 0;
@@ -201,7 +194,8 @@ bool SessionClient::alloc(mx_u64_t size, mx_u32_t alignment, mx_u32_t memory_typ
     request.flags = MX_VK_MEMORY_FLAG_MAPPED;
     MxVkSessionAllocReply reply{};
     if (!call_into(VK_SESSION_ALLOC, &request, sizeof(request), VK_SESSION_ALLOC_REPLY, &reply) ||
-        reply.status != MX_OK || reply.memory_id == 0) {
+        reply.status != MX_OK || reply.memory_id == 0 ||
+        reply.arena_offset > arena_bytes_ || reply.size > arena_bytes_ - reply.arena_offset) {
         return false;
     }
     out->id = reply.memory_id;
@@ -341,7 +335,8 @@ bool SessionClient::swapchain_acquire(mx_u64_t swapchain_id, mx_u32_t* image_ind
     MxVkSwapchainAcquireReply reply{};
     if (!call_into(VK_SESSION_SWAPCHAIN_ACQUIRE, &request, sizeof(request),
                    VK_SESSION_SWAPCHAIN_ACQUIRE_REPLY, &reply) ||
-        reply.status != MX_OK) {
+        reply.status != MX_OK || reply.image_id == 0 ||
+        reply.arena_offset > arena_bytes_ || reply.image_bytes > arena_bytes_ - reply.arena_offset) {
         return false;
     }
     if (image_index) *image_index = reply.image_index;

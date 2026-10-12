@@ -17,6 +17,10 @@
 
 #include <cstdint>
 
+#include "libk/bytes.h"
+#include "libk/str.h"
+#include "libk/text.h"
+
 #include "mochi/boot.h"
 #include "mochi/boot_log.h"
 #include "mochi/terminal.h"
@@ -109,10 +113,6 @@ extern const uint32_t kBuiltinCount;
 uint32_t slen(const char* s);
 bool streq(const char* a, const char* b);
 bool starts_with(const char* s, const char* prefix);
-void memzero(void* p, uint64_t len);
-void copy_str(char* dst, uint32_t cap, const char* src);
-void append_char(char* dst, uint32_t cap, uint32_t* n, char c);
-void append_str(char* dst, uint32_t cap, uint32_t* n, const char* s);
 bool is_space(char c);
 bool is_printable(char c);
 bool is_digit(char c);

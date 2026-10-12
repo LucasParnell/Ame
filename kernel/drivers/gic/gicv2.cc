@@ -17,6 +17,7 @@
 #include "anko/hw_info.h"
 #include "anko/types.h"
 #include "anko/smp.h"
+#include "midix/abi/cpu_limits.h"
 
 namespace drivers::timer { void handle_tick(); }
 
@@ -41,6 +42,24 @@ constexpr u32 GICC_EOIR = 0x010;
 
 static volatile u32* g_dist = nullptr;
 static volatile u32* g_cpu  = nullptr;
+static u32 g_cpu_targets[MX_HOST_MAX_CPUS]{};
+
+static void record_cpu_target() {
+    u64 logical;
+    asm volatile("mrs %0, tpidr_el1" : "=r"(logical));
+    if (logical >= MX_HOST_MAX_CPUS) return;
+    u32 target = 0;
+    // SGI/PPI target bytes are banked and identify this CPU's GIC interface.
+    for (u32 i = 0; i < 8 && !target; ++i) {
+        const u32 bytes = g_dist[GICD_ITARGETSR / 4 + i];
+        target = (bytes | (bytes >> 8) | (bytes >> 16) | (bytes >> 24)) & 0xff;
+    }
+    __atomic_store_n(&g_cpu_targets[logical], target, __ATOMIC_RELEASE);
+}
+
+u32 cpu_target(u32 logical) {
+    return logical < MX_HOST_MAX_CPUS ? __atomic_load_n(&g_cpu_targets[logical], __ATOMIC_ACQUIRE) : 0;
+}
 
 void init(PhysAddr dist_base, PhysAddr cpu_base) {
     g_dist = reinterpret_cast<volatile u32*>(dist_base);
@@ -51,6 +70,7 @@ void init(PhysAddr dist_base, PhysAddr cpu_base) {
     g_cpu[GICC_PMR / 4] = 0xFF;
     g_dist[GICD_CTLR / 4] = 1;
     g_cpu[GICC_CTLR / 4] = 1;
+    record_cpu_target();
 }
 
 void init_cpu() {
@@ -58,6 +78,7 @@ void init_cpu() {
     g_cpu[GICC_CTLR / 4] = 0;
     g_cpu[GICC_PMR / 4] = 0xFF;
     g_cpu[GICC_CTLR / 4] = 1;
+    record_cpu_target();
 }
 
 void irq_enable(u32 irq_id) {
@@ -69,8 +90,10 @@ void irq_enable(u32 irq_id) {
 }
 
 void send_sgi(u32 cpu_id, u32 sgi_id) {
-    if (!g_dist || cpu_id >= 8 || sgi_id >= 16) return;
-    g_dist[GICD_SGIR / 4] = (1u << (16 + cpu_id)) | (sgi_id & 0xFu);
+    const u32 target = cpu_target(cpu_id);
+    if (!g_dist || !target || sgi_id >= 16) return;
+    asm volatile("dsb ishst" ::: "memory");
+    g_dist[GICD_SGIR / 4] = (target << 16) | (sgi_id & 0xFu);
 }
 
 // --- GICv2 SPI programming (drivers for the irq binding table, see anko/irq.h) --

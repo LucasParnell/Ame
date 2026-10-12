@@ -64,6 +64,8 @@ inline void write_begin(RegistryPage* page) {
     mx_u64_t gen = __atomic_load_n(&page->generation, __ATOMIC_RELAXED);
     if ((gen & 1u) == 0) ++gen;
     __atomic_store_n(&page->generation, gen, __ATOMIC_RELEASE);
+    // Publish odd before any following registry stores become visible.
+    __atomic_thread_fence(__ATOMIC_RELEASE);
 }
 
 inline void write_end(RegistryPage* page) {

@@ -10,6 +10,7 @@
 #include "anko/cap.h"
 #include "anko/mm.h"
 #include "anko/syscall.h"
+#include "midix/abi/cpu_limits.h"
 
 // ---------------------------------------------------------------------------
 // Legacy priority levels — kept for thread_create API compatibility.
@@ -207,7 +208,7 @@ static_assert(__is_trivially_constructible(FairThreadQueue));
 // ---------------------------------------------------------------------------
 constexpr u32 kMaxPrincipals = 64;
 constexpr u32 kMaxRtPrio     = 16;
-constexpr u32 kMaxCpus       = 4;
+constexpr u32 kMaxCpus       = MX_HOST_MAX_CPUS;
 constexpr u32 kInvalidCpu    = ~0u;
 constexpr u32 NICE_0_WEIGHT  = 1024;
 
@@ -563,6 +564,7 @@ void collect_terminations(Eki& eki, Thread* protected_thread = nullptr);
 // ---------------------------------------------------------------------------
 u32  current_cpu_id();
 u32  online_cpu_count();
+u64  online_cpu_mask();
 void set_online_cpu_count(u32 count);
 void mark_cpu_online(u32 cpu_id);
 void note_ipi_sent(u32 cpu_id);
@@ -582,6 +584,7 @@ u64 yield_count();
 u64 block_switch_count();
 u64 timer_preempt_count();
 u64 cpu_timer_preempt_count(u32 cpu_id);
+u64 cpu_ipi_handled_count(u32 cpu_id);
 u64 exit_switch_count();
 u64 local_wake_count();
 u64 remote_wake_count();

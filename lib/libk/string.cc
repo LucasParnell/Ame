@@ -6,6 +6,7 @@
 
 #include "libk/string.h"
 #include "libk/str.h"
+#include "libk/bytes.h"
 
 namespace libk {
 
@@ -81,13 +82,6 @@ extern "C" void* memcpy(void* dst, const void* src, size_t n)    { return libk::
 extern "C" int   memcmp(const void* a, const void* b, size_t n)  { return libk::memcmp(a, b, n); }
 
 extern "C" void* memmove(void* dst, const void* src, size_t n) {
-    auto* d = static_cast<unsigned char*>(dst);
-    auto* s = static_cast<const unsigned char*>(src);
-    if (d == s || n == 0) return dst;
-    if (d < s) {
-        for (size_t i = 0; i < n; ++i) d[i] = s[i];
-    } else {
-        for (size_t i = n; i-- > 0; ) d[i] = s[i];
-    }
+    (void)libk::move_n(libk::as_bytes(dst, n), libk::as_bytes(src, n), n);
     return dst;
 }

@@ -7,10 +7,6 @@
 #include "anko/hw_info.h"
 #include "anko/platform.h"
 
-// board_fallback.cc (compiled from boards/<ANKO_BOARD>/board_fallback.cc)
-// provides get_board_fallback().
-namespace platform { const HwInfo& get_board_fallback(); }
-
 HwInfo g_hw = [] {
     const HwInfo& fb = platform::get_board_fallback();
     return fb;

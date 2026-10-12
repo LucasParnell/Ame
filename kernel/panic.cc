@@ -15,6 +15,9 @@
 #include "anko/log.h"
 #include "anko/types.h"
 #include "anko/arm64_esr.h"
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+#include "boot_diagnostics.h"
+#endif
 
 #include <cstdarg>
 
@@ -119,6 +122,9 @@ static void claim_or_park() {
 // takes a lock, allocates, or calls the log ring: the report reaches the UART
 // through log::panic_dump only.
 [[noreturn]] static void halt_and_report(const char* reason, u64 fp) {
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    anne::boot_log_panic(reason);
+#endif
     g_report.title  = "KERNEL PANIC";
     g_report.reason = reason ? reason : "unknown";
     {
@@ -160,6 +166,9 @@ static void claim_or_park() {
     }
 
     // Halt only this core. Recovery is a machine reset, which is external.
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    anne::boot_fault_reset();
+#endif
     for (;;) asm volatile("wfi" ::: "memory");
 }
 

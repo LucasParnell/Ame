@@ -168,7 +168,7 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
     t->ctx.sp = sp;
     t->tf.x[0] = arg0;
     t->tf.elr = entry;
-    t->tf.spsr = 0;
+    t->tf.spsr = kernel::kInitialUserPstate;
     t->tf.sp_el0 = sp;
     t->next = nullptr;
     t->process_next = nullptr;

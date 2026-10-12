@@ -19,6 +19,13 @@
 #include "anko/hw_info.h"
 #include "anko/platform.h"
 #include "anko/panic.h"
+#include "anko/boot_trace.h"
+#if defined(ANKO_ANNE_DISPLAY_CAPTURE) || defined(ANKO_ANNE_FRAMEBUFFER)
+#include "display_diagnostics.h"
+#endif
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+#include "debug_io.h"
+#endif
 #include "anko/spinlock.h"
 #include "libk/string.h"
 
@@ -61,6 +68,13 @@ struct PhysicalRange { PhysAddr base; u64 size; };
 static PhysicalRange g_noncached[8];
 static u32 g_noncached_count;
 static u64 normal_attrs(PhysAddr pa) {
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    if (pa >= anne::kDebugRamBase && pa - anne::kDebugRamBase < anne::kDebugRamBytes) return ATTR_NORMAL_NC;
+    if (pa >= anne::kFirmwareFiqSource && pa - anne::kFirmwareFiqSource < PAGE_SIZE) return ATTR_NORMAL_NC;
+#if defined(ANKO_ANNE_WATCHDOG) && defined(ANKO_ANNE_DIAG_TEST)
+    if (pa >= anne::watchdog::kBase && pa - anne::watchdog::kBase < PAGE_SIZE) return ATTR_NORMAL_NC;
+#endif
+#endif
     if (g_hw.has_t210_dc && pa >= g_hw.t210_dc_fb_phys &&
         pa - g_hw.t210_dc_fb_phys < static_cast<u64>(g_hw.t210_dc_fb_width) * g_hw.t210_dc_fb_height * 4) return ATTR_NORMAL_NC;
     for (u32 i = 0; i < g_noncached_count; ++i)
@@ -100,6 +114,14 @@ u64 user_device_attrs(u32 rights) {
 }
 
 u64 kernel_page_attrs(bool device, PhysAddr pa) {
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && defined(ANKO_ANNE_DIAG_TEST)
+    if ((pa >= anne::kDebugPmicBase && pa - anne::kDebugPmicBase < PAGE_SIZE) ||
+        (pa >= anne::kDebugSctrlBase && pa - anne::kDebugSctrlBase < PAGE_SIZE)) device = true;
+#if defined(ANKO_ANNE_DISPLAY_CAPTURE) || defined(ANKO_ANNE_FRAMEBUFFER)
+    if ((pa >= anne::native_display::kDssBase && pa - anne::native_display::kDssBase < anne::native_display::kDssBytes) ||
+        (pa >= anne::native_display::kCrgBase && pa - anne::native_display::kCrgBase < PAGE_SIZE)) device = true;
+#endif
+#endif
     u64 attrs = (device ? ATTR_DEVICE : normal_attrs(pa)) | PTE_AF | PTE_UXN;
     if (!device) attrs |= PTE_SH_INNER;
     if (device) attrs |= PTE_PXN;
@@ -192,6 +214,35 @@ bool map_bootstrap_identity(VmSpace& space) {
         if (!map_identity_if_present(space, g_hw.gic_cpu_base, PAGE_SIZE, true)) return false;
     }
     if (!map_identity_if_present(space, g_hw.console_base, PAGE_SIZE, true)) return false;
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    // Persistent native console lies in reserved RAM outside the allocator bank.
+#ifdef ANKO_ANNE_WATCHDOG
+    if (!contains_range(g_hw.ram_base, ram_map_size, anne::watchdog::kBase, PAGE_SIZE) &&
+        !map_identity_range(space, anne::watchdog::kBase, PAGE_SIZE,
+#ifdef ANKO_ANNE_DIAG_TEST
+                            false
+#else
+                            true
+#endif
+                            )) return false;
+#endif
+    if (!contains_range(g_hw.ram_base, ram_map_size, anne::kFirmwareFiqSource, PAGE_SIZE) &&
+        !map_identity_range(space, anne::kFirmwareFiqSource, PAGE_SIZE, false)) return false;
+    if (!contains_range(g_hw.ram_base, ram_map_size, anne::kDebugRamBase, anne::kDebugRamBytes) &&
+        !map_identity_range(space, anne::kDebugRamBase, anne::kDebugRamBytes, false)) return false;
+    if (!contains_range(g_hw.ram_base, ram_map_size, anne::kDebugPmicBase, PAGE_SIZE) &&
+        !map_identity_range(space, anne::kDebugPmicBase, PAGE_SIZE, true)) return false;
+    if (!contains_range(g_hw.ram_base, ram_map_size, anne::kDebugSctrlBase, PAGE_SIZE) &&
+        !map_identity_range(space, anne::kDebugSctrlBase, PAGE_SIZE, true)) return false;
+#if defined(ANKO_ANNE_DISPLAY_CAPTURE) || defined(ANKO_ANNE_FRAMEBUFFER)
+    if (!contains_range(g_hw.ram_base, ram_map_size, anne::native_display::kDssBase, anne::native_display::kDssBytes) &&
+        !map_identity_range(space, anne::native_display::kDssBase, anne::native_display::kDssBytes, true)) return false;
+    if (!contains_range(g_hw.ram_base, ram_map_size, anne::native_display::kCrgBase, PAGE_SIZE) &&
+        !map_identity_range(space, anne::native_display::kCrgBase, PAGE_SIZE, true)) return false;
+    if (!contains_range(g_hw.ram_base, ram_map_size, anne::native_display::kLogoBase, anne::native_display::kLogoBytes) &&
+        !map_identity_range(space, anne::native_display::kLogoBase, anne::native_display::kLogoBytes, false)) return false;
+#endif
+#endif
 
     if (g_hw.has_fwcfg &&
         !map_identity_if_present(space, g_hw.fwcfg_base, PAGE_SIZE, true)) return false;
@@ -363,6 +414,13 @@ bool map_kernel_device_mmio(PhysAddr base, u64 size) {
     return ok;
 }
 
+bool range_is_noncached(PhysAddr base, u64 size) {
+    if (!size || ((base | size) & (PAGE_SIZE - 1)) || size > ~0ull - base) return false;
+    for (u64 offset = 0; offset < size; offset += PAGE_SIZE)
+        if (normal_attrs(base + offset) != ATTR_NORMAL_NC) return false;
+    return true;
+}
+
 bool register_noncached_range(PhysAddr base, u64 size) {
     if (!size || ((base | size) & (PAGE_SIZE - 1)) || size > ~0ull - base) return false;
     kernel::LockGuard guard(g_vm_lock);
@@ -410,6 +468,7 @@ void vm_init() {
     }
 
     g_kernel_root = kernel.pgd_phys;
+    ANKO_BOOT_CHECKPOINT(MmuEnable);
     enable_mmu(g_kernel_root);
 }
 

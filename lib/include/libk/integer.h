@@ -9,14 +9,15 @@
 
 namespace libk {
 
-// Round `value` up to the next multiple of `align` (align must be a power of two).
+// Round up to a multiple of align. Requires a nonzero power of two and a result
+// representable in uint64_t; use checked_align_up for untrusted sizes.
 constexpr std::uint64_t align_up(std::uint64_t value, std::uint64_t align) {
     return (value + (align - 1)) & ~(align - 1);
 }
 
-// Ceiling division: (value + divisor - 1) / divisor.
+// Ceiling division without overflowing the numerator. Requires divisor != 0.
 constexpr std::uint64_t div_round_up(std::uint64_t value, std::uint64_t divisor) {
-    return (value + (divisor - 1)) / divisor;
+    return value / divisor + (value % divisor != 0);
 }
 
 // Overflow-checked arithmetic: false on wrap and *out is left untouched, so a
@@ -37,6 +38,21 @@ constexpr bool checked_mul(std::uint64_t a, std::uint64_t b, std::uint64_t* out)
     if (a != 0 && b > kMax / a) return false;
     if (out) *out = a * b;
     return true;
+}
+
+constexpr bool checked_align_up(std::uint64_t value, std::uint64_t align,
+                                std::uint64_t* out) {
+    if (align == 0 || (align & (align - 1)) != 0) return false;
+    std::uint64_t padded = 0;
+    if (!checked_add(value, align - 1, &padded)) return false;
+    if (out) *out = padded & ~(align - 1);
+    return true;
+}
+
+// Absolute value in unsigned storage, including INT64_MIN.
+constexpr std::uint64_t magnitude(std::int64_t value) {
+    const auto bits = static_cast<std::uint64_t>(value);
+    return value < 0 ? std::uint64_t{0} - bits : bits;
 }
 
 } // namespace libk

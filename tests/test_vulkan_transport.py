@@ -19,6 +19,7 @@ class VulkanTransport(unittest.TestCase):
                 '-Wall', '-Wextra', '-Werror',
                 '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I'+str(ROOT/'shared/include'),
+                '-idirafter', str(ROOT/'lib/include'),
                 '-I'+str(ROOT/'userland/lib/include'),
                 '-I'+str(ROOT/'userland/drivers/gpu/linux'),
                 str(ROOT/'tests/vulkan_transport_probe.cc'),

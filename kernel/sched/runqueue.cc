@@ -6,6 +6,7 @@
 // a thread/vCPU runner from that same band-specific principal queue.
 
 #include "anko/sched.h"
+#include "anko/platform_clock.h"
 #include "sched_internal.h"
 #include "anko/ipc.h"
 #include "anko/mm.h"
@@ -23,7 +24,7 @@ namespace sched {
 // Global state
 // ---------------------------------------------------------------------------
 static Eki   g_eki[kMaxCpus]{};
-static u32   g_online_cpu_count = 1;
+static u64   g_online_cpu_mask = 1;
 static u64   g_cntfrq = 0;          // cached at init
 
 using libk::metric_inc;
@@ -65,10 +66,7 @@ Eki& eki_for_cpu(u32 cpu_id) {
 Eki& current_eki() { return eki_for_cpu(current_cpu_id()); }
 
 u64 online_mask() {
-    const u32 n = g_online_cpu_count > kMaxCpus ? kMaxCpus : g_online_cpu_count;
-    u64 m = 0;
-    for (u32 i = 0; i < n; ++i) m |= (1ull << i);
-    return m ? m : 1ull;
+    return __atomic_load_n(&g_online_cpu_mask, __ATOMIC_ACQUIRE);
 }
 
 // Scheduling policy (sched_class.cc) and fair-queue data structures
@@ -361,7 +359,7 @@ static u32 least_loaded_cpu_for(const Thread* t) {
     const u64 allowed = t->affinity_mask ? (t->affinity_mask & online_mask()) : online_mask();
     u32 best_cpu  = first_allowed_cpu(allowed);
     u32 best_load = ~0u;
-    const u32 n   = g_online_cpu_count < kMaxCpus ? g_online_cpu_count : kMaxCpus;
+    const u32 n   = kMaxCpus;
     for (u32 i = 0; i < n; ++i) {
         if (!(allowed & (1ull << i))) continue;
         const u32 load = g_eki[i].latency_principals.size
@@ -595,11 +593,11 @@ static Thread* pick_next(Eki& e) {
         "mov x0, %2\n"
         "msr sp_el0, %0\n"
         "msr elr_el1, %1\n"
-        "mov x2, xzr\n"
+        "mov x2, %3\n"
         "msr spsr_el1, x2\n"
         "eret\n"
         :
-        : "r"(sp), "r"(entry), "r"(arg0)
+        : "r"(sp), "r"(entry), "r"(arg0), "r"(kernel::kInitialUserPstate)
         : "x0", "x2", "memory");
     __builtin_unreachable();
 }
@@ -634,6 +632,7 @@ static void init_eki(u32 cpu_id) {
 void init() {
     ANKO_LOG_INFO("kernel/sched", "ressha/eki v2 init");
     asm volatile("mrs %0, CNTFRQ_EL0" : "=r"(g_cntfrq));
+    g_cntfrq = platform::counter_frequency(g_cntfrq);
     for (u32 i = 0; i < kMaxCpus; ++i) init_eki(i);
 
     principal_init_bootstrap();
@@ -641,7 +640,7 @@ void init() {
     // Mirror weights into per-CPU entities.
     for (u32 cpu = 0; cpu < kMaxCpus; ++cpu) principal_mirror_weights(cpu);
 
-    g_online_cpu_count = 1;
+    __atomic_store_n(&g_online_cpu_mask, 1ull, __ATOMIC_RELEASE);
     mark_cpu_online(0);
     ANKO_LOG_INFO("kernel/sched", "eki[0] ready");
 }
@@ -664,6 +663,8 @@ void init() {
 
         e.current = next;
         next->state = TS_RUNNING;
+        metric_inc(e.context_switches);
+        metric_inc(next->switches);
         next->last_start_ns = sched_clock_ns();
         next->slice_start_ns = next->last_start_ns;
         activate_thread_space(next);
@@ -937,17 +938,18 @@ u32 current_cpu_id() {
     return static_cast<u32>(cpu_id);
 }
 
-u32  online_cpu_count() { return g_online_cpu_count; }
+u32  online_cpu_count() { return __builtin_popcountll(online_mask()); }
+u64  online_cpu_mask() { return online_mask(); }
 void set_online_cpu_count(u32 n) {
     if (!n) n = 1;
     if (n > kMaxCpus) n = kMaxCpus;
-    g_online_cpu_count = n;
+    __atomic_store_n(&g_online_cpu_mask, (1ull << n) - 1, __ATOMIC_RELEASE);
 }
 void mark_cpu_online(u32 cpu_id) {
     if (cpu_id >= kMaxCpus) return;
-    if (cpu_id + 1 > g_online_cpu_count) g_online_cpu_count = cpu_id + 1;
     // Mirror principal weights to secondary CPU Eki
     principal_mirror_weights(cpu_id);
+    __atomic_fetch_or(&g_online_cpu_mask, 1ull << cpu_id, __ATOMIC_RELEASE);
 }
 void note_ipi_sent(u32)   { metric_inc(current_eki().ipis_sent); }
 void note_ipi_handled()   { metric_inc(current_eki().ipis_handled); }

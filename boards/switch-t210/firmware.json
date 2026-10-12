@@ -1,0 +1,14 @@
+{
+  "profile": "hekate-6.5.3-erista-secfw",
+  "tzdram_base": "0xfff00000",
+  "tzdram_size": "0x00100000",
+  "reserved_prefix_size": "0x00200000",
+  "atf_options": {
+    "RESET_TO_BL31": 1,
+    "PROGRAMMABLE_RESET_ADDRESS": 1,
+    "COLD_BOOT_SINGLE_CPU": 1
+  },
+  "source_commit": "8902c539ce83b15637c5f47fc8aff5d14d95b992",
+  "source_url": "https://gitlab.com/switchroot/bootstack/switch-atf/-/archive/8902c539ce83b15637c5f47fc8aff5d14d95b992/switch-atf-8902c539ce83b15637c5f47fc8aff5d14d95b992.tar.gz",
+  "source_sha256": "e1e47c6cc077d1cbaddb5e4ac66f09455546027bbd103714799f2628e0751483"
+}

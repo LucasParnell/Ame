@@ -13,6 +13,7 @@
 #include "anko/mm.h"
 #include "anko/log.h"
 #include "anko/platform.h"
+#include "midix/hw/pci.h"
 
 namespace drivers::pci_probe {
 
@@ -51,6 +52,13 @@ static void cfg_write(u32 bus, u32 dev, u32 fn, u32 off, u32 val) {
     asm volatile("dsb sy" ::: "memory");
 }
 
+static void command_write(u32 bus, u32 dev, u32 fn, u16 value) {
+    // PCI status shares this dword and has write-one-to-clear bits.
+    auto* command = reinterpret_cast<volatile u16*>(ecam_reg(bus, dev, fn, kCfgCommand));
+    *command = value;
+    asm volatile("dsb osh" ::: "memory");
+}
+
 struct XhciInfo {
     PhysAddr bar0_phys;
     u64      bar0_size;
@@ -71,6 +79,11 @@ XhciInfo find_xhci() {
             const u32 class_code = (class_full >> 8) & 0xFFFFFFu;
             if (class_code != kClassXhci) continue;
 
+            const u16 command = static_cast<u16>(cfg_read(bus, dev, 0, kCfgCommand));
+            // Discovery is not DMA authority. Keep decode/DMA disabled while
+            // probing BARs, then enable decode only until ownership is ready.
+            command_write(bus, dev, 0, command & ~0x6u);
+
             // Found xHCI — read BAR0 and handle both 32-bit and 64-bit MMIO BARs.
             const u32 bar0_orig = cfg_read(bus, dev, 0, kCfgBar0);
             const bool bar64 = (bar0_orig & 0x6u) == 0x4u;
@@ -86,11 +99,7 @@ XhciInfo find_xhci() {
             if (bar64) {
                 bar0_base |= static_cast<PhysAddr>(bar1_orig) << 32;
             }
-            const u64 size_mask = bar64
-                ? ((static_cast<u64>(bar1_sz) << 32) |
-                   static_cast<u64>(bar0_sz & ~0xFull))
-                : static_cast<u64>(bar0_sz & ~0xFull);
-            const u64 bar0_size = size_mask ? (~size_mask + 1ull) : 0;
+            const u64 bar0_size = midix::hw::pci::memory_bar_size(bar0_sz, bar1_sz, bar64);
 
             if (bar0_base == 0 && bar0_size != 0) {
                 // Direct -kernel boots have no firmware to assign BARs. Use
@@ -101,9 +110,7 @@ XhciInfo find_xhci() {
                 if (bar64) cfg_write(bus, dev, 0, kCfgBar1, 0);
             }
 
-            // Enable memory decoding and bus mastering for DMA-capable xHCI.
-            const u32 cmd_status = cfg_read(bus, dev, 0, kCfgCommand);
-            cfg_write(bus, dev, 0, kCfgCommand, cmd_status | 0x6u);
+            command_write(bus, dev, 0, (command | 0x2u) & ~0x4u);
 
             const u32 irq = cfg_read(bus, dev, 0, kCfgIntLine) & 0xFFu;
 
@@ -120,6 +127,16 @@ XhciInfo find_xhci() {
         }
     }
     return result;
+}
+
+bool enable_xhci_bus_master(const XhciInfo& info) {
+    if (!info.found) return false;
+    const u32 bus = info.requester_id >> 8;
+    const u32 dev = (info.requester_id >> 3) & 31;
+    const u32 fn = info.requester_id & 7;
+    const auto command = static_cast<u16>(cfg_read(bus, dev, fn, kCfgCommand));
+    command_write(bus, dev, fn, command | 0x6u);
+    return (cfg_read(bus, dev, fn, kCfgCommand) & 0x6u) == 0x6u;
 }
 
 MmioRange* alloc_xhci_mmio(const XhciInfo& info) {

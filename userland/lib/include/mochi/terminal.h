@@ -33,14 +33,14 @@ struct OutputSource : ByteEndpoint {
     bool try_read(RingSlot* out) const {
         if (!out || !ring) return false;
         if (!try_pop(out)) return false;
-        return out->type == MX_TERM_OUTPUT_BYTES;
+        return message_valid(*out) && out->type == MX_TERM_OUTPUT_BYTES;
     }
 
     bool wait_read(RingSlot* out) const {
         if (!out || !valid()) return false;
         for (;;) {
             if (!wait_pop(out)) return false;
-            if (out->type == MX_TERM_OUTPUT_BYTES) return true;
+            if (message_valid(*out) && out->type == MX_TERM_OUTPUT_BYTES) return true;
         }
     }
 };
@@ -75,13 +75,13 @@ struct Terminal {
 
     bool try_read(RingSlot* out) const {
         if (!endpoint.try_recv(out)) return false;
-        return out && (out->type == MX_TERM_INPUT_BYTES || out->type == MX_TERM_CONTROL);
+        return out && message_valid(*out) && (out->type == MX_TERM_INPUT_BYTES || out->type == MX_TERM_CONTROL);
     }
 
     bool wait_read(RingSlot* out) const {
         for (;;) {
             if (!endpoint.wait_recv(out)) return false;
-            if (out && (out->type == MX_TERM_INPUT_BYTES || out->type == MX_TERM_CONTROL)) return true;
+            if (out && message_valid(*out) && (out->type == MX_TERM_INPUT_BYTES || out->type == MX_TERM_CONTROL)) return true;
         }
     }
 };

@@ -1,3 +1,5 @@
+import io
+import tarfile
 import hashlib
 import importlib.util
 import json
@@ -24,7 +26,7 @@ class Formats(unittest.TestCase):
                    '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                    '-I'+str(ROOT/'shared/include'), '-I'+str(ROOT/'kernel/include'),
                    '-I'+str(ROOT/'third_party/monocypher'), '-idirafter', str(ROOT/'lib/include'),
-                   '-x', 'c++', str(ROOT/'tests/format_probe.cc'), str(ROOT/'shared/format/bundle.cc'),
+                   '-x', 'c++', str(ROOT/'tests/format_probe.cc'), str(ROOT/'shared/format/bundle.cc'), str(ROOT/'shared/format/archive.cc'),
                    str(ROOT/'shared/format/integrity.cc'), str(ROOT/'shared/format/signature.cc'), str(ROOT/'shared/format/image.cc'), str(ROOT/'kernel/init/fdt.cc'),
                    str(ROOT/'lib/libk/string.cc'), str(ROOT/'third_party/monocypher/monocypher.c'),
                    str(ROOT/'third_party/monocypher/monocypher-ed25519.c'), '-o', str(cls.probe)]
@@ -72,6 +74,21 @@ class Formats(unittest.TestCase):
     def test_duplicate_objects(self):
         manifest = self.work/'m'; manifest.write_text('{}'); image=self.work/'i';image.write_bytes(b'x')
         with self.assertRaises(ValueError): mxpack.build_bundle(self.work/'b', manifest, ['exec:a:'+str(image)]*2)
+    def test_archive_lookup_bounds(self):
+        self.check_data('archive', self.bundle(), True)
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w', format=tarfile.USTAR_FORMAT) as archive:
+            entry = tarfile.TarInfo('init')
+            entry.size = 3
+            archive.addfile(entry, io.BytesIO(b'abc'))
+        data = stream.getvalue()
+        self.check_data('archive', data, True)
+        for cut in [0, 4, 511, 512, 514, 1023]:
+            self.check_data('archive', data[:cut], False)
+        corrupt = bytearray(data)
+        corrupt[124] = ord('9')
+        self.check_data('archive', corrupt, False)
+
     def test_json(self):
         for obj in [{}, {'services':[{'name':'a','caps':[]}]}, {'x':'escaped \\" and slash \\'}]:
             self.check_data('json', json.dumps(obj).encode(), True)

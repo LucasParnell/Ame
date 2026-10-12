@@ -226,8 +226,12 @@ enum MxVkObjectType {
 #define MX_VK_OBJECT_SESSION_SHIFT (MX_VK_OBJECT_INDEX_BITS + MX_VK_OBJECT_TYPE_BITS)
 #define MX_VK_OBJECT_SESSION_MASK \
     (((1ull << MX_VK_OBJECT_SESSION_BITS) - 1ull) << MX_VK_OBJECT_SESSION_SHIFT)
-#define MX_VK_OBJECT_GENERATION_SHIFT \
-    (MX_VK_OBJECT_INDEX_BITS + MX_VK_OBJECT_TYPE_BITS + MX_VK_OBJECT_SESSION_BITS + 12)
+// The 12 bits between the session and boot-generation fields distinguish
+// reused table slots. A saturated slot must be retired, never wrapped.
+#define MX_VK_OBJECT_INCARNATION_BITS 12
+#define MX_VK_OBJECT_INCARNATION_SHIFT (MX_VK_OBJECT_INDEX_BITS + MX_VK_OBJECT_TYPE_BITS + MX_VK_OBJECT_SESSION_BITS)
+#define MX_VK_OBJECT_MAX_INCARNATION ((1u << MX_VK_OBJECT_INCARNATION_BITS) - 1u)
+#define MX_VK_OBJECT_GENERATION_SHIFT (MX_VK_OBJECT_INCARNATION_SHIFT + MX_VK_OBJECT_INCARNATION_BITS)
 
 // 1-based index; 0 is never a valid object slot.
 static inline mx_u64_t mx_vk_object_id_make(mx_u64_t generation, mx_u32_t type,
@@ -236,6 +240,12 @@ static inline mx_u64_t mx_vk_object_id_make(mx_u64_t generation, mx_u32_t type,
            (((mx_u64_t)session << MX_VK_OBJECT_SESSION_SHIFT) & MX_VK_OBJECT_SESSION_MASK) |
            (((mx_u64_t)type << MX_VK_OBJECT_TYPE_SHIFT) & MX_VK_OBJECT_TYPE_MASK) |
            ((mx_u64_t)index & MX_VK_OBJECT_INDEX_MASK);
+}
+
+// The broker compares the full id after decoding its table index.
+static inline mx_u64_t mx_vk_object_id_with_incarnation(mx_u64_t id, mx_u32_t incarnation) {
+    return id | ((mx_u64_t)(incarnation & MX_VK_OBJECT_MAX_INCARNATION)
+                 << MX_VK_OBJECT_INCARNATION_SHIFT);
 }
 
 // Decode `id`, confirm it names `type` in generation `generation` for `session`,

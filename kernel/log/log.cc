@@ -1,9 +1,12 @@
 #include "anko/log.h"
+#include "anko/platform_clock.h"
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+#include "boot_diagnostics.h"
+#endif
+#include "anko/console.h"
 #include "anko/ipc.h"
 #include "anko/sched.h"
 #include "libk/string.h"
-
-namespace drivers::uart { void putchar(char c); }
 
 namespace anko::log {
 
@@ -38,6 +41,7 @@ u64 read_counter() {
 u64 read_counter_freq() {
     u64 value = 0;
     asm volatile("mrs %0, CNTFRQ_EL0" : "=r"(value));
+    value = platform::counter_frequency(value);
     return value ? value : 100000000ull;
 }
 
@@ -55,34 +59,42 @@ char level_char(Level level) {
 
 void uart_write(const char* s, usize len) {
     if (!g_uart_ready || !s) return;
-    for (usize i = 0; i < len; ++i) drivers::uart::putchar(s[i]);
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    anne::boot_log_write(s, len);
+#else
+    for (usize i = 0; i < len; ++i) console::putchar(s[i]);
+#endif
 }
 
 void uart_write_cstr_limited(const char* s, usize max_len) {
     if (!g_uart_ready) return;
     if (!s) s = "(null)";
     for (usize i = 0; i < max_len && s[i]; ++i) {
-        drivers::uart::putchar(s[i]);
+        console::putchar(s[i]);
     }
 }
 
 void emit_early_direct(Level level, const char* component, const char* msg) {
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    anne::boot_log_early(level_char(level), component, msg);
+    return;
+#endif
     // Do not build early log lines in a stack buffer. Before the MMU has
     // installed Normal-memory attributes, optimized C++ may use unaligned
     // word stores for byte-buffer appends; that faults under O2 on QEMU.
     uart_write("[early] [", 9);
-    drivers::uart::putchar(level_char(level));
+    console::putchar(level_char(level));
     uart_write("] cpu0 ", 7);
     uart_write_cstr_limited(component ? component : "kernel", 64);
     uart_write(": ", 2);
     uart_write_cstr_limited(msg ? msg : "(null)", kMaxMessage);
     if (!msg || msg[0] == '\0') {
-        drivers::uart::putchar('\n');
+        console::putchar('\n');
         return;
     }
     usize i = 0;
     while (i < kMaxMessage && msg[i]) ++i;
-    if (i == 0 || msg[i - 1] != '\n') drivers::uart::putchar('\n');
+    if (i == 0 || msg[i - 1] != '\n') console::putchar('\n');
 }
 
 struct Writer {
@@ -317,8 +329,18 @@ void emit_line(const char* line, usize len, bool force_uart) {
         return;
     }
 
+    // Retain native kernel logs even before io.console can drain its rings.
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    force_uart = true;
+#endif
     if (force_uart) {
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+        // Keep an immediate retained copy. io.console renders this ring's
+        // bytes later; suppress a second on-screen copy here.
+        anne::boot_log_write(line, len, false);
+#else
         uart_write(line, len);
+#endif
     }
 
     if (!push_bytes(g_rings[cpu], line, len)) {
@@ -459,7 +481,7 @@ void vformat_to(char* out, usize cap, const char* fmt, va_list ap) {
 
 void panic_dump(const char* text) {
     if (!text) return;
-    for (usize i = 0; text[i]; ++i) drivers::uart::putchar(text[i]);
+    for (usize i = 0; text[i]; ++i) console::putchar(text[i]);
 }
 
 u64 dropped_count() {

@@ -12,6 +12,30 @@
 
 static void no_close(uint32_t) {}
 
+// Resolve against init's fixed export table, then grant only the advertised rights.
+static mx_status_t resolve(const MxSessionDirectory& directory, mx_u32_t client,
+                           const RingSlot& slot, MxEndpointDesc* result) {
+    MxNsResolveRequest request{};
+    if (!mochi::message_get(slot, &request, MSG_NS_RESOLVE) ||
+        libk::str::length_n(request.name, sizeof(request.name)) == sizeof(request.name)) {
+        return MX_ERR_BAD_PROTOCOL;
+    }
+    for (const auto& entry : directory.exports) {
+        if (!entry.name[0] || !mochi::boot::streq(entry.name, request.name)) continue;
+        const auto process = __atomic_load_n(&entry.process, __ATOMIC_ACQUIRE);
+        if (!process || sys_cap_identify(process) != MX_CAP_PROCESS) return MX_ERR_SERVICE_UNAVAILABLE;
+        mx_handle_t granted = MX_NULL_HANDLE;
+        const mx_status_t status = mx_cap_grant(directory.slots[client].client, process,
+                                               entry.rights, &granted);
+        if (status == MX_OK) {
+            *result = {MX_ENDPOINT_MAGIC, MX_ENDPOINT_VERSION, 1, entry.protocol,
+                       MX_ENDPOINT_FLAG_CLIENT_ALLOCATED, {granted, 0, 0, 0}};
+        }
+        return status;
+    }
+    return MX_ERR_NOT_FOUND;
+}
+
 extern "C" [[noreturn]] void _start() {
     auto* boot = mochi::boot::map();
     (void)mochi::log_map_from_boot(boot, mochi::va::nameservice::kVaLogRing, "nameservice");
@@ -27,25 +51,8 @@ extern "C" [[noreturn]] void _start() {
             RingSlot slot{};
             if (!endpoint.try_recv(&slot)) continue;
             progress = true;
-            mx_status_t status = MX_ERR_BAD_PROTOCOL;
             MxEndpointDesc result{};
-            if (slot.type == MSG_NS_RESOLVE && slot.length == sizeof(MxNsResolveRequest)) {
-                char name[MX_NS_NAME_MAX]{};
-                for (uint32_t n = 0; n + 1 < sizeof(name); ++n) name[n] = slot.payload[n];
-                status = MX_ERR_NOT_FOUND;
-                for (const auto& entry : sessions.directory->exports) {
-                    if (!entry.name[0] || !mochi::boot::streq(entry.name, name)) continue;
-                    const auto process = __atomic_load_n(&entry.process, __ATOMIC_ACQUIRE);
-                    if (!process || sys_cap_identify(process) < 0) { status = MX_ERR_SERVICE_UNAVAILABLE; break; }
-                    mx_handle_t granted = MX_NULL_HANDLE;
-                    status = mx_cap_grant(sessions.directory->slots[i].client, process, entry.rights, &granted);
-                    if (status == MX_OK) {
-                        result = {MX_ENDPOINT_MAGIC, MX_ENDPOINT_VERSION, 1, entry.protocol,
-                                  MX_ENDPOINT_FLAG_CLIENT_ALLOCATED, {granted, 0, 0, 0}};
-                    }
-                    break;
-                }
-            }
+            const mx_status_t status = resolve(*sessions.directory, i, slot, &result);
             const mx_u64_t deadline = mx_clock_ns() + mochi::kSessionReplyTimeoutNs;
             const bool sent = (status == MX_OK)
                 ? endpoint.send_bounded(MSG_NS_RESOLVE_REPLY, &result, sizeof(result), deadline)

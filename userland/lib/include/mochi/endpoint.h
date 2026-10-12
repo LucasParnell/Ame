@@ -9,11 +9,11 @@ namespace mochi {
 // try_recv never sleep and never ask the kernel for progress unless a sleeping
 // peer requested a doorbell notify via the shared ring flag.
 struct SpscEndpoint {
-    RingPage* tx_ring;
-    RingPage* rx_ring;
-    uint32_t order;
-    CapHandle tx_doorbell;
-    CapHandle rx_doorbell;
+    RingPage* tx_ring = nullptr;
+    RingPage* rx_ring = nullptr;
+    uint32_t order = 0;
+    CapHandle tx_doorbell = kNullCap;
+    CapHandle rx_doorbell = kNullCap;
 
     // The two halves as Rings. Ring carries the whole operation set (try /
     // spinning / deadline publish, try / blocking / deadline consume, byte runs,
@@ -24,7 +24,7 @@ struct SpscEndpoint {
     Ring rx() const { return Ring{rx_ring, order, rx_doorbell}; }
 
     bool valid() const {
-        return tx_ring && rx_ring && tx_doorbell != kNullCap && rx_doorbell != kNullCap;
+        return tx().valid() && rx().valid() && tx_doorbell != kNullCap && rx_doorbell != kNullCap;
     }
 
     bool try_send(uint32_t type, const void* data, uint32_t len) const {

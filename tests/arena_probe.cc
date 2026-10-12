@@ -50,5 +50,17 @@ int main() {
     check(!empty.valid() && empty.alloc(1, 1) == nullptr && empty.remaining() == 0);
 
     check(a.high_water() > 0 && a.high_water() <= a.size());
+    mochi::Arena unaligned(region + 1, sizeof(region) - 1);
+    auto* aligned = unaligned.alloc<Pair>(1, 1);
+    check(aligned && reinterpret_cast<mx_u64_t>(aligned) % alignof(Pair) == 0);
+    const auto before = unaligned.used();
+    check(unaligned.alloc(300, 16) == nullptr && unaligned.used() == before);
+    libk::fill(libk::as_bytes(region), 0xff);
+    a.reset();
+    check(a.alloc_zeroed(sizeof(region)) == region && libk::is_zero(libk::as_bytes(region)));
+    mochi::Arena no_storage(nullptr, 64);
+    check(no_storage.remaining() == 0);
+    mochi::Arena wrap(reinterpret_cast<void*>(~mx_u64_t{0} - 7), 32);
+    check(wrap.alloc(16, 1) == nullptr && wrap.used() == 0);
     return failures;
 }

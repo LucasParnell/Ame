@@ -99,9 +99,11 @@ void maybe_send_steal_request(Eki& thief) {
     // Find most loaded peer
     u32 victim_cpu = kInvalidCpu;
     u32 max_load   = 1; // only steal if victim has > 1 stealable thread
-    const u32 n    = on < kMaxCpus ? on : kMaxCpus;
+    const u32 n    = kMaxCpus;
+    const u64 mask = online_mask();
     for (u32 c = 0; c < n; ++c) {
         if (c == thief.cpu_id) continue;
+        if (!(mask & (1ull << c))) continue;
         Eki& peer = eki_for_cpu(c);
         u32 load = peer.fair_principals.size + peer.vm_fair_principals.size + peer.batch_principals.size;
         if (load > max_load) { max_load = load; victim_cpu = c; }

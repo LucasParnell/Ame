@@ -13,6 +13,11 @@
 // On expiry, calls sched::tick() via GIC IRQ 30 → drivers::gic::handle_irq.
 
 #include "anko/platform.h"
+#include "anko/platform_clock.h"
+#include "midix/abi/cpu_limits.h"
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+#include "boot_diagnostics.h"
+#endif
 #include "anko/sched.h"
 #include "anko/smmuv3.h"
 #include "anko/vm.h"
@@ -27,6 +32,7 @@ constexpr u32 CNTP_CTL_ENABLE  = 1u << 0;
 
 static u64 g_tick_period = 0; // counter ticks between interrupts
 static u64 g_tick_count = 0;
+static u64 g_cpu_ticks[MX_HOST_MAX_CPUS]{};
 
 using libk::metric_inc;
 using libk::metric_load;
@@ -41,6 +47,7 @@ static void rearm() {
 void init(u32 irq_id) {
     u64 freq = 0;
     asm volatile("mrs %0, CNTFRQ_EL0" : "=r"(freq));
+    freq = platform::counter_frequency(freq);
     if (freq == 0) freq = 100000000;
     g_tick_period = freq / 100;
     if (g_tick_period == 0) g_tick_period = 1;
@@ -55,7 +62,13 @@ void init_cpu(u32 irq_id) {
 
 // Called from GIC handler when IRQ 30 fires.
 void handle_tick() {
-    metric_inc(g_tick_count);
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    anne::boot_timer_tick();
+#endif
+    const u32 cpu = sched::current_cpu_id();
+    metric_inc(g_cpu_ticks[cpu]);
+    // Userspace log timestamps use this 100 Hz wall-clock counter.
+    if (!cpu) metric_inc(g_tick_count);
     rearm();
     // Phase C: poll the SMMUv3 event queue.  IOMMU faults are security events
     // and must not wait for a routed SMMU interrupt (routing one to a fault
@@ -71,5 +84,6 @@ void handle_tick() {
 u64 tick_count() {
     return metric_load(g_tick_count);
 }
+u64 cpu_tick_count(u32 cpu) { return cpu < MX_HOST_MAX_CPUS ? metric_load(g_cpu_ticks[cpu]) : 0; }
 
 } // namespace drivers::timer

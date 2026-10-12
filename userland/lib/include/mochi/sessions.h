@@ -18,40 +18,58 @@ struct ServerSessions {
     SpscEndpoint endpoints[MX_MAX_SESSIONS]{};
     uint64_t generations[MX_MAX_SESSIONS]{};
     bool live[MX_MAX_SESSIONS]{};
+    bool mapped[MX_MAX_SESSIONS]{};
 
-    bool map(const MxBootInfo* boot, uint64_t va = 0x27000000) {
+    bool map(const MxBootInfo* boot, uint64_t directory_va = va::sessions::kDirectory) {
         auto cap = boot::handle(boot, "sessions");
-        if (!cap || sys_map_page(cap, va, RIGHT_READ | RIGHT_WRITE)) return false;
-        directory = reinterpret_cast<MxSessionDirectory*>(va);
-        return directory->magic == MX_SESSION_MAGIC && directory->count <= MX_MAX_SESSIONS;
+        if (!cap || sys_map_page(cap, directory_va, RIGHT_READ | RIGHT_WRITE)) return false;
+        auto* candidate = reinterpret_cast<MxSessionDirectory*>(directory_va);
+        if (candidate->magic != MX_SESSION_MAGIC || candidate->count > MX_MAX_SESSIONS) {
+            (void)sys_unmap_page(directory_va);
+            return false;
+        }
+        directory = candidate;
+        return true;
     }
 
     // The generation currently acknowledged for slot i. Handles opened for a
     // client are tagged with this value so a token minted before a restart can
     // never be replayed against the replacement client.
-    uint64_t generation_of(uint32_t i) const { return generations[i]; }
+    uint64_t generation_of(uint32_t i) const { return i < MX_MAX_SESSIONS ? generations[i] : 0; }
 
     // Peer liveness for slot i. sweep_process_caps() revokes a dead client's
     // process cap out of the server's table, so identify() fails once the
     // client has exited even if init has not yet bumped the generation.
     bool client_alive(uint32_t i) const {
-        return directory && sys_cap_identify(directory->slots[i].client) >= 0;
+        return directory && i < directory->count && i < MX_MAX_SESSIONS &&
+               sys_cap_identify(directory->slots[i].client) == MX_CAP_PROCESS;
     }
 
     template<class Close> bool refresh(uint32_t i, Close close) {
+        if (!directory || i >= directory->count || i >= MX_MAX_SESSIONS) return false;
         auto& slot = directory->slots[i];
         const auto generation = __atomic_load_n(&slot.generation, __ATOMIC_ACQUIRE);
         if (generation != generations[i]) {
             close(i);
-            const uint64_t va = 0x28000000ull + i * 0x20000ull;
-            if (generations[i]) { sys_unmap_page(va); sys_unmap_page(va + 0x10000); }
+            const uint64_t request_va = va::sessions::request(i);
+            const uint64_t reply_va = va::sessions::reply(i);
+            if (mapped[i]) {
+                (void)sys_unmap_page(request_va);
+                (void)sys_unmap_page(reply_va);
+                mapped[i] = false;
+            }
             endpoints[i] = {};
             live[i] = false;
-            if (!generation || slot.order != MX_DEFAULT_RING_ORDER || !slot.client) return false;
-            if (sys_map_page(slot.request_ring, va, RIGHT_READ | RIGHT_WRITE) ||
-                sys_map_page(slot.reply_ring, va + 0x10000, RIGHT_READ | RIGHT_WRITE)) return false;
-            auto* request = reinterpret_cast<RingPage*>(va);
-            auto* reply = reinterpret_cast<RingPage*>(va + 0x10000);
+            if (!generation || slot.order != MX_DEFAULT_RING_ORDER || !slot.client ||
+                !slot.request_doorbell || !slot.reply_doorbell) return false;
+            if (sys_map_page(slot.request_ring, request_va, RIGHT_READ | RIGHT_WRITE)) return false;
+            if (sys_map_page(slot.reply_ring, reply_va, RIGHT_READ | RIGHT_WRITE)) {
+                (void)sys_unmap_page(request_va);
+                return false;
+            }
+            mapped[i] = true;
+            auto* request = reinterpret_cast<RingPage*>(request_va);
+            auto* reply = reinterpret_cast<RingPage*>(reply_va);
             // The old client has exited and the replacement is suspended.
             request->head.v = request->tail.v = 0;
             request->flags = {};
@@ -71,6 +89,7 @@ struct ServerSessions {
     // acknowledges. Endpoints are cleared but the fixed mapping is left for the
     // next generation to unmap before remapping, so no VA is leaked.
     template<class Close> void drop(uint32_t i, Close close) {
+        if (i >= MX_MAX_SESSIONS) return;
         close(i);
         endpoints[i] = {};
         live[i] = false;

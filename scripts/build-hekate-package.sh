@@ -11,6 +11,8 @@
 #   --build-dir DIR    CMake build directory (default: build-switch)
 #   --no-configure     Skip cmake configure (assume already configured)
 #   --no-build         Skip build step (just re-stage existing artifacts)
+#   --handoff-probe    Include a separate ATF -> BL33 diagnostic entry
+#   --bl31 FILE       Install a validated replacement BL31 firmware
 #   -h, --help
 #
 # SD card layout after install:
@@ -20,10 +22,10 @@
 #   <SD>/ame/boot/system.mxb            — Signed Ame system bundle
 #   <SD>/ame/boot/system.uInitrd        — U-Boot legacy ramdisk wrapper
 #   <SD>/ame/l4t/ame-switch.dtb         — Minimal DTB handed to Ame by U-Boot
-#   <SD>/ame/l4t/extlinux/extlinux.conf — U-Boot boot menu entry
+#   <SD>/ame/l4t/boot.scr               — U-Boot source/bootm entry
 #
 # Switchroot U-Boot supplies the required external signed bundle as a legacy
-# ramdisk through extlinux. The kernel has no embedded-userland fallback.
+# ramdisk through bootm. The kernel has no embedded-userland fallback.
 #
 # Prerequisites (first run):
 #   cmake -S . -B build-switch -G Ninja \
@@ -43,6 +45,8 @@ TOOLCHAIN="${REPO}/scripts/build/toolchain-aarch64.cmake"
 BUILD_DIR=""
 CONFIGURE=1
 BUILD=1
+HANDOFF_PROBE=0
+BL31=""
 SD_MOUNT=""
 
 usage() {
@@ -53,6 +57,8 @@ Options:
   --build-dir DIR    CMake build directory (default: build-switch)
   --no-configure     Skip cmake configure
   --no-build         Skip build; re-stage existing artifacts only
+  --handoff-probe    Include 'Ame handoff probe' under Hekate's More Configs
+  --bl31 FILE       Install a compatible BL31 (build with build-switch-atf.sh)
   -h, --help         Show this help
 
 SD_MOUNT            Optional path to mounted SD card root for installation
@@ -70,6 +76,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-build)
             BUILD=0
+            ;;
+        --handoff-probe)
+            HANDOFF_PROBE=1
+            ;;
+        --bl31)
+            [[ $# -ge 2 ]] || { echo "error: --bl31 requires a file" >&2; exit 2; }
+            shift
+            BL31="$1"
             ;;
         -h|--help)
             usage
@@ -89,6 +103,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 BUILD_DIR="${BUILD_DIR:-${AME_BUILD_DIR:-${REPO}/build-switch}}"
+
+# Check firmware before any install or expensive build. The old 8 MiB-layout
+# BL31 panics against stock Hekate's 1 MiB TZDRAM before reaching U-Boot.
+FIRMWARE_SOURCE="${BL31}"
+if [[ -z "${FIRMWARE_SOURCE}" && -n "${SD_MOUNT}" ]]; then
+    FIRMWARE_SOURCE="${SD_MOUNT%/}/ame/l4t/bl31.bin"
+fi
+if [[ -n "${FIRMWARE_SOURCE}" ]]; then
+    python3 "${REPO}/scripts/switch_atf.py" check "${FIRMWARE_SOURCE}"
+fi
 
 # ---------------------------------------------------------------------------
 # CMake configure
@@ -112,6 +136,9 @@ if [[ "${BUILD}" == "1" ]]; then
 
     echo "[hekate-pkg] building anko (kernel)..."
     cmake --build "${BUILD_DIR}" --target anko --parallel "${BUILD_JOBS}"
+    if [[ "${HANDOFF_PROBE}" == "1" ]]; then
+        cmake --build "${BUILD_DIR}" --target switch-handoff --parallel "${BUILD_JOBS}"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -163,7 +190,8 @@ if ! command -v dtc >/dev/null 2>&1; then
     echo "[hekate-pkg] ERROR: dtc not found; install device-tree-compiler/dtc" >&2
     exit 1
 fi
-dtc -q -I dts -O dtb -o "${SWITCH_DTB}" "${SWITCH_DTS}"
+python3 "${REPO}/scripts/switch_atf.py" reservations "${BUILD_DIR}/firmware-reservations.dtsi"
+dtc -q -i "${BUILD_DIR}" -I dts -O dtb -o "${SWITCH_DTB}" "${SWITCH_DTS}"
 echo "[hekate-pkg] switch DTB: ${SWITCH_DTB} ($(du -h "${SWITCH_DTB}" | cut -f1))"
 
 # ---------------------------------------------------------------------------
@@ -171,7 +199,7 @@ echo "[hekate-pkg] switch DTB: ${SWITCH_DTB} ($(du -h "${SWITCH_DTB}" | cut -f1)
 # ---------------------------------------------------------------------------
 STAGE="${BUILD_DIR}/hekate-pkg"
 rm -rf "${STAGE}"
-mkdir -p "${STAGE}/bootloader/ini" "${STAGE}/ame/boot" "${STAGE}/ame/l4t/extlinux"
+mkdir -p "${STAGE}/bootloader/ini" "${STAGE}/ame/boot" "${STAGE}/ame/l4t"
 
 cp "${IMAGE}" "${STAGE}/ame/boot/Image"
 cp "${UIMAGE}" "${STAGE}/ame/boot/uImage"
@@ -183,18 +211,25 @@ awk '
     $0 == "[Ame]" { copy = 1 }
     copy { print }
 ' "${REPO}/boards/switch-t210/hekate_ipl.ini" > "${STAGE}/bootloader/ini/ame.ini"
-cat > "${STAGE}/ame/l4t/extlinux/extlinux.conf" <<'EOF'
-DEFAULT Ame
-TIMEOUT 0
-MENU TITLE Ame
+python3 "${REPO}/scripts/mk-uimage.py" \
+        --input "${REPO}/boards/switch-t210/boot.cmd" \
+        --output "${STAGE}/ame/l4t/boot.scr" \
+        --load 0 --entry 0 --type script --name AmeBoot
 
-LABEL Ame
-    MENU LABEL Ame
-    LINUX /ame/boot/Image
-    INITRD /ame/boot/system.uInitrd
-    FDT /ame/l4t/ame-switch.dtb
-    APPEND ame.boot=1
-EOF
+if [[ -n "${BL31}" ]]; then
+    cp "${BL31}" "${STAGE}/ame/l4t/bl31.bin"
+fi
+
+if [[ "${HANDOFF_PROBE}" == "1" ]]; then
+    mkdir -p "${STAGE}/ame/handoff"
+    cp "${BUILD_DIR}/kernel/switch-handoff.bin" "${STAGE}/ame/handoff/bl33.bin"
+    cp "${REPO}/boards/switch-t210/handoff/hekate.ini" \
+        "${STAGE}/bootloader/ini/ame-handoff.ini"
+    if [[ -n "${FIRMWARE_SOURCE}" ]]; then
+        cp "${FIRMWARE_SOURCE}" "${STAGE}/ame/handoff/bl31.bin"
+    fi
+    echo "[hekate-pkg] staged handoff probe (uses the same validated BL31 as Ame)"
+fi
 
 echo "[hekate-pkg] staged:"
 echo "  ${STAGE}/bootloader/hekate_ipl.ini"
@@ -204,7 +239,7 @@ echo "  ${STAGE}/ame/boot/uImage"
 echo "  ${STAGE}/ame/boot/system.mxb"
 echo "  ${STAGE}/ame/boot/system.uInitrd"
 echo "  ${STAGE}/ame/l4t/ame-switch.dtb"
-echo "  ${STAGE}/ame/l4t/extlinux/extlinux.conf"
+echo "  ${STAGE}/ame/l4t/boot.scr"
 
 # ---------------------------------------------------------------------------
 # SD card install (optional)
@@ -213,8 +248,11 @@ if [[ -z "${SD_MOUNT}" ]]; then
     echo ""
     echo "[hekate-pkg] SD_MOUNT not given — skipping SD card install."
     echo "[hekate-pkg] To install, run:"
-    echo "  $0 --build-dir ${BUILD_DIR} --no-build ${SD_MOUNT:-/mnt/sdcard}"
-    echo "  or rsync: rsync -av ${STAGE}/ /mnt/sdcard/"
+    probe_option=""
+    [[ "${HANDOFF_PROBE}" == "1" ]] && probe_option=" --handoff-probe"
+    [[ -n "${BL31}" ]] && probe_option="${probe_option} --bl31 \"${BL31}\""
+    echo "  $0 --build-dir \"${BUILD_DIR}\" --no-build${probe_option} \"/Volumes/SD_NAME\""
+    echo "The installer also removes the obsolete Ame extlinux entry."
     exit 0
 fi
 
@@ -226,8 +264,13 @@ fi
 echo "[hekate-pkg] installing to ${SD_MOUNT}..."
 rsync -a "${STAGE}/" "${SD_MOUNT%/}/"
 rm -f "${SD_MOUNT%/}/bootloader/payloads/anko.bin"
+# Retire the old Ame-generated entry: U-Boot scans extlinux before boot.scr.
+rm -f "${SD_MOUNT%/}/ame/l4t/extlinux/extlinux.conf"
 
 echo "[hekate-pkg] done."
 echo ""
 echo "Eject SD card, insert into Switch, launch Hekate, select 'Ame'."
+if [[ "${HANDOFF_PROBE}" == "1" ]]; then
+    echo "For the diagnostic, select More Configs -> Ame handoff probe (intentional magenta halt)."
+fi
 echo "Requires Switchroot/L4T shared firmware under bootloader/sys/l4t/ and bl31.bin/bl33.bin under ame/l4t/."

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "anko/types.h"
+#include "anko/interrupt_mask.h"
 
 namespace kernel {
 
@@ -26,7 +27,7 @@ public:
     ~LockGuard() {
         __atomic_store_n(&lock_.value, 0u, __ATOMIC_RELEASE);
 #if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
-        asm volatile("msr DAIF, %0" :: "r"(irq_) : "memory");
+        asm volatile("msr DAIF, %0" :: "r"(host_interrupt_state(irq_)) : "memory");
 #endif
     }
 

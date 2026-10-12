@@ -15,13 +15,14 @@ ame_jobs() {
 ame_host_tools() {
     local source_root
     source_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    if [[ -x "${source_root}/.venv/bin/python3" ]]; then
-        export PATH="${source_root}/.venv/bin:${PATH}"
-    fi
     if [[ "$(uname -s)" == Darwin ]] && command -v brew >/dev/null 2>&1; then
         local prefix
         prefix="$(brew --prefix)"
         export PATH="${AME_LLVM_ROOT:-${prefix}/opt/llvm}/bin:${prefix}/opt/lld/bin:${prefix}/opt/bison/bin:${prefix}/opt/flex/bin:${prefix}/opt/gptfdisk/sbin:${PATH}"
+    fi
+    # Keep the project's Python ahead of Homebrew's global Python as well.
+    if [[ -x "${source_root}/.venv/bin/python3" ]]; then
+        export PATH="${source_root}/.venv/bin:${PATH}"
     fi
 }
 

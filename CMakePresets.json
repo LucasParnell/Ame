@@ -15,6 +15,31 @@
       }
     },
     {
+      "name": "anne-qemu-dev",
+      "inherits": "qemu-dev",
+      "binaryDir": "${sourceDir}/out/anne-qemu-dev",
+      "cacheVariables": {
+        "MOCHI_SYSTEM_PROFILE": "huawei-anne"
+      }
+    },
+    {
+      "name": "anne-trace-qemu-dev",
+      "inherits": "anne-qemu-dev",
+      "binaryDir": "${sourceDir}/out/anne-trace-qemu-dev",
+      "cacheVariables": {
+        "ANKO_ANNE_DIAG_QEMU": true
+      }
+    },
+    {
+      "name": "anne-native-dev",
+      "inherits": "qemu-dev",
+      "binaryDir": "${sourceDir}/out/anne-native-dev",
+      "cacheVariables": {
+        "ANKO_BOARD": "huawei-anne",
+        "MOCHI_SYSTEM_PROFILE": "huawei-anne"
+      }
+    },
+    {
       "name": "qemu-release",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/out/qemu-release",
@@ -39,9 +64,69 @@
         "DANGO_BUILD_LINUX_ARTIFACTS": false,
         "CMAKE_EXPORT_COMPILE_COMMANDS": true
       }
+    },
+    {
+      "name": "anne-smp-native-dev",
+      "inherits": "anne-native-dev",
+      "binaryDir": "${sourceDir}/out/anne-smp-native-dev",
+      "cacheVariables": {
+        "MOCHI_SYSTEM_PROFILE": "huawei-anne-smp",
+        "ANKO_ANNE_DIAG_CAPTURE_SECONDS": "10"
+      }
+    },
+    {
+      "name": "anne-framebuffer-capture-dev",
+      "inherits": "anne-smp-native-dev",
+      "binaryDir": "${sourceDir}/out/anne-framebuffer-capture-dev",
+      "cacheVariables": {
+        "ANKO_ANNE_DISPLAY_CAPTURE": true
+      }
+    },
+    {
+      "name": "anne-console-capture-dev",
+      "inherits": "anne-framebuffer-capture-dev",
+      "binaryDir": "${sourceDir}/out/anne-console-capture-dev",
+      "cacheVariables": {
+        "ANKO_ANNE_FRAMEBUFFER": true,
+        "ANKO_ANNE_DIAG_READY_HOLD_SECONDS": "5",
+        "ANKO_ANNE_DIAG_RUN_TAG": "anne-console-v1"
+      }
+    },
+    {
+      "name": "anne-console-runtime-capture-dev",
+      "inherits": "anne-native-dev",
+      "binaryDir": "${sourceDir}/out/anne-console-runtime-capture-dev",
+      "cacheVariables": {
+        "ANKO_ANNE_FRAMEBUFFER": true,
+        "ANKO_ANNE_DISPLAY_CAPTURE": false,
+        "ANKO_ANNE_DIAG_CAPTURE_SECONDS": "60",
+        "ANKO_ANNE_DIAG_RESET_AT_READY": false,
+        "ANKO_ANNE_DIAG_READY_HOLD_SECONDS": "0",
+        "ANKO_ANNE_DIAG_RUN_TAG": "anne-fiq-runtime-v2"
+      }
+    },
+    {
+      "name": "anne-smp-trace-qemu-dev",
+      "inherits": "anne-trace-qemu-dev",
+      "binaryDir": "${sourceDir}/out/anne-smp-trace-qemu-dev",
+      "cacheVariables": {
+        "MOCHI_SYSTEM_PROFILE": "huawei-anne-smp"
+      }
     }
   ],
   "buildPresets": [
+    {
+      "name": "anne-trace-qemu-dev",
+      "configurePreset": "anne-trace-qemu-dev"
+    },
+    {
+      "name": "anne-native-dev",
+      "configurePreset": "anne-native-dev"
+    },
+    {
+      "name": "anne-qemu-dev",
+      "configurePreset": "anne-qemu-dev"
+    },
     {
       "name": "qemu-dev",
       "configurePreset": "qemu-dev"
@@ -53,9 +138,43 @@
     {
       "name": "switch",
       "configurePreset": "switch"
+    },
+    {
+      "name": "anne-smp-native-dev",
+      "configurePreset": "anne-smp-native-dev"
+    },
+    {
+      "name": "anne-framebuffer-capture-dev",
+      "configurePreset": "anne-framebuffer-capture-dev"
+    },
+    {
+      "name": "anne-console-capture-dev",
+      "configurePreset": "anne-console-capture-dev"
+    },
+    {
+      "name": "anne-smp-trace-qemu-dev",
+      "configurePreset": "anne-smp-trace-qemu-dev"
+    },
+    {
+      "name": "anne-console-runtime-capture-dev",
+      "configurePreset": "anne-console-runtime-capture-dev"
     }
   ],
   "testPresets": [
+    {
+      "name": "anne-native-dev",
+      "configurePreset": "anne-native-dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "anne-qemu-dev",
+      "configurePreset": "anne-qemu-dev",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
     {
       "name": "qemu-dev",
       "configurePreset": "qemu-dev",

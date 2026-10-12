@@ -47,6 +47,16 @@ static void initrd_prop(void* v, const char* name, const u8* data, u32 len, u32 
 } // namespace
 
 bool discover_initrd(PhysAddr dtb_phys, PhysAddr* out_base, usize* out_size) {
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    // The Huawei kernel partition is separate from Android/TWRP ramdisks.
+    // Carry a signed MXB in this native image without modifying either ramdisk.
+    extern const u8 anne_bundle_start[] asm("anne_bundle_start");
+    extern const u8 anne_bundle_end[] asm("anne_bundle_end");
+    if (!out_base || !out_size) return false;
+    *out_base = reinterpret_cast<PhysAddr>(anne_bundle_start);
+    *out_size = static_cast<usize>(anne_bundle_end - anne_bundle_start);
+    return *out_size != 0;
+#endif
     if (!dtb_phys || !out_base || !out_size) {
         return false;
     }

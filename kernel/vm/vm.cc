@@ -1,5 +1,6 @@
 #include "anko/vm.h"
 #include "anko/log.h"
+#include "anko/interrupt_mask.h"
 #include "libk/string.h"
 #include "libk/printf.h"
 
@@ -17,7 +18,7 @@ CallGuard::CallGuard(bool active) : active_(active), irq_(0) {
 CallGuard::~CallGuard() {
     if (!active_) return;
     __atomic_store_n(&g_call_lock, 0u, __ATOMIC_RELEASE);
-    asm volatile("msr DAIF, %0" :: "r"(irq_) : "memory");
+    asm volatile("msr DAIF, %0" :: "r"(kernel::host_interrupt_state(irq_)) : "memory");
 }
 static void dispose_vm(void* target) {
     auto* v = static_cast<Vm*>(target);

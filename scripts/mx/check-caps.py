@@ -24,61 +24,8 @@ import json
 import sys
 from pathlib import Path
 
-PRINCIPALS = {"kernel", "native_trusted", "native_sandboxed", "vm"}
-RESTARTS = {"always", "never"}
-
-
-def check_manifest(manifest: dict) -> list[str]:
-    problems: list[str] = []
-    services = manifest.get("services") or []
-    resources = manifest.get("resources") or []
-    channels = manifest.get("channels") or []
-
-    resource_names = [r.get("name") for r in resources]
-    if len(resource_names) != len(set(resource_names)):
-        problems.append("resources: a resource name is declared more than once")
-    resource_set = set(resource_names)
-
-    channel_names = [c.get("name") for c in channels]
-    if len(channel_names) != len(set(channel_names)):
-        problems.append("channels: a channel name is declared more than once")
-
-    names = [s.get("name") for s in services]
-    if len(names) != len(set(names)):
-        problems.append("services: a service name is declared more than once")
-    name_set = set(names)
-
-    # `uses` names a *provided* service, not a process: a client resolves "fs" or
-    # "nameservice", and whichever process provides it is an implementation
-    # detail. Gather the provide table first, then validate against it.
-    provided: dict[str, str] = {}
-    for svc in services:
-        for prov in svc.get("provides") or []:
-            if prov in provided:
-                problems.append(
-                    f"service {svc.get('name')}: provides {prov!r} already provided by {provided[prov]}"
-                )
-            else:
-                provided[prov] = svc.get("name")
-
-    for svc in services:
-        name = svc.get("name")
-        if svc.get("principal") not in PRINCIPALS:
-            problems.append(f"service {name}: unknown principal {svc.get('principal')!r}")
-        if svc.get("restart") not in RESTARTS:
-            problems.append(f"service {name}: unknown restart policy {svc.get('restart')!r}")
-        if not svc.get("object"):
-            problems.append(f"service {name}: missing object name")
-        for used in svc.get("uses") or []:
-            if used not in provided:
-                problems.append(f"service {name}: uses {used!r}, which nothing provides")
-        for dep in svc.get("start_after") or []:
-            if dep not in name_set:
-                problems.append(f"service {name}: start_after unknown service {dep!r}")
-        for cap in svc.get("caps") or []:
-            if cap not in resource_set:
-                problems.append(f"service {name}: cap {cap!r} is not a declared resource")
-    return problems
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from system_descriptor import check_manifest, unique_object
 
 
 def main() -> int:
@@ -90,7 +37,11 @@ def main() -> int:
         print(f"check-caps: manifest not found: {args.manifest}", file=sys.stderr)
         return 2
 
-    manifest = json.loads(args.manifest.read_text())
+    try:
+        manifest = json.loads(args.manifest.read_text(), object_pairs_hook=unique_object)
+    except (ValueError, OSError) as error:
+        print(f"check-caps: {error}", file=sys.stderr)
+        return 1
     problems = check_manifest(manifest)
     if problems:
         print("check-caps: manifest is inconsistent:")

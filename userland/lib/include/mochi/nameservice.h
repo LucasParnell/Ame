@@ -24,21 +24,13 @@ static inline mx_status_t wait_resolve_reply(const SpscEndpoint& ns, MxEndpointD
     RingSlot slot{};
     for (;;) {
         if (!ns.wait_recv(&slot)) return MX_ERR_DEAD;
-        if (slot.type == MSG_NS_RESOLVE_REPLY && slot.length >= sizeof(MxEndpointDesc)) {
-            if (out) {
-                for (uint32_t i = 0; i < sizeof(MxEndpointDesc); ++i) {
-                    reinterpret_cast<uint8_t*>(out)[i] = slot.payload[i];
-                }
-            }
+        MxEndpointDesc endpoint{};
+        if (message_get(slot, &endpoint, MSG_NS_RESOLVE_REPLY)) {
+            if (out) *out = endpoint;
             return MX_OK;
         }
-        if (slot.type == MSG_NS_ERROR && slot.length >= sizeof(mx_status_t)) {
-            mx_status_t status = MX_ERR_NOT_FOUND;
-            for (uint32_t i = 0; i < sizeof(status); ++i) {
-                reinterpret_cast<uint8_t*>(&status)[i] = slot.payload[i];
-            }
-            return status;
-        }
+        mx_status_t status = MX_ERR_NOT_FOUND;
+        if (message_get(slot, &status, MSG_NS_ERROR)) return status;
     }
 }
 

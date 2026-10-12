@@ -75,7 +75,10 @@ def hmp_screendump(sock_path, out_path, device=None, timeout=10.0):
 
 def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, output=None,
         bundle=None, snapshot=True, monitor_socket=None, screendump=None,
-        screendump_device=None, screendump_delay=0.5, allow_kernel_panic=False):
+        screendump_device=None, screendump_delay=0.5, allow_kernel_panic=False,
+        entry_el=2, cpu='cortex-a57'):
+    if entry_el not in (1, 2):
+        raise ValueError('entry_el must be 1 or 2')
     build = pathlib.Path(build).resolve()
     output = pathlib.Path(output) if output else pathlib.Path(tempfile.mkdtemp(prefix='ame-boot-'))
     output.mkdir(parents=True, exist_ok=True)
@@ -87,11 +90,12 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
     # device used by the Phase C hostile-DMA verification.
     iommu = os.environ.get('AME_QEMU_IOMMU') == '1'
     testdev = os.environ.get('AME_QEMU_TESTDEV') == '1'
-    machine = 'virt,virtualization=on,gic-version=2'
+    virtualization = 'on' if entry_el == 2 else 'off'
+    machine = f'virt,virtualization={virtualization},gic-version=2'
     if iommu:
         machine += ',iommu=smmuv3,default-bus-bypass-iommu=off'
     args = ['qemu-system-aarch64', '-machine', machine,
-            '-cpu', 'cortex-a57', '-smp', str(cpus),
+            '-cpu', cpu, '-smp', str(cpus),
             '-m', os.environ.get('AME_QEMU_MEM', '512M'), '-device', 'ramfb',
             '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,bus=xhci.0',
             '-device', 'usb-mouse,bus=xhci.0', '-display', 'none',
@@ -157,6 +161,7 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
     result = dict(success=success, reason=reason, mode=mode, cpus=cpus,
                   elapsed=time.monotonic() - started, logs=str(output), command=args,
                   snapshot=snapshot, iommu=iommu, testdev=testdev,
+                  requested_entry_el=entry_el, cpu=cpu,
                   screendump=screendump, screendump_ok=screen_ok)
     (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result))
@@ -167,7 +172,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', required=True)
     parser.add_argument('--mode', choices=['direct', 'disk'], default='direct')
-    parser.add_argument('--cpus', type=int, choices=[1, 2, 4], default=2)
+    parser.add_argument('--cpus', type=int, choices=[1, 2, 4, 8], default=2)
+    parser.add_argument('--entry-el', type=int, choices=[1, 2], default=2,
+                        help='QEMU entry level: EL1 disables virtualization; default EL2')
+    parser.add_argument('--cpu', default='cortex-a57', help='QEMU CPU model')
     parser.add_argument('--timeout', type=float, default=45)
     parser.add_argument('--disk')
     parser.add_argument('--bundle')

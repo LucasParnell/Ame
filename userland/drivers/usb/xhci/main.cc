@@ -8,8 +8,15 @@
 // left for the next hardening pass.
 
 #include "mochi/syscall.h"
+#include "mochi/arena.h"
 #include "libk/bytes.h"
+#include "libk/endian.h"
 #include "libk/integer.h"
+#include "libk/dma.h"
+#include "libk/mmio.h"
+#include "midix/usb/descriptors.h"
+#include "midix/usb/xhci_ring.h"
+#include "midix/usb/xhci_events.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
@@ -19,7 +26,7 @@
 
 using namespace mochi::va::xhci;
 
-constexpr uint32_t kRingOrder = MX_DEFAULT_RING_ORDER;
+constexpr uint32_t kControlBufferBytes = 512;
 
 // xHCI capability register offsets.
 constexpr uint32_t kXhciCapLength  = 0x00;
@@ -59,7 +66,6 @@ constexpr uint32_t kPortChangeMask =
     (1u << 21) | (1u << 22) | (1u << 23);
 
 constexpr uint32_t kTrbCycle = 1u << 0;
-constexpr uint32_t kTrbToggleCycle = 1u << 1;
 constexpr uint32_t kTrbIsp = 1u << 2;
 constexpr uint32_t kTrbChain = 1u << 4;
 constexpr uint32_t kTrbIoc = 1u << 5;
@@ -86,12 +92,7 @@ enum CompletionCode : uint32_t {
     CC_SHORT_PACKET = 13,
 };
 
-struct Trb {
-    uint64_t parameter;
-    uint32_t status;
-    uint32_t control;
-};
-static_assert(sizeof(Trb) == 16);
+using Trb = midix::usb::xhci::Trb;
 
 struct ErstEntry {
     uint64_t base;
@@ -100,14 +101,7 @@ struct ErstEntry {
 };
 static_assert(sizeof(ErstEntry) == 16);
 
-struct XhciRing {
-    Trb* trbs;
-    uint64_t phys;
-    uint32_t count;
-    uint32_t index;
-    uint32_t cycle;
-    bool link;
-};
+using XhciRing = midix::usb::xhci::ProducerRing;
 
 struct UsbDevice {
     uint8_t port;
@@ -130,6 +124,7 @@ struct UsbDevice {
 
 struct KeyboardState {
     bool ready;
+    bool report_pending;
     uint8_t slot_id;
     uint8_t endpoint_id;
     XhciRing interrupt_ring;
@@ -137,7 +132,7 @@ struct KeyboardState {
     uint64_t report_phys;
 };
 
-static volatile uint8_t* g_mmio = nullptr;
+static libk::Mmio g_mmio{};
 static uint32_t g_cap_len = 0;
 static uint32_t g_dboff = 0;
 static uint32_t g_rtsoff = 0;
@@ -148,7 +143,7 @@ static uint32_t g_ctx_stride = 32;
 static uint8_t* g_dma_base = nullptr;
 static uint64_t g_dma_phys = 0;
 static uint64_t g_dma_size = 0;
-static uint64_t g_dma_bump = 0;
+static mochi::Arena g_dma_arena;
 
 static uint64_t* g_dcbaa = nullptr;
 static XhciRing g_command_ring{};
@@ -162,24 +157,11 @@ static uint64_t g_erst_phys = 0;
 
 static mochi::usb::BootKeyboardReportSink g_hid{};
 static KeyboardState g_keyboard{};
+static midix::usb::xhci::EventBacklog g_deferred_events{};
+static bool g_event_fault = false;
 
 static void barrier() {
-    asm volatile("dsb sy" ::: "memory");
-}
-
-static void zero_mem(void* ptr, uint64_t size) {
-    libk::fill(libk::as_bytes(ptr, static_cast<std::size_t>(size)), 0);
-}
-
-static void copy_mem(void* dst, const void* src, uint64_t size) {
-    (void)libk::copy_n(libk::as_bytes(dst, static_cast<std::size_t>(size)),
-                       libk::as_bytes(src, static_cast<std::size_t>(size)),
-                       static_cast<std::size_t>(size));
-}
-
-static uint16_t load_u16(const uint8_t* p) {
-    return static_cast<uint16_t>(p[0]) |
-           static_cast<uint16_t>(static_cast<uint16_t>(p[1]) << 8);
+    libk::dma::order_mmio();
 }
 
 static uint32_t trb_type(uint32_t type) {
@@ -202,28 +184,20 @@ static uint8_t event_endpoint(const Trb& trb) {
     return static_cast<uint8_t>((trb.control >> 16) & 0x1Fu);
 }
 
-static volatile uint32_t* reg32(uint64_t off) {
-    return reinterpret_cast<volatile uint32_t*>(
-        reinterpret_cast<uint64_t>(g_mmio) + off);
-}
-
-static volatile uint64_t* reg64(uint64_t off) {
-    return reinterpret_cast<volatile uint64_t*>(
-        reinterpret_cast<uint64_t>(g_mmio) + off);
-}
-
 static uint32_t mmio_read32(uint64_t off) {
     barrier();
-    return *reg32(off);
+    uint32_t value = 0;
+    if (!g_mmio.read32(off, &value)) g_event_fault = true;
+    return value;
 }
 
 static void mmio_write32(uint64_t off, uint32_t val) {
-    *reg32(off) = val;
+    if (!g_mmio.write32(off, val)) g_event_fault = true;
     barrier();
 }
 
 static void mmio_write64(uint64_t off, uint64_t val) {
-    *reg64(off) = val;
+    if (!g_mmio.write64(off, val)) g_event_fault = true;
     barrier();
 }
 
@@ -277,19 +251,6 @@ static void port_clear_changes(uint8_t port) {
     mmio_write32(port_offset(port), (s & ~kPortChangeMask) | kPortChangeMask);
 }
 
-static uint64_t align_up(uint64_t value, uint64_t align) {
-    return static_cast<uint64_t>(libk::align_up(value, align));
-}
-
-static void* dma_alloc(uint64_t size, uint64_t align) {
-    const uint64_t off = align_up(g_dma_bump, align);
-    if (off + size > g_dma_size) return nullptr;
-    void* ptr = g_dma_base + off;
-    g_dma_bump = off + size;
-    zero_mem(ptr, size);
-    return ptr;
-}
-
 static uint64_t dma_phys(void* ptr) {
     return g_dma_phys + (reinterpret_cast<uint64_t>(ptr) -
                          reinterpret_cast<uint64_t>(g_dma_base));
@@ -305,47 +266,17 @@ static uint32_t* output_context_dwords(UsbDevice& dev, uint32_t dci) {
                                        static_cast<uint64_t>(dci) * g_ctx_stride);
 }
 
-static void ring_write_link(XhciRing& ring) {
-    if (!ring.link || ring.count == 0) return;
-    Trb& link = ring.trbs[ring.count - 1];
-    link.parameter = ring.phys;
-    link.status = 0;
-    link.control = trb_type(TRB_LINK) | kTrbToggleCycle |
-                   (ring.cycle ? kTrbCycle : 0);
-}
-
 static bool ring_init(XhciRing& ring, uint32_t count, bool link) {
-    ring.trbs = static_cast<Trb*>(dma_alloc(static_cast<uint64_t>(count) * sizeof(Trb), 64));
-    if (!ring.trbs) return false;
-    ring.phys = dma_phys(ring.trbs);
-    ring.count = count;
-    ring.index = 0;
-    ring.cycle = 1;
-    ring.link = link;
-    ring_write_link(ring);
-    return true;
+    if (!link || count < 4 || count > 4096 || (count & (count - 1))) return false;
+    // Align the segment to its power-of-two extent so it cannot straddle the
+    // 64 KiB boundary, regardless of the physical arena's starting page.
+    const uint64_t bytes = static_cast<uint64_t>(count) * sizeof(Trb);
+    auto* storage = static_cast<Trb*>(g_dma_arena.alloc_zeroed(bytes, bytes));
+    return storage && ring.init(storage, dma_phys(storage), count);
 }
 
 static uint64_t ring_enqueue(XhciRing& ring, Trb trb) {
-    const uint32_t link_index = ring.link ? ring.count - 1u : ring.count;
-    if (ring.index >= link_index) {
-        ring.index = 0;
-    }
-
-    const uint32_t index = ring.index;
-    trb.control &= ~kTrbCycle;
-    trb.control |= ring.cycle ? kTrbCycle : 0;
-    ring.trbs[index] = trb;
-    barrier();
-
-    ring.index = index + 1u;
-    if (ring.link && ring.index == ring.count - 1u) {
-        ring_write_link(ring);
-        barrier();
-        ring.index = 0;
-        ring.cycle ^= 1u;
-    }
-    return ring.phys + static_cast<uint64_t>(index) * sizeof(Trb);
+    return ring.enqueue(trb);
 }
 
 static void event_ring_update_erdp() {
@@ -358,6 +289,7 @@ static bool event_poll(Trb* out) {
     Trb& src = g_event_ring[g_event_index];
     const uint32_t control = __atomic_load_n(&src.control, __ATOMIC_ACQUIRE);
     if ((control & kTrbCycle) != (g_event_cycle ? kTrbCycle : 0)) return false;
+    libk::dma::consume();
 
     out->parameter = src.parameter;
     out->status = src.status;
@@ -381,6 +313,7 @@ static bool wait_command(uint64_t command_phys, Trb* out_event) {
                 if (out_event) *out_event = event;
                 return completion_code(event) == CC_SUCCESS;
             }
+            if (!g_deferred_events.push(event)) { g_event_fault = true; return false; }
         }
         mx_yield();
     }
@@ -389,18 +322,36 @@ static bool wait_command(uint64_t command_phys, Trb* out_event) {
 
 static bool issue_command(Trb command, Trb* out_event) {
     const uint64_t phys = ring_enqueue(g_command_ring, command);
+    if (!phys) return false;
     doorbell_write(0, 0);
-    return wait_command(phys, out_event);
+    Trb event{};
+    const bool success = wait_command(phys, &event);
+    if (event.parameter == phys) (void)g_command_ring.retire(1);
+    if (out_event) *out_event = event;
+    return success;
 }
 
-static bool wait_transfer(uint8_t slot_id, uint8_t endpoint_id, uint32_t* out_code) {
+static bool wait_transfer(uint8_t slot_id, uint8_t endpoint_id, uint64_t status_phys,
+                          uint64_t data_phys, uint32_t requested, uint32_t* out_actual, uint32_t* out_code) {
+    uint32_t actual = requested;
     for (uint32_t spin = 0; spin < 500000; ++spin) {
         Trb event{};
         while (event_poll(&event)) {
-            if (event_type(event) != TRB_TRANSFER_EVENT) continue;
-            if (event_slot(event) != slot_id || event_endpoint(event) != endpoint_id) continue;
+            if (event_type(event) != TRB_TRANSFER_EVENT || event_slot(event) != slot_id ||
+                event_endpoint(event) != endpoint_id ||
+                (event.parameter != status_phys && (!data_phys || event.parameter != data_phys))) {
+                if (!g_deferred_events.push(event)) { g_event_fault = true; return false; }
+                continue;
+            }
             const uint32_t code = completion_code(event);
+            if (event.parameter == data_phys && code == CC_SHORT_PACKET) {
+                const auto residual = event.status & 0xffffffu;
+                if (residual > requested) return false;
+                actual = requested - residual;
+                continue; // the status stage still owns descriptors and DMA
+            }
             if (out_code) *out_code = code;
+            if (out_actual) *out_actual = actual;
             return code == CC_SUCCESS || code == CC_SHORT_PACKET;
         }
         mx_yield();
@@ -409,25 +360,6 @@ static bool wait_transfer(uint8_t slot_id, uint8_t endpoint_id, uint32_t* out_co
 }
 
 static bool xhci_reset() {
-#ifdef ANKO_XHCI_NORESET
-    // T210 XUSB: Hekate pre-loaded FALCON firmware into IMEM.  Issuing HCRST
-    // (kCmdHcReset) would erase FALCON and leave the controller dead.
-    // Instead, stop the controller normally if it is still running, then wait
-    // for it to enter the halted + ready state before re-programming DCBAAP.
-    if (!(op_read(kXhciUsbSts) & kStsHcHalted)) {
-        op_write(kXhciUsbCmd, op_read(kXhciUsbCmd) & ~kCmdRun);
-        uint32_t attempts = 100000;
-        while (!(op_read(kXhciUsbSts) & kStsHcHalted) && --attempts) {
-            asm volatile("yield" ::: "memory");
-        }
-        if (!attempts) return false;
-    }
-    uint32_t attempts = 100000;
-    while ((op_read(kXhciUsbSts) & kStsNotReady) && --attempts) {
-        asm volatile("yield" ::: "memory");
-    }
-    return attempts > 0;
-#else
     if (!(op_read(kXhciUsbSts) & kStsHcHalted)) {
         op_write(kXhciUsbCmd, op_read(kXhciUsbCmd) & ~kCmdRun);
         uint32_t attempts = 100000;
@@ -437,19 +369,20 @@ static bool xhci_reset() {
         if (!attempts) return false;
     }
 
-    op_write(kXhciUsbCmd, op_read(kXhciUsbCmd) | kCmdHcReset);
     uint32_t attempts = 100000;
+#ifndef ANKO_XHCI_NORESET
+    // T210 keeps Hekate's FALCON firmware; other controllers reset normally.
+    op_write(kXhciUsbCmd, op_read(kXhciUsbCmd) | kCmdHcReset);
     while ((op_read(kXhciUsbCmd) & kCmdHcReset) && --attempts) {
         asm volatile("yield" ::: "memory");
     }
     if (!attempts) return false;
-
     attempts = 100000;
+#endif
     while ((op_read(kXhciUsbSts) & kStsNotReady) && --attempts) {
         asm volatile("yield" ::: "memory");
     }
     return attempts > 0;
-#endif
 }
 
 static uint32_t scratchpad_count(uint32_t hcs2) {
@@ -459,19 +392,19 @@ static uint32_t scratchpad_count(uint32_t hcs2) {
 }
 
 static bool xhci_dma_init() {
-    g_dcbaa = static_cast<uint64_t*>(dma_alloc(256 * sizeof(uint64_t), 64));
+    g_dcbaa = static_cast<uint64_t*>(g_dma_arena.alloc_zeroed(256 * sizeof(uint64_t), 64));
     if (!g_dcbaa) return false;
 
     const uint32_t hcs2 = cap_read(kXhciHcsParams2);
     const uint32_t scratchpads = scratchpad_count(hcs2);
     if (scratchpads != 0) {
-        if (scratchpads > 4) return false;
+        if (scratchpads > g_dma_arena.remaining() / 4096) return false;
         auto* scratchpad_array =
-            static_cast<uint64_t*>(dma_alloc(static_cast<uint64_t>(scratchpads) *
+            static_cast<uint64_t*>(g_dma_arena.alloc_zeroed(static_cast<uint64_t>(scratchpads) *
                                              sizeof(uint64_t), 64));
         if (!scratchpad_array) return false;
         for (uint32_t i = 0; i < scratchpads; ++i) {
-            void* page = dma_alloc(4096, 4096);
+            void* page = g_dma_arena.alloc_zeroed(4096, 4096);
             if (!page) return false;
             scratchpad_array[i] = dma_phys(page);
         }
@@ -482,13 +415,13 @@ static bool xhci_dma_init() {
 
     g_event_count = 128;
     g_event_ring = static_cast<Trb*>(
-        dma_alloc(static_cast<uint64_t>(g_event_count) * sizeof(Trb), 64));
+        g_dma_arena.alloc_zeroed(static_cast<uint64_t>(g_event_count) * sizeof(Trb), 64));
     if (!g_event_ring) return false;
     g_event_ring_phys = dma_phys(g_event_ring);
     g_event_index = 0;
     g_event_cycle = 1;
 
-    g_erst = static_cast<ErstEntry*>(dma_alloc(sizeof(ErstEntry), 64));
+    g_erst = static_cast<ErstEntry*>(g_dma_arena.alloc_zeroed(sizeof(ErstEntry), 64));
     if (!g_erst) return false;
     g_erst_phys = dma_phys(g_erst);
     g_erst[0].base = g_event_ring_phys;
@@ -560,10 +493,10 @@ static uint16_t default_ep0_mps(uint8_t speed) {
 
 static bool device_alloc(UsbDevice& dev) {
     const uint64_t context_bytes = static_cast<uint64_t>(33u) * g_ctx_stride;
-    dev.input_context = static_cast<uint8_t*>(dma_alloc(context_bytes, 64));
-    dev.output_context = static_cast<uint8_t*>(dma_alloc(static_cast<uint64_t>(32u) *
+    dev.input_context = static_cast<uint8_t*>(g_dma_arena.alloc_zeroed(context_bytes, 64));
+    dev.output_context = static_cast<uint8_t*>(g_dma_arena.alloc_zeroed(static_cast<uint64_t>(32u) *
                                                          g_ctx_stride, 64));
-    dev.control_buffer = static_cast<uint8_t*>(dma_alloc(512, 64));
+    dev.control_buffer = static_cast<uint8_t*>(g_dma_arena.alloc_zeroed(kControlBufferBytes, 64));
     if (!dev.input_context || !dev.output_context || !dev.control_buffer) return false;
     dev.input_context_phys = dma_phys(dev.input_context);
     dev.output_context_phys = dma_phys(dev.output_context);
@@ -573,7 +506,7 @@ static bool device_alloc(UsbDevice& dev) {
 
 static void prepare_address_context(UsbDevice& dev, uint16_t ep0_mps) {
     const uint64_t context_bytes = static_cast<uint64_t>(33u) * g_ctx_stride;
-    zero_mem(dev.input_context, context_bytes);
+    libk::zero(dev.input_context, context_bytes);
 
     auto* icc = reinterpret_cast<uint32_t*>(dev.input_context);
     icc[0] = 0;                         // Drop Context flags
@@ -617,6 +550,10 @@ static bool address_device(UsbDevice& dev) {
 static bool usb_control(UsbDevice& dev, uint8_t request_type, uint8_t request,
                         uint16_t value, uint16_t index, uint8_t* buffer,
                         uint16_t length, bool direction_in) {
+    if (length > kControlBufferBytes || (length && !buffer)) return false;
+    const uint32_t descriptors = length ? 3 : 2;
+    if (dev.control_ring.available() < descriptors) return false;
+    if (direction_in) libk::zero(dev.control_buffer, kControlBufferBytes);
     const uint64_t setup =
         static_cast<uint64_t>(request_type) |
         (static_cast<uint64_t>(request) << 8) |
@@ -631,14 +568,18 @@ static bool usb_control(UsbDevice& dev, uint8_t request_type, uint8_t request,
     setup_trb.control = trb_type(TRB_SETUP_STAGE) | kTrbIdt | (trt << 16);
     (void)ring_enqueue(dev.control_ring, setup_trb);
 
+    uint64_t data_phys = 0;
     if (length != 0) {
         Trb data_trb{};
         data_trb.parameter = dev.control_buffer_phys;
         data_trb.status = length;
         data_trb.control = trb_type(TRB_DATA_STAGE) | kTrbChain |
-                           (direction_in ? (1u << 16) : 0);
-        if (!direction_in && buffer) copy_mem(dev.control_buffer, buffer, length);
-        (void)ring_enqueue(dev.control_ring, data_trb);
+                           (direction_in ? (1u << 16) | kTrbIsp : 0);
+        if (!direction_in) {
+            libk::copy_n(libk::as_bytes(dev.control_buffer, kControlBufferBytes),
+                         libk::as_bytes(buffer, length), length);
+        }
+        data_phys = ring_enqueue(dev.control_ring, data_trb);
     }
 
     Trb status_trb{};
@@ -646,16 +587,21 @@ static bool usb_control(UsbDevice& dev, uint8_t request_type, uint8_t request,
     status_trb.status = 0;
     status_trb.control = trb_type(TRB_STATUS_STAGE) | kTrbIoc |
                          ((!direction_in || length == 0) ? (1u << 16) : 0);
-    (void)ring_enqueue(dev.control_ring, status_trb);
+    const auto status_phys = ring_enqueue(dev.control_ring, status_trb);
 
     barrier();
     doorbell_write(dev.slot_id, 1);
 
     uint32_t code = 0;
-    if (!wait_transfer(dev.slot_id, 1, &code)) return false;
-    if (direction_in && buffer && length != 0) copy_mem(buffer, dev.control_buffer, length);
+    uint32_t actual = 0;
+    if (!wait_transfer(dev.slot_id, 1, status_phys, data_phys, length, &actual, &code)) return false;
+    (void)dev.control_ring.retire(descriptors);
+    if (direction_in && actual) {
+        if (!libk::copy_n(libk::as_bytes(buffer, length),
+                         libk::as_bytes(dev.control_buffer, kControlBufferBytes), actual)) return false;
+    }
     (void)code;
-    return true;
+    return actual == length;
 }
 
 static bool get_descriptor(UsbDevice& dev, uint8_t type, uint8_t index,
@@ -678,80 +624,58 @@ static bool hid_set_idle(UsbDevice& dev, uint8_t iface) {
 }
 
 static bool parse_keyboard_config(UsbDevice& dev, uint16_t total_len) {
-    bool in_keyboard_iface = false;
-    uint32_t off = 0;
-    while (off + 2 <= total_len) {
-        const uint8_t len = dev.control_buffer[off];
-        const uint8_t type = dev.control_buffer[off + 1];
-        if (len < 2 || off + len > total_len) break;
-
-        if (type == 2 && len >= 9) {
-            dev.config_value = dev.control_buffer[off + 5];
-        } else if (type == 4 && len >= 9) {
-            const uint8_t cls = dev.control_buffer[off + 5];
-            const uint8_t sub = dev.control_buffer[off + 6];
-            const uint8_t proto = dev.control_buffer[off + 7];
-            in_keyboard_iface = cls == 3 && sub == 1 && proto == 1;
-            if (in_keyboard_iface) {
-                dev.interface_number = dev.control_buffer[off + 2];
-            }
-        } else if (type == 5 && len >= 7 && in_keyboard_iface) {
-            const uint8_t ep_addr = dev.control_buffer[off + 2];
-            const uint8_t attrs = dev.control_buffer[off + 3] & 0x3u;
-            if ((ep_addr & 0x80u) != 0 && attrs == 3) {
-                dev.endpoint_address = ep_addr;
-                const uint8_t ep_num = ep_addr & 0x0Fu;
-                dev.endpoint_id = static_cast<uint8_t>(ep_num * 2u + 1u);
-                dev.endpoint_mps = load_u16(dev.control_buffer + off + 4) & 0x07FFu;
-                dev.interval = dev.control_buffer[off + 6];
-                return dev.config_value != 0 && dev.endpoint_id != 0 &&
-                       dev.endpoint_mps != 0;
-            }
-        }
-
-        off += len;
+    // Validate the entire tree before selecting the legacy keyboard adapter.
+    // Capacity derives from the bounded descriptor blob, not a device count.
+    midix::usb::InterfaceDescriptor interfaces[kControlBufferBytes / 9]{};
+    midix::usb::EndpointDescriptor endpoints[kControlBufferBytes / 7]{};
+    midix::usb::Configuration config{interfaces, endpoints, kControlBufferBytes / 9,
+                                    kControlBufferBytes / 7, 0, 0, 0, 0, 0, 0};
+    MxUsbSpeed speed{};
+    if (!midix::usb::xhci::standard_speed(dev.speed, &speed)) return false;
+    if (!midix::usb::parse_configuration(libk::as_bytes(dev.control_buffer, total_len),
+                                       speed, &config)) return false;
+    for (uint32_t i = 0; i < config.endpoint_count; ++i) {
+        const auto& endpoint = endpoints[i];
+        const auto& interface = interfaces[endpoint.interface_index];
+        if (interface.alternate != 0 || interface.interface_class != 3 || interface.subclass != 1 ||
+            interface.protocol != 1 || endpoint.type != MxUsbTransferType::Interrupt ||
+            !(endpoint.address & 0x80u) || endpoint.max_packet < sizeof(UsbBootKeyboardReport)) continue;
+        dev.config_value = config.value;
+        dev.interface_number = interface.number;
+        dev.endpoint_address = endpoint.address;
+        dev.endpoint_id = static_cast<uint8_t>((endpoint.address & 15u) * 2u + 1u);
+        dev.endpoint_mps = endpoint.max_packet;
+        dev.interval = endpoint.interval;
+        return true;
     }
     return false;
 }
 
-static uint32_t ceil_log2(uint32_t value) {
-    if (value <= 1) return 0;
-    uint32_t p = 0;
-    uint32_t x = 1;
-    while (x < value && p < 15) {
-        x <<= 1;
-        ++p;
-    }
-    return p;
-}
-
 static uint32_t endpoint_interval(uint8_t speed, uint8_t b_interval) {
-    if (b_interval == 0) return 0;
     uint32_t interval = 0;
-    if (speed == 1 || speed == 2) {
-        interval = ceil_log2(b_interval) + 3u;
-    } else {
-        interval = b_interval;
-    }
-    return interval > 15 ? 15 : interval;
+    MxUsbSpeed logical_speed{};
+    if (midix::usb::xhci::standard_speed(speed, &logical_speed))
+        (void)midix::usb::xhci::interrupt_interval(logical_speed, b_interval, &interval);
+    return interval;
 }
 
 static bool configure_keyboard_endpoint(UsbDevice& dev) {
     if (!ring_init(g_keyboard.interrupt_ring, 64, true)) return false;
     g_keyboard.report = static_cast<UsbBootKeyboardReport*>(
-        dma_alloc(sizeof(UsbBootKeyboardReport), 64));
+        g_dma_arena.alloc_zeroed(sizeof(UsbBootKeyboardReport), 64));
     if (!g_keyboard.report) return false;
     g_keyboard.report_phys = dma_phys(g_keyboard.report);
 
     const uint64_t context_bytes = static_cast<uint64_t>(33u) * g_ctx_stride;
-    zero_mem(dev.input_context, context_bytes);
+    libk::zero(dev.input_context, context_bytes);
 
     auto* icc = reinterpret_cast<uint32_t*>(dev.input_context);
     icc[0] = 0;
     icc[1] = (1u << 0) | (1u << dev.endpoint_id);
 
     uint32_t* slot = input_context_dwords(dev, 0);
-    copy_mem(slot, output_context_dwords(dev, 0), g_ctx_stride);
+    libk::copy_exact(libk::as_bytes(slot, g_ctx_stride),
+                     libk::as_bytes(output_context_dwords(dev, 0), g_ctx_stride));
     slot[0] = (slot[0] & ~(0x1Fu << 27)) |
               (static_cast<uint32_t>(dev.endpoint_id) << 27);
 
@@ -786,7 +710,7 @@ static uint32_t doorbell_target_for_endpoint(uint8_t endpoint_id) {
 
 static void submit_keyboard_transfer() {
     if (!g_keyboard.ready) return;
-    zero_mem(g_keyboard.report, sizeof(UsbBootKeyboardReport));
+    libk::zero(g_keyboard.report, sizeof(UsbBootKeyboardReport));
     Trb trb{};
     trb.parameter = g_keyboard.report_phys;
     trb.status = sizeof(UsbBootKeyboardReport);
@@ -798,27 +722,31 @@ static void submit_keyboard_transfer() {
 }
 
 static bool send_keyboard_report(const UsbBootKeyboardReport* report) {
-    return report && g_hid.send_spinning(*report);
+    return report && g_hid.try_send(*report);
 }
 
 static bool enumerate_port(uint8_t port) {
     UsbDevice dev{};
     dev.port = port;
-    if (!reset_port(port, &dev.speed)) return false;
-    if (!device_alloc(dev)) return false;
-    if (!address_device(dev)) return false;
+    auto checked = [](bool success, uint32_t stage) {
+        if (!success) mochi::log_counter("xhci.enumeration.failure", stage);
+        return success;
+    };
+    if (!checked(reset_port(port, &dev.speed), 1)) return false;
+    if (!checked(device_alloc(dev), 2)) return false;
+    if (!checked(address_device(dev), 3)) return false;
 
-    if (!get_descriptor(dev, 1, 0, dev.control_buffer, 18)) return false;
-    if (!get_descriptor(dev, 2, 0, dev.control_buffer, 9)) return false;
-    uint16_t total_len = load_u16(dev.control_buffer + 2);
+    if (!checked(get_descriptor(dev, 1, 0, dev.control_buffer, 18), 4)) return false;
+    if (!checked(get_descriptor(dev, 2, 0, dev.control_buffer, 9), 5)) return false;
+    uint16_t total_len = libk::load_le<uint16_t>(dev.control_buffer + 2);
     if (total_len < 9) return false;
-    if (total_len > 512) total_len = 512;
-    if (!get_descriptor(dev, 2, 0, dev.control_buffer, total_len)) return false;
-    if (!parse_keyboard_config(dev, total_len)) return false;
+    if (total_len > kControlBufferBytes) return false;
+    if (!checked(get_descriptor(dev, 2, 0, dev.control_buffer, total_len), 6)) return false;
+    if (!checked(parse_keyboard_config(dev, total_len), 7)) return false;
 
-    if (!configure_keyboard_endpoint(dev)) return false;
-    if (!set_configuration(dev, dev.config_value)) return false;
-    (void)hid_set_protocol(dev, dev.interface_number, 0);
+    if (!checked(configure_keyboard_endpoint(dev), 8)) return false;
+    if (!checked(set_configuration(dev, dev.config_value), 9)) return false;
+    if (!checked(hid_set_protocol(dev, dev.interface_number, 0), 10)) return false;
     (void)hid_set_idle(dev, dev.interface_number);
 
     g_keyboard.ready = true;
@@ -827,8 +755,8 @@ static bool enumerate_port(uint8_t port) {
 }
 
 static bool enumerate_keyboard() {
-    for (uint8_t port = 1; port <= g_num_ports; ++port) {
-        if (enumerate_port(port)) return true;
+    for (uint32_t port = 1; port <= g_num_ports; ++port) {
+        if (enumerate_port(static_cast<uint8_t>(port))) return true;
     }
     return false;
 }
@@ -836,7 +764,7 @@ static bool enumerate_keyboard() {
 static void service_events() {
     Trb event{};
     bool any = false;
-    while (event_poll(&event)) {
+    while (g_deferred_events.pop(&event) || event_poll(&event)) {
         any = true;
         if (event_type(event) == TRB_TRANSFER_EVENT) {
             const uint32_t code = completion_code(event);
@@ -847,10 +775,22 @@ static void service_events() {
             }
             if (code == CC_SUCCESS || code == CC_SHORT_PACKET) {
                 barrier();
-                (void)send_keyboard_report(g_keyboard.report);
+                const auto residual = event.status & 0xffffffu;
+                if (residual == 0) g_keyboard.report_pending = true;
             }
-            submit_keyboard_transfer();
+            (void)g_keyboard.interrupt_ring.retire(1);
+            if (code != CC_SUCCESS && code != CC_SHORT_PACKET) g_keyboard.ready = false;
+            else if (!g_keyboard.report_pending) submit_keyboard_transfer();
         }
+    }
+    if (g_keyboard.report_pending && send_keyboard_report(g_keyboard.report)) {
+        g_keyboard.report_pending = false;
+        if (g_keyboard.ready) submit_keyboard_transfer();
+    }
+    if (g_event_fault) {
+        // Do not recycle DMA or continue after losing event ownership.
+        g_keyboard.ready = false;
+        op_write(kXhciUsbCmd, op_read(kXhciUsbCmd) & ~kCmdRun);
     }
     if (!any) mx_yield();
 }
@@ -859,31 +799,30 @@ extern "C" [[noreturn]] void _start() {
     MxBootInfo* boot = mochi::boot::map(kVaBootInfo);
     (void)mochi::log_map_from_boot(boot, kVaLogRing, "drv.usb.xhci");
 
-    const mx_handle_t hid_ring = mochi::boot::handle(boot, "xhci.hid.ring");
-    if (hid_ring != MX_NULL_HANDLE &&
-        mx_map_page(hid_ring, kVaHidRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        g_hid.ring = reinterpret_cast<RingPage*>(kVaHidRing);
-    }
-    g_hid.order = kRingOrder;
-    g_hid.doorbell = mochi::boot::handle(boot, "xhci.hid.doorbell");
+    const mochi::Ring hid = mochi::boot::map_ring(
+        boot, {"xhci.hid.ring", kVaHidRing, "xhci.hid.doorbell"});
+    static_cast<mochi::Ring&>(g_hid) = hid;
 
     mx_handle_t xhci_mmio_cap = mochi::boot::handle(boot, "xhci.mmio");
     if (xhci_mmio_cap == MX_NULL_HANDLE) {
         mochi::log_raw_marker("drv.usb.xhci: no xhci.mmio in BootInfo\n");
+        mochi::boot::ready(boot);
         while (true) { mx_yield(); }
     }
-    if (mx_map_mmio(xhci_mmio_cap, kVaXhciMmio,
+    MxCapInfo mmio_info{};
+    if (mx_cap_info(xhci_mmio_cap, &mmio_info) != MX_OK || mmio_info.size < 0x20 ||
+        mx_map_mmio(xhci_mmio_cap, kVaXhciMmio,
                     MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) {
         mochi::log_raw_marker("drv.usb.xhci: xhci.mmio map failed\n");
         while (true) { mx_yield(); }
     }
-    g_mmio = reinterpret_cast<volatile uint8_t*>(kVaXhciMmio);
+    g_mmio = {reinterpret_cast<volatile uint8_t*>(kVaXhciMmio), mmio_info.size};
 
     mx_handle_t dma_cap = mochi::boot::handle(boot, "xhci.dma");
     MxCapInfo dma_info{};
     if (dma_cap == MX_NULL_HANDLE ||
         mx_cap_info(dma_cap, &dma_info) != MX_OK ||
+        dma_info.attr != MX_ARENA_MEMORY_NONCACHEABLE ||
         mx_map_page(dma_cap, kVaXhciDma,
                     MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) {
         mochi::log_raw_marker("drv.usb.xhci: no dma arena\n");
@@ -892,6 +831,15 @@ extern "C" [[noreturn]] void _start() {
     g_dma_base = reinterpret_cast<uint8_t*>(kVaXhciDma);
     g_dma_phys = dma_info.base;
     g_dma_size = dma_info.size;
+    g_dma_arena = mochi::Arena(g_dma_base, g_dma_size);
+
+    mx_handle_t state_cap = MX_NULL_HANDLE;
+    if (mx_arena_create(4096, 0, &state_cap) != MX_OK ||
+        mx_map_page(state_cap, kVaXhciState, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK ||
+        !g_deferred_events.init(reinterpret_cast<Trb*>(kVaXhciState), 4096 / sizeof(Trb))) {
+        mochi::log_raw_marker("drv.usb.xhci: state arena allocation failed\n");
+        while (true) mx_yield();
+    }
 
     // V0 deliberately polls the xHCI event ring. Keep the IRQ cap out of use
     // until kernel IRQ routing and EOI/ack semantics are wired end to end.
@@ -905,6 +853,19 @@ extern "C" [[noreturn]] void _start() {
     g_ctx_stride = (hcc1 & (1u << 2)) ? 64u : 32u;
     g_dboff = cap_read(kXhciDbOff) & ~0x3u;
     g_rtsoff = cap_read(kXhciRtsoff) & ~0x1Fu;
+
+    const uint64_t port_end = static_cast<uint64_t>(g_cap_len) + kXhciPorts +
+                              static_cast<uint64_t>(g_num_ports) * 0x10;
+    const uint64_t doorbell_end = static_cast<uint64_t>(g_dboff) + (g_max_slots + 1ull) * 4;
+    if (g_event_fault || g_cap_len < 0x20 || (g_cap_len & 3) || !g_max_slots || !g_num_ports ||
+        port_end > g_mmio.size || doorbell_end > g_mmio.size ||
+        static_cast<uint64_t>(g_rtsoff) + 0x40 > g_mmio.size ||
+        (!(hcc1 & 1) && (g_dma_phys > 0xffffffffull ||
+         !g_dma_size || g_dma_size - 1 > 0xffffffffull - g_dma_phys))) {
+        mochi::log_raw_marker("drv.usb.xhci: invalid controller geometry or DMA width\n");
+        mochi::boot::ready(boot);
+        while (true) mx_yield();
+    }
 
     if (!xhci_reset()) {
         mochi::log_raw_marker("drv.usb.xhci: controller reset timeout\n");

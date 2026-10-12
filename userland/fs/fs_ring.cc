@@ -18,10 +18,13 @@
 #include "mochi/sessions.h"
 
 
-
 static mochi::ServerSessions g_sessions;
 
 static void handle_slot(const mochi::fs::Server& fs, const RingSlot& slot) {
+    if (!mochi::message_valid(slot)) {
+        (void)fs.send_error(slot, MX_ERR_BAD_PROTOCOL);
+        return;
+    }
     switch (slot.type) {
     case FS_OPEN:
         handle_open(fs, slot);

@@ -97,30 +97,6 @@ static uint32_t glyph_span_height(const FbDrawGlyphCmd& cmd) {
     return min_u32(cmd.height, 16) * (cmd.scale_y ? min_u32(cmd.scale_y, 8) : 1);
 }
 
-static bool both_8byte_aligned(const void* a, const void* b) {
-    return ((reinterpret_cast<uint64_t>(a) | reinterpret_cast<uint64_t>(b)) & 7ull) == 0;
-}
-
-static void copy_words_forward(uint32_t* dst, const uint32_t* src, uint32_t words) {
-    if (both_8byte_aligned(dst, src) && ((words & 1u) == 0)) {
-        auto* d64 = reinterpret_cast<uint64_t*>(dst);
-        const auto* s64 = reinterpret_cast<const uint64_t*>(src);
-        for (uint32_t i = 0; i < words / 2u; ++i) d64[i] = s64[i];
-        return;
-    }
-    for (uint32_t i = 0; i < words; ++i) dst[i] = src[i];
-}
-
-static void copy_words_backward(uint32_t* dst, const uint32_t* src, uint32_t words) {
-    if (both_8byte_aligned(dst, src) && ((words & 1u) == 0)) {
-        auto* d64 = reinterpret_cast<uint64_t*>(dst);
-        const auto* s64 = reinterpret_cast<const uint64_t*>(src);
-        for (uint32_t i = words / 2u; i > 0; --i) d64[i - 1u] = s64[i - 1u];
-        return;
-    }
-    for (uint32_t i = words; i > 0; --i) dst[i - 1u] = src[i - 1u];
-}
-
 static void fb_fill_rect(volatile uint32_t* pixels, uint32_t x, uint32_t y,
                          uint32_t width, uint32_t height, uint32_t color) {
     if (x >= kFbWidth || y >= kFbHeight || width == 0 || height == 0) return;
@@ -165,17 +141,14 @@ static void fb_copy_rect(volatile uint32_t* pixels, const FbCopyRectCmd& cmd) {
         const uint32_t* src = base + src_off;
         uint32_t* dst = base + dst_off;
 
-        const bool copy_left_to_right =
-            (cmd.dst_y + row != cmd.src_y + row) || cmd.dst_x <= cmd.src_x;
-        if (copy_left_to_right) {
-            copy_words_forward(dst, src, clipped_w);
-        } else {
-            copy_words_backward(dst, src, clipped_w);
-        }
+        const auto bytes = static_cast<std::size_t>(clipped_w) * sizeof(*dst);
+        (void)libk::move_n(libk::as_bytes(dst, (kFbWidth - cmd.dst_x) * sizeof(*dst)),
+                           libk::as_bytes(src, (kFbWidth - cmd.src_x) * sizeof(*src)), bytes);
     }
 }
 
 static void fb_draw_glyph(volatile uint32_t* pixels, const FbDrawGlyphCmd& cmd) {
+    if (cmd.x >= kFbWidth || cmd.y >= kFbHeight) return;
     const uint32_t glyph_w = min_u32(cmd.width, 8);
     const uint32_t glyph_h = min_u32(cmd.height, 16);
     const uint32_t scale_x = cmd.scale_x ? min_u32(cmd.scale_x, 8) : 1;
@@ -200,6 +173,7 @@ static void fb_draw_glyph(volatile uint32_t* pixels, const FbDrawGlyphCmd& cmd) 
 }
 
 static void fb_draw_text(volatile uint32_t* pixels, const FbDrawTextCmd& cmd) {
+    if (cmd.x >= kFbWidth || cmd.y >= kFbHeight) return;
     const uint32_t count = min_u32(cmd.len, static_cast<uint32_t>(sizeof(cmd.text)));
     const uint32_t scale_x = cmd.scale_x ? min_u32(cmd.scale_x, 8) : 1;
     const uint32_t scale_y = cmd.scale_y ? min_u32(cmd.scale_y, 8) : 1;
@@ -217,9 +191,8 @@ static void fb_draw_text(volatile uint32_t* pixels, const FbDrawTextCmd& cmd) {
         glyph.height = static_cast<uint8_t>(midix::font::kVga8x16Height);
         glyph.scale_x = static_cast<uint8_t>(scale_x);
         glyph.scale_y = static_cast<uint8_t>(scale_y);
-        for (uint32_t r = 0; r < midix::font::kVga8x16Height; ++r) {
-            glyph.rows[r] = rows[r];
-        }
+        (void)libk::copy_exact(libk::as_bytes(glyph.rows),
+                                libk::as_bytes(rows, midix::font::kVga8x16Height));
         fb_draw_glyph(pixels, glyph);
     }
 }
@@ -273,6 +246,7 @@ static bool handle_fb_command(ServerState& state, const RingSlot& slot) {
     volatile uint32_t* pixels = state.pixels;
     const mochi::framebuffer::Server& endpoint = *state.endpoint;
     DamageRect* damage = state.gpu ? &state.damage : nullptr;
+    if (!mochi::message_valid(slot)) return false;
     switch (slot.type) {
     case FB_INFO:
         send_info(endpoint);
@@ -359,37 +333,11 @@ extern "C" [[noreturn]] void _start() {
 
     mochi::log_raw_marker("io.framebuffer: ready\n");
 
-    RingPage* cmd_ring = nullptr;
-    RingPage* reply_ring = nullptr;
-    uint32_t cmd_ring_order = kRingOrder;
-    uint32_t reply_ring_order = kRingOrder;
-    CapHandle cmd_db = mochi::boot::handle(boot, "fb.cmd.doorbell");
-    CapHandle reply_db = mochi::boot::handle(boot, "fb.reply.doorbell");
-    const MxBootEntry* cmd_ring_entry =
-        mochi::boot::find_type(boot, "fb.cmd.ring", MX_BOOT_ENTRY_RING);
-    const MxBootEntry* reply_ring_entry =
-        mochi::boot::find_type(boot, "fb.reply.ring", MX_BOOT_ENTRY_RING);
-    if (cmd_ring_entry && cmd_ring_entry->handle != MX_NULL_HANDLE &&
-        mx_map_page(cmd_ring_entry->handle, kVaCmdRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        cmd_ring = reinterpret_cast<RingPage*>(kVaCmdRing);
-        cmd_ring_order = cmd_ring_entry->aux0
-            ? static_cast<uint32_t>(cmd_ring_entry->aux0)
-            : kRingOrder;
-    }
-    if (reply_ring_entry && reply_ring_entry->handle != MX_NULL_HANDLE &&
-        mx_map_page(reply_ring_entry->handle, kVaReplyRing,
-                    MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK) {
-        reply_ring = reinterpret_cast<RingPage*>(kVaReplyRing);
-        reply_ring_order = reply_ring_entry->aux0
-            ? static_cast<uint32_t>(reply_ring_entry->aux0)
-            : kRingOrder;
-    }
     const mochi::framebuffer::Server endpoint{
-        {cmd_ring, cmd_ring_order, cmd_db},
-        {reply_ring, reply_ring_order, reply_db},
+        mochi::boot::map_ring(boot, {"fb.cmd.ring", kVaCmdRing, "fb.cmd.doorbell"}),
+        mochi::boot::map_ring(boot, {"fb.reply.ring", kVaReplyRing, "fb.reply.doorbell"}),
     };
-    if (!cmd_ring || cmd_db == MX_NULL_HANDLE) {
+    if (!endpoint.cmd.valid() || endpoint.cmd.doorbell == MX_NULL_HANDLE) {
         mochi::log_raw_marker("io.framebuffer: no command endpoint\n");
     }
 
@@ -448,7 +396,7 @@ extern "C" [[noreturn]] void _start() {
 
     mochi::boot::ready(boot);
     while (true) {
-        if (!cmd_ring || cmd_db == MX_NULL_HANDLE) {
+        if (!endpoint.cmd.valid() || endpoint.cmd.doorbell == MX_NULL_HANDLE) {
             mx_yield();
             continue;
         }

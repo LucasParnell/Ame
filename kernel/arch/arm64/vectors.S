@@ -58,6 +58,10 @@ vectors:
 // Shared entry for the slots above: capture the full register state and call
 // kernel_unexpected_exception(vector_index, esr, far, frame).
 vec_unexpected:
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    mov x4, x9
+    b anne_diag_fault_entry
+#endif
     sub  sp, sp, #288
     stp  x0,  x1,  [sp, #0]
     stp  x2,  x3,  [sp, #16]
@@ -93,6 +97,10 @@ vec_unexpected:
 // kernel_sync_fault(esr, far, frame).  The sp_el0 slot in TrapFrame holds
 // the pre-fault SP_EL1 value.
 vec_kernel_sync:
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    mov x4, #4
+    b anne_diag_fault_entry
+#endif
     sub  sp, sp, #288
     stp  x0,  x1,  [sp, #0]
     stp  x2,  x3,  [sp, #16]

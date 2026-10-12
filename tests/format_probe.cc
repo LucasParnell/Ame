@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include "midix/format/bundle.h"
+#include "midix/format/archive.h"
 #include "midix/format/json.h"
 #include "anko/fdt.h"
 static std::vector<unsigned char> read(const char* path) {
@@ -15,6 +16,10 @@ int main(int argc, char** argv) {
     }
     auto data = read(argv[2]);
     const std::string mode(argv[1]);
+    if (mode == "archive") {
+        libk::const_bytes entry{};
+        return midix::format::archive_find(libk::as_bytes(data.data(), data.size()), "init", &entry) && entry.size ? 0 : 1;
+    }
     if (mode == "json") {
         return midix::json::parse(reinterpret_cast<const char*>(data.data()), data.size()) ? 0 : 1;
     }

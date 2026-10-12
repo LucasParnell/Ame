@@ -1,0 +1,10 @@
+.section .rodata.anne_bundle, "a"
+// boot.initrd is mapped into init directly; its physical base must be a page.
+.balign 4096
+.global anne_bundle_start
+.global anne_bundle_end
+anne_bundle_start:
+.incbin "@CMAKE_BINARY_DIR@/system.mxb"
+anne_bundle_end:
+// Keep the final mapped page separate from other kernel data.
+.balign 4096

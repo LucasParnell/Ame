@@ -249,9 +249,23 @@ if(NOT ANKO_BUILD_DEV)
     set(AME_TRUST_MODE release)
 endif()
 # Refresh provenance when the checkout moves HEAD; harmless for non-git trees.
+# .git/HEAD alone is not enough: on a branch checkout its content never
+# changes between commits (it still names the same ref), so provenance would
+# go stale after every same-branch commit. Also depend on the resolved ref
+# file, whose mtime and content move with each commit. worktrees and detached
+# HEAD keep the .git/HEAD dependency.
 set(AME_PROVENANCE_GIT_DEPS)
 if(EXISTS ${CMAKE_SOURCE_DIR}/.git/HEAD)
     list(APPEND AME_PROVENANCE_GIT_DEPS ${CMAKE_SOURCE_DIR}/.git/HEAD)
+    file(READ ${CMAKE_SOURCE_DIR}/.git/HEAD AME_PROVENANCE_HEAD_RAW)
+    string(STRIP "${AME_PROVENANCE_HEAD_RAW}" AME_PROVENANCE_HEAD)
+    if(AME_PROVENANCE_HEAD MATCHES "^ref: refs/heads/(.+)$")
+        set(AME_PROVENANCE_BRANCH "${CMAKE_MATCH_1}")
+        if(EXISTS ${CMAKE_SOURCE_DIR}/.git/refs/heads/${AME_PROVENANCE_BRANCH})
+            list(APPEND AME_PROVENANCE_GIT_DEPS
+                 ${CMAKE_SOURCE_DIR}/.git/refs/heads/${AME_PROVENANCE_BRANCH})
+        endif()
+    endif()
 endif()
 # Optional arguments are appended only when configured, so an empty value never
 # collapses into a stray flag in the command line.

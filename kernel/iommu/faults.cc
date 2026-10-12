@@ -102,10 +102,13 @@ void quarantine_stream(StreamFault& rec) {
     rec.state = static_cast<u8>(StreamState::BusMasterDisabled);
     ++rec.generation;
     note_quarantine();
-    // Stop accepting new mappings on the domain this stream belonged to.
+    // Stop accepting new mappings on the domain this stream belonged to, and
+    // migrate the core binding so a later attach recovers the stream instead
+    // of reporting E_BUSY against a domain that no longer trusts it.
     if (IommuDomain* domain = stream_domain(device)) {
         domain->state_ = DomainState::Quarantined;
     }
+    note_stream_quarantined(device);
     ANKO_LOGF_WARN("iommu/faults",
                    "quarantine: sid=%u faults=%u generation=%u (STE faulting, bus-master cleared)",
                    rec.sid, rec.count, rec.generation);

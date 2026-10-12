@@ -222,9 +222,18 @@ SysError hook_detach(void*, IommuDeviceId device) {
     return smmuv3_program_deny(device);
 }
 
+bool hook_ready(void*) {
+    return g_state == State::Ready;
+}
+
 const IommuBackendOps g_backend = {
     hook_publish,        hook_invalidate, hook_sync, hook_attach, hook_detach,
     /* ctx = */ nullptr,
+    /* table_format = */ &kArmStage2Tables,
+    /* iova_bits = */ static_cast<u8>(kIommuIovaBits),
+    /* pa_bits = */ 48,
+    /* hardware = */ true,
+    /* ready = */ hook_ready,
 };
 
 } // namespace
@@ -357,8 +366,23 @@ SysError smmuv3_bring_up() {
     }
 
     g_state = State::Ready;
-    ANKO_LOGF_INFO("iommu/smmuv3", "enabled base=0x%llx sid_limit=%u cr0ack=0x%x",
-                   static_cast<unsigned long long>(g_base), g_sid_limit, readl(kRegCr0Ack));
+    // Route every stream on this platform's single PCI segment through the
+    // verified backend. register_backend() validates the ops table (hardware
+    // backends supply every hook and explicit geometry) and rejects overlap;
+    // a registration failure means the routing core would deny every stream,
+    // so fail bring-up rather than run unrouted.
+    {
+        const IommuRoute route{pci::kSegment, 0, g_sid_limit};
+        const SysError rc = register_backend(route, g_backend);
+        if (rc != E_OK) {
+            g_state = State::Failed;
+            ANKO_LOGF_ERROR("iommu/smmuv3", "backend registration failed rc=%d", static_cast<int>(rc));
+            return rc;
+        }
+    }
+    ANKO_LOGF_INFO("iommu/smmuv3", "enabled base=0x%llx sid_limit=%u cr0ack=0x%x routes=0..%u",
+                   static_cast<unsigned long long>(g_base), g_sid_limit, readl(kRegCr0Ack),
+                   g_sid_limit - 1);
     return E_OK;
 }
 

@@ -273,7 +273,10 @@ int main() {
         assert(g_last_invalidate_iova == 0x4020'0000);
         assert(g_last_invalidate_len == 2u * 1024 * 1024);
         assert(g_last_release_pa == pa_block && g_last_release_len == 2u * 1024 * 1024);
-        assert(iommu::debug_counter(iommu::IOMMU_TLBI_RANGE) == range0 + 1);
+        // Map publication now also issues one range invalidation per mapped record
+        // (the reworked core invalidates changed ranges on install, not only on
+        // release), so two maps plus this unmap move the counter by three.
+        assert(iommu::debug_counter(iommu::IOMMU_TLBI_RANGE) == range0 + 3);
         assert(iommu::domain_pinned_pages(*d) == 1);
 
         // The cleared IOVA can be remapped with a different backing page.

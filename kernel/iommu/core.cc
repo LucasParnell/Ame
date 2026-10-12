@@ -623,6 +623,26 @@ void domain_quarantine(IommuDomain& domain) {
     if (domain.in_use_ && domain_state(domain) != DomainState::Quarantined) quarantine(domain);
 }
 
+// The fault path proved a stream dangerous (denied its STE and cleared bus
+// mastering) outside the core's binding table. Migrate the binding to the
+// permanent quarantine domain so a later domain_attach for the same requester
+// recovers it instead of failing E_BUSY forever, and so the old domain's
+// attached set no longer advertises a live stream. Idempotent.
+void note_stream_quarantined(IommuDeviceId device) {
+    ensure_initialised();
+    LockGuard streams(g_stream_lock);
+    for (u32 i = 0; i < kMaxIommuStreams; ++i) {
+        StreamBinding& b = g_streams[i];
+        if (!b.used || b.segment != device.segment ||
+            b.sid != device.requester_or_stream_id || b.domain_index == kQuarantineIndex) continue;
+        IommuDomain* previous = domain_by_index(b.domain_index);
+        b.domain_index = kQuarantineIndex;
+        if (previous) {
+            __atomic_and_fetch(&previous->attached_mask_, ~(1ull << i), __ATOMIC_RELAXED);
+        }
+    }
+}
+
 SysError domain_attach(IommuDomain& domain, IommuDeviceId device) {
     ensure_initialised();
     LockGuard streams(g_stream_lock);

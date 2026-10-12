@@ -251,6 +251,11 @@ SysError domain_sync(IommuDomain& domain);
 // Stop new work without pretending that hardware translations disappeared.
 void domain_quarantine(IommuDomain& domain);
 
+// Called by the backend fault path after it denied a stream's translation and
+// cleared its bus mastering, so the core's binding table stops advertising the
+// previous domain and a later attach can recover the stream.
+void note_stream_quarantined(IommuDeviceId device);
+
 // Bind a requester/stream ID to this domain. Fails with E_BUSY if it is already
 // bound to a different active domain. Rebinding away from the quarantine domain
 // is permitted, as is a redundant attach.

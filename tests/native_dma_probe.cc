@@ -1,5 +1,5 @@
 // Exercise the real native arena registrar with captured IOMMU owner callbacks.
-#include "anko/smmuv3.h"
+#include "anko/iommu.h"
 #include "anko/log.h"
 #include <cassert>
 #include <cstring>
@@ -15,16 +15,26 @@ CapturedDomain domains[8];
 u32 count;
 iommu::IommuDomain* attached[16];
 bool fail_attach;
+bool fail_destroy;   // models a backend that cannot prove invalidation
+bool backend_ready;  // models hardware routing authorizing DMA
 CapturedDomain& capture(iommu::IommuDomain& domain) {
     for (auto& entry : domains) if (&entry.domain == &domain) return entry;
     assert(false); return domains[0];
+}
+const iommu::IommuBackendOps& probe_backend() {
+    static const iommu::IommuBackendOps ops{}; // software model: no hooks
+    return ops;
 }
 }
 namespace libk { void* memset(void* dst, int c, usize n) { return std::memset(dst, c, n); } }
 namespace anko::log { void writef(Level, const char*, const char*, ...) {} }
 namespace iommu {
-bool smmuv3_ready() { return true; }
-const IommuBackendOps& smmuv3_backend() { static const IommuBackendOps ops{}; return ops; }
+// Software-model routing: segment 0, streams 0..15 are routed to the probe
+// backend; anything else has no route and must be denied (default deny).
+const IommuBackendOps* backend_for(IommuDeviceId device) {
+    if (device.segment != 0 || device.requester_or_stream_id >= 16) return nullptr;
+    return backend_ready ? &probe_backend() : nullptr;
+}
 SysError domain_create(u64 identity, const IommuOwnerOps& owner, const IommuBackendOps&, IommuDomain** out) {
     assert(count < 8);
     auto& entry = domains[count++];
@@ -47,12 +57,18 @@ SysError domain_attach(IommuDomain& domain, IommuDeviceId device) {
     attached[device.requester_or_stream_id] = &domain;
     return E_OK;
 }
+void domain_destroy(IommuDomain* domain) {
+    if (fail_destroy) return; // real core quarantines: state stays != Free
+    for (auto& a : attached) if (a == domain) a = nullptr;
+    domain->state_ = DomainState::Free;
+}
 IommuDomain* stream_domain(IommuDeviceId device) { return attached[device.requester_or_stream_id]; }
 DomainState domain_state(const IommuDomain& domain) { return domain.state_; }
 }
 
 int main() {
     using namespace iommu;
+    backend_ready = true;
     assert(register_native_dma_arena({0, 1}, 0x10000, PAGE_SIZE) == E_OK);
     assert(register_native_dma_arena({0, 2}, 0x20000, PAGE_SIZE) == E_OK);
     assert(attached[1] && attached[2] && attached[1] != attached[2]);
@@ -79,5 +95,29 @@ int main() {
     a.domain.state_ = DomainState::Active;
     attached[1] = nullptr;
     assert(register_native_dma_arena({0, 1}, 0x10000, PAGE_SIZE) == E_FAULT);
+
+    // Routing: an unrouted device is denied registration (default deny).
+    assert(register_native_dma_arena({1, 1}, 0x90000, PAGE_SIZE) == E_NOTIMPL);
+    // A routed backend that stopped authorizing DMA denies new arenas.
+    backend_ready = false;
+    assert(register_native_dma_arena({0, 5}, 0x90000, PAGE_SIZE) == E_NOTIMPL);
+    backend_ready = true;
+    // Unregistering an unknown owner is reported, not ignored.
+    assert(unregister_native_dma_arenas({0, 42}) == E_NOTFOUND);
+    // A failed destroy retains the owner and refuses further registration...
+    fail_destroy = true;
+    assert(unregister_native_dma_arenas({0, 2}) == E_FAULT);
+    assert(register_native_dma_arena({0, 2}, 0x60000, PAGE_SIZE) == E_FAULT);
+    // ...and a later retry, once invalidation is proven, reclaims cleanly.
+    fail_destroy = false;
+    assert(unregister_native_dma_arenas({0, 2}) == E_OK);
+    assert(!attached[2]);
+    // A cleared owner registers fresh, with a distinct identity and isolation.
+    assert(register_native_dma_arena({0, 2}, 0x20000, PAGE_SIZE) == E_OK);
+    assert(attached[2] && attached[2] != &b.domain);
+    auto& b2 = capture(*attached[2]);
+    assert(b2.identity != b.identity);
+    assert(!b2.owner.query(b2.owner.ctx, 0x10000, &owner));
+    assert(!b2.owner.query(b2.owner.ctx, 0x30000, &owner));
     std::puts("native DMA isolation probe ok");
 }

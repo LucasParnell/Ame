@@ -3,7 +3,8 @@
 #include "libk/bytes.h"
 
 namespace console {
-bool FramebufferConsole::bind(libk::Framebuffer32 fb, u64 owner_base, u64 owner_bytes, Viewport view) {
+bool FramebufferConsole::bind(libk::Framebuffer32 fb, u64 owner_base, u64 owner_bytes,
+                              Viewport view, Overflow overflow) {
     fb_ = {};
     columns_ = rows_ = x_ = y_ = 0;
     if (!libk::framebuffer_fits(fb, owner_base, owner_bytes) || !view.scale || view.scale > 4 ||
@@ -11,7 +12,7 @@ bool FramebufferConsole::bind(libk::Framebuffer32 fb, u64 owner_base, u64 owner_
         view.height > fb.height - view.y) return false;
     const u32 columns = view.width / (8 * view.scale), rows = view.height / (16 * view.scale);
     if (!columns || !rows || columns > kMaxColumns || rows > kMaxRows) return false;
-    fb_ = fb; view_ = view; columns_ = columns; rows_ = rows;
+    fb_ = fb; view_ = view; columns_ = columns; rows_ = rows; overflow_ = overflow;
     x_ = y_ = 0; characters_ = 0; dirty_y0_ = ~0u; dirty_y1_ = 0;
     for (u32 row = 0; row < rows_; ++row) clear_row(row);
     return true;
@@ -47,6 +48,14 @@ void FramebufferConsole::clear_row(u32 row) {
 }
 void FramebufferConsole::newline() {
     x_ = 0;
+    if (overflow_ == Overflow::Wrap) {
+        // Work depends on one row, even after arbitrarily many log messages.
+        // This avoids reading megabytes of uncached scanout memory in boot's
+        // synchronous logger and leaves the banner/margins intact.
+        y_ = (y_ + 1) % rows_;
+        clear_row(y_);
+        return;
+    }
     if (++y_ < rows_) return;
     y_ = rows_ - 1;
     for (u32 row = 0; row + 1 < rows_; ++row)

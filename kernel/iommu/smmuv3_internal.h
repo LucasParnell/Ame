@@ -30,5 +30,7 @@ namespace iommu::faults {
 // the stream through the ACTIVE -> FAULTED -> BUS_MASTER_DISABLED quarantine
 // transition. Called by the event-queue drain with the raw record.
 void on_event(const smmuv3::Evt& evt);
+// Reset per-assignment fault state after a verified context install.
+void on_stream_attached(u32 sid);
 
 } // namespace iommu::faults

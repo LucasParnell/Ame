@@ -19,6 +19,7 @@
 #include "boot_diagnostics.h"
 #endif
 #include "anko/sched.h"
+#include "anko/ipc.h"
 #include "anko/smmuv3.h"
 #include "anko/vm.h"
 #include "libk/metric.h"
@@ -77,6 +78,7 @@ void handle_tick() {
     if (iommu::smmuv3_ready() && (metric_load(g_tick_count) & 3ull) == 0) {
         (void)iommu::smmuv3_drain_events();
     }
+    ipc::poll_deadline_waiters();
     vm::poll_blocked_vcpu_timers();
     sched::tick();
 }

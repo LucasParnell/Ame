@@ -22,6 +22,11 @@ static_assert(!__is_constructible(TransferEngine, const TransferEngine&));
 static_assert(!__is_constructible(ExecTable, const ExecTable&));
 
 static void helper_tests() {
+    assert(mx_usb_interface_control_allowed({0x81, 6, 0x2400, 2, 32}, 2));
+    assert(mx_usb_interface_control_allowed({0x21, 9, 0x200, 2, 1}, 2));
+    assert(!mx_usb_interface_control_allowed({0x81, 6, 0x2200, 3, 32}, 2));
+    assert(!mx_usb_interface_control_allowed({0, 9, 1, 0, 0}, 2));
+    assert(!mx_usb_interface_control_allowed({0x41, 1, 0, 2, 0}, 2));
     alignas(8) mx_u32_t registers[4]{};
     libk::Mmio mmio{reinterpret_cast<volatile mx_u8_t*>(registers), sizeof(registers)};
     mx_u32_t reg = 0;
@@ -329,6 +334,45 @@ static void exec_tests() {
     const auto* timeout_completion = engine.completion(token);
     assert(timeout_completion && timeout_completion->status == MxUsbStatus::Timeout);
     assert(exec.reclaim(*exec.find(token), engine) == MX_OK);
+
+    // A detached connection keeps its ring metadata and buffer grant while a
+    // replacement connection submits work. Its late event retires only the
+    // old ring, even though the active keyboard pointer has moved on.
+    request.request_id = 7;
+    assert(engine.submit(owner, request, 1, &token) == MX_OK);
+    assert(engine.start(token, &prepared) == MX_OK);
+    const auto old_phys = ring.enqueue({prepared.device_address, 8, midix::usb::xhci::type(1)});
+    assert(old_phys && exec.record(token, 7, 3, 3, &ring, 1, old_phys, old_phys, 0, 8) == MX_OK);
+    exec.find(token)->flags |= kExecOrphan;
+    assert(engine.stop(token, MxUsbStatus::Disconnected) == MX_OK);
+    assert(engine.revoke_endpoint(owner, endpoint) == MX_OK);
+    assert(engine.revoke_buffer(owner, buffer) == MX_OK);
+    const SessionScope replacement{3, 2, 1};
+    mx_u8_t new_payload[8]{};
+    MxUsbToken new_endpoint = 0, new_buffer = 0, new_token = 0;
+    descriptor = {};
+    descriptor.address = 0x81; descriptor.type = MxUsbTransferType::Interrupt;
+    descriptor.max_packet = 8; descriptor.interval = 10; descriptor.transactions = 1;
+    assert(engine.install_endpoint({replacement, 2, descriptor, MxUsbSpeed::Full, 0,
+                                    ControlPolicy::None}, &new_endpoint) == MX_OK);
+    assert(engine.install_buffer({replacement, libk::as_bytes(new_payload), 0x50000,
+        BufferRead | BufferWrite, CacheMode::NonCacheable, true}, &new_buffer) == MX_OK);
+    alignas(64) midix::usb::xhci::Trb new_storage[16];
+    midix::usb::xhci::ProducerRing new_ring;
+    assert(new_ring.init(new_storage, 0x8000, 16));
+    MxUsbSubmit new_request{8, new_endpoint, new_buffer, 0, 8, 0, 0, 0};
+    assert(engine.submit(replacement, new_request, 1, &new_token) == MX_OK);
+    assert(engine.start(new_token, &prepared) == MX_OK);
+    const auto new_phys = new_ring.enqueue({prepared.device_address, 8, midix::usb::xhci::type(1)});
+    assert(new_phys && exec.record(new_token, 8, 4, 3, &new_ring, 1,
+                                  new_phys, new_phys, 0, 8) == MX_OK);
+    assert(exec.on_event(event_trb(3, 3, old_phys, 1, 0), engine));
+    assert(engine.completion(token)->status == MxUsbStatus::Disconnected);
+    assert(exec.reclaim(*exec.find(token), engine) == MX_OK);
+    assert(ring.outstanding == 0 && new_ring.outstanding == 1);
+    assert(engine.state(new_token) == TransferState::Active && !engine.completion(new_token));
+    assert(exec.on_event(event_trb(4, 3, new_phys, 1, 0), engine));
+    assert(exec.reclaim(*exec.find(new_token), engine) == MX_OK && new_ring.outstanding == 0);
 
     // Duplicate tokens are refused; a full table reports overflow.
     assert(exec.record(0x100, 7, 3, 3, &ring, 1, 0x1000, 0x1000, 0, 8) == MX_OK);

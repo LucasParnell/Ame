@@ -59,6 +59,7 @@ struct HwInfo {
     PhysAddr virtio_bases[kMaxVirtioMmio] = {};
 
     // SMMUv3 (compatible = "arm,smmu-v3") presence and register base, from DTB.
+    bool has_anne_usb = false;
     bool     has_smmu = false;
     PhysAddr smmu_base = 0;
 };

@@ -112,6 +112,17 @@
       "cacheVariables": {
         "MOCHI_SYSTEM_PROFILE": "huawei-anne-smp"
       }
+    },
+    {
+      "name": "anne-usb-native-dev",
+      "inherits": "anne-native-dev",
+      "binaryDir": "${sourceDir}/out/anne-usb-native-dev",
+      "cacheVariables": {
+        "MOCHI_SYSTEM_PROFILE": "huawei-anne-usb",
+        "ANKO_ANNE_DIAG_CAPTURE_SECONDS": "60",
+        "ANKO_ANNE_DIAG_RESET_AT_READY": false,
+        "ANKO_ANNE_DIAG_RUN_TAG": "anne-usb-v6"
+      }
     }
   ],
   "buildPresets": [
@@ -158,6 +169,10 @@
     {
       "name": "anne-console-runtime-capture-dev",
       "configurePreset": "anne-console-runtime-capture-dev"
+    },
+    {
+      "name": "anne-usb-native-dev",
+      "configurePreset": "anne-usb-native-dev"
     }
   ],
   "testPresets": [

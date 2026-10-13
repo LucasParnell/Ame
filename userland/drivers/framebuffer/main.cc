@@ -13,6 +13,7 @@
 // display. This service knows nothing about virtio-gpu or DRM.
 
 #include "mochi/syscall.h"
+#include "midix/abi/platform.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
@@ -49,7 +50,7 @@ constexpr uint32_t kClearColor = 0x001F3F;
 static void fb_clear(volatile uint32_t* pixels, uint32_t color) {
     const uint32_t total = kFbHeight * kFbWidth;
     for (uint32_t i = 0; i < total; ++i) {
-        pixels[i] = color;
+        pixels[i] = color | 0xff000000u;
     }
 }
 
@@ -105,7 +106,7 @@ static void fb_fill_rect(volatile uint32_t* pixels, uint32_t x, uint32_t y,
     for (uint32_t row = 0; row < clipped_h; ++row) {
         volatile uint32_t* dst = pixels + ((y + row) * kFbWidth) + x;
         for (uint32_t col = 0; col < clipped_w; ++col) {
-            dst[col] = color;
+            dst[col] = color | 0xff000000u;
         }
     }
 }
@@ -165,7 +166,7 @@ static void fb_draw_glyph(volatile uint32_t* pixels, const FbDrawGlyphCmd& cmd) 
                 const uint32_t color = on ? cmd.fg : cmd.bg;
                 for (uint32_t sx = 0; sx < scale_x; ++sx) {
                     const uint32_t px = cmd.x + gx * scale_x + sx;
-                    if (px < kFbWidth) pixels[py * kFbWidth + px] = color;
+                    if (px < kFbWidth) pixels[py * kFbWidth + px] = color | 0xff000000u;
                 }
             }
         }
@@ -328,6 +329,13 @@ extern "C" [[noreturn]] void _start() {
         while (true) { mx_yield(); }
     }
 
+    MxCapInfo extent{};
+    if(mx_cap_info(fb_arena,&extent)!=MX_OK||extent.attr!=MX_MMIO_NORMAL_NC||
+       extent.size<static_cast<uint64_t>(kFbWidth)*kFbHeight*4) mochi::boot::invalid_boot();
+    if(const auto control=mochi::boot::handle(boot,"fb.control")) {
+        if(mx_platform_control(control,MX_PLATFORM_CLAIM)!=MX_OK||
+           mx_platform_control(control,MX_PLATFORM_DISPLAY_HANDOFF)!=MX_OK) mochi::boot::invalid_boot();
+    }
     volatile uint32_t* pixels = reinterpret_cast<volatile uint32_t*>(kVaFbPixels);
     fb_clear(pixels, kClearColor);
 

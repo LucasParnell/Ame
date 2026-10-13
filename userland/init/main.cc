@@ -16,6 +16,7 @@
 // init is policy. The kernel does not know service names (spec §11).
 
 #include "mochi/syscall.h"
+#include "mochi/state.h"
 #include "libk/bytes.h"
 #include "libk/endian.h"
 #include "libk/text.h"
@@ -72,7 +73,7 @@ static int64_t set_service_affinity(CapHandle thread, uint64_t preferred) {
     return sys_thread_set_affinity(thread, (preferred & g_cpu_mask) ? (preferred & g_cpu_mask) : g_cpu_mask);
 }
 
-constexpr uint32_t kMaxManifestServices = 20;
+constexpr uint32_t kMaxManifestServices = 32;
 constexpr uint32_t kManifestScanLimit = 64 * 1024;
 
 static uint8_t g_policy_sha256[MX_SHA256_SIZE]{};
@@ -93,7 +94,7 @@ struct ServiceSpec {
     CapHandle ready_db;
     uint64_t ready_counter;
     uint64_t affinity;
-    struct Binding { char name[32]; uint32_t channel; uint32_t rights; };
+    struct Binding { char name[32]; char resource[32]; uint64_t value; bool is_value; uint32_t channel; uint32_t rights; };
     Binding bindings[32];
     uint32_t binding_count;
     uint32_t dependencies;
@@ -112,6 +113,7 @@ struct ServiceSpec {
 };
 
 struct InitRuntime {
+    const MxBootInfo* boot;
     ServiceSpec* services;
     uint32_t service_count;
     mochi::svc::RegistryPage* svc_registry;
@@ -168,15 +170,22 @@ static bool parse_service_bindings(midix::json::Value obj, ServiceSpec& svc) {
         if (i >= sizeof(svc.bindings) / sizeof(svc.bindings[0])) return false;
         auto& grant = svc.bindings[i];
         char channel_name[48];
-        if (!json::string(json::member(binding, "name"), grant.name, sizeof(grant.name)) ||
-            !grant.name[0] ||
-            !json::string(json::member(binding, "channel"), channel_name, sizeof(channel_name))) return false;
-        const int index = channel_index(channel_name);
-        if (index < 0) return false;
-        grant.channel = static_cast<uint32_t>(index);
-        for (uint32_t j = 0; j < i; ++j) {
-            if (streq(svc.bindings[j].name, grant.name)) return false;
+        if (!json::string(json::member(binding,"name"),grant.name,sizeof(grant.name)) || !grant.name[0]) return false;
+        for (uint32_t j=0;j<i;++j) if(streq(svc.bindings[j].name,grant.name)) return false;
+        if (const auto value = json::member(binding,"value")) {
+            if (json::member(binding,"boot") || json::member(binding,"channel") ||
+                !json::number(value,grant.value)) return false;
+            grant.is_value = true; ++svc.binding_count; continue;
         }
+        const bool resource = !!json::member(binding,"boot");
+        int index = -1;
+        if (resource) {
+            if (json::member(binding,"channel") || !json::string(json::member(binding,"boot"),grant.resource,sizeof(grant.resource))) return false;
+        } else {
+            if (!json::string(json::member(binding,"channel"),channel_name,sizeof(channel_name))) return false;
+            index = channel_index(channel_name); if (index < 0) return false;
+        }
+        grant.channel = static_cast<uint32_t>(index);
         auto rights = json::member(binding, "rights");
         if (!rights || *rights.begin != '[') return false;
         struct NamedRight { const char* name; uint32_t value; bool ring; };
@@ -190,7 +199,7 @@ static bool parse_service_bindings(midix::json::Value obj, ServiceSpec& svc) {
             if (!right) break;
             uint32_t value = json::equals(right, "duplicate") ? RIGHT_DUP : 0;
             for (const auto& known : named_rights) {
-                if (known.ring == kChannelNames[index].ring && json::equals(right, known.name)) {
+                if ((resource || known.ring == (kChannelNames[index].ring || kChannelNames[index].arena_bytes)) && json::equals(right, known.name)) {
                     value = known.value;
                 }
             }
@@ -443,9 +452,8 @@ static CapHandle create_service_registry(ServiceSpec* services, uint32_t service
     libk::zero(*reg);
     reg->version = mochi::svc::kRegistryVersion;
     reg->generation = 1;
-    const uint32_t count = service_count < mochi::svc::kMaxRegistryEntries
-        ? service_count
-        : mochi::svc::kMaxRegistryEntries;
+    if(service_count>mochi::svc::kMaxRegistryEntries) fail_halt("init: service registry capacity exceeded\n");
+    const uint32_t count=service_count;
     reg->entry_count = static_cast<uint16_t>(count);
     for (uint32_t i = 0; i < count; ++i) {
         mochi::svc::RegistryEntry& e = reg->entries[i];
@@ -654,10 +662,21 @@ static bool wire_client_sessions(ServiceSpec& svc) {
 static void wire_service_channels(ServiceSpec& svc) {
     for (uint32_t i = 0; i < svc.binding_count; ++i) {
         const auto& grant = svc.bindings[i];
+        if (grant.is_value) {
+            boot_add(svc,MX_BOOT_ENTRY_VALUE,grant.name,0,grant.value); continue;
+        }
+        if (grant.resource[0]) {
+            const auto* entry = mochi::boot::find(g_rt.boot,grant.resource);
+            if (!entry || !entry->handle) fail_halt("init: missing bound hardware resource\n");
+            grant_to(svc,entry->handle,grant.rights,static_cast<MxBootEntryType>(entry->type),grant.name);
+            continue;
+        }
         const auto& resource = g_rt.channels[grant.channel];
         if (!resource.handle) fail_halt("init: missing bound channel\n");
         if (kChannelNames[grant.channel].ring) {
             share_ring_to_with_rights(svc, resource.handle, grant.name, grant.rights, resource.order);
+        } else if (kChannelNames[grant.channel].arena_bytes) {
+            grant_to(svc, resource.handle, grant.rights, MX_BOOT_ENTRY_ARENA, grant.name);
         } else {
             share_doorbell_to(svc, resource.handle, grant.name, grant.rights);
         }
@@ -849,6 +868,12 @@ static void create_channels() {
             }
             channel.order = static_cast<uint32_t>(order);
             channel.handle = as_cap(sys_ring_create(order, 0));
+        } else if (kChannelNames[index].arena_bytes) {
+            uint64_t bytes = 0;
+            if (!json::equals(json::member(entry, "kind"), "arena") ||
+                !json::number(json::member(entry, "bytes"), bytes) || bytes != kChannelNames[index].arena_bytes)
+                fail_halt("init: incompatible shared arena\n");
+            channel.handle = as_cap(sys_arena_create(bytes, 0));
         } else {
             if (!json::equals(json::member(entry, "kind"), "doorbell")) {
                 fail_halt("init: incompatible doorbell\n");
@@ -1052,9 +1077,16 @@ static void launch_prepared_services() {
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
             auto& svc = g_rt.services[i];
             if (svc.ready || !dependencies_ready(svc)) continue;
-            // The terminal opens its input gate when it receives this marker.
-            if (streq(svc.name, "msh")) console_log("system ready\n");
-            if (!start_service_now(svc)) fail_halt("init: service launch failed\n");
+            // Explicit activation is separate from log mirroring.
+            if (!start_service_now(svc)) {
+                sys_debug_puts("init: failed service: ", 22);
+                sys_debug_puts(svc.name, slen(svc.name));
+                sys_debug_puts("\n", 1);
+                fail_halt("init: service launch failed\n");
+            }
+            if (streq(svc.name,"msh") || (streq(svc.name,"tty.fb0")&&!find_service(g_rt.services,g_rt.service_count,"msh"))) {
+                console_log("system ready\n"); (void)sys_notify(channel(ChannelId::console_activate_db)); (void)sys_notify(channel(ChannelId::input_tty_db));
+            }
             --remaining;
         }
     }
@@ -1091,7 +1123,7 @@ static bool supervise_services() {
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
         auto& svc = g_rt.services[i];
         if (svc.proc && !svc.ready && svc.desired && svc.restart_pending && dependencies_ready(svc)) {
-            if (streq(svc.name, "tty.fb0")) console_log("system ready\n");
+            if (streq(svc.name, "tty.fb0")) { console_log("system ready\n"); (void)sys_notify(channel(ChannelId::console_activate_db)); (void)sys_notify(channel(ChannelId::input_tty_db)); }
             if (start_service_now(svc)) { console_log("service restarted\n"); progress = true; }
         }
     }
@@ -1172,6 +1204,7 @@ static bool handle_svc_control_requests() {
 
 extern "C" [[noreturn]] void _start() {
     const MxBootInfo* boot = mochi::boot::map();
+    g_rt.boot = boot;
     if (const auto* entry = mochi::boot::find(boot, "cpu.count")) g_cpu_count = entry->aux0;
     if (!g_cpu_count || g_cpu_count > MX_HOST_MAX_CPUS) fail_halt("init: invalid CPU count\n");
     g_cpu_mask = (uint64_t{1} << g_cpu_count) - 1;
@@ -1201,7 +1234,11 @@ extern "C" [[noreturn]] void _start() {
 
     const int64_t manifest_map = sys_map_page(kCapManifest, kVaManifest, RIGHT_READ);
     const int64_t initrd_map = sys_map_page(kCapInitrd, kVaInitrd, RIGHT_READ);
-    static ServiceSpec manifest_services[kMaxManifestServices]{};
+    // Service definitions and their capability bindings are writable policy
+    // state, so retain them in a registered arena rather than image BSS.
+    auto service_state=mochi::make_state(kVaServiceState,128*1024);
+    auto* manifest_services=service_state.alloc<ServiceSpec>(kMaxManifestServices);
+    if(!manifest_services) fail_halt("init: service state allocation failed\n");
     uint32_t service_count = 0;
     if (manifest_map == 0) {
         const char* manifest_text = reinterpret_cast<const char*>(kVaManifest);

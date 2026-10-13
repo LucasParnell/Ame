@@ -82,7 +82,7 @@ void compress(u32 h[8], const u8 block[64]) {
 
 } // namespace
 
-u32 crc32c(const u8* data, usize size) {
+u32 crc32c(const u8* data, usize size, Progress progress) {
     static constexpr u32 table[16] = {
         0x00000000u, 0x105ec76fu, 0x20bd8edeu, 0x30e349b1u, 0x417b1dbcu, 0x5125dad3u,
         0x61c69362u, 0x7198540du, 0x82f63b78u, 0x92a8fc17u, 0xa24bb5a6u, 0xb21572c9u,
@@ -90,6 +90,7 @@ u32 crc32c(const u8* data, usize size) {
     };
     u32 crc = 0xffffffffu;
     for (usize i = 0; i < size; ++i) {
+        if (!(i & 4095)) progress.poll();
         crc ^= data[i];
         crc = (crc >> 4) ^ table[crc & 0xfu];
         crc = (crc >> 4) ^ table[crc & 0xfu];
@@ -97,7 +98,8 @@ u32 crc32c(const u8* data, usize size) {
     return ~crc;
 }
 
-u32 crc32c_zero_field(const u8* data, usize size, usize zero_offset, usize zero_size) {
+u32 crc32c_zero_field(const u8* data, usize size, usize zero_offset, usize zero_size,
+                     Progress progress) {
     static constexpr u32 table[16] = {
         0x00000000u, 0x105ec76fu, 0x20bd8edeu, 0x30e349b1u, 0x417b1dbcu, 0x5125dad3u,
         0x61c69362u, 0x7198540du, 0x82f63b78u, 0x92a8fc17u, 0xa24bb5a6u, 0xb21572c9u,
@@ -105,6 +107,7 @@ u32 crc32c_zero_field(const u8* data, usize size, usize zero_offset, usize zero_
     };
     u32 crc = 0xffffffffu;
     for (usize i = 0; i < size; ++i) {
+        if (!(i & 4095)) progress.poll();
         const bool zero = i >= zero_offset && i < zero_offset + zero_size;
         crc ^= zero ? 0 : data[i];
         crc = (crc >> 4) ^ table[crc & 0xfu];
@@ -113,7 +116,7 @@ u32 crc32c_zero_field(const u8* data, usize size, usize zero_offset, usize zero_
     return ~crc;
 }
 
-void sha256(const u8* data, usize size, u8 out[kSha256Size]) {
+void sha256(const u8* data, usize size, u8 out[kSha256Size], Progress progress) {
     u32 h[8] = {
         0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
@@ -121,10 +124,12 @@ void sha256(const u8* data, usize size, u8 out[kSha256Size]) {
 
     usize offset = 0;
     while (offset + 64 <= size) {
+        if (!(offset & 4095)) progress.poll();
         compress(h, data + offset);
         offset += 64;
     }
 
+    progress.poll();
     u8 tail[128]{};
     const usize remaining = size - offset;
     for (usize i = 0; i < remaining; ++i) {

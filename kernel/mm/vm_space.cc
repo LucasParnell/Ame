@@ -215,6 +215,11 @@ bool map_bootstrap_identity(VmSpace& space) {
     }
     if (!map_identity_if_present(space, g_hw.console_base, PAGE_SIZE, true)) return false;
 #ifdef ANKO_BOARD_HUAWEI_ANNE
+    // Fixed device pages used by capability-scoped kernel board mechanisms.
+#ifndef ANKO_ANNE_DIAG_TEST
+    if (!map_identity_range(space, 0xfff35000, PAGE_SIZE, true) ||
+        !map_identity_range(space, 0xe8a09000, PAGE_SIZE, true)) return false;
+#endif
     // Persistent native console lies in reserved RAM outside the allocator bank.
 #ifdef ANKO_ANNE_WATCHDOG
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::watchdog::kBase, PAGE_SIZE) &&
@@ -237,8 +242,13 @@ bool map_bootstrap_identity(VmSpace& space) {
 #if defined(ANKO_ANNE_DISPLAY_CAPTURE) || defined(ANKO_ANNE_FRAMEBUFFER)
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::native_display::kDssBase, anne::native_display::kDssBytes) &&
         !map_identity_range(space, anne::native_display::kDssBase, anne::native_display::kDssBytes, true)) return false;
+#ifdef ANKO_ANNE_DIAG_TEST
+    // The synthetic display fixture has its own CRG page. Native CRG is shared
+    // by display and USB and was already mapped with the fixed board mechanisms
+    // above; mapping it twice rejects the entire bootstrap address space.
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::native_display::kCrgBase, PAGE_SIZE) &&
         !map_identity_range(space, anne::native_display::kCrgBase, PAGE_SIZE, true)) return false;
+#endif
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::native_display::kLogoBase, anne::native_display::kLogoBytes) &&
         !map_identity_range(space, anne::native_display::kLogoBase, anne::native_display::kLogoBytes, false)) return false;
 #endif
@@ -459,12 +469,12 @@ void vm_init() {
     VmSpace kernel{};
     kernel.pid = 0;
     kernel.pgd_phys = alloc_page();
-    if (!kernel.pgd_phys) return;
+    if (!kernel.pgd_phys) panic("kernel page-table allocation failed");
     libk::memset(reinterpret_cast<void*>(kernel.pgd_phys), 0, PAGE_SIZE);
 
     if (!map_bootstrap_identity(kernel)) {
         destroy_table(kernel, kernel.pgd_phys, 0);
-        return;
+        panic("kernel identity mapping failed");
     }
 
     g_kernel_root = kernel.pgd_phys;

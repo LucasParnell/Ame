@@ -9,6 +9,7 @@
 //  - Only io.console sends log records here; tty.fb0 does not poll log rings.
 
 #include "mochi/syscall.h"
+#include "mochi/driver.h"
 #include "libk/str.h"
 #include "mochi/ring.h"
 #include "mochi/log.h"
@@ -24,34 +25,30 @@ using namespace mochi::va::tty;
 // Text grid dimensions: cover the full 1024×768 ramfb with 8×16 cells.
 // Keeping the terminal at 80×25 made boot logs hit the scroll path almost
 // immediately, which can back-pressure the framebuffer command ring.
-constexpr uint32_t kCols = 128;
-constexpr uint32_t kRows = 48;
-constexpr uint32_t kCellW = 8;
-constexpr uint32_t kCellH = 16;
 constexpr uint32_t kFg = 0xE6F1FF;
 constexpr uint32_t kBg = 0x001020;
 
 struct TtyState {
+    uint32_t cols,rows,cell_w,cell_h,origin_x,origin_y,scale;
+    mx_handle_t activation;
+    mochi::framebuffer::Client fb;
+    mochi::terminal::OutputSource mirror,shell_output;
+    mochi::input::EventSource input;
+    mochi::terminal::InputSink shell_input;
+    bool shell_attached,render_suppressed,cursor_visible,input_unlocked;
+    uint32_t cursor_row,cursor_col,esc_streak;
+
     uint32_t cursor_x;
     uint32_t cursor_y;
     // V0: store character grid as plain ASCII for log mirror.
-    char     cells[kRows][kCols];
+    char* cells;
 };
 
-static TtyState g_tty{};
-static mochi::framebuffer::Client g_fb{};
-static mochi::terminal::OutputSource g_mirror{};
-static mochi::input::EventSource g_input{};
+static TtyState* g_tty;
+static char* line(uint32_t row) { return g_tty->cells+row*g_tty->cols; }
 // The tty -> shell input sink is the shared terminal input endpoint.
 using ShellInputSink = mochi::terminal::InputSink;
 
-static ShellInputSink g_shell_input{};
-static mochi::terminal::OutputSource g_shell_output{};
-static bool g_shell_attached = false;
-static bool g_render_suppressed = false;
-static bool g_cursor_visible = false;
-static uint32_t g_cursor_row = 0;
-static uint32_t g_cursor_col = 0;
 
 constexpr uint32_t HID_KEY_RIGHT = 0x4Fu;
 constexpr uint32_t HID_KEY_LEFT = 0x50u;
@@ -62,15 +59,10 @@ constexpr uint32_t HID_KEY_END = 0x4Du;
 constexpr uint32_t HID_KEY_DELETE = 0x4Cu;
 constexpr uint32_t HID_KEY_ESCAPE = 0x29u;
 
-// Input is silently dropped until init logs "system ready" (scanned out of the
-// mirror stream below). The break-glass override is three consecutive ESC
-// presses — any other key resets the streak.
-static constexpr char kReadyMarker[] = "system ready";
-static constexpr uint32_t kReadyMarkerLen = sizeof(kReadyMarker) - 1;
+// Init explicitly activates the terminal after msh is ready. Logs are display
+// content, never control messages. ESC bypass remains useful for recovery.
 static constexpr uint32_t kEscBypassCount = 3;
-static bool     g_input_unlocked = false;
-static uint32_t g_ready_match_pos = 0;
-static uint32_t g_esc_streak = 0;
+
 
 static uint32_t slen(const char* s) {
     return static_cast<uint32_t>(libk::str::length(s));
@@ -81,35 +73,35 @@ static bool fb_send(uint32_t type, const void* data, uint32_t len) {
     // command leaves the visible text permanently truncated until a later full
     // redraw, which looks like a framebuffer stall.  Back-pressure tty.fb0
     // instead and let io.framebuffer drain at its own pace.
-    return g_fb.send_spinning(type, data, len, 0xFFFF'FFFFu);
+    return g_tty->fb.send_spinning(type, data, len, 0xFFFF'FFFFu);
 }
 
 
 static void fb_clear_screen() {
-    if (g_render_suppressed) return;
+    if (g_tty->render_suppressed) return;
     const uint32_t color = kBg;
     (void)fb_send(FB_CLEAR, &color, sizeof(color));
 }
 
 static void fb_fill_cell(uint32_t row, uint32_t col) {
-    if (g_render_suppressed) return;
+    if (g_tty->render_suppressed) return;
     FbFillRectCmd cmd{};
-    cmd.x = col * kCellW;
-    cmd.y = row * kCellH;
-    cmd.width = kCellW;
-    cmd.height = kCellH;
+    cmd.x = g_tty->origin_x + col * g_tty->cell_w;
+    cmd.y = g_tty->origin_y + row * g_tty->cell_h;
+    cmd.width = g_tty->cell_w;
+    cmd.height = g_tty->cell_h;
     cmd.color = kBg;
     (void)fb_send(FB_FILL_RECT, &cmd, sizeof(cmd));
 }
 
 static void fb_copy_rect(uint32_t src_x, uint32_t src_y, uint32_t dst_x,
                          uint32_t dst_y, uint32_t width, uint32_t height) {
-    if (g_render_suppressed) return;
+    if (g_tty->render_suppressed) return;
     FbCopyRectCmd cmd{};
-    cmd.src_x = src_x;
-    cmd.src_y = src_y;
-    cmd.dst_x = dst_x;
-    cmd.dst_y = dst_y;
+    cmd.src_x = g_tty->origin_x + src_x;
+    cmd.src_y = g_tty->origin_y + src_y;
+    cmd.dst_x = g_tty->origin_x + dst_x;
+    cmd.dst_y = g_tty->origin_y + dst_y;
     cmd.width = width;
     cmd.height = height;
     (void)fb_send(FB_COPY_RECT, &cmd, sizeof(cmd));
@@ -118,8 +110,8 @@ static void fb_copy_rect(uint32_t src_x, uint32_t src_y, uint32_t dst_x,
 static void fb_draw_text_run(uint32_t row, uint32_t col, const char* data, uint32_t len);
 
 static void fb_draw_cell(uint32_t row, uint32_t col) {
-    if (g_render_suppressed) return;
-    const char ch = g_tty.cells[row][col];
+    if (g_tty->render_suppressed) return;
+    const char ch = line(row)[col];
     if (ch == ' ') {
         fb_fill_cell(row, col);
         return;
@@ -130,7 +122,7 @@ static void fb_draw_cell(uint32_t row, uint32_t col) {
 
 static void fb_draw_text_run(uint32_t row, uint32_t col, const char* data, uint32_t len) {
     if (!data || len == 0) return;
-    if (g_render_suppressed) return;
+    if (g_tty->render_suppressed) return;
 
     uint32_t off = 0;
     while (off < len) {
@@ -140,13 +132,13 @@ static void fb_draw_text_run(uint32_t row, uint32_t col, const char* data, uint3
             : remaining;
 
         FbDrawTextCmd cmd{};
-        cmd.x = (col + off) * kCellW;
-        cmd.y = row * kCellH;
+        cmd.x = g_tty->origin_x + (col + off) * g_tty->cell_w;
+        cmd.y = g_tty->origin_y + row * g_tty->cell_h;
         cmd.fg = kFg;
         cmd.bg = kBg;
         cmd.len = static_cast<uint8_t>(chunk);
-        cmd.scale_x = 1;
-        cmd.scale_y = 1;
+        cmd.scale_x = g_tty->scale;
+        cmd.scale_y = g_tty->scale;
         for (uint32_t i = 0; i < chunk; ++i) {
             const char ch = data[off + i];
             cmd.text[i] = libk::str::is_ascii_printable(ch) ? ch : '?';
@@ -157,66 +149,66 @@ static void fb_draw_text_run(uint32_t row, uint32_t col, const char* data, uint3
 }
 
 static void tty_cursor_hide() {
-    if (!g_cursor_visible) return;
-    if (g_cursor_row < kRows && g_cursor_col < kCols) {
-        fb_draw_cell(g_cursor_row, g_cursor_col);
+    if (!g_tty->cursor_visible) return;
+    if (g_tty->cursor_row < g_tty->rows && g_tty->cursor_col < g_tty->cols) {
+        fb_draw_cell(g_tty->cursor_row, g_tty->cursor_col);
     }
-    g_cursor_visible = false;
+    g_tty->cursor_visible = false;
 }
 
 static void tty_cursor_show() {
-    if (g_render_suppressed) return;
-    const uint32_t row = g_tty.cursor_y < kRows ? g_tty.cursor_y : (kRows - 1u);
-    const uint32_t col = g_tty.cursor_x < kCols ? g_tty.cursor_x : (kCols - 1u);
+    if (g_tty->render_suppressed) return;
+    const uint32_t row = g_tty->cursor_y < g_tty->rows ? g_tty->cursor_y : (g_tty->rows - 1u);
+    const uint32_t col = g_tty->cursor_x < g_tty->cols ? g_tty->cursor_x : (g_tty->cols - 1u);
     FbFillRectCmd cmd{};
-    cmd.x = col * kCellW;
-    cmd.y = row * kCellH + (kCellH - 2u);
-    cmd.width = kCellW;
+    cmd.x = g_tty->origin_x + col * g_tty->cell_w;
+    cmd.y = g_tty->origin_y + row * g_tty->cell_h + (g_tty->cell_h - 2u);
+    cmd.width = g_tty->cell_w;
     cmd.height = 2;
     cmd.color = kFg;
     (void)fb_send(FB_FILL_RECT, &cmd, sizeof(cmd));
-    g_cursor_row = row;
-    g_cursor_col = col;
-    g_cursor_visible = true;
+    g_tty->cursor_row = row;
+    g_tty->cursor_col = col;
+    g_tty->cursor_visible = true;
 }
 
 static void tty_redraw_all() {
     tty_cursor_hide();
     fb_clear_screen();
-    for (uint32_t r = 0; r < kRows; ++r) {
-        fb_draw_text_run(r, 0, g_tty.cells[r], kCols);
+    for (uint32_t r = 0; r < g_tty->rows; ++r) {
+        fb_draw_text_run(r, 0, line(r), g_tty->cols);
     }
     (void)fb_send(FB_PRESENT, nullptr, 0);
 }
 
 static void tty_scroll_pixels_up_one_row() {
-    fb_copy_rect(0, kCellH, 0, 0, kCols * kCellW, (kRows - 1u) * kCellH);
+    fb_copy_rect(0, g_tty->cell_h, 0, 0, g_tty->cols * g_tty->cell_w, (g_tty->rows - 1u) * g_tty->cell_h);
 
     FbFillRectCmd clear{};
-    clear.x = 0;
-    clear.y = (kRows - 1u) * kCellH;
-    clear.width = kCols * kCellW;
-    clear.height = kCellH;
+    clear.x = g_tty->origin_x;
+    clear.y = g_tty->origin_y + (g_tty->rows - 1u) * g_tty->cell_h;
+    clear.width = g_tty->cols * g_tty->cell_w;
+    clear.height = g_tty->cell_h;
     clear.color = kBg;
     (void)fb_send(FB_FILL_RECT, &clear, sizeof(clear));
 }
 
 static void fb_present() {
-    if (g_render_suppressed) return;
+    if (g_tty->render_suppressed) return;
     (void)fb_send(FB_PRESENT, nullptr, 0);
 }
 
 static void tty_newline() {
-    g_tty.cursor_x = 0;
-    if (g_tty.cursor_y + 1 < kRows) {
-        ++g_tty.cursor_y;
+    g_tty->cursor_x = 0;
+    if (g_tty->cursor_y + 1 < g_tty->rows) {
+        ++g_tty->cursor_y;
     } else {
         // Scroll: shift rows up.
-        for (uint32_t r = 0; r + 1 < kRows; ++r) {
-            (void)libk::copy_exact(libk::as_bytes(g_tty.cells[r]),
-                                    libk::as_bytes(g_tty.cells[r + 1]));
+        for (uint32_t r = 0; r + 1 < g_tty->rows; ++r) {
+            (void)libk::copy_exact(libk::as_bytes(line(r),g_tty->cols),
+                                    libk::as_bytes(line(r + 1),g_tty->cols));
         }
-        libk::fill(libk::as_bytes(g_tty.cells[kRows - 1]), ' ');
+        libk::fill(libk::as_bytes(line(g_tty->rows - 1),g_tty->cols), ' ');
         tty_scroll_pixels_up_one_row();
     }
 }
@@ -228,49 +220,49 @@ static void tty_write_char(char ch) {
         return;
     }
     if (ch == '\r') {
-        g_tty.cursor_x = 0;
+        g_tty->cursor_x = 0;
         return;
     }
     if (ch == '\b') {
-        if (g_tty.cursor_x > 0) {
-            --g_tty.cursor_x;
-            g_tty.cells[g_tty.cursor_y][g_tty.cursor_x] = ' ';
-            fb_draw_cell(g_tty.cursor_y, g_tty.cursor_x);
+        if (g_tty->cursor_x > 0) {
+            --g_tty->cursor_x;
+            line(g_tty->cursor_y)[g_tty->cursor_x] = ' ';
+            fb_draw_cell(g_tty->cursor_y, g_tty->cursor_x);
         }
         return;
     }
     if (ch == '\t') {
-        const uint32_t next = (g_tty.cursor_x + 8u) & ~7u;
-        while (g_tty.cursor_x < next && g_tty.cursor_x < kCols) {
+        const uint32_t next = (g_tty->cursor_x + 8u) & ~7u;
+        while (g_tty->cursor_x < next && g_tty->cursor_x < g_tty->cols) {
             tty_write_char(' ');
         }
         return;
     }
-    if (g_tty.cursor_x >= kCols) tty_newline();
-    const uint32_t row = g_tty.cursor_y;
-    const uint32_t col = g_tty.cursor_x++;
-    g_tty.cells[row][col] = libk::str::is_ascii_printable(ch) ? ch : '?';
+    if (g_tty->cursor_x >= g_tty->cols) tty_newline();
+    const uint32_t row = g_tty->cursor_y;
+    const uint32_t col = g_tty->cursor_x++;
+    line(row)[col] = libk::str::is_ascii_printable(ch) ? ch : '?';
     fb_draw_cell(row, col);
 }
 
 static void tty_write_printable_run(const char* s, uint32_t len) {
     uint32_t off = 0;
     while (off < len) {
-        if (g_tty.cursor_x >= kCols) tty_newline();
+        if (g_tty->cursor_x >= g_tty->cols) tty_newline();
 
-        const uint32_t row = g_tty.cursor_y;
-        const uint32_t col = g_tty.cursor_x;
-        const uint32_t room = kCols - col;
+        const uint32_t row = g_tty->cursor_y;
+        const uint32_t col = g_tty->cursor_x;
+        const uint32_t room = g_tty->cols - col;
         uint32_t chunk = len - off;
         if (chunk > room) chunk = room;
         if (chunk > kFbDrawTextMaxChars) {
             chunk = static_cast<uint32_t>(kFbDrawTextMaxChars);
         }
 
-        (void)libk::copy_n(libk::slice(libk::as_bytes(g_tty.cells[row]), col, room),
+        (void)libk::copy_n(libk::slice(libk::as_bytes(line(row),g_tty->cols), col, room),
                            libk::as_bytes(s + off, len - off), chunk);
         fb_draw_text_run(row, col, s + off, chunk);
-        g_tty.cursor_x += chunk;
+        g_tty->cursor_x += chunk;
         off += chunk;
     }
 }
@@ -291,35 +283,15 @@ static void tty_write(const char* s, uint32_t len) {
     }
 }
 
-static void scan_ready_marker(const char* data, uint32_t len) {
-    if (g_input_unlocked || !data) return;
-    for (uint32_t i = 0; i < len; ++i) {
-        const char b = data[i];
-        if (b == kReadyMarker[g_ready_match_pos]) {
-            ++g_ready_match_pos;
-            if (g_ready_match_pos == kReadyMarkerLen) {
-                g_input_unlocked = true;
-                g_ready_match_pos = 0;
-                return;
-            }
-        } else {
-            // "system ready" has no internal periodicity, so the only retry
-            // worth doing is treating the mismatching byte as a fresh start.
-            g_ready_match_pos = (b == kReadyMarker[0]) ? 1u : 0u;
-        }
-    }
-}
-
 static bool handle_mirror_slot(const RingSlot& slot) {
     const char* bytes = reinterpret_cast<const char*>(slot.payload);
-    scan_ready_marker(bytes, slot.length);
     tty_write(bytes, slot.length);
     return true;
 }
 
 static bool send_shell_input_char(char ch) {
-    if (!g_shell_attached || !g_shell_input.valid()) return false;
-    return g_shell_input.write_input_byte_spinning(ch, 4096);
+    if (!g_tty->shell_attached || !g_tty->shell_input.valid()) return false;
+    return g_tty->shell_input.write_input_byte_spinning(ch, 4096);
 }
 
 static bool send_shell_input_bytes(const char* bytes, uint32_t len) {
@@ -331,25 +303,25 @@ static bool send_shell_input_bytes(const char* bytes, uint32_t len) {
 }
 
 static bool handle_input_event(const InputEvent& event) {
-    if (!g_input_unlocked) {
+    if (!g_tty->input_unlocked) {
         // Pre-ready gate: count ESC streaks, drop everything else. INPUT_TEXT
         // events for the ESC code (0x1B) are not currently produced by the
         // existing key-press path, so the HID keycode is the only trigger.
-        if (event.type == INPUT_KEY_DOWN) {
+        if (event.type == INPUT_KEY_DOWN || event.type == INPUT_KEY_REPEAT) {
             if (event.keycode == HID_KEY_ESCAPE) {
-                ++g_esc_streak;
-                if (g_esc_streak >= kEscBypassCount) {
-                    g_input_unlocked = true;
-                    g_esc_streak = 0;
+                ++g_tty->esc_streak;
+                if (g_tty->esc_streak >= kEscBypassCount) {
+                    g_tty->input_unlocked = true;
+                    g_tty->esc_streak = 0;
                 }
             } else {
-                g_esc_streak = 0;
+                g_tty->esc_streak = 0;
             }
         }
         return false;
     }
 
-    if (event.type == INPUT_KEY_DOWN) {
+    if (event.type == INPUT_KEY_DOWN || event.type == INPUT_KEY_REPEAT) {
         const uint32_t key = event.keycode;
         if (key == HID_KEY_UP) return send_shell_input_bytes("\x1b[A", 3);
         if (key == HID_KEY_DOWN) return send_shell_input_bytes("\x1b[B", 3);
@@ -375,11 +347,11 @@ static bool handle_input_event(const InputEvent& event) {
 }
 
 static bool drain_input(uint32_t max_slots) {
-    if (!g_input.ring) return false;
+    if (!g_tty->input.ring) return false;
     bool any = false;
     InputEvent event{};
     uint32_t drained = 0;
-    while (drained < max_slots && g_input.try_read(&event)) {
+    while (drained < max_slots && g_tty->input.try_read(&event)) {
         any = handle_input_event(event) || any;
         ++drained;
     }
@@ -387,11 +359,11 @@ static bool drain_input(uint32_t max_slots) {
 }
 
 static bool drain_mirror(uint32_t max_slots) {
-    if (!g_mirror.ring) return false;
+    if (!g_tty->mirror.ring) return false;
     bool any = false;
     RingSlot slot{};
     uint32_t drained = 0;
-    while (drained < max_slots && g_mirror.try_read(&slot)) {
+    while (drained < max_slots && g_tty->mirror.try_read(&slot)) {
         any = handle_mirror_slot(slot) || any;
         ++drained;
     }
@@ -399,17 +371,13 @@ static bool drain_mirror(uint32_t max_slots) {
 }
 
 static bool drain_shell_output(uint32_t max_slots) {
-    if (!g_shell_output.ring) return false;
-    // Hold shell terminal output until init has logged "system ready". Without
-    // this, the msh banner/prompt can interleave with the tail of the boot log
-    // on first paint. The marker scan in handle_mirror_slot flips
-    // g_input_unlocked at the same moment input gating ends. msh back-pressures
-    // on its output ring in the meantime — exactly the behaviour we want.
-    if (!g_input_unlocked) return false;
+    if (!g_tty->shell_output.ring) return false;
+    // Activation is an explicit boot doorbell; preserve output until then.
+    if (!g_tty->input_unlocked) return false;
     bool any = false;
     RingSlot slot{};
     uint32_t drained = 0;
-    while (drained < max_slots && g_shell_output.try_read(&slot)) {
+    while (drained < max_slots && g_tty->shell_output.try_read(&slot)) {
         tty_write(reinterpret_cast<const char*>(slot.payload), slot.length);
         any = true;
         ++drained;
@@ -422,26 +390,49 @@ extern "C" [[noreturn]] void _start() {
 
     (void)mochi::log_map_from_boot(boot, kVaLogRing, "tty.fb0");
 
-    g_fb = {
+    auto state = mochi::make_state(0x1b100000,131072);
+    g_tty = state.alloc<TtyState>();
+    if(!g_tty) mochi::boot::invalid_boot();
+    g_tty->cols=mochi::driver::value(boot,"tty.cols",128); g_tty->rows=mochi::driver::value(boot,"tty.rows",48);
+    g_tty->origin_x=mochi::driver::value(boot,"tty.x"); g_tty->origin_y=mochi::driver::value(boot,"tty.y");
+    g_tty->scale=mochi::driver::value(boot,"tty.scale",1);
+    if(!g_tty||!g_tty->cols||g_tty->cols>256||!g_tty->rows||g_tty->rows>256||!g_tty->scale||g_tty->scale>8) mochi::boot::invalid_boot();
+    g_tty->cell_w=8*g_tty->scale; g_tty->cell_h=16*g_tty->scale;
+    g_tty->activation=mochi::boot::require_handle(boot,"console.activate");
+    g_tty->fb = {
         mochi::boot::map_ring(boot, {"fb.cmd.ring", kVaFbCmdRing, "fb.cmd.doorbell"}),
         mochi::boot::map_ring(boot, {"fb.reply.ring", kVaFbReplyRing, "fb.reply.doorbell"}),
     };
-    g_mirror = {mochi::boot::map_ring(boot,
+    g_tty->mirror = {mochi::boot::map_ring(boot,
         {"console.mirror.ring", kVaMirrorRing, "console.mirror.doorbell"})};
-    g_input = {mochi::boot::map_ring(boot,
+    g_tty->input = {mochi::boot::map_ring(boot,
         {"input.tty.ring", kVaInputRing, "input.tty.doorbell"})};
-    g_shell_input = {mochi::boot::map_ring(boot,
+    g_tty->shell_input = {mochi::boot::map_ring(boot,
         {"term.input.ring", kVaShellInputRing, "term.input.doorbell"})};
-    g_shell_output = {mochi::boot::map_ring(boot,
+    g_tty->shell_output = {mochi::boot::map_ring(boot,
         {"term.output.ring", kVaShellOutputRing, "term.output.doorbell"})};
-    g_shell_attached = g_shell_input.valid() && g_shell_output.valid();
-    if (g_shell_attached) {
+    g_tty->shell_attached = g_tty->shell_input.valid() && g_tty->shell_output.valid();
+    if (g_tty->shell_attached) {
         mochi::log_raw_marker("tty.fb0: shell terminal attached\n");
     } else {
         mochi::log_raw_marker("tty.fb0: shell terminal not attached; local echo fallback\n");
     }
 
-    libk::fill(libk::as_bytes(g_tty.cells), ' ');
+    FbInfo info{};
+    if(!g_tty->fb.request_info()) mochi::boot::invalid_boot();
+    const auto geometry_deadline=mx_clock_ns()+3000000000ull;
+    while(!g_tty->fb.try_read_info(&info)) {
+        if(mx_clock_ns()>=geometry_deadline) mochi::boot::invalid_boot(); mx_yield();
+    }
+    if(!mochi::boot::find(boot,"tty.cols")) g_tty->cols=info.width/g_tty->cell_w;
+    if(!mochi::boot::find(boot,"tty.rows")) g_tty->rows=info.height/g_tty->cell_h;
+    if(g_tty->cols>256||g_tty->rows>256) mochi::boot::invalid_boot();
+    g_tty->cells=state.alloc<char>(g_tty->rows*g_tty->cols);
+    if(!g_tty->cells) mochi::boot::invalid_boot();
+    if(g_tty->origin_x>info.width||g_tty->origin_y>info.height||
+       g_tty->cols*g_tty->cell_w>info.width-g_tty->origin_x||
+       g_tty->rows*g_tty->cell_h>info.height-g_tty->origin_y) mochi::boot::invalid_boot();
+    libk::fill(libk::as_bytes(g_tty->cells,g_tty->rows*g_tty->cols), ' ');
 
     fb_clear_screen();
     mochi::log_raw_marker("tty.fb0: ready\n");
@@ -450,16 +441,22 @@ extern "C" [[noreturn]] void _start() {
     tty_cursor_show();
     fb_present();
 
+    mochi::SpscEndpoint readers[4]{};
+    readers[0].rx_ring=g_tty->input.ring; readers[0].order=g_tty->input.order;
+    readers[1].rx_ring=g_tty->mirror.ring; readers[1].order=g_tty->mirror.order;
+    readers[2].rx_ring=g_tty->shell_output.ring; readers[2].order=g_tty->shell_output.order;
+    readers[3].rx_ring=g_tty->fb.reply.ring; readers[3].order=g_tty->fb.reply.order;
     mochi::boot::ready(boot);
     while (true) {
-        const bool any_input = drain_input(64);
+        if(!g_tty->input_unlocked&&mx_doorbell_read(g_tty->activation)) g_tty->input_unlocked=true;
+        const bool any_input = g_tty->input_unlocked&&drain_input(64);
         const bool any_shell = drain_shell_output(64);
-        const uint32_t mirror_depth = g_mirror.depth();
+        const uint32_t mirror_depth = g_tty->mirror.depth();
         const bool bulk_mirror = mirror_depth > 8;
-        g_render_suppressed = bulk_mirror;
+        g_tty->render_suppressed = bulk_mirror;
         const uint32_t mirror_budget = bulk_mirror ? mirror_depth : 4;
         const bool any_mirror = drain_mirror(mirror_budget);
-        g_render_suppressed = false;
+        g_tty->render_suppressed = false;
         if (bulk_mirror && any_mirror) {
             tty_redraw_all();
         }
@@ -467,7 +464,7 @@ extern "C" [[noreturn]] void _start() {
             tty_cursor_show();
             fb_present();
         } else {
-            mx_yield();
+            mochi::driver::idle(readers,4,g_tty->input.doorbell,mx_clock_ns()+10000000);
         }
     }
 }

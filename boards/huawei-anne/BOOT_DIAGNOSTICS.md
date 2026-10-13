@@ -50,6 +50,12 @@ back to zero for normal operation.
 This is a diagnostic run, not a ten-second limit on the production target.
 A CPU stuck without interrupts or syscalls still needs physical recovery.
 
+With `ANKO_ANNE_DIAG_RESET_AT_READY=OFF`, the configured interval measures
+runtime **after service readiness**, including framebuffer readiness. Startup
+retains a separate timeout of at least 30 seconds from scheduler entry. A slow
+boot therefore records `timeout` rather than claiming `runtime.observed` before
+services are ready. Watchdog retention uses the same runtime interval.
+
 The package saves the exact `kernel.elf` and raw Image with hashes, alongside
 the AVB container and stock restore image. Use that ELF to decode this run;
 later builds can move instruction addresses.
@@ -57,6 +63,10 @@ later builds can move instruction addresses.
 After testing, restore the full stock `kernel` image, then on this phone use
 `fastboot reboot bootloader` and allow recovery to start. This session verified
 that route to installed TWRP; `fastboot reboot recovery` enters eRecovery.
+The user reconfirmed this route during native USB work: use `reboot bootloader`,
+not `reboot recovery`. Check the actual transport after the command and use the
+installed-TWRP button route if recovery does not appear; a reboot acknowledgement
+alone does not verify TWRP startup.
 Do not issue overlapping USB writes or assume the shared recovery kernel can
 boot while it still contains Anko.
 

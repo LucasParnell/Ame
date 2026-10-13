@@ -9,8 +9,12 @@ struct Viewport { u32 x, y, width, height, scale; };
 // dirty rows for DMA; this class only accesses validated normal pixel memory.
 class FramebufferConsole {
 public:
+    // Early diagnostics can recycle rows instead of copying the whole viewport
+    // with interrupts masked. Interactive terminals keep ordinary scrolling.
+    enum class Overflow { Scroll, Wrap };
     static constexpr u32 kMaxColumns = 160, kMaxRows = 128;
-    bool bind(libk::Framebuffer32 fb, u64 owner_base, u64 owner_bytes, Viewport view);
+    bool bind(libk::Framebuffer32 fb, u64 owner_base, u64 owner_bytes, Viewport view,
+              Overflow overflow = Overflow::Scroll);
     void putchar(char c);
     void write(const char* text, usize size);
     void draw_text(u32 x, u32 y, u32 scale, const char* text, u32 foreground);
@@ -24,6 +28,7 @@ public:
 private:
     libk::Framebuffer32 fb_{};
     Viewport view_{};
+    Overflow overflow_ = Overflow::Scroll;
     u32 columns_ = 0, rows_ = 0, x_ = 0, y_ = 0;
     u32 dirty_y0_ = ~0u, dirty_y1_ = 0;
     u64 characters_ = 0;

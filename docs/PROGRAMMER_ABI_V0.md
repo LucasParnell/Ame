@@ -111,3 +111,26 @@ It fits exactly into one 48-byte ring payload.
 - Make nameservice support registration from init using `MxEndpointDesc` rather than static table seeding inside nameservice.
 - Add the interactive serial terminal on top of `MxEndpointDesc` and terminal protocol constants.
 - Add CI that checks the ABI headers against kernel headers and verifies that `ring_try_push` does not notify on the hot path.
+
+
+## Native driver support extensions
+
+`MX_NR_WAIT_DOORBELL_UNTIL` (67) takes a waited doorbell, its expected counter
+and an absolute monotonic deadline. Counter mismatch, notify and expiry all
+return `MX_OK`; consumers recheck their rings/hardware and clock. A zero deadline
+retains the untimed wait contract. Timer records are bounded per CPU and retain
+thread/doorbell lifetimes; a wait sequence prevents an old expiry waking a later
+wait. Expiry never overwrites another syscall's saved return register.
+
+`MX_CAP_PLATFORM` (22) and `MX_NR_PLATFORM_CONTROL` (68) expose cold, fixed board
+mechanisms. The caller first claims one domain with its process incarnation.
+The capability permits only that domain's enumerated operations and reset masks;
+arguments cannot specify arbitrary physical addresses. IRQ routing, PIO register
+access, role policy and USB classes retain their separate contracts. A controller
+owner exit fences hardware before arena/capability reclamation.
+
+Signed manifest bindings can name a declared hardware boot resource (`boot`) or
+an inline configuration value (`value`) as alternatives to a channel. Init grants
+only rights derived from its actual capability. The descriptor admits 32 service
+definitions and 128 channels; a selected profile remains bounded by the 24-row
+service registry. Session directories admit eight clients and 32 exports.

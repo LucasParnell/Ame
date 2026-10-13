@@ -319,45 +319,81 @@ SysError reply_handoff(u64 reply_val, u32 caller_pid) {
     return E_OK;
 }
 
-SysError wait_doorbell(CapHandle handle, u64 expected, u32 caller_pid) {
+// Timed waits use bounded per-CPU storage. Only the owning CPU writes a row;
+// notification still takes only the existing doorbell lock. References retain
+// both objects until the local timer removes the row, including after exit.
+struct alignas(64) DeadlineWait {
+    Thread* thread;
+    Doorbell* doorbell;
+    object::Record* thread_ref;
+    object::Record* doorbell_ref;
+    u64 deadline, sequence;
+};
+static DeadlineWait deadline_waits[kMaxCpus][64]{};
+static void release_deadline(DeadlineWait& row) {
+    object::release(row.thread_ref);
+    object::release(row.doorbell_ref);
+    row = {};
+}
+void poll_deadline_waiters() {
+    const u64 now = sched::sched_clock_ns();
+    for (auto& row : deadline_waits[sched::current_cpu_id()]) {
+        if (!row.thread) continue;
+        Doorbell* db = row.doorbell;
+        lock(db);
+        const bool active = db->waiter == row.thread && row.thread->wait_sequence == row.sequence;
+        const bool expired = active && now >= row.deadline;
+        if (expired) {
+            db->waiter = nullptr;
+            __atomic_store_n(&row.thread->waiting_doorbell, nullptr, __ATOMIC_RELEASE);
+        }
+        unlock(db);
+        if (expired) {
+            sched::apply_wake_metadata(row.thread, WAKE_DOORBELL, db->sched_hints);
+            sched::wake(row.thread);
+        }
+        if (!active || expired) release_deadline(row);
+    }
+}
+SysError wait_doorbell_until(CapHandle handle, u64 expected, u64 deadline, u32 caller_pid) {
     metric_inc(g_wait_calls);
-
     cap::Ref e = resolve_doorbell_entry(caller_pid, handle, RIGHT_WAIT);
     Doorbell* db = e ? static_cast<Doorbell*>(e->target) : nullptr;
     if (!db) return E_NOTFOUND;
-
     Thread* cur = sched::current();
     if (!cur) return E_DEAD;
     ANKO_ASSERT(cur->state == TS_RUNNING);
-
     const u64 irq = local_irq_save_disable();
+    // Only timed admission touches the local timer table. Untimed Tier-2 waits
+    // retain their original constant work; the periodic tick reaps stale rows.
+    if (deadline) poll_deadline_waiters();
+    DeadlineWait* timer = nullptr;
+    if (deadline) {
+        if (sched::sched_clock_ns() >= deadline) { local_irq_restore(irq); return E_OK; }
+        for (auto& row : deadline_waits[sched::current_cpu_id()])
+            if (!row.thread) { timer = &row; break; }
+        if (!timer) { local_irq_restore(irq); return E_OVERFLOW; }
+    }
     lock(db);
-
-    const u64 now = __atomic_load_n(&db->counter, __ATOMIC_ACQUIRE);
-    if (now != expected) {
+    if (__atomic_load_n(&db->counter, __ATOMIC_ACQUIRE) != expected) {
         metric_inc(g_wait_immediate);
-        unlock(db);
-        local_irq_restore(irq);
-        return E_OK;
+        unlock(db); local_irq_restore(irq); return E_OK;
     }
-
-    if (db->waiter != nullptr) {
-        unlock(db);
-        local_irq_restore(irq);
-        return E_BUSY;
-    }
-
+    if (db->waiter) { unlock(db); local_irq_restore(irq); return E_BUSY; }
     object::release(cur->waiting_lifetime);
     cur->waiting_lifetime = object::acquire(db);
+    ++cur->wait_sequence;
+    if (timer) *timer = {cur, db, object::acquire(cur), object::acquire(db), deadline, cur->wait_sequence};
     db->waiter = cur;
     __atomic_store_n(&cur->waiting_doorbell, db, __ATOMIC_RELEASE);
     cur->state = TS_SLEEPING;
     metric_inc(g_sleep_count);
     sched::block(cur);
-
-    unlock(db);
-    local_irq_restore(irq);
+    unlock(db); local_irq_restore(irq);
     return E_OK;
+}
+SysError wait_doorbell(CapHandle handle, u64 expected, u32 caller_pid) {
+    return wait_doorbell_until(handle, expected, 0, caller_pid);
 }
 
 u64 doorbell_counter(CapHandle handle, u32 caller_pid) {

@@ -3,11 +3,13 @@
 
 constexpr mx_u32_t MX_PROTOCOL_USB_CONTROLLER = 0x55534331u; // USC1
 enum MxUsbControllerMsg : mx_u32_t {
-    MX_USB_CONTROLLER_NEGOTIATE = 1, MX_USB_CONTROLLER_PORT_STATUS = 2,
-    MX_USB_CONTROLLER_RESET_PORT = 3, MX_USB_CONTROLLER_ADDRESS = 4,
-    MX_USB_CONTROLLER_CONFIGURE_ENDPOINT = 5, MX_USB_CONTROLLER_INSTALL_GRANT = 6,
-    MX_USB_CONTROLLER_REVOKE_GRANT = 7, MX_USB_CONTROLLER_QUIESCE = 8,
-    MX_USB_CONTROLLER_ACTIVATE_ROLE = 9, MX_USB_CONTROLLER_EVENT = 10,
+    MX_USB_CONTROLLER_NEGOTIATE = 0x100, MX_USB_CONTROLLER_PORT_STATUS = 0x101,
+    MX_USB_CONTROLLER_RESET_PORT = 0x102, MX_USB_CONTROLLER_ADDRESS = 0x103,
+    MX_USB_CONTROLLER_CONFIGURE_ENDPOINT = 0x104, MX_USB_CONTROLLER_INSTALL_GRANT = 0x105,
+    MX_USB_CONTROLLER_REVOKE_GRANT = 0x106, MX_USB_CONTROLLER_QUIESCE = 0x107,
+    MX_USB_CONTROLLER_ACTIVATE_ROLE = 0x108, MX_USB_CONTROLLER_EVENT = 0x109,
+    MX_USB_CONTROLLER_REPLY = 0x10a, MX_USB_CONTROLLER_EP0_PACKET = 0x10b,
+    MX_USB_CONTROLLER_REMOVE_DEVICE = 0x10c,
 };
 enum MxUsbControllerFeatures : mx_u32_t {
     MX_USB_FEATURE_HOST = 1u << 0, MX_USB_FEATURE_DEVICE = 1u << 1,
@@ -43,3 +45,30 @@ struct MxUsbEndpointConfig {
 };
 static_assert(sizeof(MxUsbControllerInfo) == MX_RING_INLINE_PAYLOAD);
 static_assert(sizeof(MxUsbEndpointConfig) <= MX_RING_INLINE_PAYLOAD);
+
+// Cold controller operations and port events; data-plane submissions use UST1.
+struct MxUsbControllerRequest {
+    mx_u64_t request_id;
+    MxUsbToken device;
+    mx_u32_t offset;
+    mx_u32_t length;
+    mx_u32_t value;
+    mx_u32_t reserved;
+};
+struct MxUsbControllerReply {
+    mx_u64_t request_id;
+    MxUsbToken device;
+    MxUsbToken endpoint;
+    mx_status_t status;
+    mx_u32_t value;
+    MxUsbSpeed speed;
+    mx_u8_t reserved[7];
+};
+struct MxUsbPortEvent {
+    mx_u64_t sequence;
+    mx_u16_t port;
+    MxUsbSpeed speed;
+    mx_u8_t connected;
+    mx_u32_t reserved;
+};
+static_assert(sizeof(MxUsbControllerReply) <= MX_RING_INLINE_PAYLOAD);

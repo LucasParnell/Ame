@@ -22,7 +22,7 @@ class SystemDescriptor(unittest.TestCase):
         self.assertEqual(switch['checks'], [])
         self.assertNotIn('dango.manager', mksystem.legacy_view(switch))
         self.assertEqual(policy.check_manifest(switch), [])
-        self.assertEqual(len(self.manifest['services']), 16)
+        self.assertEqual(len(self.manifest['services']), 17)
 
     def test_anne_bootstrap_profile_does_not_require_el2_or_qemu_devices(self):
         anne = policy.load_profile(self.path, 'huawei-anne')
@@ -34,6 +34,22 @@ class SystemDescriptor(unittest.TestCase):
         self.assertEqual({cap for service in anne['services'] for cap in service['caps']},
                          {'uart'})
 
+    def test_native_usb_profile_has_separate_hardware_and_input_owners(self):
+        anne=policy.load_profile(self.path,'huawei-anne-usb')
+        self.assertEqual(policy.check_manifest(anne),[])
+        services={s['name']:s for s in anne['services']}
+        self.assertNotIn('drv.usb.xhci',services)
+        self.assertEqual(services['io.usb']['start_after'],['drv.usb.dwc2'])
+        self.assertEqual(services['msh']['uses'],[])
+        self.assertNotIn('io.fs',services)
+        hardware={name:{b['boot'] for b in svc['bindings'] if 'boot' in b} for name,svc in services.items()}
+        self.assertEqual(hardware['drv.usb.dwc2'],{'dwc2.mmio','dwc2.irq','usb.fence'})
+        self.assertEqual(hardware['drv.usb.anne-phy'],{'usb.phy.mmio','usb.phy.control'})
+        self.assertFalse(hardware['drv.usb.hid'])
+        self.assertFalse(hardware['dev.usb-input'])
+        sources=[b['channel'] for b in services['ui.input']['bindings'] if b['name'] in {'hid.input.ring','test.input.ring'}]
+        self.assertEqual(len(set(sources)),2)
+
     def test_fixed_grants_and_actual_cpu_placement_are_preserved(self):
         services = {s['name']: s for s in self.manifest['services']}
         self.assertEqual(services['io.console']['affinity'], 1)
@@ -43,6 +59,21 @@ class SystemDescriptor(unittest.TestCase):
         fs = {b['name']: b for b in services['io.fs']['bindings']}
         self.assertEqual(fs['blk.req.doorbell']['rights'], ['notify'])
         self.assertEqual(fs['blk.reply.doorbell']['rights'], ['wait'])
+
+    def test_usb_service_authority_and_arena_bounds(self):
+        services = {s['name']: s for s in self.manifest['services']}
+        self.assertEqual(services['io.usb']['start_after'], ['drv.usb.xhci'])
+        self.assertEqual(services['drv.usb.hid']['start_after'], ['io.usb'])
+        self.assertEqual(services['drv.usb.hid']['caps'], [])
+        self.assertTrue(all(b['name'].startswith('usb.controller.')
+                            for b in services['drv.usb.xhci']['bindings']))
+        self.assertFalse(any('xhci' in b['name'] for b in services['drv.usb.hid']['bindings']))
+        arena = next(c for c in self.manifest['channels'] if c['name'] == 'usb_controller_payload')
+        self.assertEqual(arena['kind'], 'arena')
+        for size in (0, 1, True, 4097, 1048577):
+            bad = copy.deepcopy(self.manifest)
+            next(c for c in bad['channels'] if c['name'] == arena['name'])['bytes'] = size
+            self.assertTrue(policy.check_manifest(bad))
 
     def test_cycle_rejected(self):
         self.manifest['services'][1]['start_after'] = ['nameservice']

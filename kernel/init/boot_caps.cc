@@ -3,6 +3,10 @@
 // Spec ref: §8 V0 Boot Flow (step 9), §7.1 Init
 
 #include "anko/cap.h"
+#include "anko/platform_control.h"
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+#include "../../boards/huawei-anne/display_diagnostics.h"
+#endif
 #include "anko/boot_trace.h"
 #include "anko/hw_info.h"
 #include "anko/irq.h"
@@ -152,6 +156,41 @@ void issue_boot_caps(Process& init_proc,
     }
     anko::log::attach_console(kernel_log_rings, log_db, kMaxCpus);
 
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    if (g_hw.has_anne_usb) {
+        struct Resource { const char* name; PhysAddr base; u64 bytes; };
+        constexpr Resource resources[] = {
+            {"dwc2.mmio",0xff100000,0x40000}, {"usb.phy.mmio",0xff200000,4096},
+            {"i2c.mmio",0xfdf0d000,4096},
+        };
+        for (const auto& r : resources) {
+            auto* range = static_cast<MmioRange*>(mm::slab_alloc(sizeof(MmioRange),alignof(MmioRange)));
+            if (!range) panic("Anne USB resource allocation failed");
+            *range = {r.base,r.bytes,MX_MMIO_DEVICE_nGnRnE,0,0,0};
+            grant(r.name,CAP_MMIO,range,RIGHT_READ|RIGHT_WRITE|RIGHT_MAP|RIGHT_DUP);
+        }
+        auto* line = static_cast<IrqLine*>(mm::slab_alloc(sizeof(IrqLine),alignof(IrqLine)));
+        if (!line) panic("Anne USB IRQ allocation failed");
+        *line = {191,0,0,0,0};
+        grant("dwc2.irq",CAP_IRQ,line,RIGHT_READ|RIGHT_WRITE|RIGHT_DUP);
+        grant("usb.phy.control",CAP_PLATFORM,platform::board_control(platform::Domain::UsbPhy),RIGHT_WRITE|RIGHT_DUP);
+        grant("usb.fence",CAP_PLATFORM,platform::board_control(platform::Domain::UsbController),RIGHT_WRITE|RIGHT_DUP);
+        grant("i2c.control",CAP_PLATFORM,platform::board_control(platform::Domain::I2c),RIGHT_WRITE|RIGHT_DUP);
+#ifdef ANKO_ANNE_FRAMEBUFFER
+        u64 address=0; u32 width=0,height=0;
+        if (anne::native_display::framebuffer(address,width,height)) {
+            const usize size = libk::align_up(u64{width}*height*4,PAGE_SIZE);
+            if (!mm::register_noncached_range(address,size)) panic("Anne framebuffer attributes failed");
+            auto* range = static_cast<MmioRange*>(mm::slab_alloc(sizeof(MmioRange),alignof(MmioRange)));
+            if (!range) panic("Anne framebuffer allocation failed");
+            *range = {address,size,MX_MMIO_NORMAL_NC,0,0,0};
+            grant("fb.memory",CAP_MMIO,range,RIGHT_READ|RIGHT_WRITE|RIGHT_MAP|RIGHT_DUP);
+            grant("fb.control",CAP_PLATFORM,platform::board_control(platform::Domain::Display),RIGHT_WRITE|RIGHT_DUP);
+        }
+#endif
+    }
+#endif
+
     // 11) Framebuffer.  Two paths:
     //   T210: Hekate pre-configured TegraDC0; g_hw.t210_dc_fb_phys is the
     //         physical address of the active buffer. Map it as NORMAL_NC.
@@ -238,7 +277,7 @@ void issue_boot_caps(Process& init_proc,
         // T210 XUSB xHCI registers.
         constexpr PhysAddr kXusbBase = 0x7009'0000ull;
         constexpr usize    kXusbSize = 0x8000u;   // 32 KiB xHCI register window
-        constexpr usize kXhciDmaPages = 16;
+        constexpr usize kXhciDmaPages = 64;
         auto* xhci_mmio = static_cast<MmioRange*>(
             mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
         const PhysAddr xhci_dma_phys = mm::alloc_pages_contiguous_aligned(kXhciDmaPages, 16);
@@ -289,7 +328,7 @@ void issue_boot_caps(Process& init_proc,
         }
     } else if (g_hw.has_pcie) {
         // QEMU path: PCI xHCI scan.
-        constexpr usize kXhciDmaPages = 16;
+        constexpr usize kXhciDmaPages = 64;
         const drivers::pci_probe::XhciInfo xhci = drivers::pci_probe::find_xhci();
         // Phase A: inventory the ECAM hierarchy.  The PCI command register is
         // read (bus-master observation) but never written here, and BAR probing

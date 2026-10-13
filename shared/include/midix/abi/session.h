@@ -2,8 +2,8 @@
 #include "midix/abi/service.h"
 
 constexpr mx_u32_t MX_SESSION_MAGIC = 0x53455331;
-constexpr mx_u32_t MX_MAX_SESSIONS = 4;
-constexpr mx_u32_t MX_MAX_EXPORTS = 16;
+constexpr mx_u32_t MX_MAX_SESSIONS = 8;
+constexpr mx_u32_t MX_MAX_EXPORTS = 32;
 
 // Init publishes generation last. The server resets both rings and releases
 // handles from the preceding generation, then acknowledges before client resume.

@@ -50,6 +50,18 @@ class Formats(unittest.TestCase):
         return bytearray(bundle.read_bytes())
     def crc(self, b): struct.pack_into('<I', b, 64, mxpack.crc32c_with_zeroed_field(b, 64, 4))
     def test_signed_bundle(self): self.check_data('bundle', self.bundle(), True)
+    def test_large_bundle_progress_preserves_authentication(self):
+        manifest = self.work / 'progress-manifest.json'
+        manifest.write_text('{"schema":2,"services":[]}')
+        image = self.work / 'progress-image'
+        image.write_bytes(bytes(range(256)) * 128)
+        bundle = self.work / 'progress-bundle'
+        mxpack.build_bundle(bundle, manifest, ['exec:init:' + str(image)], 'manifest.json')
+        data = bytearray(bundle.read_bytes())
+        self.check_data('bundle-progress', data, True)
+        data[-1] ^= 1
+        self.crc(data)
+        self.check_data('bundle-progress', data, False)
     def test_signature_tamper(self):
         b = self.bundle(); h = struct.unpack_from('<IHHIIQQQQQQIIII48s', b)
         manifest = h[6]; signature = struct.unpack_from('<Q', b, manifest+40)[0]

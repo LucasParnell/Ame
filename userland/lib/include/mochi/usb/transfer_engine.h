@@ -6,6 +6,7 @@
 #include "libk/hash.h"
 #include "mochi/arena.h"
 #include "mochi/usb/platform.h"
+#include "midix/abi/protocols/usb_host.h"
 #include "midix/usb/descriptors.h"
 
 namespace mochi::usb {
@@ -333,8 +334,9 @@ private:
         const auto type = setup.request_type & 0x60u;
         if (type == 0x60) return false;
         if (ep.control_policy == ControlPolicy::Bus) return true;
-        return (setup.request_type & 0x1fu) == 1 && setup.index == ep.interface_number &&
-               (type == 0x20 || (type == 0x40 && ep.control_policy == ControlPolicy::InterfaceClassVendor));
+        return mx_usb_interface_control_allowed(setup, ep.interface_number) ||
+               ((setup.request_type & 0x1fu) == 1 && setup.index == ep.interface_number &&
+                type == 0x40 && ep.control_policy == ControlPolicy::InterfaceClassVendor);
     }
     mx_status_t accept(const SessionScope& scope, const MxUsbSubmit& request, const MxUsbSetup& setup,
                        bool control, mx_u64_t now_ns, MxUsbToken* out) {

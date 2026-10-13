@@ -573,7 +573,11 @@ void abort_attach(VmDeviceAssignment* a) {
         }
     }
     if (a->dma_domain) {
-        iommu::domain_destroy(a->dma_domain);
+        if (iommu::domain_destroy(a->dma_domain) != E_OK) {
+            a->state = VM_DEV_QUARANTINED;
+            metric_inc(VM_DEBUG_VM_DEVICE_QUARANTINE);
+            return;
+        }
         a->dma_domain = nullptr;
     }
     a->state = VM_DEV_FAILED;
@@ -852,7 +856,7 @@ SysError device_secure_attach(Process& caller, CapHandle vm_cap, const pci::Host
     rc = collect_vm_ram(a);
     if (rc == E_OK) rc = device_attach(a, spec);
     if (rc != E_OK) {
-        object::release(a->lifetime);
+        if (a->state != VM_DEV_QUARANTINED) object::release(a->lifetime);
         return rc;
     }
     const CapHandle cap_h =
@@ -1201,7 +1205,11 @@ static SysError device_revoke_impl(VmDeviceAssignment* a, bool faulting) {
     if (a->dma_domain) {
         // Every translation is invalidated and synchronised; destroy now frees
         // the pinned page tables.
-        iommu::domain_destroy(a->dma_domain);
+        if (iommu::domain_destroy(a->dma_domain) != E_OK) {
+            a->state = VM_DEV_QUARANTINED;
+            metric_inc(VM_DEBUG_VM_DEVICE_QUARANTINE);
+            return E_FAULT;
+        }
         a->dma_domain = nullptr;
     }
     a->state = VM_DEV_REVOKED;

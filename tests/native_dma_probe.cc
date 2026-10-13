@@ -17,6 +17,7 @@ iommu::IommuDomain* attached[16];
 bool fail_attach;
 bool fail_destroy;   // models a backend that cannot prove invalidation
 bool backend_ready;  // models hardware routing authorizing DMA
+bool recycle_destroyed_slot;
 CapturedDomain& capture(iommu::IommuDomain& domain) {
     for (auto& entry : domains) if (&entry.domain == &domain) return entry;
     assert(false); return domains[0];
@@ -57,10 +58,13 @@ SysError domain_attach(IommuDomain& domain, IommuDeviceId device) {
     attached[device.requester_or_stream_id] = &domain;
     return E_OK;
 }
-void domain_destroy(IommuDomain* domain) {
-    if (fail_destroy) return; // real core quarantines: state stays != Free
+SysError domain_destroy(IommuDomain* domain) {
+    if (fail_destroy) return E_FAULT;
     for (auto& a : attached) if (a == domain) a = nullptr;
     domain->state_ = DomainState::Free;
+    // Models another principal allocating the pool slot after reclamation.
+    if (recycle_destroyed_slot) domain->state_ = DomainState::Active;
+    return E_OK;
 }
 IommuDomain* stream_domain(IommuDeviceId device) { return attached[device.requester_or_stream_id]; }
 DomainState domain_state(const IommuDomain& domain) { return domain.state_; }
@@ -110,7 +114,9 @@ int main() {
     assert(register_native_dma_arena({0, 2}, 0x60000, PAGE_SIZE) == E_FAULT);
     // ...and a later retry, once invalidation is proven, reclaims cleanly.
     fail_destroy = false;
+    recycle_destroyed_slot = true;
     assert(unregister_native_dma_arenas({0, 2}) == E_OK);
+    recycle_destroyed_slot = false;
     assert(!attached[2]);
     // A cleared owner registers fresh, with a distinct identity and isolation.
     assert(register_native_dma_arena({0, 2}, 0x20000, PAGE_SIZE) == E_OK);

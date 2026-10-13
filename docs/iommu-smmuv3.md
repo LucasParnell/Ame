@@ -1,4 +1,4 @@
-# ARM SMMUv3 backend and hostile-DMA verification (Phase C)
+# IOMMU ownership, routing and ARM SMMUv3 verification
 
 Spec ref: `AME-GPU-DRIVER-APPLIANCE` §8.1 (isolation rule), §8.2 (IOVA model),
 §8.7 (SMMUv3 backend), §8.8 (publication), §8.10 (faults), §8.12 (revoke),
@@ -8,8 +8,10 @@ Spec ref: `AME-GPU-DRIVER-APPLIANCE` §8.1 (isolation rule), §8.2 (IOVA model),
 
 | File | Role |
 |---|---|
+| `kernel/include/anko/iommu_pt.h` | Pure descriptor format data for the bounded radix walker. |
+| `kernel/include/anko/smmuv3_update.h` | Checked break-before-make STE replacement, with failure-injection probes. |
 | `kernel/include/anko/smmuv3_enc.h` | Pure register/record encoders (STE, commands, events, queue maths). Host-testable, no MMIO. |
-| `kernel/include/anko/smmuv3.h` | Public backend API (bring-up, stream programming, fault drain, native arenas, selftest). |
+| `kernel/include/anko/smmuv3.h` | Public hardware API (bring-up, stream programming, fault drain, selftest); native registration lives in `iommu.h`. |
 | `kernel/iommu/smmuv3.cc` | MMIO, stream table, command/event queues, backend hooks. |
 | `kernel/iommu/faults.cc` | Event decode, rate-limited records, `ACTIVE → FAULTED → BUS_MASTER_DISABLED` quarantine. |
 | `kernel/iommu/native.cc` | IOMMU context for native (non-assigned) devices, e.g. drv.usb.xhci. |
@@ -28,6 +30,46 @@ bit convention the core already emits (`AP[2:1]` = read/write permission).
 It also matches §8.2: the IOVA is the address Linux uses, translated to whatever
 Ame physical page owns it.
 
+### Core ownership and backend routing
+
+Platform code registers disjoint stream ranges through `register_backend` only
+once translation is ready. `backend_for` checks the route's live readiness.
+Hardware backends supply every publication/invalidation/completion/stream hook,
+descriptor format and explicit IOVA/PA limits. The null backend is a software
+model: it cannot authorize native DMA or a Dango assignment. A domain cannot be
+attached through another backend or moved over an uncertain binding.
+
+The current walker supports three levels, a 4 KiB granule and aligned 2 MiB
+blocks. Descriptor bits belong to the backend; other walk geometries require
+another walker. Mapping bounds include physical output width, preventing silent
+address truncation. Page-owner queries, DMA classes and permissions establish
+which pinned extents belong to each domain. Native devices have separate domains;
+registration overlap across owners is denied. Unregister completes revocation
+before the caller can free the physical arena, and gives fresh owner identities
+on reuse. Unsupported routes return `E_NOTIMPL`, with negative probe coverage.
+
+Mapping and unmapping are cold operations over fixed tables. The complete batch
+is validated before descriptor mutation. Dirty table flags include existing leaf
+and parent tables, not just newly allocated tables. Publication errors propagate.
+An allocation rollback clears partial descriptors, unlinks new empty tables,
+publishes the removals and completes scoped invalidation before reclaiming them.
+A failed publication, invalidation or completion retains attempted records and
+pins and stops new mappings. Owners keep pages pinned until successful teardown.
+
+Unmap retires empty tables and invalidates their whole walk-cache coverage:
+2 MiB for an L3 table, 1 GiB for L2. A retired parent's coverage absorbs its
+children's coverage. Tables and payload pages are reclaimed after one completion
+for the batch. Destroy first denies all attached streams, then publishes cleared
+translations and completes a domain invalidation. Failed detach retains its
+binding for retry. Quarantined metadata alone does not prove DMA denial.
+
+This keeps allocation and table work out of USB transfer submission. The dense
+mapping array and table-address, dirty and retired-coverage columns are bounded;
+there is no per-transfer IOMMU allocation or cache maintenance. The current
+registered pool bounds remain eight domains (one permanent deny slot), 2,048
+mapping records and 1,024 table pages per domain, and 64 live/uncertain stream
+bindings. Proven-denied binding slots can be reused during repeated hotplug.
+
 ### Stream table
 
 * Linear (single-level), `STRTAB_BASE_CFG.FMT = 0`, `LOG2SIZE = 8` → 256 entries
@@ -38,9 +80,10 @@ Ame physical page owns it.
 * A stream id `>= sid_limit` (`min(8, IDR1.SIDSIZE)`) is rejected by
   `smmuv3_program_stream()` with `E_INVALID`, so an out-of-range requester can
   never be silently attached.
-* Attach writes the STE, cleans it to the point of coherency, issues
-  `CFGI_STE(sid)` (a cached stream configuration must not keep translating with
-  the old context) and `CMD_SYNC`. Detach programmes a *faulting* STE: stage-2
+* Replacement first invalidates the old STE, publishes it, issues
+  `CFGI_STE(sid)` and invalidates the old VMID before completion. The new
+  payload is published while invalid; the valid word is published last, followed
+  by `CFGI_STE` and completion. Detach programmes a *faulting* STE: stage-2
   enabled with an all-zero root table, so every lookup misses and is recorded as
   an `F_TRANSLATION` fault. That is "switch to the faulting domain" from §8.12,
   not a bypass.
@@ -50,7 +93,7 @@ Ame physical page owns it.
 ```
 Config = 0b110 (S2 translate), S2TTB = domain root table, S2VMID = domain index,
 S2T0SZ = 25 (39-bit IOVA), S2SL0 = 1 (walk starts at level 1), S2TG = 0 (4 KiB),
-S2PS = 4 (44-bit PA), S2AA64 = 1, S2R = 1 (record faults)
+S2PS = min(IDR5.OAS, 48-bit encoding), S2AA64 = 1, S2R = 1 (record faults)
 ```
 
 Per-domain VMIDs make invalidation scoped: `TLBI_S12_VMALL(vmid)` for a domain
@@ -59,26 +102,33 @@ invalidation is never issued (`IOMMU_TLBI_GLOBAL` stays zero).
 
 ### Queues
 
-* Command queue: 256 × 16 B = 4 KiB static, `log2size = 8`. Submission writes
+* Command queue: up to 256 × 16 B = 4 KiB static. Active depth is bounded by
+  `IDR1.CMDQS`; event depth is likewise bounded by `EVENTQS`. A full queue
+  waits for ownership with a bounded deadline and never overwrites pending commands. Submission writes
   the record, cleans it, and advances `CMDQ_PROD`; completion is polled through
   `CMDQ_CONS` after a `CMD_SYNC` (bounded spin). A `CMDQ_CONS.ERR` is surfaced as
   `E_FAULT` so the core quarantines rather than continuing on a broken command
   stream.
 * Event queue: 256 × 32 B = 8 KiB static. The SMMU is the producer; the kernel
   pops each record at `EVENTQ_CONS`, advances and publishes the consumer index.
-  `EVT_Q_OVERFLOW` is detected and logged; drains are bounded per call.
+  Overflow is detected by the `EVENTQ_PROD/CONS` overflow-bit mismatch, not
+  an event-record bit. Lost events or active global errors disable the controller
+  under acknowledged `GBPA.ABORT`; failed routes stop authorizing DMA and pins
+  remain retained. Drains are bounded per call.
 
 ### Backend hooks
 
-* `publish_page_table_range` — clean the range to the point of coherency.
+* `publish_page_table_range` — order coherent writes, or clean the range to PoC
+  and complete cache maintenance before queue publication. Cache-line size comes
+  from `CTR_EL0`, avoiding a fixed 64-byte assumption.
 * `invalidate_iotlb_range` — `TLBI_S12_VMALL` for a domain (`length == ~0`) or
   `TLBI_S2_IPA` for a range; a range longer than the 5-bit `NUM × SCALE`
-  encoding is rounded up to the next representable granularity (never
-  under-covers).
+  encoding is aligned and rounded to cover both its leading offset and tail.
+  Without `IDR3.RIL`, small ranges use legacy single-page commands (reserved
+  range fields remain zero) and large ranges use a VMID-scoped invalidation.
 * `sync_command_stream` — `CMD_SYNC` + wait.
-* `attach_stream` / `detach_stream` — programme the STE (added to the core's
-  vtable; a null hook stays a no-op, so the host regression and platforms
-  without a programmable IOMMU are unaffected).
+* `attach_stream` / `detach_stream` — replace the STE with ordered publication
+  and checked completion. Optional hooks belong only to the explicit software model.
 
 ## Fault handling
 
@@ -87,12 +137,21 @@ reason) with rate-limited logging, records it through the core's `note_fault`
 (increments `IOMMU_FAULTS`), and counts per-stream faults. An unmapped fault is
 never answered by mapping a page.
 
-A stream that reaches the fault threshold moves `ACTIVE → FAULTED →
-BUS_MASTER_DISABLED`: its STE is reprogrammed to the faulting context, the PCI
-command register's **Bus Master Enable** is cleared, `IOMMU_QUARANTINES`
-advances, and the owning domain is put into the quarantined state (no new
-mappings). The event queue is drained from the timer tick (throttled, bounded),
-so faults are handled without a routed SMMU interrupt.
+All 256 supported stream IDs have indexed fault records; there is no smaller
+tracking table that an untrusted device can exhaust. Repeated faults contain the
+stream through the core, changing its binding only after denial is proven. PCI
+bus-master shutdown is read back before being reported. Failed containment keeps
+pins and bindings; logs distinguish it from success. New assignments reset fault
+accounting so a previously quarantined stream remains containable after recovery.
+Hardware/core operations run outside the statistics lock, preserving lock order.
+Faults remain timer-polled pending interrupt routing.
+
+`IDR0.COHACC` describes only the SMMU's walks, structures and queues. It does
+not establish payload-DMA coherency for USB or another client. `CR1` and STE walk
+attributes match that capability. Non-coherent structures are explicitly cleaned;
+event storage is initially cleaned, then CPU read-only and invalidated before
+consumption. Client payload arenas retain their independently established memory
+attributes; xHCI continues using uniformly Normal Non-Cacheable CPU aliases.
 
 ## Early bring-up and bus-master containment
 
@@ -101,13 +160,15 @@ and before the GIC, timer, scheduler and any userland service. It sets
 `GBPA.ABORT` first (fail closed: if anything below fails, or while `SMMUEN` is
 not yet effective, every stream terminates instead of bypassing), builds the
 empty stream table, programmes the queues, clears `IRQ_CTRL`/`CR2`, and enables
-`CR0 = SMMUEN | CMDQEN | EVENTQEN`, confirming `CR0ACK`. With no SMMU present it
-is a no-op and the core stays on the null backend.
+`CR0 = SMMUEN | CMDQEN | EVENTQEN`, confirming `CR0ACK`. Bring-up waits for GBPA and disable acknowledgements before replacing firmware
+state, validates granule/format/queue geometry and registers the route only after
+command completion. With no SMMU, no hardware route is registered.
 
 `pci::contain_assignable()` holds every assignable (non-native, non-bridge) PCI
-function non-bus-mastering until an assignment is constructed. The native xHCI
-function is left untouched so the native USB path keeps working; it gets a
-translation context through `register_native_dma_arena()` (IOVA == PA over its
+function non-bus-mastering until an assignment is constructed. Native xHCI discovery disables bus mastering too; activation follows
+verified DMA registration before authority is issued. Development QEMU builds
+can explicitly run without an IOMMU, while release activation requires a route.
+It gets a translation context through `register_native_dma_arena()` (IOVA == PA over its
 pinned DMA arena, a scoped set of kernel-owned pages — not an identity map).
 
 ## Driving QEMU `iommu-testdev`
@@ -166,28 +227,21 @@ python3 scripts/test/iommu_dma.py --build out/verify
 | (e) | Repeated faults (16 injections) neither overflow the event queue (`GERROR` clear) nor escape quarantine: the stream ends `state = 3` (bus-master disabled) and `IOMMU_QUARANTINES` advances. |
 | (f) | An IOVA unmapped and synchronised can no longer be reached: the range-scoped `TLBI` (`IOMMU_TLBI_RANGE`) dropped the cached translation and the released page stayed untouched. |
 
-Observed evidence (QEMU 11.1.1, `out/qemu-dev`):
+Host regressions run with ASan/UBSan. `tests/iommu_ordering_probe.cc` uses a
+cached device-walker model against the real core and injects allocation,
+publication, attach and detach failures. It verifies existing-table publication,
+whole-batch rejection, retained pins and roots, full retired-table coverage,
+recovery and binding reuse. `tests/smmuv3_probe.cc` injects failure at every STE
+replacement step and checks aligned range coverage, queue wrap/full arithmetic,
+coherent attributes and output-width encodings. `tests/native_dma_probe.cc`
+checks registration isolation, unrouted devices, failure retention and fresh
+identities after unregister. The live QEMU test still proves hostile DMA through
+actual SMMUv3 translation and the unchanged 22-check kernel selftest.
 
-```
-iommu/smmuv3: idr0=0xd44101b idr1=0x2730010 idr5=0x74 sid_bits=16 cmdq_bits=19 evtq_bits=19 oas=4
-iommu/smmuv3: enabled base=0x9050000 sid_limit=256 cr0ack=0xd
-iommu/selftest: ste sid=32 valid_config=0xd s2cfg=0x40c0059 s2ttb=0x41426000/0x0 root=0x41426000
-iommu/selftest: (a) mapped DMA ok result=0x0
-iommu/selftest: (f) unmap + scoped TLBI ok result=0xdead0002 tlbi_range=1
-iommu/selftest: (b) unmapped fault ok result=0xdead0002 faults=2 canary=0xa5a5a5a5
-iommu/selftest: (c) read-only rejection ok result=0xdead0002
-iommu/selftest: (d) detached fault ok result=0xdead0002
-iommu/faults: quarantine: sid=32 faults=8 generation=2 (STE faulting, bus-master cleared)
-iommu/selftest: (e) repeated faults ok injections=16 stream_faults=20 state=3 quarantines=2 gerror=0x0
-iommu/selftest: counters IOMMU_FAULTS=20 IOMMU_QUARANTINES=2 IOMMU_TLBI_RANGE=1 events=20
-iommu/selftest: iommu dma test passed (22 checks)
-iommu/native: arena registered seg=0 sid=16 base=0x4186d000 size=0x10000   # native xHCI
-```
-
-Host-side encoder regression: `tests/smmuv3_probe.cc` (run by
-`tests/test_smmuv3.py` via `ctest`) checks the STE, command and event encodings,
-the TLBI coalescing and the queue index arithmetic. `tests/iommu_probe.cc` was
-extended to assert the level-3 page descriptor type (`[1:0] = 0b11`).
+Architectural reference: [Arm IHI 0070 G.a](https://documentation-service.arm.com/static/66c5c097882fec713ef4a8ff),
+particularly coherency considerations, structure update procedures and queue
+register formats. Non-coherent physical hardware and Huawei USB stream routing
+still require platform evidence; QEMU does not establish those paths.
 
 ## Known gaps
 
@@ -199,6 +253,8 @@ extended to assert the level-3 page descriptor type (`[1:0] = 0b11`).
 * Stage-1 translation is not implemented: a device whose SMMU advertises no
   stage-2 support cannot be isolated by this backend and bring-up fails closed
   with the SMMU in global-abort (no bypass).
-* §8.14 item 4 ("a page subsequently reused by another process") is covered to
-  the extent that the released page provably stays untouched after unmap; real
-  page recycling needs Phase D/E assignment plumbing.
+* Non-coherent cache maintenance is implemented, but QEMU's coherent backend
+  does not validate a physical non-coherent interconnect.
+* Huawei USB routing, a board IOMMU backend, alternative walk geometries and
+  four-level/x86 translation backends remain unimplemented. They must supply
+  verified routes and completion mechanisms rather than using the null model.

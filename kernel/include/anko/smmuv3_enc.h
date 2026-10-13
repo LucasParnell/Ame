@@ -117,7 +117,7 @@ constexpr u32 kEvtBytes = 32; // sizeof(Evt)
 // generic core's descriptor bit convention (APT[1] = read, AP[2] = write)
 // already encodes. A missing/invalid STE aborts; there is no bypass value.
 // ---------------------------------------------------------------------------
-struct Ste {
+struct alignas(8) Ste {
     u32 w[16];
 };
 static_assert(sizeof(Ste) == kSteBytes);
@@ -213,7 +213,7 @@ inline Cmd make_cmd_tlbi_s12_vmall(u16 vmid) {
 
 // Encode `pages` 4 KiB pages as the TLBI NUM/SCALE pair: NUM in [0,31],
 // SCALE in [0,31], covered pages = (NUM + 1) << SCALE >= pages.
-inline void range_num_scale(u32 pages, u32* num, u32* scale) {
+inline void range_num_scale(u64 pages, u32* num, u32* scale) {
     u64 cover = pages == 0 ? 1u : pages;
     u32 s = 0;
     while (cover > 32u && s < 31u) {
@@ -234,12 +234,23 @@ inline void range_num_scale(u32 pages, u32* num, u32* scale) {
 inline Cmd make_cmd_tlbi_s2_ipa(u16 vmid, u64 iova, u32 pages) {
     u32 num = 0;
     u32 scale = 0;
-    range_num_scale(pages, &num, &scale);
+    const u64 first_page = iova >> 12;
+    const u64 count = pages ? pages : 1;
+    // Hardware aligns the base to SCALE. Include the leading pages in the
+    // coverage calculation, otherwise an unaligned range loses its tail.
+    for (;;) {
+        const u64 granule = 1ull << scale;
+        const u64 offset = first_page & (granule - 1);
+        const u64 units = (count + offset + granule - 1) / granule;
+        if (units <= 32) { num = static_cast<u32>(units - 1); break; }
+        ++scale;
+    }
+    const u64 base = (first_page & ~((1ull << scale) - 1)) << 12;
     Cmd c{};
     c.w[0] = kCmdTlbiS2Ipa | ((num & 0x1Fu) << 12) | ((scale & 0x1Fu) << 20);
     c.w[1] = static_cast<u32>(vmid);
-    c.w[2] = static_cast<u32>(iova & 0xFFFF'F000ull) | (1u << 10) /* TG=4KB */;
-    c.w[3] = static_cast<u32>(iova >> 32);
+    c.w[2] = static_cast<u32>(base & 0xFFFF'F000ull) | (1u << 10) /* TG=4KB */;
+    c.w[3] = static_cast<u32>(base >> 32);
     return c;
 }
 
@@ -277,14 +288,8 @@ enum EvtType : u32 {
     kEvtEPageReq = 0x24,
 };
 
-// EVT word0[31] is the overflow marker a stalled consumer leaves behind.
-constexpr u32 kEvtOverflow = 1u << 31;
-
 inline u32 evt_word0_type(const u32 word0) {
     return word0 & 0xFFu;
-}
-inline bool evt_word0_overflow(const u32 word0) {
-    return (word0 & kEvtOverflow) != 0;
 }
 inline u32 evt_word0_ssid(const u32 word0) {
     return word0 >> 12;

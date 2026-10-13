@@ -4,6 +4,7 @@
 
 #include "anko/syscall.h"
 #include "anko/cap.h"
+#include "anko/platform_control.h"
 #include "anko/sched.h"
 #include "anko/ipc.h"
 #include "anko/irq.h"
@@ -558,6 +559,18 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         const SysError rc = ipc::notify(static_cast<CapHandle>(a0), p->pid);
         if (rc != E_OK) return err(rc);
         return ok(E_OK);
+    }
+
+    case SYS_PLATFORM_CONTROL: {
+        auto entry = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PLATFORM);
+        if (!entry || !has_rights(entry, RIGHT_WRITE)) return err(E_PERM);
+        if (a1 > 0xffffffffu) return err(E_INVALID);
+        return ok(platform::control(*static_cast<platform::Control*>(entry->target),
+            static_cast<u32>(a1), a2, sched::process_identity(*p)));
+    }
+
+    case SYS_WAIT_DOORBELL_UNTIL: {
+        return ok(ipc::wait_doorbell_until(static_cast<CapHandle>(a0), a1, a2, p->pid));
     }
 
     case SYS_WAIT_DOORBELL: {

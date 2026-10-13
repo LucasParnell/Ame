@@ -5,6 +5,9 @@
 #include "midix/format/bundle.h"
 #include "manifest_trust.h"
 #include "libk/string.h"
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && defined(ANKO_ANNE_WATCHDOG)
+#include "watchdog.h"
+#endif
 namespace kernel::init {
 namespace {
 midix::format::Bundle g_archive{};
@@ -80,9 +83,16 @@ bool discover_initrd(PhysAddr dtb_phys, PhysAddr* out_base, usize* out_size) {
 }
 
 bool init_archive(PhysAddr base, usize size) {
+    integrity::Progress progress{};
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && defined(ANKO_ANNE_WATCHDOG)
+    // Bundle validation runs before CPU0 enters the scheduler with IRQs enabled.
+    // Feed the inherited watchdog between bounded checksum/hash chunks; never
+    // weaken authentication or put board-specific policy in the format library.
+    progress.step = [](void*) { anne::watchdog::poll(); };
+#endif
     const char* error = midix::format::verify_bundle(
         reinterpret_cast<const u8*>(base), size, kManifestTrustedKeys,
-        sizeof(kManifestTrustedKeys) / sizeof(kManifestTrustedKeys[0]), g_archive);
+        sizeof(kManifestTrustedKeys) / sizeof(kManifestTrustedKeys[0]), g_archive, progress);
     if (error) {
         ANKO_LOGF_ERROR("kernel/init", "bundle rejected: %s", error);
         return false;

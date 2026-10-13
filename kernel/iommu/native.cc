@@ -160,8 +160,7 @@ SysError unregister_native_dma_arenas(IommuDeviceId device) {
         if (!owner.used || owner.device.segment != device.segment ||
             owner.device.requester_or_stream_id != device.requester_or_stream_id) continue;
         if (owner.domain) {
-            domain_destroy(owner.domain);
-            if (domain_state(*owner.domain) != DomainState::Free) {
+            if (domain_destroy(owner.domain) != E_OK) {
                 owner.failed = true;
                 return E_FAULT;
             }

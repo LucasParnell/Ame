@@ -8,75 +8,101 @@ drivers. This document defines the work; it does not claim USB hardware bring-up
 
 ## Implementation checkpoint
 
-The portable foundation is implemented. It is not yet the replacement for the
-fixed xHCI/HID service wiring:
+The native development profile now includes standalone I2C, Type-C, VBUS,
+Hi6250 PHY, role, DesignWare host/device, gadget, CDC, bulk and diagnostic-input
+services. The controller provides USC1/UST1 PIO packet/transfer mechanisms;
+keyboard matching, reports, LEDs and input policy remain separate processes.
+A physical USB-C keyboard plugs directly into the phone. Mac testing uses the
+same normalized input path through a dedicated diagnostic producer ring.
 
-- Separate v1 host, controller, transfer and gadget ABI headers retain the
-  legacy boot-report protocol unchanged. Transfer metadata fits the existing
-  48-byte ring payload. Mochi transfer clients/servers expose try-style SPSC
-  operations; the host probe checks zero notify/yield calls with active peers.
-- `mochi/usb/transfer_engine.h` uses caller-provided registered arenas, flat
-  resource tables, dense transfer columns and generational slot pools. Buffer
-  slices are registered once and borrowed exclusively. Request lookup uses a
-  bounded flat hash index. Normal submission/completion does not allocate.
-- The engine validates session/controller generations, endpoint grants, buffer
-  direction/ranges and interface-scoped EP0 policy. Cancellation/deadline/session
-  closure retains active buffers until hardware completion or stop acknowledgement.
-  Completion backpressure retains both results and buffer ownership. Isochronous
-  execution and cached non-coherent direct DMA are explicitly unavailable.
-- Shared descriptor validation, xHCI rings/TD encoders/event backlog and the
-  boot-keyboard decoder have sanitizer probes. The live legacy driver now uses
-  the descriptor/ring helpers, preserves unrelated events during control waits,
-  rejects truncated configuration/report data, checks SET_PROTOCOL and retains
-  reports/key transitions under backpressure. HS/SS interrupt interval decoding
-  and ring alignment across 64 KiB boundaries are corrected.
-- Kernel-issued xHCI DMA arenas are Normal Non-Cacheable in every CPU alias;
-  arena capability metadata reports that attribute. DMA barriers order accesses
-  and do not claim to perform cache maintenance. PCI discovery disables bus
-  mastering and uses 16-bit command writes, preserving W1C status. Activation
-  follows successful DMA registration; release activation requires an IOMMU.
-- Each native device has its own IOMMU domain and ownership query. Native DMA
-  uses the generic `NativeDevice` DMA class, preserving existing Dango values.
-  Failed registration retains potentially reachable pages and refuses activation.
+See [the native USB guide](ANNE_USB.md) for service boundaries, build/capture
+commands, the Mac sender, verified hardware geometry and explicit limits.
+The normal Anne profile remains minimal. This development profile admits a
+single directly attached USB2 device; hubs/splits and isochronous operation
+remain implementation gates. It grants no physical DMA authority.
 
-The checkpoint passes all 160 host tests and a two-CPU QEMU keyboard regression
-both with and without SMMUv3. The physical Huawei path is unverified. Re-run the
-gates after further controller, lifecycle or ABI changes.
+Validation after implementation: native and QEMU builds pass; 21 focused unit
+checks pass, plus the device executor's register/ring probe. The updated
+SMMUv3 QEMU input regression passes with two CPUs and two reconnects, including
+shared receiver wakes and deadline sleeps. Phone capture and stock restoration
+are authorized; native keyboard/Mac acceptance is still pending. The exact
+reviewed package is `out/anne-usb-native-package-v2` with its matching ELF,
+verified stock restore image and fresh private run controller. The user supplied
+FASTBOOT; the pinned kernel flash and native reboot were acknowledged.
+The first hardware capture shows slow native screen drawing/scrolling and a CPU
+4 entry timeout; no Mac CDC node appeared in the first 45 seconds. The temporary
+kernel has now been replaced by a live checksum-verified stock restore in TWRP.
+V2's matching retained trace showed eight CPUs online and a watchdog FIQ during
+bundle hashing. V4 still failed to spawn init. The cause was a duplicate native
+CRG page mapping: bootstrap silently continued with MMU/caches off. V5 fixes
+that mapping and makes MMU setup failure fatal; tests assert the actual cache
+and MMU enable bits on each CPU. It reached `tty.fb0: ready` on the phone but
+has not enumerated CDC. Stock restore was acknowledged; TWRP re-verification
+and retained service-startup trace collection are pending. Early diagnostics
+also recycle one row at overflow, and format CRC/SHA progress hooks let the
+boot layer feed the watchdog during cold authentication. Physical keyboard and
+Mac injection are not yet hardware verified.
 
-The new transfer ledger is tested with deterministic hardware completion/stop
-injection, but it is not yet connected to the live xHCI transfer service. That
-connection, separate `io.usb`/platform services, controller/session provisioning,
-timed sleeps and IRQ routing, Huawei IOMMU/DesignWare bring-up, report-protocol
-HID, per-source input v2, and executable gadget/CDC support remain to implement.
-No new controller/gadget protocol is advertised as a working service yet.
+The live host path is split across three processes:
 
-Validation commands:
+- `drv.usb.xhci` owns only controller mechanisms: port state, slot/context
+  programming, endpoint rings, pinned DMA buffers and completion/stop proof.
+  It contains no HID class matching, keyboard reports or USB enumeration policy.
+- `io.usb` enumerates all root-port devices, validates device/configuration
+  descriptors, sets configurations, publishes generic interface offers and
+  enforces interface leases and control-request scope. It brokers a provisioned
+  class session; additional session provisioning is a later extension.
+- `drv.usb.hid` matches boot-keyboard interfaces, claims them, selects their
+  interrupt-IN endpoint, sends SET_PROTOCOL/SET_IDLE, requests reports and
+  decodes them. It retains separate state for up to eight keyboards and emits
+  disconnect releases. `ui.input` continues handling text/layout policy.
+
+CPU state resides in kernel-created arenas. Hot transfer IDs, completion flags,
+endpoint activity and ownership columns are separate from cold descriptor and
+context records. Generational flat tables bound devices/interfaces/endpoints;
+normal transfers allocate no state or DMA memory. Shared SPSC rings retain the
+existing release/acquire contract, with payload publication before completion.
+Full reply rings retain transfer rows and buffers.
+
+The controller DMA arena is 256 KiB and uniformly Normal Non-Cacheable across
+CPU aliases; it is registered to one verified native IOMMU domain before bus
+master activation. CPU IPC payload arenas are Write-Back and never exposed as
+DMA memory. This implementation explicitly bounces between those CPU arenas
+and preallocated isolated DMA slices. DMA barriers order publication/consumption;
+they do not replace cache maintenance. Future direct payload grants can reuse
+these transfer contracts once kernel lifetime/delegation is available.
+
+Cancellation and deadlines stop the hardware endpoint before recycling its
+ring or DMA ownership. Disconnect disables the slot and drains old events;
+terminal records retire their old ring metadata before it can be reused.
+Controller event loss stops further activation rather than releasing uncertain
+DMA. Endpoint/buffer references survive reply backpressure.
+
+Current bounds: eight devices, 32 controller endpoints, 16 controller transfer
+slots, 4 KiB per transfer; 32 bus interfaces, 32 class endpoint leases and 15
+class transfers plus one reserved enumeration payload slot. Control, bulk and
+interrupt transfers are supported; isochronous transfers and hubs remain
+separate implementation gates. The native PIO service has IRQ/deadline sleeps and device/gadget functions; their
+phone acceptance remains pending. xHCI backend hardware sleep remains a separate
+implementation gate.
+
+After implementation, validate with:
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_usb.py'
-python3 -m unittest discover -s tests -p 'test_mochi_ring.py'
-cmake --preset qemu-dev -B out/usb-qemu-dev -DMOCHI_USB_TRACE_INPUT=ON
-cmake --build out/usb-qemu-dev --target anko mochi_system
-python3 scripts/test/usb-input.py --build out/usb-qemu-dev --cpus 2
+cmake --build out/usb-qemu-dev
+.venv/bin/python -m unittest discover -s tests -p 'test_usb.py'
+AME_QEMU_IOMMU=1 python3 scripts/test/usb-input.py --build out/usb-qemu-dev --cpus 2 --reconnect 2
 ```
-
-The last check sends repeated virtual keys, releases and a modifier chord through
-QEMU's actual xHCI/HID path. Its input trace is development-only and disabled by
-default. The test uses a local Unix monitor socket and no physical USB device.
 
 ## Existing code and phone evidence
 
-`userland/drivers/usb/xhci/main.cc` already runs in userspace and maps controller
-MMIO and a DMA arena. It combines root-port enumeration, configuration parsing,
-HID class requests, one global keyboard and eight-byte interrupt reports. It
-polls the event ring even though kernel IRQ-to-doorbell delivery exists. The
-running USB service path still exposes only boot-keyboard reports; the new
-general contracts are not yet used by that service path.
-
-`drv.usb.hid` decodes that report into key transitions; `ui.input` supplies US
-layout translation. Both keep one input source, and their manifest channels are
-fixed. There is no native Huawei USB backend. The normal Huawei service profile
-currently selects only `nameservice` and `io.console`.
+`userland/drivers/usb/xhci/main.cc` is a controller service. Generic host
+policy lives in `userland/usb/main.cc`, with the keyboard class implementation
+in `userland/drivers/usb/hid/main.cc`. Their signed manifest bindings provide
+separate request/reply rings and CPU payload arenas. Class processes receive
+interface IPC and payload memory, without controller MMIO or DMA capabilities.
+The normal Huawei service profile selects only nameservice and console;
+there is no native Huawei USB backend yet.
 
 The captured phone DTB and matching vendor source identify the board path:
 

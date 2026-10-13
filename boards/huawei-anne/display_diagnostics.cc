@@ -1,4 +1,5 @@
 #include "display_diagnostics.h"
+#include "anko/spinlock.h"
 #include "boot_diagnostics.h"
 #include "debug_io.h"
 #ifdef ANKO_ANNE_FRAMEBUFFER
@@ -76,6 +77,7 @@ void paint_pattern(const minimal::Buffer& fb, u64 el) {
 }
 #ifdef ANKO_ANNE_FRAMEBUFFER
 console::FramebufferConsole screen;
+kernel::SpinLock screen_lock{};
 bool screen_enabled;
 char screen_line[512];
 u32 screen_line_length;
@@ -158,7 +160,8 @@ bool bind_console() {
         const libk::Framebuffer32 fb{p.dma.address, 1080, 2280};
         if (!libk::framebuffer_fits(fb, kLogoBase, kLogoBytes)) continue;
         libk::framebuffer_fill(fb, console::FramebufferConsole::kBackground);
-        if (!screen.bind(fb, kLogoBase, kLogoBytes, {64, 224, 952, 1960, 2})) continue;
+        if (!screen.bind(fb, kLogoBase, kLogoBytes, {64, 224, 952, 1960, 2},
+                         console::FramebufferConsole::Overflow::Wrap)) continue;
         screen.draw_text(64, 144, 3, g_boot_el == 1 ? "ANKO EL1" : "ANKO EL2", 0xff7ee6a8);
         debug_clean(fb.address, fb.width * fb.height * 4);
         screen_enabled = true;
@@ -169,12 +172,28 @@ bool bind_console() {
     text("DISPLAY console=skip no_verified_32bit_scanout\n"); boot_log_flush();
     return false;
 }
+bool framebuffer(u64& address, u32& width, u32& height) {
+    for (Channel channel : kChannels) {
+        const Pipeline p = pipeline(channel);
+        if (!rejection(p) && ((p.dma.control >> 3) & 31) >= 5) {
+            address = p.dma.address; width = 1080; height = 2280; return true;
+        }
+    }
+    return false;
+}
+void handoff_console() {
+    console_flush();
+    kernel::LockGuard guard(screen_lock);
+    __atomic_store_n(&screen_enabled, false, __ATOMIC_RELEASE);
+}
 void console_putchar(char c) {
+    kernel::LockGuard guard(screen_lock);
     if (!screen_enabled) return;
     if (c == '\n') screen_commit_line();
     else if (screen_line_length + 1 < sizeof(screen_line)) screen_line[screen_line_length++] = c;
 }
 void console_flush() {
+    kernel::LockGuard guard(screen_lock);
     u64 address; u32 bytes;
     if (screen_enabled && screen.take_dirty(address, bytes)) debug_clean(address, bytes);
 }

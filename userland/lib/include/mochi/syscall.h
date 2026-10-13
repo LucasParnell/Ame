@@ -253,6 +253,14 @@ static inline mx_status_t mx_ring_share(mx_handle_t ring, mx_handle_t process, m
 static inline mx_status_t mx_doorbell_create(mx_handle_t* out) { return mx_status_from_value(sys_doorbell_create(), out); }
 static inline mx_status_t mx_doorbell_share(mx_handle_t db, mx_handle_t process, mx_rights_t rights, mx_handle_t* out) { return mx_status_from_value(sys_doorbell_share(db, process, rights), out); }
 static inline mx_status_t mx_doorbell_notify(mx_handle_t db) { return sys_notify(db); }
+// Expiry and notification both return MX_OK. Recheck rings and the monotonic
+// clock on every wake; this avoids delivering a stale timeout to a later wait.
+static inline mx_status_t mx_doorbell_wait_until(mx_handle_t db, uint64_t expected, uint64_t deadline) {
+    return static_cast<mx_status_t>(_svc3(MX_NR_WAIT_DOORBELL_UNTIL, db, expected, deadline));
+}
+static inline mx_status_t mx_platform_control(mx_handle_t cap, uint32_t op, uint64_t arg = 0) {
+    return static_cast<mx_status_t>(_svc3(MX_NR_PLATFORM_CONTROL, cap, op, arg));
+}
 static inline mx_status_t mx_doorbell_wait(mx_handle_t db, uint64_t expected) { return sys_wait_doorbell(db, expected); }
 static inline uint64_t mx_doorbell_read(mx_handle_t db) { return sys_doorbell_read(db); }
 static inline mx_status_t mx_thread_set_affinity(mx_handle_t thread, uint64_t cpu_mask) { return sys_thread_set_affinity(thread, cpu_mask); }

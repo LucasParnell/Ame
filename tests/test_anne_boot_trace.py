@@ -42,7 +42,11 @@ class NativeBootTrace(unittest.TestCase):
     def trace(self, el, fault=0, capture=0, cpus=1, workload=False, display=False, iova=False, frame_console=False, reset_at_ready=True, fiq_source=0, watchdog=False, watchdog_control=3, retention=False):
         preset = "anne-smp-trace-qemu-dev" if workload else "anne-trace-qemu-dev"
         build = ROOT / "out/anne-smp-trace-qemu-dev" if workload else BUILD
-        self.configure(fault, capture, preset, display, frame_console, reset_at_ready, watchdog, retention)
+        # A readiness capture's interval is a boot deadline, not the runtime
+        # observation duration. Eight emulated CPUs and display rendering need
+        # startup headroom even on a busy host; the same assertions still apply.
+        boot_capture = max(capture, 30) if capture and reset_at_ready and cpus > 1 else capture
+        self.configure(fault, boot_capture, preset, display, frame_console, reset_at_ready, watchdog, retention)
         retention_wait = retention and bool(watchdog_control)
         end_marker = 'RETENTION watchdog.expiry deliberately_requested=1' if retention_wait else 'RESET nmi=0x4' if fault or capture else 'LED g ctl='
         with tempfile.TemporaryDirectory(prefix='ame-boot-trace-') as directory:
@@ -92,7 +96,7 @@ class NativeBootTrace(unittest.TestCase):
             record = ''
             try:
                 receive(); qmp('qmp_capabilities'); qmp('cont')
-                deadline = time.monotonic() + (30 if frame_console else 15)
+                deadline = time.monotonic() + (60 if cpus > 1 or frame_console else 15)
                 while time.monotonic() < deadline:
                     self.assertEqual(qmp('human-monitor-command', {'command-line':
                         f'pmemsave 0x46060000 65536 "{path}"'}), '')
@@ -180,6 +184,11 @@ class NativeBootTrace(unittest.TestCase):
                     self.assertIsNotNone(initial_pstate)
                     self.assertEqual(int(initial_pstate.group(1), 16) & 0xc0, 0x40, 'FIQ masked; IRQ available to userspace')
                     self.assertIn(f'smp ready online={cpus} mask={((1 << cpus) - 1):x}', record)
+                    for cpu in range(cpus):
+                        cache = re.search(rf'CACHE cpu={cpu} midr=0x[0-9a-f]+ sctlr=(0x[0-9a-f]+)', record)
+                        self.assertIsNotNone(cache, 'Each CPU must report the actual MMU/cache state')
+                        self.assertEqual(int(cache.group(1), 16) & 0x1005, 0x1005,
+                                         'MMU, data cache and instruction cache must be enabled')
                     if cpus > 1:
                         for cpu in range(1, cpus):
                             self.assertIn(f'CPU {cpu} secondary.entry', record)

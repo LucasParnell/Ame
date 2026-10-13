@@ -220,9 +220,11 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | Service | Status | Evidence | Limitations |
 |---------|--------|----------|-------------|
 | `drv.pci` | **Not implemented (placeholder)** | `userland/drivers/pci/main.cc`; boot: `drv.pci: placeholder — M10 not yet implemented` | Kernel-side `pci_probe.cc` is the temporary stand-in |
-| `drv.usb.xhci` | Implemented legacy keyboard path (polling) | Shared bounded descriptor/ring helpers; non-cacheable DMA pool; gated bus mastering; `scripts/test/usb-input.py` validates repeated keys/releases/modifiers | General transfer ledger and host/controller/gadget v1 contracts are implemented separately and not yet wired into live services; Huawei backend remains pending |
-| `drv.usb.hid` | Implemented (polling) | `userland/drivers/usb/hid/main.cc`; boot: `drv.usb.hid: ready` | Boot-keyboard reports only |
-| `ui.input` | Implemented | `userland/drivers/input/main.cc`; boot: `ui.input: ready` | US boot-keyboard layout normalization only |
+| `drv.usb.xhci` | Generic controller/transfer service (polling) | Flat arena state, transfer ledger, isolated NC DMA pool, stop/disable fencing; no class matching or report code | IRQ-driven sleep, hubs/isochronous execution and Huawei backend remain pending |
+| `io.usb` | Implemented | Generic enumeration, descriptor validation, interface leases and scoped requests; signed controller/class ring pairs and WB payload arenas | One provisioned class session; dynamic session provisioning remains pending |
+| `drv.usb.hid` | Boot/report keyboard class driver | Bounded report compiler, report IDs, array/variable keys, LED control requests, source-tagged events and disconnect releases; SMMUv3 QEMU reconnect passes on 1/2 CPUs | Bounded keyboard encodings; physical Anne input/LEDs remain unverified |
+| DesignWare USB2 host/device and Anne platform | Implemented; native build and register-model tests pass | Separate I2C/Type-C/power/PHY/role services; PIO transfer phases, IRQ/deadline waits, gadget/CDC/bulk and dedicated Mac input producer; see `docs/ANNE_USB.md` | Native v5 reaches terminal readiness after a bootstrap MMU mapping fix; CDC ACKs and physical keyboard input remain unverified; direct USB2 device only; hubs/splits/isochronous/DMA not advertised |
+| `ui.input` | Implemented | `userland/drivers/input/main.cc`; boot: `ui.input: ready` | US layout; independent source state, locks/LEDs and repeat; physical Anne input unverified |
 | `drv.blk.virtio` | Implemented (device-dependent) | `userland/drivers/blk/virtio/main.cc`; no-disk boot: `mmio bank has no virtio-blk`, `no-device mode`; disk boots: `virtio-blk device detected`, `BLK read OK` | `BLK_WRITE`/`BLK_FLUSH` are exercised by the durability check (the no-device path still runs in the default boot) |
 
 ---

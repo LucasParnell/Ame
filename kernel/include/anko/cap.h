@@ -34,6 +34,7 @@ constexpr CapHandle cap_make(u32 index, u32 gen) {
 // Cap types (spec §5.5)
 // ---------------------------------------------------------------------------
 enum CapType : u16 {
+    CAP_PLATFORM = MX_CAP_PLATFORM,
     CAP_NULL = MX_CAP_NULL,
     CAP_THREAD = MX_CAP_THREAD,
     CAP_PROCESS = MX_CAP_PROCESS,
@@ -86,12 +87,7 @@ static_assert(static_cast<u16>(CAP_VM_SHARED) == static_cast<u16>(MX_CAP_VM_SHAR
 // ---------------------------------------------------------------------------
 // MMIO memory attribute classes (determines page-table memory type)
 // ---------------------------------------------------------------------------
-enum MxMmioAttr : u32 {
-    MX_MMIO_DEVICE_nGnRnE = 1, // strongly ordered (xHCI registers)
-    MX_MMIO_DEVICE_nGnRE = 2,  // device, early write ack (fw_cfg)
-    MX_MMIO_NORMAL_NC = 3,     // normal noncacheable (framebuffer pixels)
-    MX_MMIO_WRITE_COMBINE = 4, // write-combining (framebuffer if supported)
-};
+// Attribute values are shared in midix/abi/cap.h.
 
 // Kernel object referenced by a CAP_MMIO entry.
 struct MmioRange {

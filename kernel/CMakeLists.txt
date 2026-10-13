@@ -13,6 +13,7 @@ set(ANKO_SOURCES
     drivers/gic/gicv2.cc
     drivers/gic/irq_table.cc
     drivers/timer/generic_timer.cc
+    platform/control.cc
     platform/hw_info.cc
     platform/probe.cc
     ${CMAKE_SOURCE_DIR}/boards/${ANKO_BOARD}/board_fallback.cc

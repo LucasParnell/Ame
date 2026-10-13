@@ -50,7 +50,7 @@ bool hash_matches_json(json::Value value, const mx_u8_t expected[MX_SHA256_SIZE]
     return true;
 }
 
-const char* validate_bundle_header(const Bundle& bundle) {
+const char* validate_bundle_header(const Bundle& bundle, integrity::Progress progress) {
     const auto& header = bundle.header;
     if (header.magic != MX_BUNDLE_MAGIC || header.version != MX_BUNDLE_VERSION ||
         header.header_size != sizeof(header)) {
@@ -84,7 +84,7 @@ const char* validate_bundle_header(const Bundle& bundle) {
     }
 
     const mx_u32_t checksum = integrity::crc32c_zero_field(
-        bundle.data, bundle.size, kBundleChecksumOffset, sizeof(header.bundle_crc32c));
+        bundle.data, bundle.size, kBundleChecksumOffset, sizeof(header.bundle_crc32c), progress);
     if (checksum != header.bundle_crc32c) {
         return "bundle checksum mismatch";
     }
@@ -189,12 +189,13 @@ bool has_duplicate_name(const Bundle& bundle, mx_u32_t index, const char* name) 
     return false;
 }
 
-bool object_digest_matches(const Bundle& bundle, const MxBundleObject& entry) {
+bool object_digest_matches(const Bundle& bundle, const MxBundleObject& entry,
+                           integrity::Progress progress) {
     const mx_u8_t* payload = bundle.data + entry.offset;
     mx_u8_t digest[MX_SHA256_SIZE];
-    integrity::sha256(payload, entry.size, digest);
+    integrity::sha256(payload, entry.size, digest, progress);
     return integrity::bytes_equal(digest, entry.sha256, sizeof(digest)) &&
-           integrity::crc32c(payload, entry.size) == entry.crc32c;
+           integrity::crc32c(payload, entry.size, progress) == entry.crc32c;
 }
 
 bool catalog_entry_matches(json::Value catalog, mx_u32_t index, const MxBundleObject& entry,
@@ -214,7 +215,8 @@ bool catalog_entry_matches(json::Value catalog, mx_u32_t index, const MxBundleOb
            hash_matches_json(json::member(record, "sha256"), entry.sha256);
 }
 
-const char* validate_object_catalog(const Bundle& bundle, json::Value catalog) {
+const char* validate_object_catalog(const Bundle& bundle, json::Value catalog,
+                                    integrity::Progress progress) {
     const auto& header = bundle.header;
     mx_u64_t previous_end = header.string_table_offset + header.string_table_size;
 
@@ -234,7 +236,7 @@ const char* validate_object_catalog(const Bundle& bundle, json::Value catalog) {
         if (has_duplicate_name(bundle, index, name)) {
             return "duplicate object";
         }
-        if (!object_digest_matches(bundle, entry)) {
+        if (!object_digest_matches(bundle, entry, progress)) {
             return "object digest mismatch";
         }
 
@@ -302,7 +304,7 @@ bool object(const Bundle& bundle, mx_u32_t index, MxBundleObject& entry, const c
 
 const char* verify_bundle(const mx_u8_t* data, mx_size_t size,
                           const mx_u8_t (*trusted_keys)[MX_ED25519_PUBLIC_KEY_SIZE],
-                          mx_size_t key_count, Bundle& out) {
+                          mx_size_t key_count, Bundle& out, integrity::Progress progress) {
     out = {};
     if (!data || size < sizeof(MxBundleHeader)) {
         return "truncated bundle";
@@ -315,7 +317,8 @@ const char* verify_bundle(const mx_u8_t* data, mx_size_t size,
     candidate.data = data;
     candidate.size = size;
     libk::memcpy(&candidate.header, data, sizeof(candidate.header));
-    if (const char* error = validate_bundle_header(candidate)) {
+    progress.poll();
+    if (const char* error = validate_bundle_header(candidate, progress)) {
         return error;
     }
 
@@ -326,6 +329,7 @@ const char* verify_bundle(const mx_u8_t* data, mx_size_t size,
     if (const char* error = authenticate_manifest(envelope, trusted_keys, key_count)) {
         return error;
     }
+    progress.poll();
 
     candidate.manifest = reinterpret_cast<const char*>(envelope.body);
     candidate.manifest_size = envelope.header.body_size;
@@ -333,7 +337,7 @@ const char* verify_bundle(const mx_u8_t* data, mx_size_t size,
     if (const char* error = read_signed_catalog(candidate, catalog)) {
         return error;
     }
-    if (const char* error = validate_object_catalog(candidate, catalog)) {
+    if (const char* error = validate_object_catalog(candidate, catalog, progress)) {
         return error;
     }
 

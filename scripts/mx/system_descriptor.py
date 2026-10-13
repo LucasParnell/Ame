@@ -13,7 +13,7 @@ from pathlib import Path
 
 PRINCIPALS = {"native_trusted", "native_sandboxed"}
 RESTARTS = {"always", "never"}
-RIGHTS = {"ring": {"read", "write", "map", "duplicate"},
+RIGHTS = {"arena": {"read", "write", "map", "duplicate"}, "ring": {"read", "write", "map", "duplicate"},
           "doorbell": {"wait", "notify", "duplicate"}}
 
 
@@ -70,9 +70,9 @@ def check_manifest(manifest: dict) -> list[str]:
             problems.append(f"service {record['name']}: duplicate {key}")
         return values
 
-    services = records("services", 20)
+    services = records("services", 32)
     resources = {r["name"]: r for r in records("resources", 64)}
-    channels = {c["name"]: c for c in records("channels", 64)}
+    channels = {c["name"]: c for c in records("channels", 128)}
     by_name = {s["name"]: s for s in services}
     for resource in resources.values():
         name(resource.get("boot"), "resource boot name")
@@ -84,6 +84,10 @@ def check_manifest(manifest: dict) -> list[str]:
             order = channel.get("order")
             if type(order) is not int or not 4 <= order <= 10:
                 problems.append(f"channel {channel['name']}: order must be in [4, 10]")
+        elif kind == "arena":
+            size = channel.get("bytes")
+            if type(size) is not int or not 4096 <= size <= 1048576 or size % 4096:
+                problems.append(f"channel {channel['name']}: arena bytes must be page aligned in [4096, 1048576]")
         elif "order" in channel:
             problems.append(f"channel {channel['name']}: doorbells have no order")
     # The console's log multiplexor uses the shared log ABI geometry.
@@ -138,6 +142,18 @@ def check_manifest(manifest: dict) -> list[str]:
             if boot_name in boot_names:
                 problems.append(f"{label}: duplicate boot name {boot_name!r}")
             boot_names.add(boot_name)
+            if "value" in binding:
+                if type(binding["value"]) is not int or not 0 <= binding["value"] <= 0xffffffffffffffff or "channel" in binding or "boot" in binding:
+                    problems.append(f"{label}: invalid value binding")
+                continue
+            if "boot" in binding:
+                name(binding["boot"],label+" hardware boot name")
+                if "channel" in binding or binding["boot"] not in {r["boot"] for r in resources.values()}:
+                    problems.append(f"{label}: hardware binding must name a declared boot resource")
+                rights = binding.get("rights")
+                if not isinstance(rights,list) or not rights or len(rights)!=len(set(rights)) or any(r not in {"read","write","map","wait","notify","duplicate"} for r in rights):
+                    problems.append(f"{label}: invalid hardware rights")
+                continue
             channel_name = binding.get("channel")
             channel = channels.get(channel_name) if isinstance(channel_name, str) else None
             rights = binding.get("rights")
@@ -171,6 +187,10 @@ def load_profile(path: Path, profile: str) -> dict:
     descriptor = read_descriptor(path)
     profiles = descriptor.pop("profiles", {})
     selected = profiles.get(profile) if isinstance(profiles, dict) else None
+    overrides = {}
+    if isinstance(selected,dict):
+        overrides = selected.get("overrides",{})
+        selected = selected.get("services")
     if not isinstance(selected, list) or any(not isinstance(s, str) for s in selected) or len(selected) != len(set(selected)):
         raise ValueError(f"unknown or invalid system profile: {profile}")
     problems = check_manifest(descriptor)
@@ -180,6 +200,11 @@ def load_profile(path: Path, profile: str) -> dict:
     if any(s not in services for s in selected):
         raise ValueError(f"{profile}: profile selects an unknown service")
     descriptor["services"] = [copy.deepcopy(services[s]) for s in selected]
+    if len(selected)>24:
+        raise ValueError(f"{profile}: selected services exceed registry capacity")
+    for service in descriptor["services"]:
+        if service["name"] in overrides:
+            service.update(overrides[service["name"]])
     descriptor["checks"] = [c for c in descriptor.get("checks", []) if c["service"] in selected]
     problems = check_manifest(descriptor)
     if problems:
@@ -199,9 +224,9 @@ def channel_header(path: Path, output: Path) -> None:
     lines = ["#pragma once", "// Generated channel identifiers. Policy remains in the signed manifest.",
              "enum class ChannelId : unsigned {"]
     lines += [f"    {c['name']}," for c in channels]
-    lines += ["    count", "};", "struct ChannelName { const char* name; bool ring; };",
+    lines += ["    count", "};", "struct ChannelName { const char* name; bool ring; unsigned arena_bytes; };",
               "inline constexpr ChannelName kChannelNames[] = {"]
-    lines += [f'    {{"{c["name"]}", {"true" if c["kind"] == "ring" else "false"}}},' for c in channels]
+    lines += [f'    {{"{c["name"]}", {"true" if c["kind"] == "ring" else "false"}, {c.get("bytes", 0)}}},' for c in channels]
     lines += ["};", ""]
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines), encoding="utf-8")

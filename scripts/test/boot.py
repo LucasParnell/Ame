@@ -76,7 +76,7 @@ def hmp_screendump(sock_path, out_path, device=None, timeout=10.0):
 def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, output=None,
         bundle=None, snapshot=True, monitor_socket=None, screendump=None,
         screendump_device=None, screendump_delay=0.5, allow_kernel_panic=False,
-        entry_el=2, cpu='cortex-a57'):
+        entry_el=2, cpu='cortex-a57', usb_keyboard_id=None):
     if entry_el not in (1, 2):
         raise ValueError('entry_el must be 1 or 2')
     build = pathlib.Path(build).resolve()
@@ -97,7 +97,8 @@ def run(build, mode, cpus, timeout, disk=None, firmware=None, markers=None, outp
     args = ['qemu-system-aarch64', '-machine', machine,
             '-cpu', cpu, '-smp', str(cpus),
             '-m', os.environ.get('AME_QEMU_MEM', '512M'), '-device', 'ramfb',
-            '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,bus=xhci.0',
+            '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd,bus=xhci.0' +
+            (f',id={usb_keyboard_id}' if usb_keyboard_id else ''),
             '-device', 'usb-mouse,bus=xhci.0', '-display', 'none',
             '-serial', f'file:{host}', '-serial', f'file:{guest}']
     if monitor_socket:

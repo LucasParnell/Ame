@@ -12,6 +12,17 @@
 
 namespace mochi::input {
 
+struct LedSink : Ring {
+    bool try_send(const InputLedCommand& command) const {
+        return try_push_msg(INPUT_MSG_LEDS, command);
+    }
+};
+struct LedSource : Ring {
+    bool try_read(InputLedCommand* command) const {
+        return try_pop_msg(INPUT_MSG_LEDS, command);
+    }
+};
+
 // Push one event to a subscriber (ui.input -> tty.fb0).
 struct EventSink : Ring {
     bool try_send(const InputEvent& event) const {

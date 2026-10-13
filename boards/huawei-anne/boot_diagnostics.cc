@@ -95,6 +95,24 @@ void number(u64 value) {
     do { digits[n++] = '0' + value % 10; value /= 10; } while (value);
     while (n) raw_putc(digits[--n]);
 }
+void cache_snapshot() {
+    u64 midr, sctlr, mair, tcr;
+    asm volatile("mrs %0, midr_el1" : "=r"(midr));
+    asm volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+    asm volatile("mrs %0, mair_el1" : "=r"(mair));
+    asm volatile("mrs %0, tcr_el1" : "=r"(tcr));
+    text("\nCACHE cpu="); number(cpu_id()); text(" midr="); hex(midr);
+    text(" sctlr="); hex(sctlr); text(" mair="); hex(mair); text(" tcr="); hex(tcr);
+    // Cortex-A53 TRM DDI 0500J 4.3.79: this register is readable at EL1;
+    // writes depend on firmware permissions. Observe SMPEN without changing
+    // retention settings or assuming a generic CPU implements this register.
+    if ((midr >> 24) == 0x41 && ((midr >> 4) & 0xfff) == 0xd03) {
+        u64 extended;
+        asm volatile("mrs %0, S3_1_C15_C2_1" : "=r"(extended));
+        text(" cpuectlr="); hex(extended);
+    }
+    text("\n");
+}
 void led_hold(char led) {
     anne::debug_led(led);
     text("LED "); raw_putc(led); text(" ctl="); hex(anne::debug_pmic_read(0x14d));
@@ -132,6 +150,15 @@ void capture_poll() {
     if (state.retention_waiting) return;
     u64 reported;
     asm volatile("mrs %0, cntfrq_el0" : "=r"(reported));
+    if (!ANKO_ANNE_DIAG_RESET_AT_READY && state.stage < static_cast<u32>(anne::BootStage::ServicesReady)) {
+        // Runtime observation begins at readiness. Boot/display work on a
+        // loaded host can outlast a short runtime interval; retain a separate
+        // bounded startup failure capture instead of reporting it as runtime.
+        constexpr u64 boot_seconds = ANKO_ANNE_DIAG_CAPTURE_SECONDS > 30 ? ANKO_ANNE_DIAG_CAPTURE_SECONDS : 30;
+        if (state.capture_start && anne::minimal::elapsed(state.capture_start, anne::minimal::counter(),
+                boot_seconds * platform::counter_frequency(reported))) capture_reset("timeout");
+        return;
+    }
     if (state.capture_start && anne::minimal::elapsed(state.capture_start, anne::minimal::counter(),
             static_cast<u64>(ANKO_ANNE_DIAG_CAPTURE_SECONDS) * platform::counter_frequency(reported))) {
         if (!ANKO_ANNE_DIAG_RESET_AT_READY) {
@@ -200,7 +227,10 @@ void boot_checkpoint(BootStage stage) {
 #endif
     if (stage == BootStage::Entry) led_hold('r');
     if (stage == BootStage::KernelMain) led_hold('b');
-    if (stage == BootStage::MmuDone) firmware_fiq_snapshot("mmu.done");
+    if (stage == BootStage::MmuDone) {
+        cache_snapshot();
+        firmware_fiq_snapshot("mmu.done");
+    }
 #ifdef ANKO_ANNE_DISPLAY_CAPTURE
     if (stage == BootStage::MmuDone) native_display::snapshot("mmu.done", true);
 #endif
@@ -241,6 +271,8 @@ void boot_checkpoint(BootStage stage) {
     }
 #if ANKO_ANNE_DIAG_CAPTURE_SECONDS > 0
     if (stage == BootStage::SchedulerEnter) state.capture_start = minimal::counter();
+    if (stage == BootStage::ServicesReady && !ANKO_ANNE_DIAG_RESET_AT_READY)
+        state.capture_start = minimal::counter();
     if (stage == BootStage::ServicesReady && ANKO_ANNE_DIAG_RESET_AT_READY) capture_reset("services.ready");
 #endif
 }
@@ -276,6 +308,7 @@ void boot_secondary_online(u32 cpu, u64 mpidr) {
     IrqGuard guard;
     state.cpu_stage[cpu] = static_cast<u32>(BootStage::SmpDone);
     text("\nCPU "); number(cpu); text(" secondary.entry mpidr="); hex(mpidr);
+    cache_snapshot();
     text("\n"); boot_log_flush();
 }
 void boot_log_fault(u64 esr, u64 pc, u64 far, u64 sp) {

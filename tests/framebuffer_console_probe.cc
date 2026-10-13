@@ -42,6 +42,18 @@ int main() {
     screen.write("unsafe\n", 7);
     assert(!screen.bind(fb, address, width * height * 4 - 1, {16, 32, 80, 64, 1}));
     assert(!screen.bind(fb, address, width * height * 4, {16, 32, 80, 64, 0}));
+    assert(screen.bind(fb, address, width * height * 4, {16, 32, 80, 64, 1},
+                       console::FramebufferConsole::Overflow::Wrap));
+    screen.write("one\ntwo\nthree\nfour", 18);
+    assert(screen.take_dirty(dirty, bytes)); // Discard initial viewport damage.
+    u32 saved_row[16 * width];
+    std::memcpy(saved_row, storage + guard + 48 * width, sizeof(saved_row));
+    screen.write("\nfive", 5);
+    assert(screen.cell(0, 0) == 'f' && screen.cell(1, 0) == 't');
+    assert(screen.cell(2, 0) == 't' && screen.cell(3, 0) == 'f');
+    assert(screen.take_dirty(dirty, bytes));
+    assert(dirty == address + 32 * width * 4 && bytes == 16 * width * 4);
+    assert(std::memcmp(saved_row, storage + guard + 48 * width, sizeof(saved_row)) == 0);
     static u32 phone[1080 * 2280];
     for (auto& pixel : phone) pixel = untouched;
     const u64 phone_address = reinterpret_cast<u64>(phone);

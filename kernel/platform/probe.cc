@@ -74,6 +74,7 @@ constexpr u8 kVirtio = 6;
 constexpr u8 kPCIe = 7;
 constexpr u8 kSimpleFb = 8;
 constexpr u8 kSMMU = 9;
+constexpr u8 kAnneUsb = 10;
 
 constexpr u32 kRangesMax = 128; // PCI ranges: 3 windows * 7 cells * 4 B
 
@@ -197,6 +198,11 @@ static void probe_end(void* v, u32 depth) {
             }
         }
         break;
+    case kAnneUsb:
+        // The fixed Anne resource table is granted only for this DT core.
+        hw.has_anne_usb = s.reg_len >= 16 && read_phys_be(s.reg,s.reg_len) == 0xff100000 &&
+            read_phys_be(s.reg+8,s.reg_len-8) == 0x40000;
+        break;
     case kSMMU:
         // SMMUv3 register base (arm,smmu-v3 reg).  Keep the first instance.
         if (s.reg_len >= 8 && !hw.has_smmu) {
@@ -275,6 +281,8 @@ static void probe_prop(void* v, const char* name, const u8* data, u32 len, u32 d
             new_kind = kVirtio;
         } else if (compat_has(data, len, "pci-host-ecam-generic")) {
             new_kind = kPCIe;
+        } else if (compat_has(data,len,"hisilicon,hi6250-usb-otg")) {
+            new_kind = kAnneUsb;
         } else if (compat_has(data, len, "arm,smmu-v3")) {
             new_kind = kSMMU;
         } else if (compat_has(data, len, "simple-framebuffer")) {

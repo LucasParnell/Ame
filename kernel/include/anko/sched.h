@@ -329,6 +329,7 @@ struct Thread {
     object::Record* lifetime;
     object::Record* owner_lifetime;
     object::Record* waiting_lifetime;
+    u64 wait_sequence; // protected by the waited doorbell; prevents stale timer wakes
     object::Record* sched_context_lifetime;
     struct Process* owner;
     u32 terminate_requested;

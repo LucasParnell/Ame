@@ -113,7 +113,9 @@ enum Syscall : unsigned {
     SYS_VM_SHARED_MEMORY_ATTACH = MX_NR_VM_SHARED_MEMORY_ATTACH, // (vm, arena, pa, size, rights, flags) -> cap
     SYS_VM_SHARED_MEMORY_REGISTER_DMA = MX_NR_VM_SHARED_MEMORY_REGISTER_DMA, // (shared, perms)
     SYS_VM_SHARED_MEMORY_INSPECT = MX_NR_VM_SHARED_MEMORY_INSPECT, // (shared, SharedArenaInfo*, len)
-    SYS_COUNT = MX_NR_VM_SHARED_MEMORY_INSPECT + 1,
+    SYS_WAIT_DOORBELL_UNTIL = MX_NR_WAIT_DOORBELL_UNTIL,
+    SYS_PLATFORM_CONTROL = MX_NR_PLATFORM_CONTROL,
+    SYS_COUNT = MX_NR_PLATFORM_CONTROL + 1,
 };
 
 static_assert(static_cast<unsigned>(SYS_YIELD) == static_cast<unsigned>(MX_NR_YIELD), "syscall number drift: YIELD");

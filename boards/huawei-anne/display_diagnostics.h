@@ -72,6 +72,8 @@ constexpr const char* rejection(const Pipeline& p) {
 }
 void snapshot(const char* phase, bool paint);
 bool bind_console();
+bool framebuffer(u64& address, u32& width, u32& height);
+void handoff_console();
 void console_putchar(char c);
 void console_flush();
 bool console_active();

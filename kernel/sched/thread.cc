@@ -6,6 +6,7 @@
 // Thread and Process objects are allocated from the kernel heap (mm::heap_alloc).
 
 #include "anko/sched.h"
+#include "anko/platform_control.h"
 #include "anko/ipc.h"
 #include "anko/irq.h"
 #include "anko/vm.h"
@@ -391,6 +392,7 @@ void process_destroy(Process* p) {
         }
     }
     if (completed) {
+        platform::fence_owner(process_identity(*p));
         sweep_process_caps(p);
         cap::clear(*p->cap_table);
         irq::unbind_owner(process_identity(*p));

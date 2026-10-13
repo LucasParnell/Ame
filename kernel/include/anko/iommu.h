@@ -141,8 +141,8 @@ struct IommuBackendOps {
     // to the default-deny state. These run inside domain_attach/domain_detach
     // before the core commits its binding table; the backend programs the
     // architecture-specific stream entry so that a requester whose context is
-    // not (yet) installed faults instead of bypassing translation. A null
-    // detach must invalidate cached configuration; the core then synchronises.
+    // not (yet) installed faults instead of bypassing translation. The
+    // detach hook must invalidate cached configuration; the core then synchronises.
     SysError (*attach_stream)(void* ctx, IommuDeviceId device, IommuDomain* domain);
     SysError (*detach_stream)(void* ctx, IommuDeviceId device);
     void* ctx;
@@ -222,6 +222,8 @@ struct IommuDomain {
     PhysAddr root_table_;
     PhysAddr tables_[kMaxDomainTables];
     u8 table_flags_[kMaxDomainTables]; // dirty/retired columns; cold mutation only
+    u64 retired_iova_[kMaxDomainTables];
+    u64 retired_length_[kMaxDomainTables]; // whole walk-cache coverage before free
     IommuOwnerOps owner_;
     IommuBackendOps backend_;
     SpinLock lock_;
@@ -251,10 +253,10 @@ SysError domain_sync(IommuDomain& domain);
 // Stop new work without pretending that hardware translations disappeared.
 void domain_quarantine(IommuDomain& domain);
 
-// Called by the backend fault path after it denied a stream's translation and
-// cleared its bus mastering, so the core's binding table stops advertising the
-// previous domain and a later attach can recover the stream.
-void note_stream_quarantined(IommuDeviceId device);
+// Contain one faulting stream. Reject new mappings on its domain, deny its
+// hardware context, and change the binding only after completion is proven.
+// Failure retains the binding and pins; a later retry can finish containment.
+SysError quarantine_stream(IommuDeviceId device);
 
 // Bind a requester/stream ID to this domain. Fails with E_BUSY if it is already
 // bound to a different active domain. Rebinding away from the quarantine domain
@@ -287,7 +289,9 @@ SysError domain_create(u64 authorized_object, const IommuOwnerOps& owner,
 // Destroy a domain. Every translation is invalidated, synchronised, and only
 // then are the host pages released to their owner. If the backend cannot prove
 // invalidation, the domain is quarantined and the pages stay pinned.
-void domain_destroy(IommuDomain* domain);
+// E_OK is the reclamation proof. Callers must use the result rather than read
+// this pool slot after return: another owner may immediately allocate it.
+SysError domain_destroy(IommuDomain* domain);
 
 // Register kernel-pinned native memory at a verified route (IOVA == PA).
 // No route returns E_NOTIMPL; this API never reports unisolated DMA as success.

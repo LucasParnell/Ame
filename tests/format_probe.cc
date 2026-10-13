@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
                    ? 0
                    : 1;
     }
-    if (mode != "bundle" || argc != 4) {
+    if ((mode != "bundle" && mode != "bundle-progress") || argc != 4) {
         return 2;
     }
     auto key = read(argv[3]);
@@ -40,10 +40,18 @@ int main(int argc, char** argv) {
         return 2;
     }
     midix::format::Bundle bundle;
+    std::size_t polls = 0;
+    integrity::Progress progress{};
+    if (mode == "bundle-progress") {
+        progress = {[](void* state) { ++*static_cast<std::size_t*>(state); }, &polls};
+    }
     auto error = midix::format::verify_bundle(
-        data.data(), data.size(), reinterpret_cast<const uint8_t (*)[32]>(key.data()), 1, bundle);
+        data.data(), data.size(), reinterpret_cast<const uint8_t (*)[32]>(key.data()), 1, bundle,
+        progress);
     if (error) {
         std::cerr << error << '\n';
     }
+    if (!error && mode == "bundle-progress" && polls < data.size() / 4096) return 2;
+    if (error && bundle.data) return 2; // Hooks never publish a rejected bundle.
     return error ? 1 : 0;
 }

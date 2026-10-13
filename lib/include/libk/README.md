@@ -75,6 +75,8 @@ bytes after its declared payload are cleared by the ring producer.
   `div_round_up` requires a nonzero divisor and avoids numerator overflow.
 - `write_le<T>` checks the entire destination before writing. `read_bits` reads
   up to 64 little-endian bits from a bounded view without aligned loads.
+  `write_bits` validates both the entire field and value before changing bytes,
+  preserving adjacent bits.
 - `SlotPool` allocates generational tokens over caller-owned metadata in O(1).
   It is single-owner; generation exhaustion retires a slot instead of aliasing
   an old token. It does not own or free the associated storage.
@@ -84,3 +86,7 @@ bytes after its declared payload are cleared by the ring producer.
 - `Mmio` checks register width, range and alignment over a caller-owned mapping.
   Volatile accesses preserve the requested width; ordering remains explicit in
   the hardware backend.
+  `read_fifo32` / `write_fifo32` repeatedly access one register, validate the CPU
+  view before the first access, and handle a partial final word without reading
+  or writing past the view. Writes zero-pad that word; FIFO space and ordering
+  belong to the controller owner.

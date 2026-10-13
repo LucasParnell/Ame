@@ -97,6 +97,7 @@ constexpr uint64_t kVaLogRing = 0x2002'0000ull;
 // init's layout grows after the mapped initrd, so a large rootfs cannot run
 // through the fixed mappings above it.
 namespace init {
+constexpr uint64_t kVaServiceState = 0x1b10'0000ull;
 constexpr uint64_t kVaManifest       = 0x2000'0000ull;
 constexpr uint64_t kVaInitrd         = 0x2400'0000ull;
 constexpr uint64_t kVaInitLogRing    = kVaInitrd + DANGO_INITRD_VA_SPAN;
@@ -167,18 +168,33 @@ constexpr uint64_t kVaVirtioDma   = 0x2200'0000ull;
 namespace xhci {
 constexpr uint64_t kVaBootInfo  = kBootInfo;
 constexpr uint64_t kVaLogRing   = kLogRing;
-constexpr uint64_t kVaHidRing   = 0x1900'0000ull;
+constexpr uint64_t kVaControllerTx = 0x1900'0000ull;
+constexpr uint64_t kVaControllerRx = 0x1902'0000ull;
+constexpr uint64_t kVaControllerPayload = 0x1a00'0000ull;
 constexpr uint64_t kVaXhciMmio  = 0x2000'0000ull;
 constexpr uint64_t kVaXhciDma   = 0x2100'0000ull;
 constexpr uint64_t kVaXhciState = 0x2200'0000ull; // cacheable CPU state; never device DMA
+}
+
+// --- io.usb ---------------------------------------------------------------
+namespace usb_host {
+constexpr uint64_t kVaBootInfo = kBootInfo, kVaLogRing = kLogRing;
+constexpr uint64_t kVaControllerTx = 0x1900'0000ull, kVaControllerRx = 0x1902'0000ull;
+constexpr uint64_t kVaClassTx = 0x1910'0000ull, kVaClassRx = 0x1912'0000ull;
+constexpr uint64_t kVaControllerPayload = 0x1a00'0000ull, kVaClassPayload = 0x1a10'0000ull;
+constexpr uint64_t kVaState = 0x1b00'0000ull;
 }
 
 // --- drv.usb.hid -----------------------------------------------------------
 namespace hid {
 constexpr uint64_t kVaBootInfo  = kBootInfo;
 constexpr uint64_t kVaLogRing   = kLogRing;
-constexpr uint64_t kVaXhciRing  = 0x1900'0000ull;
-constexpr uint64_t kVaInputRing = kVaXhciRing + kRingWindow;
+constexpr uint64_t kVaHostTx = 0x1900'0000ull;
+constexpr uint64_t kVaHostRx = 0x1902'0000ull;
+constexpr uint64_t kVaPayload = 0x1a00'0000ull;
+constexpr uint64_t kVaState = 0x1b00'0000ull;
+constexpr uint64_t kVaInputRing = 0x1904'0000ull;
+constexpr uint64_t kVaLedRing = 0x1906'0000ull;
 }
 
 // --- ui.input --------------------------------------------------------------
@@ -187,6 +203,7 @@ constexpr uint64_t kVaBootInfo = kBootInfo;
 constexpr uint64_t kVaLogRing  = kLogRing;
 constexpr uint64_t kVaHidRing  = 0x1900'0000ull;
 constexpr uint64_t kVaTtyRing  = kVaHidRing + kRingWindow;
+constexpr uint64_t kVaLedRing  = kVaTtyRing + kRingWindow;
 }
 
 // --- drv.pci ---------------------------------------------------------------
@@ -233,3 +250,10 @@ constexpr uint64_t kVaFsRx    = 0x2A03'0000ull;
 }
 
 } // namespace mochi::va
+
+namespace mochi::va::native_driver {
+constexpr uint64_t kLog=0x1b010000, kState=0x1b100000;
+constexpr uint64_t kLinks=0x1b200000, kLinkStride=0x20000;
+constexpr uint64_t kPayload=0x1b300000, kDevicePayload=0x1b400000;
+constexpr uint64_t kRegisters=0x1b500000;
+}

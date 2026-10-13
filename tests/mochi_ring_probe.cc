@@ -8,7 +8,11 @@ static_assert(msh::kVaSvcCmdRing + ring_span <= msh::kVaSvcReplyRing);
 static_assert(msh::kVaSvcReplyRing + ring_span <= msh::kVaSvcRegistry);
 static_assert(fs::kVaBlkReqRing + ring_span <= fs::kVaBlkReplyRing);
 static_assert(blk::kVaReqRing + ring_span <= blk::kVaReplyRing);
-static_assert(hid::kVaXhciRing + ring_span <= hid::kVaInputRing);
+static_assert(hid::kVaHostTx + ring_span <= hid::kVaHostRx);
+static_assert(hid::kVaHostRx + ring_span <= hid::kVaInputRing);
+static_assert(xhci::kVaControllerTx + ring_span <= xhci::kVaControllerRx);
+static_assert(usb_host::kVaControllerRx + ring_span <= usb_host::kVaClassTx);
+static_assert(usb_host::kVaClassTx + ring_span <= usb_host::kVaClassRx);
 static_assert(input::kVaHidRing + ring_span <= input::kVaTtyRing);
 static_assert(demo_ping::kVaSendRing + ring_span <= demo_ping::kVaRecvRing);
 static_assert(demo_ping::kVaRecvRing + ring_span <= demo_ping::kVaConsoleRing);
@@ -25,6 +29,7 @@ static_assert(demo_pong::kVaSendRing + ring_span <= demo_pong::kVaLogRing);
 #include "mochi/nameservice.h"
 #include "mochi/usb.h"
 #include "mochi/framebuffer.h"
+#include "mochi/driver.h"
 
 namespace {
 constexpr uint32_t kOrder = 2;
@@ -193,6 +198,49 @@ void usb_transfer_hot_path() {
     assert(client.try_completion(&result) && result.request_id == 99 && result.actual_length == 16);
     assert(host_yields == 0 && host_notifies == 0);
 }
+
+void cold_driver_bindings() {
+    // Exercise the same named startup mappings the standalone I2C service uses.
+    // Kernel mappings are a syscall seam; capability metadata and endpoint
+    // assembly remain production helpers, including failures and asymmetric order.
+    MxBootInfo boot{};
+    boot.magic = MX_BOOT_MAGIC;
+    boot.version = MX_BOOT_VERSION;
+    auto add = [&](const char* name, mx_u32_t type, mx_handle_t cap, mx_u64_t value = 0) {
+        auto& entry = boot.entries[boot.entry_count++];
+        entry.type = type; entry.handle = cap; entry.aux0 = value;
+        libk::str::copy_into(entry.name, sizeof(entry.name), name);
+    };
+    add("i2c.0.tx", MX_BOOT_ENTRY_RING, 11, 6);
+    add("i2c.0.rx", MX_BOOT_ENTRY_RING, 12, 6);
+    add("i2c.0.tx.db", MX_BOOT_ENTRY_DOORBELL, 13);
+    add("i2c.0.rx.db", MX_BOOT_ENTRY_DOORBELL, 14);
+    add("i2c.0.address", MX_BOOT_ENTRY_VALUE, 0, 33);
+    add("i2c.mmio", MX_BOOT_ENTRY_HANDLE, 15);
+    host_on_map_page = [](CapHandle cap, mx_vaddr_t, mx_rights_t rights) -> mx_status_t {
+        assert(rights == (MX_RIGHT_READ | MX_RIGHT_WRITE));
+        return cap == 11 || cap == 12 ? MX_OK : MX_ERR_NOT_FOUND;
+    };
+    const auto link = mochi::driver::link(&boot, "i2c.0", 0x1b300000);
+    assert(link.valid() && link.order == 6 && link.tx_doorbell == 13 && link.rx_doorbell == 14);
+    assert(mochi::driver::value(&boot, "i2c.0.address") == 33);
+    assert(!mochi::driver::link(&boot, "missing", 0x1b300000).valid());
+    boot.entries[1].aux0 = 7;
+    assert(!mochi::driver::link(&boot, "i2c.0", 0x1b300000).valid());
+    host_on_cap_info = [](CapHandle cap, MxCapInfo* info) -> mx_status_t {
+        assert(cap == 15);
+        *info = {}; info->type = MX_CAP_MMIO; info->attr = MX_MMIO_DEVICE_nGnRnE; info->size = 4096;
+        return MX_OK;
+    };
+    host_on_map_mmio = [](CapHandle cap, mx_vaddr_t va, mx_rights_t rights) -> mx_status_t {
+        assert(cap == 15 && va == 0x1b200000 && rights == (MX_RIGHT_READ | MX_RIGHT_WRITE));
+        return MX_OK;
+    };
+    assert(mochi::driver::registers(&boot, "i2c.mmio", 0x1b200000).size == 4096);
+    host_on_map_mmio = nullptr;
+    assert(!mochi::driver::registers(&boot, "i2c.mmio", 0x1b200000).base);
+    host_on_map_page = nullptr; host_on_cap_info = nullptr;
+}
 } // namespace
 
 int main() {
@@ -207,4 +255,5 @@ int main() {
     sleep_and_typed_reads();
     protocol_replies();
     usb_transfer_hot_path();
+    cold_driver_bindings();
 }

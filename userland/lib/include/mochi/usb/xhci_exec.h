@@ -23,7 +23,7 @@ constexpr mx_u32_t kXhciEventPortStatusChange = 34;
 struct ExecEntry {
     MxUsbToken token = 0;                            // engine transfer token; 0 = free
     mx_u64_t request_id = 0;
-    xhci::ProducerRing* ring = nullptr;              // ring holding the descriptors
+    xhci::ProducerRing* ring = nullptr;              // stable until reclaimed, including orphans
     mx_u64_t head_phys = 0;                          // first TRB: a stall here is terminal
     mx_u64_t status_phys = 0;                        // TRB whose completion terminates
     mx_u64_t data_phys = 0;                          // control data stage TRB, or 0
@@ -72,6 +72,8 @@ public:
                        mx_u8_t endpoint_id, xhci::ProducerRing* ring, mx_u32_t descriptors,
                        mx_u64_t head_phys, mx_u64_t status_phys, mx_u64_t data_phys,
                        mx_u32_t requested) {
+        // The caller retains ring metadata and DMA storage until reclaim,
+        // including after timeout/detach. A new connection gets another ring.
         // `requested` may be zero: a control transfer with no data stage still
         // terminates through its status stage.
         if (!token || !ring || !descriptors || !head_phys || !status_phys)

@@ -141,6 +141,8 @@ SysError notify(CapHandle cap, u32 caller_pid);
 SysError notify_object(Doorbell* db);
 SysError notify_handoff(CapHandle cap, u64 payload_word, u32 caller_pid);
 SysError reply_handoff(u64 reply_val, u32 caller_pid);
+SysError wait_doorbell_until(CapHandle handle, u64 expected, u64 deadline, u32 caller_pid);
+void poll_deadline_waiters();
 SysError wait_doorbell(CapHandle cap, u64 expected, u32 caller_pid);
 u64 doorbell_counter(CapHandle cap, u32 caller_pid);
 void doorbell_clear_waiter(Thread* thread);

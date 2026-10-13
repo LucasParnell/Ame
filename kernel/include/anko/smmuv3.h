@@ -67,7 +67,8 @@ u32 smmuv3_drain_events();
 
 // Per-stream fault accounting, for diagnostics and tests.
 u32 smmuv3_stream_faults(u32 sid);
-// 0 unknown, 1 active, 2 faulted, 3 bus-master disabled (quarantined).
+// 0 unknown, 1 active, 2 faulted, 3 bus-master disabled, 4 containment pending,
+// 5 DMA denied (no verified PCI bus-master shutdown).
 u32 smmuv3_stream_state(u32 sid);
 
 // Total fault events drained from the event queue since bring-up.

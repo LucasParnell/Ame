@@ -28,6 +28,38 @@
     {
       "name": "gpu.irq",
       "boot": "gpu.irq"
+    },
+    {
+      "name": "i2c.mmio",
+      "boot": "i2c.mmio"
+    },
+    {
+      "name": "i2c.control",
+      "boot": "i2c.control"
+    },
+    {
+      "name": "usb.phy.mmio",
+      "boot": "usb.phy.mmio"
+    },
+    {
+      "name": "usb.phy.control",
+      "boot": "usb.phy.control"
+    },
+    {
+      "name": "dwc2.mmio",
+      "boot": "dwc2.mmio"
+    },
+    {
+      "name": "dwc2.irq",
+      "boot": "dwc2.irq"
+    },
+    {
+      "name": "usb.fence",
+      "boot": "usb.fence"
+    },
+    {
+      "name": "fb.control",
+      "boot": "fb.control"
     }
   ],
   "channels": [
@@ -113,15 +145,6 @@
     },
     {
       "name": "fb_reply_db",
-      "kind": "doorbell"
-    },
-    {
-      "name": "xhci_hid_ring",
-      "kind": "ring",
-      "order": 6
-    },
-    {
-      "name": "xhci_hid_db",
       "kind": "doorbell"
     },
     {
@@ -213,6 +236,225 @@
     {
       "name": "svc_ctl_reply_db",
       "kind": "doorbell"
+    },
+    {
+      "name": "usb_controller_req_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_controller_req_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_controller_reply_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_controller_reply_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_host_req_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_host_req_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_host_reply_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_host_reply_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_controller_payload",
+      "kind": "arena",
+      "bytes": 65536
+    },
+    {
+      "name": "usb_host_payload",
+      "kind": "arena",
+      "bytes": 65536
+    },
+    {
+      "name": "hid_led_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "hid_led_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_wake_0",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_wake_1",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_wake_2",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_wake_3",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_wake_4",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_wake_5",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_wake_6",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_wake_7",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_wake_8",
+      "kind": "doorbell"
+    },
+    {
+      "name": "usb_wake_9",
+      "kind": "doorbell"
+    },
+    {
+      "name": "i2c_typec_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "i2c_typec_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "i2c_power_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "i2c_power_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_typec_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_typec_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_power_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_power_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_phy_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_phy_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_role_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_role_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_device_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_device_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_acm_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_acm_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_bulk_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_bulk_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "debug_acm_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "debug_acm_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "debug_bulk_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "debug_bulk_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_device_payload",
+      "kind": "arena",
+      "bytes": 8192
+    },
+    {
+      "name": "test_input_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "console_activate_db",
+      "kind": "doorbell"
     }
   ],
   "checks": [
@@ -274,7 +516,7 @@
           ]
         },
         {
-          "channel": "console_mirror_db",
+          "channel": "input_tty_db",
           "name": "tty.mirror.doorbell",
           "rights": [
             "notify"
@@ -511,7 +753,7 @@
           ]
         },
         {
-          "channel": "fb_reply_db",
+          "channel": "input_tty_db",
           "name": "fb.reply.doorbell",
           "rights": [
             "notify"
@@ -595,14 +837,14 @@
           ]
         },
         {
-          "channel": "fb_reply_db",
+          "channel": "input_tty_db",
           "name": "fb.reply.doorbell",
           "rights": [
             "wait"
           ]
         },
         {
-          "channel": "console_mirror_db",
+          "channel": "input_tty_db",
           "name": "console.mirror.doorbell",
           "rights": [
             "wait"
@@ -623,8 +865,15 @@
           ]
         },
         {
-          "channel": "term_output_db",
+          "channel": "input_tty_db",
           "name": "term.output.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "console_activate_db",
+          "name": "console.activate",
           "rights": [
             "wait"
           ]
@@ -665,8 +914,8 @@
       "uses": [],
       "bindings": [
         {
-          "channel": "xhci_hid_ring",
-          "name": "xhci.hid.ring",
+          "channel": "usb_controller_reply_ring",
+          "name": "usb.controller.tx",
           "rights": [
             "read",
             "write",
@@ -674,10 +923,135 @@
           ]
         },
         {
-          "channel": "xhci_hid_db",
-          "name": "xhci.hid.doorbell",
+          "channel": "usb_controller_req_ring",
+          "name": "usb.controller.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_controller_reply_db",
+          "name": "usb.controller.tx.db",
           "rights": [
             "notify"
+          ]
+        },
+        {
+          "channel": "usb_controller_req_db",
+          "name": "usb.controller.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_controller_payload",
+          "name": "usb.controller.payload",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "io.usb",
+      "object": "io.usb",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "drv.usb.xhci"
+      ],
+      "caps": [],
+      "provides": [
+        "usb.host"
+      ],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "usb_controller_req_ring",
+          "name": "usb.controller.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_controller_reply_ring",
+          "name": "usb.controller.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_controller_req_db",
+          "name": "usb.controller.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_controller_reply_db",
+          "name": "usb.controller.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_controller_payload",
+          "name": "usb.controller.payload",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_host_reply_ring",
+          "name": "usb.host.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_host_req_ring",
+          "name": "usb.host.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_host_reply_db",
+          "name": "usb.host.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_controller_reply_db",
+          "name": "usb.host.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_host_payload",
+          "name": "usb.host.payload",
+          "rights": [
+            "read",
+            "write",
+            "map"
           ]
         }
       ]
@@ -690,15 +1064,47 @@
       "restart": "always",
       "stage": "drivers",
       "start_after": [
-        "drv.usb.xhci"
+        "io.usb"
       ],
       "caps": [],
       "provides": [],
       "uses": [],
       "bindings": [
         {
-          "channel": "xhci_hid_ring",
-          "name": "xhci.hid.ring",
+          "channel": "usb_host_req_ring",
+          "name": "usb.host.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_host_reply_ring",
+          "name": "usb.host.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_controller_reply_db",
+          "name": "usb.host.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_host_reply_db",
+          "name": "usb.host.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_host_payload",
+          "name": "usb.host.payload",
           "rights": [
             "read",
             "write",
@@ -715,17 +1121,26 @@
           ]
         },
         {
-          "channel": "xhci_hid_db",
-          "name": "xhci.hid.doorbell",
-          "rights": [
-            "wait"
-          ]
-        },
-        {
           "channel": "hid_input_db",
           "name": "hid.input.doorbell",
           "rights": [
             "notify"
+          ]
+        },
+        {
+          "channel": "hid_led_ring",
+          "name": "hid.led.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_host_reply_db",
+          "name": "hid.led.doorbell",
+          "rights": [
+            "wait"
           ]
         }
       ]
@@ -774,6 +1189,38 @@
           "name": "input.tty.doorbell",
           "rights": [
             "notify"
+          ]
+        },
+        {
+          "channel": "hid_led_ring",
+          "name": "hid.led.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_host_reply_db",
+          "name": "hid.led.doorbell",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "test_input_ring",
+          "name": "test.input.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "hid_input_db",
+          "name": "test.input.doorbell",
+          "rights": [
+            "wait"
           ]
         }
       ]
@@ -929,7 +1376,7 @@
           ]
         },
         {
-          "channel": "term_output_db",
+          "channel": "input_tty_db",
           "name": "term.output.doorbell",
           "rights": [
             "notify"
@@ -1004,6 +1451,1021 @@
       "provides": [],
       "uses": [],
       "bindings": []
+    },
+    {
+      "name": "drv.i2c.dw",
+      "object": "drv.i2c.dw",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "io.console"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "i2c_typec_a",
+          "name": "i2c.0.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "i2c_typec_b",
+          "name": "i2c.0.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_1",
+          "name": "i2c.0.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_0",
+          "name": "i2c.0.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "i2c_power_a",
+          "name": "i2c.1.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "i2c_power_b",
+          "name": "i2c.1.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_2",
+          "name": "i2c.1.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_0",
+          "name": "i2c.1.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "boot": "i2c.mmio",
+          "name": "i2c.mmio",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "boot": "i2c.control",
+          "name": "i2c.control",
+          "rights": [
+            "write"
+          ]
+        },
+        {
+          "name": "i2c.0.address",
+          "value": 33
+        },
+        {
+          "name": "i2c.1.address",
+          "value": 107
+        }
+      ]
+    },
+    {
+      "name": "drv.typec.fusb301",
+      "object": "drv.typec.fusb301",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "drv.i2c.dw"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "i2c_typec_b",
+          "name": "i2c.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "i2c_typec_a",
+          "name": "i2c.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_0",
+          "name": "i2c.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_1",
+          "name": "i2c.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_typec_b",
+          "name": "typec.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_typec_a",
+          "name": "typec.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_5",
+          "name": "typec.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_1",
+          "name": "typec.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "name": "i2c.address",
+          "value": 33
+        }
+      ]
+    },
+    {
+      "name": "drv.power.hi6523",
+      "object": "drv.power.hi6523",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "drv.i2c.dw"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "i2c_power_b",
+          "name": "i2c.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "i2c_power_a",
+          "name": "i2c.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_0",
+          "name": "i2c.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_2",
+          "name": "i2c.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_power_b",
+          "name": "power.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_power_a",
+          "name": "power.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_5",
+          "name": "power.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_2",
+          "name": "power.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "name": "i2c.address",
+          "value": 107
+        }
+      ]
+    },
+    {
+      "name": "drv.usb.anne-phy",
+      "object": "drv.usb.anne-phy",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "io.console"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "usb_phy_b",
+          "name": "phy.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_phy_a",
+          "name": "phy.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_5",
+          "name": "phy.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_3",
+          "name": "phy.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "boot": "usb.phy.mmio",
+          "name": "usb.phy.mmio",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "boot": "usb.phy.control",
+          "name": "usb.phy.control",
+          "rights": [
+            "write"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "drv.usb.dwc2",
+      "object": "drv.usb.dwc2",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "drv.usb.anne-phy"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "usb_role_b",
+          "name": "role.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_role_a",
+          "name": "role.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_5",
+          "name": "role.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_4",
+          "name": "role.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_device_a",
+          "name": "device.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_device_b",
+          "name": "device.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_6",
+          "name": "device.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_4",
+          "name": "device.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_device_payload",
+          "name": "device.payload",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "boot": "dwc2.mmio",
+          "name": "dwc2.mmio",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "boot": "dwc2.irq",
+          "name": "dwc2.irq",
+          "rights": [
+            "read",
+            "write"
+          ]
+        },
+        {
+          "boot": "usb.fence",
+          "name": "usb.fence",
+          "rights": [
+            "write"
+          ]
+        },
+        {
+          "channel": "usb_controller_reply_ring",
+          "name": "usb.controller.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_controller_req_ring",
+          "name": "usb.controller.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_controller_reply_db",
+          "name": "usb.controller.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_4",
+          "name": "usb.controller.rx.db",
+          "rights": [
+            "wait",
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_controller_payload",
+          "name": "usb.controller.payload",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "io.usb.role",
+      "object": "io.usb.role",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "drv.typec.fusb301",
+        "drv.power.hi6523",
+        "drv.usb.dwc2"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "usb_typec_a",
+          "name": "typec.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_typec_b",
+          "name": "typec.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_1",
+          "name": "typec.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_5",
+          "name": "typec.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_power_a",
+          "name": "power.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_power_b",
+          "name": "power.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_2",
+          "name": "power.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_5",
+          "name": "power.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_phy_a",
+          "name": "phy.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_phy_b",
+          "name": "phy.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_3",
+          "name": "phy.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_5",
+          "name": "phy.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_role_a",
+          "name": "role.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_role_b",
+          "name": "role.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_4",
+          "name": "role.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_5",
+          "name": "role.rx.db",
+          "rights": [
+            "wait"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "io.usb.gadget",
+      "object": "io.usb.gadget",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "drv.usb.dwc2"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "usb_device_b",
+          "name": "device.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_device_a",
+          "name": "device.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_4",
+          "name": "device.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_6",
+          "name": "device.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_acm_a",
+          "name": "function.0.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_acm_b",
+          "name": "function.0.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_7",
+          "name": "function.0.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_6",
+          "name": "function.0.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_bulk_a",
+          "name": "function.1.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_bulk_b",
+          "name": "function.1.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_8",
+          "name": "function.1.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_6",
+          "name": "function.1.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_device_payload",
+          "name": "device.payload",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "usb.fn.acm",
+      "object": "usb.fn.acm",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "io.usb.gadget"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "usb_acm_b",
+          "name": "function.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_acm_a",
+          "name": "function.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_6",
+          "name": "function.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_7",
+          "name": "function.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "debug_acm_a",
+          "name": "stream.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "debug_acm_b",
+          "name": "stream.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_9",
+          "name": "stream.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_7",
+          "name": "stream.rx.db",
+          "rights": [
+            "wait"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "usb.fn.bulk",
+      "object": "usb.fn.bulk",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "io.usb.gadget"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "usb_bulk_b",
+          "name": "function.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_bulk_a",
+          "name": "function.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_6",
+          "name": "function.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_8",
+          "name": "function.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "debug_bulk_a",
+          "name": "stream.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "debug_bulk_b",
+          "name": "stream.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_9",
+          "name": "stream.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_8",
+          "name": "stream.rx.db",
+          "rights": [
+            "wait"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "dev.usb-input",
+      "object": "dev.usb-input",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "usb.fn.acm",
+        "usb.fn.bulk"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "debug_acm_b",
+          "name": "stream.0.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "debug_acm_a",
+          "name": "stream.0.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_7",
+          "name": "stream.0.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_9",
+          "name": "stream.0.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "debug_bulk_b",
+          "name": "stream.1.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "debug_bulk_a",
+          "name": "stream.1.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_8",
+          "name": "stream.1.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_9",
+          "name": "stream.1.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "test_input_ring",
+          "name": "test.input.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "hid_input_db",
+          "name": "test.input.doorbell",
+          "rights": [
+            "notify"
+          ]
+        }
+      ]
     }
   ],
   "profiles": {
@@ -1018,6 +2480,7 @@
       "tty.fb0",
       "drv.pci",
       "drv.usb.xhci",
+      "io.usb",
       "drv.usb.hid",
       "ui.input",
       "drv.blk.virtio",
@@ -1039,7 +2502,299 @@
       "nameservice",
       "io.console",
       "test.anne_smp"
-    ]
+    ],
+    "huawei-anne-usb": {
+      "services": [
+        "nameservice",
+        "io.console",
+        "io.framebuffer",
+        "tty.fb0",
+        "drv.i2c.dw",
+        "drv.typec.fusb301",
+        "drv.power.hi6523",
+        "drv.usb.anne-phy",
+        "drv.usb.dwc2",
+        "io.usb",
+        "drv.usb.hid",
+        "ui.input",
+        "io.usb.role",
+        "io.usb.gadget",
+        "usb.fn.acm",
+        "usb.fn.bulk",
+        "dev.usb-input",
+        "msh"
+      ],
+      "overrides": {
+        "io.usb": {
+          "start_after": [
+            "drv.usb.dwc2"
+          ],
+          "bindings": [
+            {
+              "channel": "usb_controller_req_ring",
+              "name": "usb.controller.tx",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "usb_controller_reply_ring",
+              "name": "usb.controller.rx",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "usb_wake_4",
+              "name": "usb.controller.tx.db",
+              "rights": [
+                "notify"
+              ]
+            },
+            {
+              "channel": "usb_controller_reply_db",
+              "name": "usb.controller.rx.db",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "usb_controller_payload",
+              "name": "usb.controller.payload",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "usb_host_reply_ring",
+              "name": "usb.host.tx",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "usb_host_req_ring",
+              "name": "usb.host.rx",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "usb_host_reply_db",
+              "name": "usb.host.tx.db",
+              "rights": [
+                "notify"
+              ]
+            },
+            {
+              "channel": "usb_controller_reply_db",
+              "name": "usb.host.rx.db",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "usb_host_payload",
+              "name": "usb.host.payload",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            }
+          ]
+        },
+        "io.framebuffer": {
+          "bindings": [
+            {
+              "channel": "fb_cmd_ring",
+              "name": "fb.cmd.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "fb_reply_ring",
+              "name": "fb.reply.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "fb_cmd_db",
+              "name": "fb.cmd.doorbell",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "input_tty_db",
+              "name": "fb.reply.doorbell",
+              "rights": [
+                "notify"
+              ]
+            },
+            {
+              "boot": "fb.control",
+              "name": "fb.control",
+              "rights": [
+                "write"
+              ]
+            }
+          ]
+        },
+        "tty.fb0": {
+          "bindings": [
+            {
+              "channel": "fb_cmd_ring",
+              "name": "fb.cmd.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "fb_reply_ring",
+              "name": "fb.reply.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "console_mirror_ring",
+              "name": "console.mirror.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "input_tty_ring",
+              "name": "input.tty.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "term_input_ring",
+              "name": "term.input.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "term_output_ring",
+              "name": "term.output.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "fb_cmd_db",
+              "name": "fb.cmd.doorbell",
+              "rights": [
+                "notify"
+              ]
+            },
+            {
+              "channel": "input_tty_db",
+              "name": "fb.reply.doorbell",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "input_tty_db",
+              "name": "console.mirror.doorbell",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "input_tty_db",
+              "name": "input.tty.doorbell",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "term_input_db",
+              "name": "term.input.doorbell",
+              "rights": [
+                "notify"
+              ]
+            },
+            {
+              "channel": "input_tty_db",
+              "name": "term.output.doorbell",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "console_activate_db",
+              "name": "console.activate",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "name": "tty.cols",
+              "value": 59
+            },
+            {
+              "name": "tty.rows",
+              "value": 61
+            },
+            {
+              "name": "tty.x",
+              "value": 64
+            },
+            {
+              "name": "tty.y",
+              "value": 224
+            },
+            {
+              "name": "tty.scale",
+              "value": 2
+            }
+          ]
+        },
+        "msh": {
+          "start_after": [
+            "tty.fb0",
+            "ui.input",
+            "io.usb.role",
+            "dev.usb-input"
+          ],
+          "uses": []
+        }
+      }
+    }
   },
   "endpoints": [
     {
@@ -1061,6 +2816,20 @@
       "rings": [
         "svc_ctl_req_ring",
         "svc_ctl_reply_ring"
+      ]
+    },
+    {
+      "name": "usb.controller",
+      "rings": [
+        "usb_controller_req_ring",
+        "usb_controller_reply_ring"
+      ]
+    },
+    {
+      "name": "usb.host",
+      "rings": [
+        "usb_host_req_ring",
+        "usb_host_reply_ring"
       ]
     }
   ]

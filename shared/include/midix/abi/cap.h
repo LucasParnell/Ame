@@ -26,7 +26,15 @@ enum MxCapType : mx_u16_t {
     MX_CAP_IRQ           = 18,  // IRQ line object; driver binds to a doorbell explicitly
     MX_CAP_PCI_FUNCTION  = 19,  // host PCI function authority object (Phase D)
     MX_CAP_VM_DEVICE     = 20,  // VM device-assignment object (Phase D, spec §6.1)
+    MX_CAP_PLATFORM      = 22, // narrow board mechanism authority
     MX_CAP_VM_SHARED     = 21,  // attached shared arena (Phase L, spec §12.3)
+};
+
+enum MxMmioAttr : mx_u32_t {
+    MX_MMIO_DEVICE_nGnRnE = 1, // strongly ordered (xHCI registers)
+    MX_MMIO_DEVICE_nGnRE = 2,  // device, early write ack (fw_cfg)
+    MX_MMIO_NORMAL_NC = 3,     // normal noncacheable (framebuffer pixels)
+    MX_MMIO_WRITE_COMBINE = 4, // write-combining (framebuffer if supported)
 };
 
 struct MxCapInfo {
@@ -165,6 +173,7 @@ inline constexpr MxCapTypeName kMxCapTypeNames[] = {
     {MX_CAP_PCI_FUNCTION, "pci_function"},
     {MX_CAP_VM_DEVICE, "vm_device"},
     {MX_CAP_VM_SHARED, "vm_shared"},
+    {MX_CAP_PLATFORM, "platform"},
 };
 inline const char* mx_cap_type_name(mx_u32_t type) {
     for (const MxCapTypeName& row : kMxCapTypeNames) {

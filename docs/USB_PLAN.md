@@ -44,7 +44,8 @@ boot layer feed the watchdog during cold authentication. Physical keyboard and
 Mac injection are not yet hardware verified. V6 names startup operations and the
 failing service; V7 brings up the I2C4 pads explicitly (mux + readbacks) and names each
 Type-C/power startup stage. V7 capture: I2C bus live, all services ready;
-V8 names the Type-C role-transition stages.
+V8 named the role-transition stall; V9 fixes the REG_TYPE mapping and probes
+the ABB lock.
 
 The live host path is split across three processes:
 

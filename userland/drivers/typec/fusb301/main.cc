@@ -1,5 +1,7 @@
-// FUSB301 reports the PARTNER type: DFP means our phone is a device;
-// UFP means our phone is the host. Connector orientation is independent.
+// FUSB301 REG_TYPE: bit3 ("UFP") reads when a DFP host is attached, so our
+// port is the device; bit4 ("DFP") reads when a UFP/OTG device is attached,
+// so our port is the host. Matches vendor fusb301_detect_port_mode().
+// Connector orientation is independent.
 #include "mochi/drivers/i2c.h"
 #include "mochi/log.h"
 #include "mochi/boot_log.h"
@@ -77,7 +79,7 @@ extern "C" [[noreturn]] void _start() {
                         r->reply.status = MX_ERR_INVALID;
                     } else {
                         r->reply.value =
-                            static_cast<mx_u32_t>(type == 8 ? MxUsbRole::Host : MxUsbRole::Device);
+                            static_cast<mx_u32_t>(type == 8 ? MxUsbRole::Device : MxUsbRole::Host);
                         r->reply.flags = MX_TYPEC_ATTACHED | ((bytes[0] & 8) ? MX_TYPEC_VBUS : 0) |
                                          (orientation == 1 ? MX_TYPEC_CC1 : MX_TYPEC_CC2);
                     }

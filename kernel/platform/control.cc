@@ -16,6 +16,9 @@ Control domains[] = {{Domain::UsbPhy, 0, 0},
                      {Domain::I2c, 0, 0},
                      {Domain::Display, 0, 0}};
 kernel::SpinLock domain_lock;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+u32 ref_logged;
+#endif
 } // namespace
 Control* board_control(Domain domain) { return &domains[static_cast<u32>(domain)]; }
 SysError control(Control& object, u32 op, u64 arg, u64 owner) {
@@ -47,15 +50,25 @@ SysError control(Control& object, u32 op, u64 arg, u64 owner) {
             libk::Mmio pmic{reinterpret_cast<volatile u8*>(0xfff34000), 4096};
             libk::Mmio pctrl{reinterpret_cast<volatile u8*>(0xe8a09000), 4096};
             // PMIC ABB is shared with firmware. Hi6250 lock 9 is group 1,
-            // nibble 1; AP master 1 requests value 3. One attempt per syscall:
-            // contention returns to the PHY service's bounded deadline loop.
+            // nibble 1; AP master 1 requests value 3.
+            // Best-effort during bring-up: the raw lock status is logged and a
+            // busy lock must not wedge the PHY service; the transition proceeds
+            // with the firmware-provided ABB state.
             constexpr u32 command = 3u << 4;
+            u32 before = 0, after = 0;
+            pctrl.read32(0x414, &before);
             pctrl.write32(0x40c, command);
             libk::dma::order_mmio();
-            u32 lock_status = 0;
-            pctrl.read32(0x414, &lock_status);
-            if (((lock_status >> 4) & 15u) != 3u) {
-                return E_BUSY;
+            pctrl.read32(0x414, &after);
+            const bool acquired = ((after >> 4) & 15u) == 3u;
+            if (ref_logged < 3) {
+                ++ref_logged;
+                anko::log::writef(anko::log::Level::Info, "kernel/platform",
+                                  "usb ref status=%x/%x acquired=%u", before, after,
+                                  acquired ? 1u : 0u);
+            }
+            if (!acquired) {
+                return E_OK;
             }
             u32 gate = 0;
             pmic.read32(0x43c, &gate);

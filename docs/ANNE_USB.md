@@ -10,6 +10,8 @@ partner UFP, the role service requests host mode and the Hi6523 supplies a
 DFP and selects peripheral mode. These uses are sequential on one controller.
 
 Controller register/packet handling has no keyboard, terminal or charger code.
+Device startup is compared with the same hardware's vendor implementation in
+[the reference audit](ANNE_USB_REFERENCE_AUDIT.md).
 The standalone services are:
 
 | Service | Authority and responsibility |
@@ -64,8 +66,12 @@ python3 scripts/anne/build-native-package.py --build out/anne-usb-native-dev \
   --output out/anne-usb-native-package
 ```
 
-The preset requests 60 seconds of runtime after service readiness and then the
-existing LPM3 reset transport. Packaging prepares the matching ELF, image and
+The current preset leaves development runs active (`capture_seconds=0`). Periodic
+PHY/core register dumps are removed, and the Anne profile omits the console's
+terminal mirror bindings: command output owns the phone terminal. Logs still
+reach the retained diagnostic sink. For retained captures, configure a
+nonzero capture duration: the existing LPM3 reset transports the trace to the
+firmware's retained records; a manual power cycle may lose it. Packaging prepares the matching ELF, image and
 verified full stock restore image; it performs no phone writes. Native execution
 uses this phone's shared `kernel` partition. Restore stock before attempting to
 return to TWRP. Follow [the established capture/restore procedure](../boards/huawei-anne/BOOT_DIAGNOSTICS.md).
@@ -110,9 +116,10 @@ keyboard interfaces, and control/bulk/interrupt transfers. It does not advertise
 hub/split, isochronous or DMA support. Type-C observation currently uses bounded
 polling through the I2C service. The development gadget requires dynamic,
 dedicated device FIFOs and enough endpoints, checked from GHWCFG before use.
-Unsupported hardware geometry fails closed. Hardware acceptance still requires
-observing both Mac ACKs and physical command entry on this phone; builds and
-register-model tests cannot establish either result.
+Unsupported hardware geometry fails closed. V18 hardware acceptance confirmed
+Mac enumeration, CDC binding, input ACKs and `help` output on the phone. Physical
+USB-C keyboard command entry remains unverified; the user could not connect it.
+The V19 refactor still requires its own native hardware regression.
 
 The first v2 hardware capture reached eight online CPUs but ended in a firmware
 watchdog FIQ during bundle authentication, before USB services started. Stock
@@ -132,3 +139,41 @@ reference (logged best-effort) now actually execute. Cortex-A53 CPUECTLR
 observations use
 [Arm DDI 0500J, section 4.3.79](https://documentation-service.arm.com/static/6040c321ee937942ba301626);
 they preserve firmware-controlled coherency and retention settings.
+
+## USB service scheduling and memory
+
+The Anne profile co-locates DWC2, bus/HID, gadget/functions, diagnostic input,
+input policy, terminal and shell on CPU 0. The existing GICv2 binding routes
+native SPI delivery there; this keeps the hot IPC chain local without changing
+kernel scheduling authority. Other profiles retain their own placement. No RT
+class or unimplemented handoff primitive is introduced.
+
+Ready services drain bounded bursts, yielding after 32 progress turns for
+fairness. CDC/bulk directions retain one complete inline slot under output
+pressure, including its sequence. No sleeping turn is inserted between ready
+chunks. EP0 function RX forwards the bounded packet's chunks in one pass; device
+commands drain in order and fill the IN FIFO immediately. Endpoint configuration
+and STALL stay pending rather than exiting/dropping on a full ring.
+
+Idle uses the common doorbell's publish-sleep/recheck protocol. Rings temporarily
+blocked by retained output are excluded from the readable check. The current ABI
+has no TX-space wake, so only retained output uses a 1 ms retry timer. Otherwise
+services sleep until an input event, IRQ, or real deadline. DWC2 takes its IRQ
+counter snapshot before draining hardware, preventing a late IRQ from being
+absorbed by a post-drain snapshot. Host SOF interrupts are disabled: endpoint
+intervals, NAK retries, transfer expiration, reset settling and address recovery
+supply explicit deadlines. Input repeats use their own 500/33 ms policy times.
+Power lease renewal runs every 500 ms, independently of 50 ms CC observation.
+
+HID identity/in-flight records are contiguous; compiled layouts and decoder
+storage live in separate fixed arena arrays. Single-owner state needs no atomic
+or cache-line padding. Shared rings keep the ABI's separate head/tail/flags cache
+lines and release/acquire publication; CPU payload storage stays Write-Back,
+MMIO stays Device, and no CPU payload is presented as DMA memory. Ownership lasts
+through terminal completion and backpressure. This refactor changes no ring ABI
+and adds no global cache maintenance. `libk::earlier_deadline` centralizes pure
+absolute-time selection; mochi owns the service wake and bounded-drain helpers.
+
+These are structural scheduling/IPC improvements, not measured throughput or
+latency claims. Hardware regression and the physical keyboard check remain
+separate evidence.

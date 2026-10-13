@@ -161,6 +161,8 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
     t->pid = pid;
     t->state = (flags & THREAD_SUSPENDED) ? TS_SUSPENDED : TS_RUNNABLE_QUEUED;
     t->cpu_id = 0;
+    t->execution_cpu = kInvalidCpu;
+    t->deferred_wake_cpu = kInvalidCpu;
     t->affinity_mask = 0;  // 0 = any CPU
     t->home_cpu  = kInvalidCpu;
     t->last_cpu  = kInvalidCpu;
@@ -226,6 +228,7 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
         return nullptr;
     }
     t->principal_id = p->principal_id;
+    t->principal_generation = principal_generation(t->principal_id);
     t->owner = p;
     t->owner_lifetime = p->lifetime;
     object::retain(t->owner_lifetime);
@@ -253,10 +256,15 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
 
 void thread_destroy(Thread* t) {
     if (!t) return;
-    u32 expected = 0;
-    if (__atomic_compare_exchange_n(&t->terminate_requested, &expected, 1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-        __atomic_add_fetch(&g_terminating_threads, 1u, __ATOMIC_RELEASE);
-    smp::send_wake_ipi(t->cpu_id);
+    u32 cpu;
+    {
+        kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
+        u32 expected = 0;
+        if (__atomic_compare_exchange_n(&t->terminate_requested, &expected, 1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            __atomic_add_fetch(&g_terminating_threads, 1u, __ATOMIC_RELEASE);
+        cpu = t->cpu_id;
+    }
+    smp::send_wake_ipi(cpu);
 }
 
 // Scheduler acknowledgement: no CPU queue, pending wake, trap frame or active

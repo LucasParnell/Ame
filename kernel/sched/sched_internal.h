@@ -12,6 +12,7 @@ inline constexpr u32 kMaxPrincipalsLocal = kMaxPrincipals; // alias for clarity
 
 // --- Band / class policy (sched_class.cc) ----------------------------------
 u32 band_index(SchedBand band);
+u32 band_rank(SchedBand band);
 bool is_vm_band(SchedBand band);
 u64 wake_credit_cap(const Thread* t);
 u64 wake_credit_for(const Thread* t, WakeReason reason, u32 hints);
@@ -37,6 +38,7 @@ void fpq_rebuild(FairPrincipalQueue& q);
 PrincipalEntity* fpq_pop_min(FairPrincipalQueue& q);
 PrincipalEntity* fpq_peek_min(const FairPrincipalQueue& q);
 void fpq_resift(FairPrincipalQueue& q, PrincipalEntity* pe);
+bool fpq_remove(FairPrincipalQueue& q, PrincipalEntity* pe);
 FairPrincipalQueue& band_for(Eki& e, SchedBand band);
 BandQueue& band_threads(PrincipalEntity& pe, SchedBand band);
 u64& min_vruntime_for(Eki& e, SchedBand band);
@@ -47,12 +49,15 @@ Eki& current_eki();
 u64 online_mask();
 u32 first_allowed_cpu(u64 allowed);
 void pending_push(Eki& target, Thread* t);
+void publish_queue_load(Eki& e);
 bool dequeue_from_principal(Eki& e, Thread* t);
 
 // --- Principal accounting / budgets / throttle (accounting.cc) -------------
 bool principal_allocated(u32 pid);
 bool principal_throttled(u32 pid);
 u32  principal_weight(u32 pid);
+u32  principal_generation(u32 pid);
+bool retain_principal(u32 pid);
 void principal_init_bootstrap();
 void principal_mirror_weights(u32 cpu_id);
 void account_current(Eki& e);
@@ -65,6 +70,9 @@ void release_principal(u32 principal_id);
 
 // --- SchedContext budgets (sched_context.cc) -------------------------------
 void refill_sched_context_budgets();
+bool sched_context_available(SchedContext* ctx);
+bool charge_sched_context(SchedContext* ctx, u64 delta, u64 now);
+bool thread_budget_available(const Thread* t);
 
 // --- Handoff / reply / donation / IPC drain quantum (handoff.cc) -----------
 Thread* handoff_take_next(Eki& e);

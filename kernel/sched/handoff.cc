@@ -51,6 +51,11 @@ void ipc_drain_quantum_begin(Thread* t, u64 now) {
 }
 
 void ipc_drain_quantum_expire(Thread* t, u64 now) {
+    if (handoff_deadline_expired(t, now)) {
+        t->handoff_deadline_ns = 0;
+        t->has_donation = false;
+        t->donated_key = 0;
+    }
     if (t->in_drain_quantum && now - t->drain_quantum_start_ns > kIpcDrainQuantumNs) {
         t->in_drain_quantum = false;
         t->wake_credit_ns   = 0;

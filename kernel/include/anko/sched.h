@@ -38,6 +38,18 @@ enum ThreadState : u8 {
     TS_DEAD                  = 6,
 };
 
+// State is observed by wakers and teardown on other CPUs. Queue and frame
+// ownership still require the lifecycle lock; publishing a byte alone is not
+// permission to dispatch a thread.
+struct PublishedThreadState {
+    ThreadState value;
+    operator ThreadState() const { return __atomic_load_n(&value, __ATOMIC_ACQUIRE); }
+    PublishedThreadState& operator=(ThreadState state) {
+        __atomic_store_n(&value, state, __ATOMIC_RELEASE);
+        return *this;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Wake reasons
 // ---------------------------------------------------------------------------
@@ -182,6 +194,10 @@ struct TrapFrame {
     u64 spsr;    // SPSR_EL1
     u64 sp_el0;  // user SP
 };
+static_assert(sizeof(CpuContext) == 104);
+static_assert(__builtin_offsetof(TrapFrame, elr) == 248);
+static_assert(__builtin_offsetof(TrapFrame, spsr) == 256);
+static_assert(__builtin_offsetof(TrapFrame, sp_el0) == 264);
 
 // ---------------------------------------------------------------------------
 // Forward declarations for circular references.
@@ -215,12 +231,13 @@ constexpr u32 NICE_0_WEIGHT  = 1024;
 // ---------------------------------------------------------------------------
 // Per-principal scheduling state — global, one entry per principal_id.
 // ---------------------------------------------------------------------------
-struct PrincipalSchedState {
+struct alignas(64) PrincipalSchedState {
     u32  principal_id;
     PrincipalClass class_;
     u8   allocated;
     u16  _pad0;
     u32  weight;
+    u32  generation;
     u64  runtime_ns;
     u64  period_ns;
     u64  budget_ns;
@@ -242,6 +259,9 @@ using BandQueue = FairThreadQueue;
 struct PrincipalEntity {
     u32             principal_id;
     u32             weight;
+    u32             generation;
+    u64             service_vruntime_ns; // principal share across all non-RT bands
+    u64             thread_min_vruntime_ns; // thread clock; never a principal clock
     u64             vruntime[NUM_BANDS];
     u64             runtime_ns;
     u32             runnable[NUM_BANDS];
@@ -249,18 +269,12 @@ struct PrincipalEntity {
     bool            in_queue[NUM_BANDS];
     u8              heap_idx[NUM_BANDS]; // position in each FairPrincipalQueue heap
 
-    BandQueue       rt;
-    BandQueue       latency;
-    BandQueue       fair;
-    BandQueue       vm_latency;
-    BandQueue       vm_fair;
-    BandQueue       batch;
-    BandQueue       idle;
+    BandQueue       bands[NUM_BANDS - 1]; // RT has only the station's FIFO queues
 };
 static_assert(__is_trivially_constructible(PrincipalEntity));
 
 // ---------------------------------------------------------------------------
-// Fair principal queue — min-heap of PrincipalEntity* keyed by vruntime_ns.
+// Fair principal queue — min-heap keyed by the principal's service clock.
 // ---------------------------------------------------------------------------
 struct FairPrincipalQueue {
     PrincipalEntity* data[kMaxPrincipals];
@@ -334,6 +348,11 @@ struct Thread {
     struct Process* owner;
     u32 terminate_requested;
     u32 lifecycle_lock;
+    // The exception-return frame must be saved before another CPU can enqueue
+    // this thread. Wakeups during that interval are published by post_syscall.
+    u32 execution_cpu;
+    u32 deferred_wake_cpu;
+    u32 principal_generation;
 
     // --- Identity ---
     u32         tid;
@@ -344,12 +363,12 @@ struct Thread {
     u32         last_cpu;        // CPU last ran on
 
     // --- State flags (byte-packed) ---
-    ThreadState state;
+    PublishedThreadState state;
     WakeReason  last_wake_reason;
     LatencyHint latency_hint;
     u8          _pad0;
 
-    // --- Fair queue position: heap index within PrincipalEntity.threads ---
+    // --- Position within the principal's thread heap for this band ---
     u32         heap_idx;
 
     // --- Affinity ---
@@ -387,7 +406,8 @@ struct Thread {
     bool        in_drain_quantum;
     bool        has_donation;
     bool        on_runqueue;      // physically present in an Eki fair/RT queue
-    u8          _pad1[5];
+    bool        migration_rebase;
+    u8          _pad1[4];
 
     // --- Scheduling context binding ---
     u32          sched_context_id;
@@ -398,6 +418,7 @@ struct Thread {
     SchedAttrs  sched;
 };
 static_assert(__is_trivially_constructible(Thread));
+static_assert(__builtin_offsetof(Thread, ctx) == 0);
 
 // ---------------------------------------------------------------------------
 // Process — one isolated address space + cap table.
@@ -430,7 +451,7 @@ struct Process {
 // ---------------------------------------------------------------------------
 // Per-CPU scheduler station (Eki).
 // ---------------------------------------------------------------------------
-struct Eki {
+struct alignas(64) Eki {
     u32     cpu_id;
     Thread* current;
     Thread* idle;
@@ -444,13 +465,19 @@ struct Eki {
     FairPrincipalQueue   vm_fair_principals;
     FairPrincipalQueue   batch_principals;
     FairPrincipalQueue   idle_principals;
-    PrincipalEntity      principal_entities[kMaxPrincipals];
 
     // --- Cross-CPU coordination ---
-    PendingWakeQueue  pending_wakes;
-    PendingStealQueue pending_steal_requests;
+    alignas(64) PendingWakeQueue  pending_wakes;
+    alignas(64) PendingStealQueue pending_steal_requests;
     StealRequest      steal_req_buf;       // single pre-allocated steal request
     bool              steal_req_in_flight;
+
+    // Only this CPU changes queue counts. Peers read the published summaries,
+    // never the mutable heap sizes or nodes.
+    alignas(64) u32 queued_threads[NUM_BANDS];
+    alignas(64) u32 published_load;
+    u32 published_steal_load;
+    u64 min_service_vruntime_ns;
 
     // --- Min-vruntime watermarks (lag detection and normalization) ---
     u64 min_vruntime[NUM_BANDS];
@@ -484,6 +511,8 @@ struct Eki {
     u64 fair_queue_overflows;
     u64 handoff_success;
     u64 handoff_fallback;
+    // Fixed-capacity thread heaps are cold relative to dispatch state.
+    PrincipalEntity principal_entities[kMaxPrincipals];
 };
 static_assert(__is_trivially_constructible(Eki));
 

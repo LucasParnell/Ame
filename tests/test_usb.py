@@ -11,7 +11,9 @@ class UsbCore(unittest.TestCase):
         for source, marker in [('usb_dwc2_probe.cc', 'dwc2 packet probe ok'),
                                ('usb_hid_report_probe.cc', 'hid report probe ok'),
                                ('usb_debug_probe.cc','usb debug probe ok'),
-                               ('usb_device_probe.cc','usb device probe ok')]:
+                               ('usb_device_probe.cc','usb device probe ok'),
+                               ('usb_gadget_probe.cc','usb gadget control probe ok'),
+                               ('usb_schedule_probe.cc','usb scheduling probe ok')]:
             with self.subTest(source=source), tempfile.TemporaryDirectory(prefix='ame-usb-') as work:
                 probe = str(Path(work) / 'probe')
                 result = subprocess.run([

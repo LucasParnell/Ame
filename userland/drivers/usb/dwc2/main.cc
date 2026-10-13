@@ -9,6 +9,7 @@
 #include "midix/abi/protocols/board_usb.h"
 namespace {
 using namespace mochi::usb::dwc2;
+enum class TransitionStep : mx_u8_t { Quiescing, Resetting, WaitingMode, Complete };
 struct Runtime {
     libk::Mmio mmio;
     Registers registers;
@@ -20,11 +21,10 @@ struct Runtime {
     MxUsbRole role, desired;
     MxBoardReply reply;
     mx_u64_t deadline;
-    mx_u32_t stage;
+    TransitionStep stage;
     mx_u32_t fault_stage;
     mx_handle_t irq, wake;
     bool busy, pending;
-    mx_u64_t diag_next;
 };
 bool transition(Runtime& r) {
     if (!r.busy) {
@@ -35,7 +35,7 @@ bool transition(Runtime& r) {
         r.fault_stage = 99;
         return false;
     }
-    if (r.stage == 0) {
+    if (r.stage == TransitionStep::Quiescing) {
         if (r.role == MxUsbRole::Host && !r.host.quiesce()) {
             return true;
         }
@@ -43,37 +43,26 @@ bool transition(Runtime& r) {
             r.device.quiesce();
         }
         if (r.role == MxUsbRole::Detached && r.desired == MxUsbRole::Detached) {
-            r.stage = 3;
+            r.stage = TransitionStep::Complete;
         } else {
             if (r.desired != MxUsbRole::Detached) {
                 if (!identify(r.registers, &r.geometry)) {
                     r.fault_stage = 20;
                     return false;
                 }
-                mx_u32_t cfg = 0;
-                r.registers.read(r.registers.context, kUsbConfig, &cfg);
-                if (r.geometry.high_speed_phy != 1 && r.geometry.high_speed_phy != 3) {
+                if (!configure_utmi(r.registers, r.geometry, r.desired == MxUsbRole::Host)) {
                     r.fault_stage = 21;
                     return false;
                 }
-                const bool wide = r.geometry.utmi_width == 1;
-                // Select the advertised UTMI bus, with its documented PHY
-                // turnaround. Software roles disable legacy HNP/SRP policy.
-                cfg &= ~((1u << 29) | (1u << 30) | (15u << 10) | (1u << 3) | (1u << 4) | (1u << 6) |
-                         (1u << 8) | (1u << 9) | (1u << 15));
-                cfg |= (wide ? (1u << 3) : 0) | ((wide ? 5u : 9u) << 10);
-                cfg |= r.desired == MxUsbRole::Host ? (1u << 29) : (1u << 30);
-                r.registers.write(r.registers.context, kUsbConfig, cfg);
-                libk::dma::order_mmio();
             }
             if (!r.reset.begin(r.registers, r.deadline)) {
                 r.fault_stage = 22;
                 return false;
             }
-            r.stage = 1;
+            r.stage = TransitionStep::Resetting;
         }
     }
-    if (r.stage == 1) {
+    if (r.stage == TransitionStep::Resetting) {
         const auto state = r.reset.advance(r.registers, now);
         if (state == ResetState::Fault) {
             r.fault_stage = 30;
@@ -82,9 +71,16 @@ bool transition(Runtime& r) {
         if (state != ResetState::Ready) {
             return true;
         }
-        r.stage = 2;
+        // CSFTRST can restore timing defaults. Reapply the selected bus
+        // configuration before the role executor exposes any endpoints.
+        if (r.desired != MxUsbRole::Detached &&
+            !configure_utmi(r.registers, r.geometry, r.desired == MxUsbRole::Host)) {
+            r.fault_stage = 31;
+            return false;
+        }
+        r.stage = TransitionStep::WaitingMode;
     }
-    if (r.stage == 2) {
+    if (r.stage == TransitionStep::WaitingMode) {
         mx_u32_t mode = 0;
         r.registers.read(r.registers.context, kInterruptStatus, &mode);
         if (r.desired == MxUsbRole::Host && !(mode & kHostMode)) {
@@ -101,9 +97,9 @@ bool transition(Runtime& r) {
             r.fault_stage = 41;
             return false;
         }
-        r.stage = 3;
+        r.stage = TransitionStep::Complete;
     }
-    if (r.stage == 3) {
+    if (r.stage == TransitionStep::Complete) {
         r.role = r.desired;
         r.busy = false;
         r.pending = true;
@@ -144,41 +140,20 @@ extern "C" [[noreturn]] void _start() {
     }
     mochi::boot::ready(boot);
     for (;;) {
+        const auto expected = mx_doorbell_read(r->wake);
         r->host.poll();
         r->device.poll();
         if (!transition(*r)) {
             char line[128];
-            const int length =
-                libk::snprintf(line, sizeof(line),
-                               "drv.usb.dwc2: transition fault stage=%u reason=%u desired=%u\n",
-                               static_cast<unsigned>(r->stage),
-                               static_cast<unsigned>(r->fault_stage),
-                               static_cast<unsigned>(r->desired));
+            const int length = libk::snprintf(
+                line, sizeof(line),
+                "drv.usb.dwc2: transition fault stage=%u reason=%u desired=%u\n",
+                static_cast<unsigned>(r->stage), static_cast<unsigned>(r->fault_stage),
+                static_cast<unsigned>(r->desired));
             if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
                 mochi::log_raw_marker(line);
             }
             mx_exit(MX_ERR_FAULT);
-        }
-        // Live bus-state readout for interactive runs (no retained trace):
-        // printed to the phone console every 10 s while the device role is up.
-        if (r->role == MxUsbRole::Device && !r->busy) {
-            const auto now = mx_clock_ns();
-            if (!r->diag_next || now >= r->diag_next) {
-                r->diag_next = now + 10000000000ull;
-                char line[176];
-                const int length = libk::snprintf(
-                    line, sizeof(line),
-                    "drv.usb.dwc2: pcgcctl=%x dctl=%x dsts=%x otgctl=%x gusbcfg=%x gint=%x\n",
-                    static_cast<unsigned>(r->device.read(kPowerClock)),
-                    static_cast<unsigned>(r->device.read(kDeviceControl)),
-                    static_cast<unsigned>(r->device.read(kDeviceStatus)),
-                    static_cast<unsigned>(r->device.read(kOtgControl)),
-                    static_cast<unsigned>(r->device.read(kUsbConfig)),
-                    static_cast<unsigned>(r->device.read(kInterruptStatus)));
-                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
-                    mochi::log_raw_marker(line);
-                }
-            }
         }
         if (r->pending && r->links[1].tx().try_push_msg(MX_ROLE_REPLY, r->reply)) {
             r->pending = false;
@@ -195,21 +170,26 @@ extern "C" [[noreturn]] void _start() {
             } else {
                 r->desired = static_cast<MxUsbRole>(request.value);
                 r->busy = true;
-                r->stage = 0;
+                r->stage = TransitionStep::Quiescing;
                 r->deadline = mx_clock_ns() + 2000000000ull;
-                char line[80];
-                const int length = libk::snprintf(line, sizeof(line), "role-set value=%u\n",
-                                                  static_cast<unsigned>(request.value));
-                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
-                    mochi::log_raw_marker(line);
-                }
             }
         }
         // Owned device sources are drained before rearming this level IRQ.
         if (r->role != MxUsbRole::Detached) {
             (void)mx_irq_ack(r->irq);
         }
-        mochi::driver::idle(r->links, 3, r->wake,
-                            mx_clock_ns() + (r->busy ? 1000000ull : 10000000ull));
+        const auto now = mx_clock_ns();
+        mx_u64_t deadline = r->busy ? now + 100000ull : 0;
+        deadline = libk::earlier_deadline(deadline, r->host.wake_deadline(now));
+        deadline = libk::earlier_deadline(deadline, r->device.wake_deadline(now));
+        if (r->pending) {
+            deadline = libk::earlier_deadline(deadline, now + mochi::driver::kBackpressureRetryNs);
+        }
+        // Blocked cold requests stay queued. They must not turn the reader
+        // recheck into a busy loop while reset/addressing/publication runs.
+        const mx_u64_t readable = (!r->host.reply_pending && !r->host.addressing ? 1u : 0u) |
+                                  (!r->busy && !r->pending ? 2u : 0u) |
+                                  (!r->device.event_pending ? 4u : 0u);
+        mochi::driver::idle_on_counter(r->links, 3, r->wake, expected, deadline, readable);
     }
 }

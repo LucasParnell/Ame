@@ -8,10 +8,9 @@
 namespace {
 struct Runtime {
     mochi::SpscEndpoint links[4];
-    mx_u64_t sequence, next;
+    mx_u64_t sequence, renew_at;
     MxUsbRole role;
     bool fault;
-    mx_u32_t observed_value, observed_flags;
     bool query_fault_logged;
 };
 struct CallOutcome {
@@ -87,6 +86,7 @@ Transition change(Runtime& r, MxUsbRole next) {
         }
     }
     r.role = next;
+    r.renew_at = mx_clock_ns() + 500000000ull;
     result.ok = true;
     return result;
 }
@@ -108,7 +108,6 @@ extern "C" [[noreturn]] void _start() {
         }
     }
     r->sequence = mx_clock_ns();
-    r->observed_value = ~0u;
     mochi::boot::ready(boot);
     for (;;) {
         MxBoardReply status{};
@@ -119,17 +118,6 @@ extern "C" [[noreturn]] void _start() {
             next = static_cast<MxUsbRole>(status.value);
             if (next == MxUsbRole::Device && !(status.flags & MX_TYPEC_VBUS)) {
                 next = MxUsbRole::Detached;
-            }
-            if (status.value != r->observed_value || status.flags != r->observed_flags) {
-                r->observed_value = status.value;
-                r->observed_flags = status.flags;
-                char line[96];
-                const int length = libk::snprintf(line, sizeof(line), "typec role=%u flags=0x%x\n",
-                                                  static_cast<unsigned>(status.value),
-                                                  static_cast<unsigned>(status.flags));
-                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
-                    mochi::log_raw_marker(line);
-                }
             }
         } else if (!r->query_fault_logged) {
             r->query_fault_logged = true;
@@ -155,16 +143,16 @@ extern "C" [[noreturn]] void _start() {
                 if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
                     mochi::log_raw_marker(line);
                 }
-            } else {
-                mochi::log_raw_marker(next == MxUsbRole::Host     ? "io.usb.role: host\n"
-                                      : next == MxUsbRole::Device ? "io.usb.role: device\n"
-                                                                  : "io.usb.role: detached\n");
             }
         }
-        if (r->role == MxUsbRole::Host) {
+        // The source lease lasts two seconds. Renew with ample margin, not
+        // on every 50 ms CC observation; power fault checks remain independent.
+        if (r->role == MxUsbRole::Host && mx_clock_ns() >= r->renew_at) {
             const auto keep = call(*r, 1, MX_POWER_SET, MX_POWER_REPLY, 500);
             if (!keep.ok) {
                 (void)change(*r, MxUsbRole::Detached);
+            } else {
+                r->renew_at = mx_clock_ns() + 500000000ull;
             }
         }
         // Polling the CC chip is intentional until its GPIO IRQ service exists.

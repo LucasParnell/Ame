@@ -121,7 +121,19 @@
         "MOCHI_SYSTEM_PROFILE": "huawei-anne-usb",
         "ANKO_ANNE_DIAG_CAPTURE_SECONDS": "0",
         "ANKO_ANNE_DIAG_RESET_AT_READY": false,
-        "ANKO_ANNE_DIAG_RUN_TAG": "anne-usb-v14"
+        "ANKO_ANNE_DIAG_RUN_TAG": "anne-usb-v19"
+      }
+    },
+    {
+      "name": "anne-usb-native-release",
+      "inherits": "qemu-release",
+      "binaryDir": "${sourceDir}/out/anne-usb-native-release",
+      "cacheVariables": {
+        "ANKO_BOARD": "huawei-anne",
+        "MOCHI_SYSTEM_PROFILE": "huawei-anne-usb",
+        "ANKO_ANNE_DIAG_CAPTURE_SECONDS": "0",
+        "ANKO_ANNE_DIAG_RESET_AT_READY": false,
+        "ANKO_ANNE_DIAG_RUN_TAG": "anne-usb-v20-release"
       }
     }
   ],
@@ -173,6 +185,10 @@
     {
       "name": "anne-usb-native-dev",
       "configurePreset": "anne-usb-native-dev"
+    },
+    {
+      "name": "anne-usb-native-release",
+      "configurePreset": "anne-usb-native-release"
     }
   ],
   "testPresets": [

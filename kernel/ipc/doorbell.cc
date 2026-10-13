@@ -224,6 +224,7 @@ SysError notify_handoff(CapHandle handle, u64 payload_word, u32 caller_pid) {
         const bool affinity_ok = (receiver->affinity_mask == 0) ||
                                  ((receiver->affinity_mask >> cpu) & 1u);
         if ((db->sched_hints & IPC_HINT_HANDOFF_OK) &&
+            sender->reply_target == nullptr &&
             !__atomic_load_n(&receiver->terminate_requested, __ATOMIC_ACQUIRE) &&
             receiver->state == TS_SLEEPING &&
             receiver->cpu_id == cpu &&

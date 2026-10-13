@@ -4,6 +4,69 @@ Self-contained summary of everything this session touched. The day handoff
 (`docs/HANDOFF_2026-10-13.md`, sections V7–V14) has the blow-by-blow detail;
 this file is the one to read first.
 
+## Continuation: V18 Mac acceptance and V19 cleanup
+
+Current phone state: **V18 native image is installed. Stock is not restored.**
+The Mac enumerated `Ame USB diagnostics`, bound CDC ACM, and the standard-library
+sender acknowledged `help` plus Enter. The user confirmed the command list
+appeared on the phone. The Mac required its accessory approval. A physical
+USB-C keyboard has not been checked; the user could not connect it then.
+Private evidence is in `out/anne-device-private/usb-native-v18-test/`.
+The V18 image SHA256 is
+`f92a53a336514247ad3ad8ecd40a4c8ab48dff9a4cee9209671e2f8f2d0b4666`.
+
+The user now requested readable, commented USB cleanup with DOP, cache/IPC
+and scheduling attention, and debug text disabled. V19 changes are written;
+validation/package preparation is underway, and it has not been flashed.
+The existing direct native-to-native flash authorization persists. Restore
+stock only before returning to TWRP/Android. Never use `reboot recovery`:
+it enters eRecovery; use the established bootloader/button route.
+
+## Earlier continuation: V15–V17
+
+- V14 was restored, and TWRP verified the live stock checksum. Recovery clock
+  readout showed HCLK 240 MHz and USB/ABB reference 19.2 MHz. FUSB301 dump showed
+  ID `12`, mode `04`, status `2d`, type `08`: attached Mac with VBUS. Recovery
+  has no `/dev/mem` and the USB debug directory only exposes device inventory;
+  attempts to read PHY/core snapshots there did not succeed.
+- V15 added full board-PHY readout without an electrical change. Live state:
+  `ctrl0=44 ctrl1=0 ctrl2=bd ctrl3=6b866db ctrl4=202 ctrl5=c22`,
+  `bc3=0 bc4=c01 bc5=0 bc=c20`. No Mac USB device or CDC node appeared.
+- V16 selects the vendor's PHY IDDIG source for device mode (`ctrl0=14`);
+  host mode retains software ID=0 for Type-C. Fresh user readings confirmed
+  `ctrl0=14` and the same other controls, with `bc=20`. No Mac enumeration.
+  The user's first V16 paste repeated V15 exactly; it was excluded from V16
+  evidence and a fresh readout was obtained. Private run kits contain both
+  Mac observation and accepted live-screen evidence.
+- The user asked why an equivalent Linux driver was not being used. A stricter
+  startup comparison found omissions, documented in
+  [ANNE_USB_REFERENCE_AUDIT.md](ANNE_USB_REFERENCE_AUDIT.md).
+- V17 corrects post-layout FIFO flush, a bounded asynchronous disconnect/settle
+  interval, post-reset and ENUMDONE UTMI timing, ENUMDONE global IN NAK clear,
+  and revision-3 SETUP receive credits without rewriting an enabled OUT receive.
+  It adds controller-local reset/ENUMDONE/SETUP/command/completion counters and
+  EP0 register readbacks. Board/HID/input/terminal responsibilities stay separate.
+- After implementation, native build and all four ASan/UBSan controller/HID/
+  debug/device probes in `test_dwc2_and_hid_report_state_machines` passed.
+  A model verifies disconnect through flush/settle, quarantine on stuck flush,
+  revision-dependent timing, and cumulative event counters. Diff check clean.
+- Prepared package: `out/anne-usb-native-package-v17`, run tag `anne-usb-v17`,
+  native image SHA256
+  `52e3e7cb9d4e63a1cbb30569b41b7dd113d9eaacd33a6108831c0e480173c0f9`.
+  Hash-pinned controller and observer:
+  `out/anne-device-private/usb-native-v17-test/{control.py,observe.py}`.
+  Observer checks the correct IOService USB device query and CDC nodes for
+  65 seconds; if an Ame device and one CDC node appear, it sends `help` + Enter
+  and saves the ACK result. The V17 package is locally AVB-verified. FASTBOOT target/unlocked preflight,
+  flash and reboot were acknowledged. The 65-second Mac observation window
+  finished with no enumerated Ame device or CDC node, so injection did not run.
+  Fresh V17 readings subsequently showed 36 reset/ENUMDONE events, eight SETUP
+  requests and eight IN completions. This localized the fault to enumeration.
+  V18 stages ADDRESS before the status SEND and handles PIO FIFO OUTDONE plus
+  early EP0 OUT retention. Mac command input succeeded as recorded above.
+
+The historical V14 state below is superseded by this continuation.
+
 ## TL;DR / where this stands
 
 - Goal of the arc: get the full native USB stack booting on the phone and the

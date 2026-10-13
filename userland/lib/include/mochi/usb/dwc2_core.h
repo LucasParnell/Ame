@@ -38,6 +38,42 @@ struct Registers {
     bool valid() const { return context && read && write && receive && transmit; }
 };
 
+// The vendor core uses revision-dependent UTMI turnaround values. Width is
+// chosen from GHWCFG4 before reset; timing is restored after reset and again
+// when ENUMDONE establishes the bus speed. Neither helper selects a board role.
+inline mx_u32_t utmi_turnaround(mx_u32_t core_id, bool wide, MxUsbSpeed speed) {
+    if (speed != MxUsbSpeed::High) return 9;
+    return (core_id & 0xffffu) >= 0x260au ? (wide ? 6u : 9u) : (wide ? 4u : 8u);
+}
+
+inline bool configure_utmi(const Registers& registers, const Geometry& geometry, bool host) {
+    if (!registers.valid() || geometry.utmi_width > 2 ||
+        (geometry.high_speed_phy != 1 && geometry.high_speed_phy != 3)) return false;
+    mx_u32_t cfg = 0;
+    if (!registers.read(registers.context, kUsbConfig, &cfg)) return false;
+    const bool wide = geometry.utmi_width == 1;
+    // Keep unrelated core options; disable legacy HNP/SRP and select UTMI.
+    constexpr mx_u32_t mask = (1u << 29) | (1u << 30) | (15u << 10) | (1u << 3) |
+                              (1u << 4) | (1u << 6) | (1u << 8) | (1u << 9) | (1u << 15);
+    cfg = (cfg & ~mask) | (wide ? (1u << 3) : 0) |
+          (utmi_turnaround(geometry.core_id, wide, MxUsbSpeed::High) << 10) |
+          (host ? (1u << 29) : (1u << 30));
+    if (!registers.write(registers.context, kUsbConfig, cfg)) return false;
+    libk::dma::order_mmio();
+    return true;
+}
+
+inline bool device_turnaround(const Registers& registers, mx_u32_t core_id, MxUsbSpeed speed) {
+    mx_u32_t cfg = 0;
+    if (!registers.read(registers.context, kUsbConfig, &cfg)) return false;
+    const auto timing = utmi_turnaround(core_id, (cfg & (1u << 3)) != 0, speed);
+    if (!registers.write(registers.context, kUsbConfig, (cfg & ~(15u << 10)) | (timing << 10))) {
+        return false;
+    }
+    libk::dma::order_mmio();
+    return true;
+}
+
 enum class ResetState : mx_u8_t { Idle, WaitingAhb, WaitingReset, Settling, WaitingFlush, Ready, Fault };
 struct Reset {
     ResetState state = ResetState::Idle;

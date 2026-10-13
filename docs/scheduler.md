@@ -1,181 +1,150 @@
-# Anko Scheduler — Architecture Reference
+# Ressha / Eki scheduler
 
-Spec refs: §5.4 Threads and Scheduler, §5.6 Principals
+Ressha has one CPU-owned station (`Eki`) per online CPU. Native RT uses fixed
+priority FIFO queues. The other working bands share weighted principal fairness,
+then weighted thread fairness; idle work runs only when no other band is eligible.
+The station owns its heaps, dispatch state, and accounting clocks. Remote CPUs
+publish wakes and steal requests, rather than editing those heaps.
 
----
+## Fair scheduling
 
-## Overview: Ressha / Eki model
+Each principal has one local `service_vruntime_ns` across latency, VM latency,
+fair, VM fair, and batch. Running time increases it by
+`elapsed_ns * NICE_0_WEIGHT / principal_weight`. Each band heap orders principals
+by this clock. The picker compares eligible principals across bands, so a busy
+latency process cannot permanently starve a fair process.
 
-The scheduler design is called **Ressha**. Each online CPU owns one local **Eki** (station)
-object (`struct Eki` in `kernel/include/anko/sched.h`). Scheduling decisions are made
-per-Eki; cross-CPU wakes go through a lock-free pending-wake queue + IPI.
+Within a principal, each thread increases its own vruntime by
+`elapsed_ns * NICE_0_WEIGHT / thread_weight`. The least effective thread key wins;
+equal service and thread keys use this band precedence:
 
----
+1. Native latency
+2. VM latency
+3. Native fair
+4. VM fair
+5. Batch
 
-## Priority levels and scheduling classes
+Idle is a separate final fallback. Native RT precedes all these bands and is
+available only to kernel or trusted principals. There is no hard RT admission
+or deadline scheduler.
 
-V0 uses five flat priority levels (`ThreadPriority`):
+A principal's thread watermark uses thread keys, including its running thread;
+it never uses the principal service clock. This distinction preserves relative
+thread weights. Principal service is normalized against the station's service
+watermark when work joins. These are local CPU fairness clocks; an aggregate
+principal budget, when configured, is enforced across CPUs.
 
-| Enum            | Level | SchedClass       | Weight |
-|-----------------|-------|------------------|--------|
-| PRIO_IDLE       | 0     | SCHED_IDLE       | 256    |
-| PRIO_BACKGROUND | 1     | SCHED_BATCH      | 512    |
-| PRIO_NORMAL     | 2     | SCHED_NORMAL     | 1024   |
-| PRIO_SERVICE    | 3     | SCHED_SERVICE    | 2048   |
-| PRIO_CRITICAL   | 4     | SCHED_INTERACTIVE| 4096   |
+Legacy thread creation maps priorities as follows:
 
-`SchedAttrs` (added Milestone 2) records the class and weight per thread. `pick_next()`
-still uses the flat priority order; the fair-queue path (`kSchedFairQueue`) is not yet
-enabled.
+| Priority | Band | Thread weight | Hint |
+|---|---|---:|---|
+| IDLE | Idle | 0 (accounting falls back to 1024) | Normal |
+| BACKGROUND | Batch | 512 | Batch |
+| NORMAL | Fair | 1024 | Normal |
+| SERVICE | Latency | 1536 | IPC server |
+| CRITICAL | Latency | 2048 | Interactive |
 
----
+Trusted process principals default to weight 2048; sandboxed principals use 1024.
+`PrincipalClass` controls authorization; unique principal IDs define fairness
+buckets. Principal generations prevent a recycled ID from inheriting local state.
+Contexts retain their principal, so a transferred context can outlive its creator
+without referring to a subsequently recycled ID.
 
-## Run queues
+## Wake publication and frame ownership
 
-Each `Eki` holds `RunQueue queues[PRIO_COUNT]` — one singly-linked FIFO per priority
-level. `pick_next()` scans from `PRIO_CRITICAL` down to `PRIO_BACKGROUND`, skipping
-`PRIO_IDLE` (the idle thread is handled separately).
+`Thread::execution_cpu` identifies the CPU that still owns the live exception
+frame. Entering a blocking syscall changes state before the syscall return frame
+is saved. A wake during that window records `deferred_wake_cpu`, under the thread
+lifecycle lock, and publishes no runnable node yet.
 
----
+`post_syscall` saves the frame, charges execution through the blocking operation,
+and releases execution ownership before publishing the deferred wake. Remote
+publication uses an MPSC CAS stack and a wake IPI. The receiving CPU detaches the
+stack with acquire semantics, reverses it to preserve FIFO order, and inserts the
+threads into its own queues. Thread state uses acquire/release publication too;
+state publication alone does not transfer frame ownership.
 
-## SwitchReason
+Wake selection considers hard affinity, wake-affine hints, doorbell home CPU,
+thread home/last CPU, and published load. Publication rechecks affinity while
+holding the lifecycle lock, since a blocked thread can be rebound after selection.
+Queue membership rejects duplicate insertion. Termination is collected by the
+owning station; a retiring thread leaves the active address space before storage
+is reclaimed. An idle station retains no finished thread or process reference.
 
-Recorded at the point a context switch is requested:
+## Budgets and slices
 
-| Value         | When                                           |
-|---------------|------------------------------------------------|
-| SWITCH_NONE   | No pending switch                              |
-| SWITCH_YIELD  | `sys_yield` called                             |
-| SWITCH_BLOCK  | Thread blocked on doorbell or I/O              |
-| SWITCH_TIMER  | Timer preemption (10 ms tick, IRQ 30)          |
-| SWITCH_EXIT   | Thread or process terminated                   |
-| SWITCH_IDLE   | No runnable threads, going idle                |
+Principal and context budgets are independent. An exhausted running thread is
+requeued, then becomes ineligible until its period rolls over. Ineligible nodes
+remain in their queues, so period refill never needs to edit another CPU's heaps
+or reconstruct lost queue membership.
 
----
+Charging and period rollover use per-principal and per-context locks. Period
+starts advance by whole periods rather than drifting to the next timer tick.
+A late accounting timestamp cannot underflow that arithmetic. Budgeted contexts
+require a nonzero period and `budget_ns <= period_ns`.
 
-## WakeReason
+The picker refills the principal/context it examines, including after an idle
+period. Ordinary ticks do not scan all principal and context tables. A CPU with
+only budget-limited work waits for a timer or event, then retries selection.
 
-Recorded on the thread when it is transitioned from blocked to runnable:
+Slices are derived from band target latency, thread weight, and the number of
+queued peers, with 0.5 ms minimum granularity and band-specific maxima. The
+current generic timer checks at about 10 ms, so these are scheduling targets,
+not sub-millisecond timing guarantees. Budgets can overshoot by the accounting
+checkpoint interval, including simultaneous execution on several CPUs.
 
-| Value          | When                                           |
-|----------------|------------------------------------------------|
-| WAKE_NONE      | Default / not yet set                          |
-| WAKE_YIELD     | (reserved — yield does not sleep)              |
-| WAKE_TIMER     | (reserved — timer wakes via preemption path)   |
-| WAKE_DOORBELL  | `notify_object()` woke a sleeping waiter       |
-| WAKE_NOTIFY    | Reserved for future sys_notify_handoff         |
-| WAKE_REMOTE    | Thread drained from pending-wake queue (IPI)   |
-| WAKE_RESUME    | `resume_thread()` resumed a suspended thread   |
-| WAKE_IRQ       | Reserved for device IRQ wakeup                 |
-| WAKE_DEBUG     | Reserved for debug injection                   |
+## IPC credit and handoff
 
----
+Doorbell and IRQ events can grant bounded, per-thread wake credit. Credit lowers
+the thread's effective key and decays as it executes. IPC servers use a nominal
+100 us drain window. Blocking ends that window so the next wake starts a fresh
+one. A timeout on the drain or handoff window clears the remaining advantage.
 
-## Timer preemption
+Synchronous handoff requires the doorbell hint, a sleeping same-CPU receiver,
+compatible affinity, no existing sender/receiver reply chain, and available
+principal budget. Dispatch also checks the receiver's context budget. The direct
+path sets a normal slice and a nominal 100 us handoff deadline; expiry is checked
+at the next accounting/timer checkpoint. The reply link survives quantum expiry,
+while the donated scheduling key does not. Ineligible handoffs use ordinary wake
+and scheduling rather than bypassing budget checks.
 
-`drivers::timer::init()` programs the AArch64 generic timer (PPI IRQ 30) for ~10 ms
-intervals. On each tick, `sched::tick()` increments `runtime_ticks` on the current
-thread and process, increments `g_principal_sched[principal_id].runtime_ns`, and calls
-`request_switch(true, SWITCH_TIMER)`.
+## Work stealing and data layout
 
-The actual context switch happens in `post_syscall()` after the SVC return path
-processes `e.switch_pending`.
+Idle stations request work from the peer with the largest published lower-band
+thread count. This counts threads, rather than principal heap entries, so a
+single multithreaded principal can supply work. Victims select only eligible
+lower-band threads whose affinity includes the destination CPU. Pinned and
+IPC-hot work is excluded; VM fair runners require an explicit stealable flag.
+Every request outcome releases the thief's request slot.
 
----
+Migration transfers thread lag relative to the source thread watermark; the
+receiving station rebases it against its own watermark. Absolute clocks from
+unrelated stations are not compared directly.
 
-## Remote wake and IPI path
+Stations and cross-CPU coordination areas are cache aligned. Peers read atomic
+load summaries, never live heap sizes. Dispatch state precedes the cold fixed
+thread-heap arrays. Per-principal RT thread heaps were removed because native RT
+uses the station FIFO queues. Heap mechanics live in `libk/indexed_heap.h`, with
+scheduler index/membership adapters in `fair_queue.cc`.
 
-When `sched::wake(t)` is called and the target CPU differs from the current CPU:
+Accounting and dispatch use the thread's retained process owner instead of
+looking it up through the global process registry. Address-space activation
+reads the active TTBR0 and skips `vm_activate` when it already matches; restoring
+an address space changed by a syscall still uses the existing VM activation path.
+Initial station dispatch restores the complete saved EL0 trap frame, including
+when the first runnable thread has already executed on another CPU.
 
-1. `t->state` is set to `TS_RUNNABLE`.
-2. `t` is pushed onto `target_eki.pending_wakes` (lock-free CAS stack).
-3. `smp::send_wake_ipi(target_cpu)` fires a GICv2 SGI.
-4. On the target CPU, `drain_pending_wakes()` is called from `post_syscall()` and
-   from the idle loop, reversing the stack (to preserve FIFO order) and enqueuing
-   each thread locally.
+## Validation and metrics
 
-Counters: `Eki::remote_wakes` (incremented by the sending CPU),
-`Eki::wake_remote` (incremented by the draining CPU per thread).
+Run `python3 tests/test_scheduler.py` for the host regression probe. It compiles
+scheduler code with address/undefined-behavior sanitizers, replacing only
+privileged clock, interrupt, wait, and EL0-entry boundaries in a temporary copy.
+It checks heap ordering/indexes, weighted shares, starvation, principal reuse,
+budget refill, affinity, remote frame publication, idle reclamation, and concurrent
+charging of a shared principal/context. QEMU lifecycle and supervision fixtures
+provide kernel execution and teardown coverage.
 
----
-
-## Fairness tracking
-
-`g_principal_sched[64]` (type `PrincipalSchedState`) accumulates `runtime_ns` per
-principal ID on each timer tick. `sched::fairness_max_lag()` returns `max − min`
-across all non-zero principals — a read-only fairness indicator. No enforcement is
-performed yet (`kSchedPrincipalBudget = false`).
-
----
-
-## Principal classes
-
-| Enum                      | Value | Description                           |
-|---------------------------|-------|---------------------------------------|
-| PRINCIPAL_KERNEL          | 0     | Kernel threads (none in V0)           |
-| PRINCIPAL_NATIVE_TRUSTED  | 1     | init, nameservice, io.console         |
-| PRINCIPAL_NATIVE_SANDBOXED| 2     | demo.ping, demo.pong, untrusted code  |
-
----
-
-## Context switch mechanics
-
-`context_switch(CpuContext* prev, CpuContext* next)` in
-`kernel/arch/arm64/context.S` saves callee-saved registers (x19–x28, fp, lr)
-and SP into `prev`, then restores from `next`. Return from `context_switch`
-resumes execution in the new thread at its saved `lr`.
-
-In V0, all threads are EL0 and context switches happen through the TrapFrame
-path in `post_syscall()`. `context_switch()` is implemented but its direct
-call path is not yet wired into `post_syscall()`.
-
----
-
-## Scheduler feature flags
-
-Defined in `kernel/sched/runqueue.cc`:
-
-| Flag                    | Status | Guards                                  |
-|-------------------------|--------|-----------------------------------------|
-| `kSchedFairQueue`       | false  | vruntime fair queue for NORMAL/BATCH    |
-| `kSchedHandoff`         | false  | SYS_NOTIFY_HANDOFF same-CPU IPC boost   |
-| `kSchedReplyHandoff`    | false  | SYS_REPLY_HANDOFF reply token path      |
-| `kSchedDonation`        | false  | Priority donation on accepted handoff   |
-| `kSchedWorkStealing`    | false  | Steal fair-class threads across CPUs    |
-| `kSchedPrincipalBudget` | false  | Enforce period/budget in pick_next      |
-| `kSchedVmClass`         | false  | SCHED_VM class and vCPU accounting      |
-
----
-
-## Known gaps (future milestones)
-
-- No vruntime / fair queue: all scheduling is strict priority FIFO (Milestone 3)
-- No handoff: SYS_NOTIFY and SYS_WAIT_DOORBELL do not attempt same-CPU handoff (Milestone 4)
-- No priority donation (Milestone 4)
-- No work stealing (Milestone 5)
-- No principal budget enforcement (Milestone 5)
-- No dedicated scheduler conformance tests (Milestone 6)
-
----
-
-## Debug counters (SYS_DEBUG_COUNTERS)
-
-| Index | Metric                        |
-|-------|-------------------------------|
-| 2     | Total context switches        |
-| 13    | Total yields                  |
-| 14    | Block switches                |
-| 15    | Timer preempts (all CPUs)     |
-| 16    | Exit switches                 |
-| 18–19 | Per-CPU context switches      |
-| 20–21 | Per-CPU timer preempts        |
-| 22    | Local wakes (all CPUs)        |
-| 23    | Remote wakes (all CPUs)       |
-| 24–25 | IPI sent / handled            |
-| 26    | Pending-wake drain calls      |
-| 27–28 | Doorbell local/remote wakes   |
-| 29    | fairness_max_lag()            |
-| 30–31 | Principal 1/2 runtime_ns      |
-| 32    | wake_doorbell (all CPUs)      |
-| 33    | wake_remote (all CPUs)        |
-| 34    | wake_resume (all CPUs)        |
+`timer_preempts` counts timer requests caused by slice or handoff expiry;
+`cpu_tick_count` counts timer interrupts. Runtime counters measure charged elapsed
+nanoseconds. `fairness_max_lag` is the spread of nonzero cumulative principal
+runtime; it is diagnostic and does not normalize weights or sleeping time.

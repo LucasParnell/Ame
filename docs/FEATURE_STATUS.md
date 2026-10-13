@@ -31,9 +31,8 @@ code or a captured log it is marked **unverified**.
 Some design documents predate the current code and describe the implementation as
 less complete than it is. Do **not** treat these as status:
 
-- `docs/scheduler.md` describes the V0 strict-priority scheduler with the fair
-  queue and handoff features listed as *disabled*. `kernel/sched/` now implements
-  the Ressha/Eki V2 fair scheduler and the handoff path. Trust the code.
+- `docs/scheduler.md` describes the Ressha/Eki scheduler, including fairness,
+  execution-frame ownership, budget refill, handoff timing, and work stealing.
 - `docs/architecture.md` and `docs/boot-sequence.md` describe a `boot/` shim
   (`boot/entry/boot_main.cc`, `boot/dtb/fdt.cc`, `boot/mmu/*`) as the boot path.
   That directory is **not built** (`add_subdirectory(boot)` is commented out in the
@@ -78,15 +77,15 @@ less complete than it is. Do **not** treat these as status:
 
 | Feature | Status | Evidence | Limitations |
 |---------|--------|----------|-------------|
-| Per-CPU station (`Eki`), per-band principal/thread fair queues | Implemented | `kernel/sched/runqueue.cc` (`Eki`, `enqueue_fair`, `pick_fair`, `pick_next`); `kernel/sched/fair_queue.cc`; `kernel/sched/sched_class.cc` | Pick order: native RT → latency → VM latency → fair → VM fair → batch → idle |
+| Per-CPU station (`Eki`), per-band principal/thread fair queues | Implemented | `kernel/sched/runqueue.cc` (`Eki`, `enqueue_fair`, `pick_fair`, `pick_next`); `kernel/sched/fair_queue.cc`; `kernel/sched/sched_class.cc` | Native RT first, then weighted principal/thread fairness across working bands; band precedence breaks ties; idle last |
 | vruntime fair scheduling with wake credit and preemption margin | Implemented | `kernel/sched/sched_class.cc` (`effective_key`, `compute_slice_ns`, `wakeup_preempt_margin_ns`), `kernel/sched/accounting.cc` | — |
 | Principal budgets / throttle, `SchedContext` budgets | Implemented | `kernel/sched/accounting.cc` (`principal_throttled`, `refill_principal_budgets`), `kernel/sched/sched_context.cc` | — |
 | Work stealing (fair classes only) | Implemented | `kernel/sched/steal.cc` (`maybe_send_steal_request`, `handle_pending_steal_requests`) | RT / pinned / VM latency exempt |
 | Cross-CPU wake via lock-free MPSC + GICv2 SGI | Implemented | `kernel/sched/runqueue.cc` (`pending_push`, `drain_pending_wakes`), `kernel/smp.cc` | — |
-| Timer preemption (~10 ms, PPI 30) | Implemented | `kernel/drivers/timer/generic_timer.cc`; `kernel/sched/runqueue.cc::tick` | Actual switch occurs on the SVC return path (`post_syscall`) |
+| Timer preemption (~10 ms, PPI 30) | Implemented | `kernel/drivers/timer/generic_timer.cc`; `kernel/sched/runqueue.cc::tick` | Actual switch occurs on lower-EL syscall/IRQ return (`post_syscall`); timing remains quantized to timer checkpoints |
 | SMP bring-up | Implemented | `kernel/smp.cc`; boot: `kernel/smp: smp ready`; lifecycle fixture green at 1/2/4 CPUs | — |
 | Scheduler init / dispatch | Implemented | Boot: `kernel/sched: ressha/eki v2 init`, `kernel/sched: eki[0] ready`, `kernel/sched: dispatch tid=… pid=…` | — |
-| Dedicated scheduler conformance test | Not implemented | None found under `tests/` | Correctness is argued from the fair-queue code + lifecycle fixture, not a scheduler-specific test |
+| Dedicated scheduler regression test | Implemented | `tests/test_scheduler.py`, `tests/scheduler_probe.cc` | Host checks with substituted privileged boundaries; kernel lifecycle/supervision fixtures run under QEMU |
 
 ### 1.5 Memory
 
@@ -297,7 +296,7 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | Supervision as a long soak | The restart path is asserted by a bounded fixture | Extend the fixture / soak run |
 | xHCI hardware IRQ delivery | Kernel bind/ack exists; native USB driver still polls | Resolve PCI INTx mapping and integrate deadline-aware backend sleep |
 
-| Scheduler conformance suite | No dedicated test | Add scheduler-specific tests |
+| Scheduler regression suite | Implemented | `tests/test_scheduler.py`; QEMU lifecycle/supervision fixtures |
 
 ---
 

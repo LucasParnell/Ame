@@ -269,6 +269,9 @@ struct Ring {
     bool try_push(uint32_t type, const void* data, uint32_t len) const {
         return ring != nullptr && ring_try_push(ring, order, type, data, len, doorbell);
     }
+    bool try_push_frame(const RingSlot& frame) const {
+        return ring != nullptr && ring_try_push_frame(ring, order, frame, doorbell);
+    }
     bool push(uint32_t type, const void* data, uint32_t len, uint32_t max_yields = 1024) const {
         return ring != nullptr && ring_send_spinning(ring, order, type, data, len, doorbell, max_yields);
     }

@@ -51,7 +51,9 @@ struct Host {
         (void)registers.read(registers.context, reg, &v);
         return v;
     }
-    void write(mx_u32_t reg, mx_u32_t v) const { (void)registers.write(registers.context, reg, v); }
+    void write(mx_u32_t reg, mx_u32_t v) const {
+        (void)registers.write(registers.context, reg, v);
+    }
     void port(mx_u32_t set, mx_u32_t clear, mx_u32_t ack = 0) {
         mx_u32_t value = 0;
         if (port_write(read(kHostPort), set, clear, ack, &value)) {
@@ -85,8 +87,7 @@ struct Host {
         write(kHostConfig, 0);
         write(kHostFrameInterval, frame_interval(MxUsbSpeed::Full));
         write(kInterruptStatus, 0xffffffffu & ~kHostMode);
-        write(kInterruptMask,
-              kSof | kRxAvailable | kPortInterrupt | kChannelInterrupt | (1u << 29));
+        write(kInterruptMask, kRxAvailable | kPortInterrupt | kChannelInterrupt | (1u << 29));
         port(kPortPower, 0);
         active = true;
         connected = false;
@@ -352,9 +353,14 @@ struct Host {
             event_pending = false;
         }
         MxRingSlot slot{};
-        if (reply_pending || addressing || !link.try_recv(&slot)) {
-            return;
+        for (mx_u32_t i = 0; i < driver::kBatchLimit && !reply_pending && !addressing; ++i) {
+            if (!link.try_recv(&slot)) {
+                break;
+            }
+            command(slot);
         }
+    }
+    void command(const MxRingSlot& slot) {
         if (slot.type == MX_USB_TRANSFER_SUBMIT) {
             MxUsbSubmit r{};
             if (message_get(slot, &r, slot.type)) {
@@ -381,7 +387,8 @@ struct Host {
             MxUsbToken token = 0;
             if (message_get(slot, &r, slot.type)) {
                 mx_status_t rc = MX_ERR_INVALID;
-                if (r.device == device && !r.max_burst && !r.mult && r.max_esit_payload<=r.max_packet &&
+                if (r.device == device && !r.max_burst && !r.mult &&
+                    r.max_esit_payload <= r.max_packet &&
                     r.type != MxUsbTransferType::Isochronous) {
                     bool duplicate = false;
                     for (mx_u32_t i = 0; i < kEndpoints; ++i) {
@@ -431,6 +438,32 @@ struct Host {
                 complete_reply(r.request_id, MX_ERR_NOT_IMPLEMENTED);
             }
         }
+    }
+    // NAK retries and periodic endpoints have absolute due times. SOF need
+    // not wake the CPU at 1/8 kHz: packet and port changes already use IRQs.
+    mx_u64_t wake_deadline(mx_u64_t now) const {
+        mx_u64_t deadline = addressing ? address_deadline : 0;
+        if (reply_pending || event_pending) {
+            deadline = libk::earlier_deadline(deadline, now + driver::kBackpressureRetryNs);
+        }
+        for (mx_u32_t i = 0; i < kTransfers; ++i) {
+            if (!tokens[i]) {
+                continue;
+            }
+            const auto& row = transfer_rows[i];
+            if (row.prepared.request.deadline_ns > now) {
+                deadline = libk::earlier_deadline(deadline, row.prepared.request.deadline_ns);
+            }
+            if (!row.packet && row.phase != TransferPhase::Done) {
+                // A due row can still be waiting for a channel/FIFO credit.
+                const auto retry = row.retry > now ? row.retry : now + driver::kBackpressureRetryNs;
+                deadline = libk::earlier_deadline(deadline, retry);
+            }
+            if (row.phase == TransferPhase::Done || row.stopping) {
+                deadline = libk::earlier_deadline(deadline, now + driver::kBackpressureRetryNs);
+            }
+        }
+        return deadline;
     }
     mx_status_t update_ep0(mx_u32_t packet) {
         auto* ep = endpoint(ep0);

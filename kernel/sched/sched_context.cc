@@ -16,7 +16,41 @@ constexpr u32 kMaxSchedContexts = 128;
 static SchedContext g_sched_contexts[kMaxSchedContexts]{};
 static bool g_sched_context_allocated[kMaxSchedContexts]{};
 static kernel::SpinLock g_context_lock{};
+struct alignas(64) ContextBudgetGuard { kernel::SpinLock lock; };
+static ContextBudgetGuard g_budget_guards[kMaxSchedContexts]{};
 static u32 g_next_sched_context_id = 1;
+
+static kernel::SpinLock& budget_lock(const SchedContext* ctx) {
+    const usize address = reinterpret_cast<usize>(ctx);
+    const usize base = reinterpret_cast<usize>(g_sched_contexts);
+    if (address >= base && address - base < sizeof(g_sched_contexts) &&
+        (address - base) % sizeof(SchedContext) == 0)
+        return g_budget_guards[(address - base) / sizeof(SchedContext)].lock;
+    // Host probes use caller-owned contexts. Production contexts use the pool.
+    return g_context_lock;
+}
+
+static void refill_context(SchedContext& ctx, u64 now) {
+    if (!ctx.budget_ns || !ctx.period_ns || now < ctx.period_start_ns ||
+        now - ctx.period_start_ns < ctx.period_ns) return;
+    ctx.period_start_ns += ((now - ctx.period_start_ns) / ctx.period_ns) * ctx.period_ns;
+    ctx.used_ns = 0;
+}
+
+bool sched_context_available(SchedContext* ctx) {
+    if (!ctx) return true;
+    kernel::LockGuard guard(budget_lock(ctx));
+    refill_context(*ctx, sched_clock_ns());
+    return !ctx->budget_ns || ctx->used_ns < ctx->budget_ns;
+}
+
+bool charge_sched_context(SchedContext* ctx, u64 delta, u64 now) {
+    if (!ctx) return false;
+    kernel::LockGuard guard(budget_lock(ctx));
+    refill_context(*ctx, now);
+    ctx->used_ns += delta;
+    return ctx->budget_ns && ctx->used_ns >= ctx->budget_ns;
+}
 
 void refill_sched_context_budgets() {
     kernel::LockGuard guard(g_context_lock);
@@ -24,10 +58,8 @@ void refill_sched_context_budgets() {
     for (u32 i = 0; i < kMaxSchedContexts; ++i) {
         if (!g_sched_context_allocated[i]) continue;
         SchedContext& ctx = g_sched_contexts[i];
-        if (ctx.budget_ns == 0 || ctx.period_ns == 0) continue;
-        if (now - ctx.period_start_ns < ctx.period_ns) continue;
-        ctx.used_ns = 0;
-        ctx.period_start_ns = now;
+        kernel::LockGuard budget(g_budget_guards[i].lock);
+        refill_context(ctx, now);
     }
 }
 
@@ -59,6 +91,7 @@ static bool valid_sched_band(SchedBand band) {
 
 static bool sanitize_context_for_caller(Process& caller, SchedContext& ctx) {
     if (!valid_sched_band(ctx.band)) return false;
+    if (ctx.budget_ns && (!ctx.period_ns || ctx.budget_ns > ctx.period_ns)) return false;
     if (ctx.weight == 0) ctx.weight = NICE_0_WEIGHT;
     if (ctx.core_mask == 0) ctx.core_mask = online_mask();
     ctx.core_mask &= online_mask();
@@ -84,8 +117,11 @@ static void dispose_sched_context(void* target) {
     auto* ctx = static_cast<SchedContext*>(target);
     const usize slot = ctx - g_sched_contexts;
     ANKO_ASSERT(slot < kMaxSchedContexts);
+    kernel::LockGuard budget(g_budget_guards[slot].lock);
+    const u32 principal_id = ctx->principal_id;
     g_sched_context_allocated[slot] = false;
     *ctx = {};
+    release_principal(principal_id);
 }
 
 CapHandle sched_context_create(Process& caller, const SchedContext& request, SysError* out_error) {
@@ -99,6 +135,10 @@ CapHandle sched_context_create(Process& caller, const SchedContext& request, Sys
         kernel::LockGuard guard(g_context_lock);
         for (u32 i = 0; i < kMaxSchedContexts; ++i) if (!g_sched_context_allocated[i]) { slot = i; break; }
         if (slot == kMaxSchedContexts) { if (out_error) *out_error = E_OVERFLOW; return kNullCap; }
+        // Transferred context capabilities and bound threads may outlive the
+        // process that created the fairness bucket. Keep its ID reserved.
+        if (!retain_principal(ctx.principal_id)) { if (out_error) *out_error = E_DEAD; return kNullCap; }
+        kernel::LockGuard budget(g_budget_guards[slot].lock);
         ctx.id = g_next_sched_context_id++; ctx.used_ns = 0; ctx.period_start_ns = sched_clock_ns();
         g_sched_contexts[slot] = ctx; g_sched_context_allocated[slot] = true;
     }
@@ -113,9 +153,13 @@ CapHandle sched_context_create(Process& caller, const SchedContext& request, Sys
 
 static bool bind_thread_to_context(Thread* t, SchedContext* ctx) {
     if (!t || !ctx) return false;
+    kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
+    if (t->execution_cpu != kInvalidCpu || t->terminate_requested) return false;
     if (t->state == TS_DEAD || t->on_runqueue || t->state == TS_RUNNING ||
         t->state == TS_RUNNABLE_PENDING_REMOTE || t->state == TS_RUNNABLE_QUEUED) return false;
     t->principal_id = ctx->principal_id;
+    t->principal_generation = principal_generation(ctx->principal_id);
+    t->vruntime_ns = 0;
     t->sched_context_id = ctx->id;
     auto* next_context = object::acquire(ctx);
     object::release(t->sched_context_lifetime); t->sched_context_lifetime = next_context;
@@ -147,9 +191,13 @@ SysError bind_current_to_sched_context_id(u32 sched_context_id) {
     Thread* t = current();
     auto ctx = sched_context_by_id(sched_context_id);
     if (!t || !ctx) return E_NOTFOUND;
+    if (!(ctx->core_mask & (1ull << current_cpu_id()))) return E_INVALID;
+    account_current(current_eki());
+    kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
     // Current runner is already running, so bind only fields that affect future
     // accounting and re-enqueue.  Do not migrate it mid-syscall.
     t->principal_id = ctx->principal_id;
+    t->principal_generation = principal_generation(ctx->principal_id);
     t->sched_context_id = ctx->id;
     auto* next_context = object::acquire(ctx);
     object::release(t->sched_context_lifetime); t->sched_context_lifetime = next_context;

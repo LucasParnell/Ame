@@ -10,6 +10,7 @@ constexpr CapHandle kNullCap = MX_NULL_HANDLE;
 
 inline unsigned host_yields = 0;
 inline unsigned host_notifies = 0;
+inline mx_u64_t host_wait_expected = 0, host_wait_deadline = 0;
 inline mx_u64_t host_now = 0;
 inline void (*host_on_yield)() = nullptr;
 inline void (*host_on_read)() = nullptr;
@@ -53,6 +54,8 @@ inline mx_status_t mx_map_mmio(CapHandle cap, mx_vaddr_t va, mx_rights_t rights)
 inline mx_status_t mx_arena_create(mx_u64_t, mx_u32_t, CapHandle*) { return MX_ERR_INVALID; }
 inline mx_u64_t mx_doorbell_read(CapHandle cap) { return sys_doorbell_read(cap); }
 inline mx_status_t mx_doorbell_wait_until(CapHandle cap,mx_u64_t expected,mx_u64_t deadline) {
+    host_wait_expected = expected;
+    host_wait_deadline = deadline;
     if(host_on_wait) return sys_wait_doorbell(cap,expected);
     host_now=deadline; return MX_OK;
 }

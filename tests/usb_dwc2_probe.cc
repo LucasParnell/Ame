@@ -73,6 +73,21 @@ static void geometry_and_reset() {
     assert(identify(io, &geometry));
     assert(geometry.core_id == 0x4f54310a && geometry.host_channels == 2 && geometry.device_endpoints == 4);
     assert(geometry.host && geometry.device && geometry.fifo_words == 2048);
+    // Revisions and fixed/either-width geometry select the vendor's timing;
+    // a reset-default turnaround is replaced without losing unrelated options.
+    m.words[kUsbConfig/4]=(1u<<22)|(1u<<29)|(5u<<10);
+    assert(configure_utmi(io,geometry,false));
+    assert(m.words[kUsbConfig/4]==((1u<<22)|(1u<<30)|(9u<<10)));
+    auto wide=geometry; wide.utmi_width=1;
+    assert(configure_utmi(io,wide,true));
+    assert(m.words[kUsbConfig/4]==((1u<<22)|(1u<<29)|(1u<<3)|(6u<<10)));
+    assert(device_turnaround(io,wide.core_id,MxUsbSpeed::Full));
+    assert((m.words[kUsbConfig/4]&(15u<<10))==(9u<<10));
+    auto unsupported=geometry; unsupported.high_speed_phy=2;
+    const auto unchanged=m.words[kUsbConfig/4];
+    assert(!configure_utmi(io,unsupported,false)&&m.words[kUsbConfig/4]==unchanged);
+    assert(utmi_turnaround(0x4f54250a,true,MxUsbSpeed::High)==4);
+    assert(utmi_turnaround(0x4f54250a,false,MxUsbSpeed::High)==8);
     assert(!decode_geometry(0x55330000, 0, 0, 0, 0, &geometry) && geometry.core_id == 0x4f54310a);
     assert(!decode_geometry(0x4f54310a, 0, 7, 2048u << 16, 0, &geometry));
     const HostFifos layout{{0, 512}, {512, 512}, {1024, 512}};

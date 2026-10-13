@@ -16,6 +16,19 @@ u32 band_index(SchedBand band) {
     return (i < NUM_BANDS) ? i : static_cast<u32>(SCHED_BAND_FAIR);
 }
 
+u32 band_rank(SchedBand band) {
+    // Enum values are ABI identifiers, not dispatch precedence.
+    switch (band) {
+    case SCHED_BAND_RT_NATIVE: return 0;
+    case SCHED_BAND_LATENCY: return 1;
+    case SCHED_BAND_VM_LATENCY: return 2;
+    case SCHED_BAND_FAIR: return 3;
+    case SCHED_BAND_VM_FAIR: return 4;
+    case SCHED_BAND_BATCH: return 5;
+    default: return 6;
+    }
+}
+
 bool is_vm_band(SchedBand band) {
     return band == SCHED_BAND_VM_LATENCY || band == SCHED_BAND_VM_FAIR;
 }

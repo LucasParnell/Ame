@@ -16,7 +16,6 @@ struct Runtime {
     mx_u64_t next, deadline;
     mx_u32_t step;
     bool busy, pending;
-    mx_u64_t diag_next;
 };
 bool operation(Runtime& r, mx_u32_t op, mx_u32_t arg = 0) {
     return mx_platform_control(r.authority, op, arg) == MX_OK;
@@ -33,10 +32,9 @@ bool advance(Runtime& r) {
     mx_u64_t delay = 0;
     if (!ok) {
         char line[112];
-        const int length =
-            libk::snprintf(line, sizeof(line), "drv.usb.anne-phy: deadline step=%u desired=%u\n",
-                           static_cast<unsigned>(r.step ? r.step - 1 : 0),
-                           static_cast<unsigned>(r.desired));
+        const int length = libk::snprintf(
+            line, sizeof(line), "drv.usb.anne-phy: deadline step=%u desired=%u\n",
+            static_cast<unsigned>(r.step ? r.step - 1 : 0), static_cast<unsigned>(r.desired));
         if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
             mochi::log_raw_marker(line);
         }
@@ -67,13 +65,20 @@ bool advance(Runtime& r) {
         }
         delay = 1000000;
         break;
-    case 2:
-        ok = update(r, 0, (3u << 4) | (1u << 6) | (1u << 2) | (1u << 3),
-                    (1u << 2) | (r.desired == MxUsbRole::Device ? (1u << 6) : 0)) &&
+    case 2: {
+        // AHB is clocked and out of reset before this register update.
+        // Match the vendor's normal device path: ID_SEL=1 selects PHY IDDIG.
+        // Host mode on a Type-C connector still needs a software ID=0 because
+        // it has no Micro-USB ID pin; the role service owns that decision.
+        // ACA remains disabled in both roles. The ID bit is ignored with PHY
+        // selection and cleared here for an explicit register image.
+        const mx_u32_t id_source = r.desired == MxUsbRole::Device ? (1u << 4) : 0;
+        ok = update(r, 0, (3u << 4) | (1u << 6) | (1u << 2) | (1u << 3), (1u << 2) | id_source) &&
              r.ahb.write32(0xc, r.desired == MxUsbRole::Host ? 0x073f679f : 0x06b866db) &&
              operation(r, MX_PLATFORM_RESET_RELEASE, 1u << 13);
         delay = 50000;
         break;
+    }
     case 3:
         ok = operation(r, MX_PLATFORM_RESET_RELEASE, 1u << 12);
         delay = 100000;
@@ -97,10 +102,9 @@ bool advance(Runtime& r) {
     r.next = mx_clock_ns() + delay;
     if (!ok) {
         char line[112];
-        const int length =
-            libk::snprintf(line, sizeof(line), "drv.usb.anne-phy: step %u failed desired=%u\n",
-                           static_cast<unsigned>(r.step ? r.step - 1 : 0),
-                           static_cast<unsigned>(r.desired));
+        const int length = libk::snprintf(
+            line, sizeof(line), "drv.usb.anne-phy: step %u failed desired=%u\n",
+            static_cast<unsigned>(r.step ? r.step - 1 : 0), static_cast<unsigned>(r.desired));
         if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
             mochi::log_raw_marker(line);
         }
@@ -149,37 +153,17 @@ extern "C" [[noreturn]] void _start() {
                 r->busy = true;
             }
         }
-        // Live board-PHY readout (10 s) while a role is active: the control
-        // and BC status registers from the PHY's own window (bc_sts2 = 0x44
-        // reports vbus/session/dp/dm/id as the PHY sees them).
-        if (r->role != MxUsbRole::Detached) {
-            const auto diag_now = mx_clock_ns();
-            if (!r->diag_next || diag_now >= r->diag_next) {
-                r->diag_next = diag_now + 10000000000ull;
-                mx_u32_t c0 = 0, c2 = 0, c3 = 0, bc = 0;
-                (void)r->ahb.read32(0x0, &c0);
-                (void)r->ahb.read32(0x8, &c2);
-                (void)r->ahb.read32(0xc, &c3);
-                (void)r->ahb.read32(0x44, &bc);
-                char line[176];
-                const int length =
-                    libk::snprintf(line, sizeof(line),
-                                   "drv.usb.anne-phy: ctrl0=%x ctrl2=%x ctrl3=%x bc=%x\n",
-                                   static_cast<unsigned>(c0), static_cast<unsigned>(c2),
-                                   static_cast<unsigned>(c3), static_cast<unsigned>(bc));
-                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
-                    mochi::log_raw_marker(line);
-                }
-            }
+        // Run immediately when a step is due; zero is the ABI's unbounded
+        // sleep sentinel, so it must never represent a pending first step.
+        const auto now = mx_clock_ns();
+        if (r->busy && r->next <= now) {
+            continue;
         }
-        // r.next is an absolute step time and is zero immediately after a
-        // request is accepted. idle() with a zero deadline means an unbounded
-        // sleep, which parked the state machine until the next request arrived
-        // (faulting at the expired deadline without ever running a step).
-        const mx_u64_t now_ns = mx_clock_ns();
-        const mx_u64_t wake = (r->busy && r->next > now_ns)
-                                  ? r->next
-                                  : now_ns + (r->busy ? 1000000ull : 1000000000ull);
-        mochi::driver::idle(&r->control, 1, r->control.rx_doorbell, wake);
+        mx_u64_t deadline = r->busy ? libk::earlier_deadline(r->next, r->deadline) : 0;
+        if (r->pending) {
+            deadline = libk::earlier_deadline(deadline, now + mochi::driver::kBackpressureRetryNs);
+        }
+        mochi::driver::idle(&r->control, 1, r->control.rx_doorbell, deadline,
+                            !r->busy && !r->pending ? 1u : 0u);
     }
 }

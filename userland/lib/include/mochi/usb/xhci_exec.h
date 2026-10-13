@@ -40,6 +40,7 @@ constexpr mx_u8_t kExecDone = 1u << 1;       // finish() published; awaiting pic
 constexpr mx_u8_t kExecInvalid = 1u << 2;    // finish() refused: treat as a fault
 constexpr mx_u8_t kExecOrphan = 1u << 3;     // claimant gave up; reclaim on completion
 constexpr mx_u8_t kExecRingRetired = 1u << 4; // ring descriptors already retired
+constexpr mx_u8_t kExecNotified = 1u << 5;   // caller saw this terminal result once
 
 class ExecTable {
 public:

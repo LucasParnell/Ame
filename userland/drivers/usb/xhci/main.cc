@@ -338,14 +338,7 @@ static bool event_poll(Trb* out) {
 // unclaimed and may be deferred.
 static bool route_event(const Trb& event) {
     const uint32_t type = event_type(event);
-    if (type == TRB_TRANSFER_EVENT) {
-        mochi::log_counter("xhci.evt.meta",
-                           (static_cast<uint64_t>(completion_code(event)) << 32) |
-                           (static_cast<uint64_t>(event_slot(event)) << 16) |
-                           ((event.control >> 16) & 0x1Fu));
-        mochi::log_counter("xhci.evt.param", event.parameter & 0xFFFFFFFFull);
-        return g_exec.on_event(event, g_engine);
-    }
+    if (type == TRB_TRANSFER_EVENT) return g_exec.on_event(event, g_engine);
     if (type == TRB_PORT_STATUS_CHANGE_EVENT) {
         const uint8_t port = static_cast<uint8_t>((event.parameter >> 24) & 0xFFu);
         if (!port || port > g_num_ports) return false;
@@ -651,8 +644,6 @@ static bool address_device(UsbDevice& dev) {
 static bool usb_control(UsbDevice& dev, uint8_t request_type, uint8_t request,
                         uint16_t value, uint16_t index, uint8_t* buffer,
                         uint16_t length, bool direction_in) {
-    mochi::log_counter("xhci.ctrl.enter", request_type == 0x80 ? request :
-                       (static_cast<uint64_t>(request_type) << 8) | request);
     if (length > kControlBufferBytes || (length && !buffer)) return false;
     const uint32_t descriptors = length ? 3 : 2;
     if (dev.control_ring.available() < descriptors) return false;
@@ -715,8 +706,6 @@ static bool usb_control(UsbDevice& dev, uint8_t request_type, uint8_t request,
                          ((data_in && length != 0) ? 0 : (1u << 16));
     const uint64_t status_phys = ring_enqueue(dev.control_ring, status_trb);
 
-    mochi::log_counter("xhci.ctrl.phys.status", status_phys & 0xFFFFFFFFull);
-    mochi::log_counter("xhci.ctrl.phys.data", data_phys & 0xFFFFFFFFull);
     const mx_status_t record_rc = g_exec.record(token, control.request_id, dev.slot_id, 1,
                                                 &dev.control_ring, descriptors, setup_phys,
                                                 status_phys, data_phys, length);
@@ -734,7 +723,6 @@ static bool usb_control(UsbDevice& dev, uint8_t request_type, uint8_t request,
     doorbell_write(dev.slot_id, 1);
 
     const MxUsbCompletion* completion = wait_completion(token);
-    mochi::log_counter("xhci.ctrl.wait_end", 1);
     if (!completion) {
         mochi::log_counter("xhci.ctrl.wait", 1);
         if (auto* entry = g_exec.find(token)) entry->flags |= mochi::usb::kExecOrphan;
@@ -969,12 +957,12 @@ static void settle_keyboard() {
         fault_keyboard();
         return;
     }
-    if (completion->actual_length == sizeof(UsbBootKeyboardReport)) {
+    if (completion->actual_length == sizeof(UsbBootKeyboardReport) &&
+        !(entry->flags & mochi::usb::kExecNotified)) {
+        // Exactly once per completion: a second notice would re-arm the
+        // publish branch and starve the reclaim path below.
+        entry->flags |= mochi::usb::kExecNotified;
         g_keyboard.report_pending = true;
-        mochi::log_counter("xhci.kbd.done.mods",
-                           (static_cast<uint64_t>(g_keyboard.report->modifiers) << 16) |
-                           (static_cast<uint64_t>(g_keyboard.report->keys[0]) << 8) |
-                           g_keyboard.report->keys[1]);
     }
     if (g_keyboard.report_pending) return; // keep the report pinned until published
     if (g_exec.reclaim(*entry, g_engine) != MX_OK) {
@@ -1022,21 +1010,16 @@ static void sweep_orphans() {
 }
 
 static bool send_keyboard_report(const UsbBootKeyboardReport* report) {
-    const bool sent = report && g_hid.try_send(*report);
-    if (sent)
-        mochi::log_counter("xhci.kbd.pub.mods",
-                           (static_cast<uint64_t>(report->modifiers) << 16) |
-                           (static_cast<uint64_t>(report->keys[0]) << 8) |
-                           report->keys[1]);
-    return sent;
+    return report && g_hid.try_send(*report);
 }
 
 static bool enumerate_port_inner(uint8_t port) {
     UsbDevice dev{};
     dev.port = port;
     auto checked = [port](bool success, uint32_t stage) {
+        // Reported once per failed scan: value = port * 100 + stage.
         if (!success)
-            mochi::log_counter("xhci.enum.fail.port.stage",
+            mochi::log_counter("xhci.enumeration.failure",
                                static_cast<uint64_t>(port) * 100 + stage);
         return success;
     };
@@ -1056,14 +1039,7 @@ static bool enumerate_port_inner(uint8_t port) {
     if (!checked(configure_keyboard_endpoint(dev), 8)) return false;
     if (!checked(set_configuration(dev, dev.config_value), 9)) return false;
     if (!checked(hid_set_protocol(dev, dev.interface_number, 0), 10)) return false;
-    const bool idle_ok = hid_set_idle(dev, dev.interface_number);
-    mochi::log_counter("xhci.kbd.setidle_ok", idle_ok ? 1 : 0);
-    uint8_t idle_value = 0xFF;
-    (void)usb_control(dev, 0xA1, 0x02, 0, dev.interface_number, &idle_value, 1, true);
-    mochi::log_counter("xhci.kbd.getidle", idle_value);
-    uint8_t proto_value = 0xFF;
-    (void)usb_control(dev, 0xA1, 0x03, 0, dev.interface_number, &proto_value, 1, true);
-    mochi::log_counter("xhci.kbd.getproto", proto_value);
+    (void)hid_set_idle(dev, dev.interface_number);
 
     g_keyboard.port = port;
     g_keyboard.ready = true;

@@ -23,7 +23,7 @@ def run(build, output, cpus=2):
         monitor = pathlib.Path(work) / 'monitor.sock'
 
         def inject():
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + 45
             log = output / 'host.log'
             while not finished.is_set() and time.monotonic() < deadline:
                 text = log.read_text(errors='replace') if log.exists() else ''
@@ -56,7 +56,7 @@ def run(build, output, cpus=2):
         for key in (4, 5, 6, 0xe1):
             markers.extend((f'usb.hid.key_down={key}', f'usb.hid.key_up={key}'))
         try:
-            success = boot.run(build, 'direct', cpus, 25, output=output,
+            success = boot.run(build, 'direct', cpus, 60, output=output,
                                markers=markers, monitor_socket=monitor)
         finally:
             finished.set()

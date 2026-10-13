@@ -10,6 +10,7 @@
 #include "midix/usb/xhci_events.h"
 #include "midix/usb/hid_boot.h"
 #include "mochi/usb/transfer_engine.h"
+#include "mochi/usb/xhci_exec.h"
 #include <cassert>
 #include <cstdio>
 #include <limits>
@@ -18,6 +19,7 @@ using namespace mochi::usb;
 using namespace midix::usb;
 static_assert(!__is_constructible(libk::SlotPool, const libk::SlotPool&));
 static_assert(!__is_constructible(TransferEngine, const TransferEngine&));
+static_assert(!__is_constructible(ExecTable, const ExecTable&));
 
 static void helper_tests() {
     alignas(8) mx_u32_t registers[4]{};
@@ -182,6 +184,160 @@ static void hid_tests() {
     assert(!decoder.prepare(libk::as_bytes(&report, sizeof(report) - 1)));
 }
 
+
+static void exec_tests() {
+    alignas(64) mx_u8_t memory[16384]{};
+    mx_u8_t payload[64]{};
+    mochi::Arena arena(memory, sizeof(memory));
+    TransferEngine engine;
+    assert(engine.init(arena, {4, 4, 8, 64, (1u << 0) | (1u << 2) | (1u << 3)}));
+    ExecEntry records[8];
+    ExecTable exec;
+    assert(exec.init(records, 8));
+
+    alignas(64) midix::usb::xhci::Trb storage[16];
+    midix::usb::xhci::ProducerRing ring;
+    assert(ring.init(storage, 0x4000, 16));
+
+    auto event_trb = [](mx_u32_t slot, mx_u32_t endpoint, mx_u64_t parameter, mx_u32_t code,
+                        mx_u32_t residual) {
+        midix::usb::xhci::Trb e{};
+        e.parameter = parameter;
+        e.status = (code << 24) | residual;
+        e.control = (32u << 10) | ((slot & 0xffu) << 24) | ((endpoint & 0x1fu) << 16);
+        return e;
+    };
+
+    const SessionScope owner{3, 1, 1};
+    midix::usb::EndpointDescriptor descriptor{};
+    descriptor.address = 0x81; descriptor.type = MxUsbTransferType::Interrupt;
+    descriptor.max_packet = 8; descriptor.interval = 10; descriptor.transactions = 1;
+    MxUsbToken endpoint = 0, buffer = 0;
+    assert(engine.install_endpoint({owner, 1, descriptor, MxUsbSpeed::Full, 0, ControlPolicy::None}, &endpoint) == MX_OK);
+    assert(engine.install_buffer({owner, libk::as_bytes(payload), 0x40000, BufferRead | BufferWrite,
+                                  CacheMode::NonCacheable, true}, &buffer) == MX_OK);
+
+    // Success: the terminal event publishes through the engine and reclaim
+    // retires the ring slot and the ledger token.
+    MxUsbSubmit request{1, endpoint, buffer, 0, 8, 0, 0, 0};
+    MxUsbToken token = 0;
+    PreparedTransfer prepared{};
+    assert(engine.submit(owner, request, 1, &token) == MX_OK);
+    assert(engine.start(token, &prepared) == MX_OK);
+    const auto phys = ring.enqueue({prepared.device_address, 8, midix::usb::xhci::type(1)});
+    assert(phys && exec.record(token, 1, 3, 3, &ring, 1, phys, phys, 0, 8) == MX_OK);
+    assert(!exec.on_event({0, 0, midix::usb::xhci::type(1)}, engine)); // not a transfer event
+    assert(!exec.on_event(event_trb(2, 3, phys, 1, 0), engine));       // wrong slot: unmatched
+    assert(engine.completion(token) == nullptr);
+    assert(exec.on_event(event_trb(3, 3, phys, 1, 0), engine));
+    assert(engine.completion(token) && engine.completion(token)->status == MxUsbStatus::Success);
+    assert(engine.completion(token)->actual_length == 8);
+    auto* entry = exec.find(token);
+    assert(entry && (entry->flags & kExecDone));
+    assert(exec.reclaim(*entry, engine) == MX_OK);
+    assert(exec.find(token) == nullptr && ring.outstanding == 0);
+
+    // A short single-TRB transfer (residual > 0) publishes Short with the
+    // accumulated length.
+    request.request_id = 2;
+    assert(engine.submit(owner, request, 1, &token) == MX_OK);
+    assert(engine.start(token, &prepared) == MX_OK);
+    const auto short_phys = ring.enqueue({prepared.device_address, 8, midix::usb::xhci::type(1)});
+    assert(short_phys && exec.record(token, 2, 3, 3, &ring, 1, short_phys, short_phys, 0, 8) == MX_OK);
+    assert(exec.on_event(event_trb(3, 3, short_phys, 13, 3), engine));
+    assert(engine.completion(token) && engine.completion(token)->status == MxUsbStatus::Short);
+    assert(engine.completion(token)->actual_length == 5);
+    assert(exec.reclaim(*exec.find(token), engine) == MX_OK);
+
+    // Stall is a terminal non-success result the caller can observe.
+    request.request_id = 3;
+    assert(engine.submit(owner, request, 1, &token) == MX_OK);
+    assert(engine.start(token, &prepared) == MX_OK);
+    const auto stall_phys = ring.enqueue({prepared.device_address, 8, midix::usb::xhci::type(1)});
+    assert(stall_phys && exec.record(token, 3, 3, 3, &ring, 1, stall_phys, stall_phys, 0, 8) == MX_OK);
+    assert(exec.on_event(event_trb(3, 3, stall_phys, 6, 0), engine));
+    assert(engine.completion(token) && engine.completion(token)->status == MxUsbStatus::Stall);
+    assert(exec.reclaim(*exec.find(token), engine) == MX_OK);
+
+    // A control transfer keeps its short data stage live until the status
+    // stage completes, then publishes the accumulated length.
+    descriptor = {};
+    descriptor.type = MxUsbTransferType::Control; descriptor.max_packet = 8;
+    MxUsbToken control_ep = 0;
+    assert(engine.install_endpoint({owner, 1, descriptor, MxUsbSpeed::Full, 2,
+                                    ControlPolicy::Bus, 99}, &control_ep) == MX_OK);
+    MxUsbControlSubmit control{100, 99, buffer, 0, {0x80, 6, 1, 0, 8}, 0, 0};
+    assert(engine.submit_control(owner, control_ep, control, 1, &token) == MX_OK);
+    assert(engine.start(token, &prepared) == MX_OK);
+    const auto setup_phys = ring.enqueue({0x80ull, 8, midix::usb::xhci::type(2)});
+    const auto data_phys = ring.enqueue({prepared.device_address, 8, midix::usb::xhci::type(3)});
+    const auto status_phys = ring.enqueue({0, 0, midix::usb::xhci::type(4)});
+    assert(setup_phys && data_phys && status_phys &&
+           exec.record(token, 100, 3, 1, &ring, 3, setup_phys, status_phys, data_phys, 8) == MX_OK);
+    assert(exec.on_event(event_trb(3, 1, data_phys, 13, 2), engine));  // short data stage
+    assert(engine.completion(token) == nullptr);                       // still owned by hardware
+    assert(exec.on_event(event_trb(3, 1, status_phys, 1, 0), engine)); // status stage
+    assert(engine.completion(token) && engine.completion(token)->status == MxUsbStatus::Short);
+    assert(engine.completion(token)->actual_length == 6);
+    assert(exec.reclaim(*exec.find(token), engine) == MX_OK);
+
+    // A stall at the setup stage terminates the transfer against the head TRB.
+    assert(engine.submit_control(owner, control_ep, control, 1, &token) == MX_OK);
+    assert(engine.start(token, &prepared) == MX_OK);
+    const auto stall_setup = ring.enqueue({0x80ull, 8, midix::usb::xhci::type(2)});
+    const auto stall_data = ring.enqueue({prepared.device_address, 8, midix::usb::xhci::type(3)});
+    const auto stall_status = ring.enqueue({0, 0, midix::usb::xhci::type(4)});
+    assert(stall_setup && stall_data && stall_status &&
+           exec.record(token, 101, 3, 1, &ring, 3, stall_setup, stall_status, stall_data, 8) == MX_OK);
+    assert(exec.on_event(event_trb(3, 1, stall_setup, 6, 0), engine));
+    assert(engine.completion(token) && engine.completion(token)->status == MxUsbStatus::Stall);
+    assert(exec.reclaim(*exec.find(token), engine) == MX_OK);
+
+    // Live records refuse reclaim; cancellation before completion keeps the
+    // cancellation as the terminal result.
+    request.request_id = 4;
+    assert(engine.submit(owner, request, 1, &token) == MX_OK);
+    assert(engine.start(token, &prepared) == MX_OK);
+    const auto live_phys = ring.enqueue({prepared.device_address, 8, midix::usb::xhci::type(1)});
+    assert(live_phys && exec.record(token, 4, 3, 3, &ring, 1, live_phys, live_phys, 0, 8) == MX_OK);
+    assert(exec.reclaim(*exec.find(token), engine) == MX_ERR_BUSY);
+    assert(engine.cancel(owner, 4) == MX_OK && engine.state(token) == TransferState::Stopping);
+    assert(exec.on_event(event_trb(3, 3, live_phys, 1, 0), engine));
+    assert(engine.completion(token) && engine.completion(token)->status == MxUsbStatus::Cancelled);
+    assert(exec.reclaim(*exec.find(token), engine) == MX_OK);
+
+    // A consumed record cannot be reclaimed again by a replayed event.
+    request.request_id = 5;
+    assert(engine.submit(owner, request, 1, &token) == MX_OK);
+    assert(engine.start(token, &prepared) == MX_OK);
+    const auto replay_phys = ring.enqueue({prepared.device_address, 8, midix::usb::xhci::type(1)});
+    assert(replay_phys && exec.record(token, 5, 3, 3, &ring, 1, replay_phys, replay_phys, 0, 8) == MX_OK);
+    assert(exec.on_event(event_trb(3, 3, replay_phys, 1, 0), engine));
+    assert(exec.reclaim(*exec.find(token), engine) == MX_OK);
+    assert(!exec.on_event(event_trb(3, 3, replay_phys, 1, 0), engine));
+
+    // An abandoned wait (timeout) keeps its record pinned; a late completion
+    // still publishes the retained timeout result for the reclaim sweep.
+    request.request_id = 6;
+    assert(engine.submit(owner, request, 1, &token) == MX_OK);
+    assert(engine.start(token, &prepared) == MX_OK);
+    const auto late_phys = ring.enqueue({prepared.device_address, 8, midix::usb::xhci::type(1)});
+    assert(late_phys && exec.record(token, 6, 3, 3, &ring, 1, late_phys, late_phys, 0, 8) == MX_OK);
+    exec.find(token)->flags |= kExecOrphan;
+    assert(engine.stop(token, MxUsbStatus::Timeout) == MX_OK);
+    assert(exec.on_event(event_trb(3, 3, late_phys, 1, 0), engine));
+    const auto* timeout_completion = engine.completion(token);
+    assert(timeout_completion && timeout_completion->status == MxUsbStatus::Timeout);
+    assert(exec.reclaim(*exec.find(token), engine) == MX_OK);
+
+    // Duplicate tokens are refused; a full table reports overflow.
+    assert(exec.record(0x100, 7, 3, 3, &ring, 1, 0x1000, 0x1000, 0, 8) == MX_OK);
+    assert(exec.record(0x100, 8, 3, 3, &ring, 1, 0x1000, 0x1000, 0, 8) == MX_ERR_BUSY);
+    for (mx_u32_t i = 1; i < 8; ++i)
+        assert(exec.record(0x100 + i, 8 + i, 3, 3, &ring, 1, 0x1000 + i, 0x1000 + i, 0, 8) == MX_OK);
+    assert(exec.record(0x200, 30, 3, 3, &ring, 1, 0x2000, 0x2000, 0, 8) == MX_ERR_OVERFLOW);
+}
+
 static void engine_tests() {
     alignas(64) mx_u8_t memory[32768]{};
     mx_u8_t payload[256]{};
@@ -293,5 +449,6 @@ static void engine_tests() {
 
 int main() {
     helper_tests(); descriptor_tests(); ring_tests(); lifecycle_tests(); hid_tests(); engine_tests();
+    exec_tests();
     std::puts("usb core probe ok");
 }

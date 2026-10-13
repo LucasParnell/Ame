@@ -4,8 +4,16 @@
 // QEMU's root ports, configures a HID boot keyboard interrupt-IN endpoint, and
 // forwards 8-byte boot keyboard reports to drv.usb.hid.
 //
-// This milestone deliberately polls the xHCI event ring. IRQ routing/ack is
-// left for the next hardening pass.
+// Every transfer flows through the shared transfer ledger
+// (mochi/usb/transfer_engine.h) with xHCI event routing in
+// mochi/usb/xhci_exec.h: a submission is recorded before its doorbell, the
+// terminal event publishes the engine completion, and a terminal report is
+// retained (buffer pinned) under sink backpressure until it is published.
+// Port status changes drive detach/attach: a removed keyboard cancels its
+// stream; a later attach event re-enumerates that port.
+//
+// The controller still polls its event ring. IRQ routing/ack is a separate
+// hardening pass.
 
 #include "mochi/syscall.h"
 #include "mochi/arena.h"
@@ -22,11 +30,14 @@
 #include "mochi/boot.h"
 #include "mochi/boot_log.h"
 #include "mochi/usb.h"
+#include "mochi/usb/transfer_engine.h"
+#include "mochi/usb/xhci_exec.h"
 #include "mochi/va_layout.h"
 
 using namespace mochi::va::xhci;
 
 constexpr uint32_t kControlBufferBytes = 512;
+constexpr uint32_t kStateBytes = 16 * 1024;
 
 // xHCI capability register offsets.
 constexpr uint32_t kXhciCapLength  = 0x00;
@@ -125,11 +136,13 @@ struct UsbDevice {
 struct KeyboardState {
     bool ready;
     bool report_pending;
+    uint8_t port;
     uint8_t slot_id;
     uint8_t endpoint_id;
     XhciRing interrupt_ring;
     UsbBootKeyboardReport* report;
     uint64_t report_phys;
+    MxUsbToken transfer; // outstanding ledger transfer; keeps the buffer pinned
 };
 
 static libk::Mmio g_mmio{};
@@ -160,6 +173,26 @@ static KeyboardState g_keyboard{};
 static midix::usb::xhci::EventBacklog g_deferred_events{};
 static bool g_event_fault = false;
 
+// --- Transfer ledger --------------------------------------------------------
+static mochi::Arena g_state_arena; // cacheable CPU state; never device DMA
+static mochi::usb::TransferEngine g_engine;
+static mochi::usb::ExecTable g_exec;
+static mochi::usb::SessionScope g_scope{1, 1, 1};
+constexpr MxUsbToken kBootBusToken = 1; // control_target for the bus policy
+static MxUsbToken g_control_endpoint = 0;
+static MxUsbToken g_control_buffer = 0;
+static MxUsbToken g_kbd_endpoint = 0;
+static MxUsbToken g_kbd_buffer = 0;
+static uint64_t g_next_request_id = 0;
+static bool g_boot_enumerated = false; // boot scan finished; attach events may re-enumerate
+static bool g_enum_active = false;     // an enumeration owns the ports right now
+
+static bool enumerate_port(uint8_t port);
+static void detach_keyboard();
+static void fault_keyboard();
+static void settle_keyboard();
+static void submit_keyboard_transfer();
+
 static void barrier() {
     libk::dma::order_mmio();
 }
@@ -178,10 +211,6 @@ static uint32_t completion_code(const Trb& trb) {
 
 static uint8_t event_slot(const Trb& trb) {
     return static_cast<uint8_t>((trb.control >> 24) & 0xFFu);
-}
-
-static uint8_t event_endpoint(const Trb& trb) {
-    return static_cast<uint8_t>((trb.control >> 16) & 0x1Fu);
 }
 
 static uint32_t mmio_read32(uint64_t off) {
@@ -304,16 +333,80 @@ static bool event_poll(Trb* out) {
     return true;
 }
 
+// Route one event to its owner: transfer events go to the ledger's exec table;
+// port status changes drive detach/attach bookkeeping. Anything else is
+// unclaimed and may be deferred.
+static bool route_event(const Trb& event) {
+    const uint32_t type = event_type(event);
+    if (type == TRB_TRANSFER_EVENT) {
+        mochi::log_counter("xhci.evt.meta",
+                           (static_cast<uint64_t>(completion_code(event)) << 32) |
+                           (static_cast<uint64_t>(event_slot(event)) << 16) |
+                           ((event.control >> 16) & 0x1Fu));
+        mochi::log_counter("xhci.evt.param", event.parameter & 0xFFFFFFFFull);
+        return g_exec.on_event(event, g_engine);
+    }
+    if (type == TRB_PORT_STATUS_CHANGE_EVENT) {
+        const uint8_t port = static_cast<uint8_t>((event.parameter >> 24) & 0xFFu);
+        if (!port || port > g_num_ports) return false;
+        port_clear_changes(port);
+        const uint32_t state = port_read(port);
+        if ((state & kPortCcs) == 0) {
+            if (g_keyboard.ready && port == g_keyboard.port) detach_keyboard();
+        } else if (!g_enum_active && g_boot_enumerated && !g_keyboard.ready) {
+            (void)enumerate_port(port); // device re-attached (or a new one)
+        }
+        return true;
+    }
+    return false;
+}
+
+// Drain deferred events first (each considered once; unclaimed ones are
+// dropped), then the hardware ring (unclaimed ones are deferred). An event is
+// only ever deferrable once: a submission is recorded before its doorbell, so
+// a claimed transfer event can never arrive before its record exists.
+static uint32_t pump_events() {
+    uint32_t drained = 0;
+    Trb event{};
+    while (g_deferred_events.pop(&event)) {
+        ++drained;
+        (void)route_event(event);
+    }
+    while (event_poll(&event)) {
+        ++drained;
+        if (route_event(event)) continue;
+        if (!g_deferred_events.push(event)) { g_event_fault = true; return drained; }
+    }
+    return drained;
+}
+
+static const MxUsbCompletion* wait_completion(MxUsbToken token) {
+    for (uint32_t spin = 0; spin < 500000; ++spin) {
+        pump_events();
+        const MxUsbCompletion* completion = g_engine.completion(token);
+        if (completion) return completion;
+        if (g_event_fault) return nullptr;
+        mx_yield();
+    }
+    return nullptr;
+}
+
 static bool wait_command(uint64_t command_phys, Trb* out_event) {
     for (uint32_t spin = 0; spin < 500000; ++spin) {
         Trb event{};
+        // Deferred items can only be stale copies (the command was issued after
+        // the last drain), so each is considered once and dropped when nothing
+        // claims it.
+        while (g_deferred_events.pop(&event)) (void)route_event(event);
         while (event_poll(&event)) {
             if (event_type(event) == TRB_COMMAND_COMPLETION_EVENT &&
                 event.parameter == command_phys) {
                 if (out_event) *out_event = event;
                 return completion_code(event) == CC_SUCCESS;
             }
-            if (!g_deferred_events.push(event)) { g_event_fault = true; return false; }
+            if (!route_event(event)) {
+                if (!g_deferred_events.push(event)) { g_event_fault = true; return false; }
+            }
         }
         mx_yield();
     }
@@ -329,34 +422,6 @@ static bool issue_command(Trb command, Trb* out_event) {
     if (event.parameter == phys) (void)g_command_ring.retire(1);
     if (out_event) *out_event = event;
     return success;
-}
-
-static bool wait_transfer(uint8_t slot_id, uint8_t endpoint_id, uint64_t status_phys,
-                          uint64_t data_phys, uint32_t requested, uint32_t* out_actual, uint32_t* out_code) {
-    uint32_t actual = requested;
-    for (uint32_t spin = 0; spin < 500000; ++spin) {
-        Trb event{};
-        while (event_poll(&event)) {
-            if (event_type(event) != TRB_TRANSFER_EVENT || event_slot(event) != slot_id ||
-                event_endpoint(event) != endpoint_id ||
-                (event.parameter != status_phys && (!data_phys || event.parameter != data_phys))) {
-                if (!g_deferred_events.push(event)) { g_event_fault = true; return false; }
-                continue;
-            }
-            const uint32_t code = completion_code(event);
-            if (event.parameter == data_phys && code == CC_SHORT_PACKET) {
-                const auto residual = event.status & 0xffffffu;
-                if (residual > requested) return false;
-                actual = requested - residual;
-                continue; // the status stage still owns descriptors and DMA
-            }
-            if (out_code) *out_code = code;
-            if (out_actual) *out_actual = actual;
-            return code == CC_SUCCESS || code == CC_SHORT_PACKET;
-        }
-        mx_yield();
-    }
-    return false;
 }
 
 static bool xhci_reset() {
@@ -504,6 +569,38 @@ static bool device_alloc(UsbDevice& dev) {
     return ring_init(dev.control_ring, 64, true);
 }
 
+// Register (or re-register) the bus-scope control grants: EP0 accepts standard,
+// class and vendor requests (enumeration needs all three); the control buffer
+// is a directly mapped non-cacheable slice of the DMA arena.
+static bool install_control_grants(UsbDevice& dev) {
+    if (g_control_endpoint) {
+        (void)g_engine.revoke_endpoint(g_scope, g_control_endpoint);
+        g_control_endpoint = 0;
+    }
+    if (g_control_buffer) {
+        (void)g_engine.revoke_buffer(g_scope, g_control_buffer);
+        g_control_buffer = 0;
+    }
+    MxUsbSpeed speed{};
+    if (!midix::usb::xhci::standard_speed(dev.speed, &speed)) return false;
+    midix::usb::EndpointDescriptor descriptor{};
+    descriptor.address = 0;
+    descriptor.type = MxUsbTransferType::Control;
+    descriptor.max_packet = default_ep0_mps(dev.speed);
+    if (g_engine.install_endpoint({g_scope, kBootBusToken, descriptor, speed, 0,
+                                   mochi::usb::ControlPolicy::Bus, kBootBusToken},
+                                  &g_control_endpoint) != MX_OK)
+        return false;
+    mochi::usb::BufferGrant grant{};
+    grant.owner = g_scope;
+    grant.cpu = libk::as_bytes(dev.control_buffer, kControlBufferBytes);
+    grant.device_address = dev.control_buffer_phys;
+    grant.access = mochi::usb::BufferRead | mochi::usb::BufferWrite;
+    grant.cache_mode = mochi::usb::CacheMode::NonCacheable;
+    grant.direct_dma = true;
+    return g_engine.install_buffer(grant, &g_control_buffer) == MX_OK;
+}
+
 static void prepare_address_context(UsbDevice& dev, uint16_t ep0_mps) {
     const uint64_t context_bytes = static_cast<uint64_t>(33u) * g_ctx_stride;
     libk::zero(dev.input_context, context_bytes);
@@ -547,38 +644,67 @@ static bool address_device(UsbDevice& dev) {
     return issue_command(address, &event);
 }
 
+// Submit one control transfer through the ledger and wait for its terminal
+// completion. The ring slot count is reserved up front, so encoding cannot
+// publish a partial sequence; a timeout leaves the record pinned (uncertain
+// DMA is never recycled).
 static bool usb_control(UsbDevice& dev, uint8_t request_type, uint8_t request,
                         uint16_t value, uint16_t index, uint8_t* buffer,
                         uint16_t length, bool direction_in) {
+    mochi::log_counter("xhci.ctrl.enter", request_type == 0x80 ? request :
+                       (static_cast<uint64_t>(request_type) << 8) | request);
     if (length > kControlBufferBytes || (length && !buffer)) return false;
     const uint32_t descriptors = length ? 3 : 2;
     if (dev.control_ring.available() < descriptors) return false;
     if (direction_in) libk::zero(dev.control_buffer, kControlBufferBytes);
-    const uint64_t setup =
-        static_cast<uint64_t>(request_type) |
-        (static_cast<uint64_t>(request) << 8) |
-        (static_cast<uint64_t>(value) << 16) |
-        (static_cast<uint64_t>(index) << 32) |
-        (static_cast<uint64_t>(length) << 48);
+    else if (length && !libk::copy_n(libk::as_bytes(dev.control_buffer, kControlBufferBytes),
+                                     libk::as_bytes(buffer, length), length)) return false;
 
-    const uint32_t trt = length == 0 ? 0u : (direction_in ? 3u : 2u);
+    MxUsbControlSubmit control{};
+    control.request_id = ++g_next_request_id;
+    control.interface = kBootBusToken;
+    control.buffer = g_control_buffer;
+    control.deadline_ns = 0;
+    control.setup = {request_type, request, value, index, length};
+    control.offset = 0;
+    control.flags = 0;
+
+    MxUsbToken token = 0;
+    const mx_status_t submit_rc = g_engine.submit_control(g_scope, g_control_endpoint, control,
+                                                          mx_clock_ns(), &token);
+    if (submit_rc != MX_OK) {
+        mochi::log_counter("xhci.ctrl.submit", static_cast<uint64_t>(-static_cast<int>(submit_rc)));
+        return false;
+    }
+    mochi::usb::PreparedTransfer prepared{};
+    if (g_engine.start(token, &prepared) != MX_OK) {
+        mochi::log_counter("xhci.ctrl.start", 1);
+        (void)g_engine.stop(token, MxUsbStatus::ControllerLost);
+        return false;
+    }
+
+    const uint64_t setup_word =
+        static_cast<uint64_t>(control.setup.request_type) |
+        (static_cast<uint64_t>(control.setup.request) << 8) |
+        (static_cast<uint64_t>(control.setup.value) << 16) |
+        (static_cast<uint64_t>(control.setup.index) << 32) |
+        (static_cast<uint64_t>(control.setup.length) << 48);
+    const bool data_in = prepared.direction == MxUsbDirection::In;
+    const uint32_t trt = length == 0 ? 0u : (data_in ? 3u : 2u);
+
     Trb setup_trb{};
-    setup_trb.parameter = setup;
+    setup_trb.parameter = setup_word;
     setup_trb.status = 8;
     setup_trb.control = trb_type(TRB_SETUP_STAGE) | kTrbIdt | (trt << 16);
-    (void)ring_enqueue(dev.control_ring, setup_trb);
+    const uint64_t setup_phys = ring_enqueue(dev.control_ring, setup_trb);
 
     uint64_t data_phys = 0;
     if (length != 0) {
         Trb data_trb{};
-        data_trb.parameter = dev.control_buffer_phys;
+        data_trb.parameter = prepared.device_address;
         data_trb.status = length;
         data_trb.control = trb_type(TRB_DATA_STAGE) | kTrbChain |
-                           (direction_in ? (1u << 16) | kTrbIsp : 0);
-        if (!direction_in) {
-            libk::copy_n(libk::as_bytes(dev.control_buffer, kControlBufferBytes),
-                         libk::as_bytes(buffer, length), length);
-        }
+                           (data_in ? (1u << 16) | kTrbIsp : 0);
         data_phys = ring_enqueue(dev.control_ring, data_trb);
     }
 
@@ -586,22 +712,50 @@ static bool usb_control(UsbDevice& dev, uint8_t request_type, uint8_t request,
     status_trb.parameter = 0;
     status_trb.status = 0;
     status_trb.control = trb_type(TRB_STATUS_STAGE) | kTrbIoc |
-                         ((!direction_in || length == 0) ? (1u << 16) : 0);
-    const auto status_phys = ring_enqueue(dev.control_ring, status_trb);
+                         ((data_in && length != 0) ? 0 : (1u << 16));
+    const uint64_t status_phys = ring_enqueue(dev.control_ring, status_trb);
+
+    mochi::log_counter("xhci.ctrl.phys.status", status_phys & 0xFFFFFFFFull);
+    mochi::log_counter("xhci.ctrl.phys.data", data_phys & 0xFFFFFFFFull);
+    const mx_status_t record_rc = g_exec.record(token, control.request_id, dev.slot_id, 1,
+                                                &dev.control_ring, descriptors, setup_phys,
+                                                status_phys, data_phys, length);
+    if (record_rc != MX_OK) {
+        mochi::log_counter("xhci.ctrl.record.rc", static_cast<uint64_t>(record_rc));
+        mochi::log_counter("xhci.ctrl.record.token", token);
+        mochi::log_counter("xhci.ctrl.record.status",
+                           (status_phys << 8) | (data_phys ? 1u : 0u));
+        (void)g_engine.stop(token, MxUsbStatus::ControllerLost);
+        g_event_fault = true;
+        return false;
+    }
 
     barrier();
     doorbell_write(dev.slot_id, 1);
 
-    uint32_t code = 0;
-    uint32_t actual = 0;
-    if (!wait_transfer(dev.slot_id, 1, status_phys, data_phys, length, &actual, &code)) return false;
-    (void)dev.control_ring.retire(descriptors);
-    if (direction_in && actual) {
-        if (!libk::copy_n(libk::as_bytes(buffer, length),
-                         libk::as_bytes(dev.control_buffer, kControlBufferBytes), actual)) return false;
+    const MxUsbCompletion* completion = wait_completion(token);
+    mochi::log_counter("xhci.ctrl.wait_end", 1);
+    if (!completion) {
+        mochi::log_counter("xhci.ctrl.wait", 1);
+        if (auto* entry = g_exec.find(token)) entry->flags |= mochi::usb::kExecOrphan;
+        (void)g_engine.stop(token, MxUsbStatus::Timeout);
+        return false;
     }
-    (void)code;
-    return actual == length;
+    bool ok = completion->status == MxUsbStatus::Success ||
+              completion->status == MxUsbStatus::Short;
+    const uint32_t actual = completion->actual_length;
+    if (!ok || actual != length)
+        mochi::log_counter("xhci.ctrl.result",
+                           (static_cast<uint64_t>(completion->status) << 32) | actual);
+    if (ok && direction_in && actual) {
+        if (!libk::copy_n(libk::as_bytes(buffer, length),
+                          libk::as_bytes(dev.control_buffer, kControlBufferBytes), actual))
+            ok = false;
+    }
+    if (auto* entry = g_exec.find(token)) {
+        if (g_exec.reclaim(*entry, g_engine) != MX_OK) entry->flags |= mochi::usb::kExecOrphan;
+    }
+    return ok && actual == length;
 }
 
 static bool get_descriptor(UsbDevice& dev, uint8_t type, uint8_t index,
@@ -659,12 +813,46 @@ static uint32_t endpoint_interval(uint8_t speed, uint8_t b_interval) {
     return interval;
 }
 
+// Register (or re-register) the keyboard grants: the interrupt-IN endpoint and
+// the directly mapped report buffer.
+static bool install_keyboard_grants(UsbDevice& dev) {
+    if (g_kbd_endpoint) {
+        (void)g_engine.revoke_endpoint(g_scope, g_kbd_endpoint);
+        g_kbd_endpoint = 0;
+    }
+    if (g_kbd_buffer) {
+        (void)g_engine.revoke_buffer(g_scope, g_kbd_buffer);
+        g_kbd_buffer = 0;
+    }
+    MxUsbSpeed speed{};
+    if (!midix::usb::xhci::standard_speed(dev.speed, &speed)) return false;
+    midix::usb::EndpointDescriptor descriptor{};
+    descriptor.address = dev.endpoint_address;
+    descriptor.type = MxUsbTransferType::Interrupt;
+    descriptor.max_packet = dev.endpoint_mps;
+    descriptor.interval = dev.interval;
+    descriptor.transactions = 1;
+    if (g_engine.install_endpoint({g_scope, 1, descriptor, speed, dev.interface_number,
+                                   mochi::usb::ControlPolicy::None, 0},
+                                  &g_kbd_endpoint) != MX_OK)
+        return false;
+    mochi::usb::BufferGrant grant{};
+    grant.owner = g_scope;
+    grant.cpu = libk::as_bytes(g_keyboard.report, sizeof(UsbBootKeyboardReport));
+    grant.device_address = g_keyboard.report_phys;
+    grant.access = mochi::usb::BufferRead | mochi::usb::BufferWrite;
+    grant.cache_mode = mochi::usb::CacheMode::NonCacheable;
+    grant.direct_dma = true;
+    return g_engine.install_buffer(grant, &g_kbd_buffer) == MX_OK;
+}
+
 static bool configure_keyboard_endpoint(UsbDevice& dev) {
     if (!ring_init(g_keyboard.interrupt_ring, 64, true)) return false;
     g_keyboard.report = static_cast<UsbBootKeyboardReport*>(
         g_dma_arena.alloc_zeroed(sizeof(UsbBootKeyboardReport), 64));
     if (!g_keyboard.report) return false;
     g_keyboard.report_phys = dma_phys(g_keyboard.report);
+    if (!install_keyboard_grants(dev)) return false;
 
     const uint64_t context_bytes = static_cast<uint64_t>(33u) * g_ctx_stride;
     libk::zero(dev.input_context, context_bytes);
@@ -709,31 +897,152 @@ static uint32_t doorbell_target_for_endpoint(uint8_t endpoint_id) {
 }
 
 static void submit_keyboard_transfer() {
-    if (!g_keyboard.ready) return;
+    if (!g_keyboard.ready || g_keyboard.transfer) return;
     libk::zero(g_keyboard.report, sizeof(UsbBootKeyboardReport));
+
+    MxUsbSubmit submit{};
+    submit.request_id = ++g_next_request_id;
+    submit.endpoint = g_kbd_endpoint;
+    submit.buffer = g_kbd_buffer;
+    submit.offset = 0;
+    submit.length = sizeof(UsbBootKeyboardReport);
+    submit.deadline_ns = 0;
+    submit.flags = 0;
+
+    MxUsbToken token = 0;
+    const mx_status_t submit_rc = g_engine.submit(g_scope, submit, mx_clock_ns(), &token);
+    if (submit_rc != MX_OK) {
+        mochi::log_counter("xhci.kbd.submit_rc", static_cast<uint64_t>(submit_rc));
+        return;
+    }
+    mochi::usb::PreparedTransfer prepared{};
+    if (g_engine.start(token, &prepared) != MX_OK) {
+        mochi::log_counter("xhci.kbd.start_rc", 1);
+        (void)g_engine.stop(token, MxUsbStatus::ControllerLost);
+        return;
+    }
+
     Trb trb{};
-    trb.parameter = g_keyboard.report_phys;
+    trb.parameter = prepared.device_address;
     trb.status = sizeof(UsbBootKeyboardReport);
     trb.control = trb_type(TRB_NORMAL) | kTrbIoc | kTrbIsp;
-    (void)ring_enqueue(g_keyboard.interrupt_ring, trb);
+    const uint64_t trb_phys = ring_enqueue(g_keyboard.interrupt_ring, trb);
+    if (!trb_phys) {
+        mochi::log_counter("xhci.kbd.enqueue", 1);
+        (void)g_engine.stop(token, MxUsbStatus::ControllerLost);
+        g_event_fault = true;
+        return;
+    }
+    const mx_status_t record_rc = g_exec.record(token, submit.request_id, g_keyboard.slot_id,
+                                                g_keyboard.endpoint_id,
+                                                &g_keyboard.interrupt_ring, 1, trb_phys,
+                                                trb_phys, 0, sizeof(UsbBootKeyboardReport));
+    if (record_rc != MX_OK) {
+        mochi::log_counter("xhci.kbd.record_rc", static_cast<uint64_t>(record_rc));
+        (void)g_engine.stop(token, MxUsbStatus::ControllerLost);
+        g_event_fault = true;
+        return;
+    }
     barrier();
     doorbell_write(g_keyboard.slot_id,
                    doorbell_target_for_endpoint(g_keyboard.endpoint_id));
+    g_keyboard.transfer = token;
+}
+
+// Claim the terminal interrupt transfer: publish a full report (retaining the
+// pin under backpressure), then retire and re-arm. Exactly one interrupt
+// transfer is in flight while the keyboard is ready.
+static void settle_keyboard() {
+    if (!g_keyboard.ready) return;
+    if (!g_keyboard.transfer) {
+        if (!g_keyboard.report_pending) submit_keyboard_transfer();
+        return;
+    }
+    auto* entry = g_exec.find(g_keyboard.transfer);
+    if (!entry || !(entry->flags & mochi::usb::kExecDone)) return;
+    const auto* completion = g_engine.completion(g_keyboard.transfer);
+    if ((entry->flags & mochi::usb::kExecInvalid) || !completion) {
+        fault_keyboard();
+        return;
+    }
+    if (completion->status != MxUsbStatus::Success && completion->status != MxUsbStatus::Short) {
+        fault_keyboard();
+        return;
+    }
+    if (completion->actual_length == sizeof(UsbBootKeyboardReport)) {
+        g_keyboard.report_pending = true;
+        mochi::log_counter("xhci.kbd.done.mods",
+                           (static_cast<uint64_t>(g_keyboard.report->modifiers) << 16) |
+                           (static_cast<uint64_t>(g_keyboard.report->keys[0]) << 8) |
+                           g_keyboard.report->keys[1]);
+    }
+    if (g_keyboard.report_pending) return; // keep the report pinned until published
+    if (g_exec.reclaim(*entry, g_engine) != MX_OK) {
+        entry->flags |= mochi::usb::kExecOrphan;
+        return;
+    }
+    g_keyboard.transfer = 0;
+    submit_keyboard_transfer();
+}
+
+// Drop the keyboard stream after a fault or detach. A transfer that already
+// completed reclaims immediately; an in-flight one stays pinned (the executor
+// reclaims it when its late completion arrives).
+static void fault_keyboard() {
+    g_keyboard.ready = false;
+    g_keyboard.report_pending = false;
+    const MxUsbToken token = g_keyboard.transfer;
+    g_keyboard.transfer = 0;
+    if (!token) return;
+    if (auto* entry = g_exec.find(token)) {
+        if (entry->flags & mochi::usb::kExecDone) {
+            if (g_exec.reclaim(*entry, g_engine) != MX_OK) entry->flags |= mochi::usb::kExecOrphan;
+            return;
+        }
+        entry->flags |= mochi::usb::kExecOrphan;
+    }
+    (void)g_engine.stop(token, MxUsbStatus::Disconnected);
+}
+
+static void detach_keyboard() {
+    if (!g_keyboard.ready) return;
+    mochi::log_raw_marker("drv.usb.xhci: keyboard detached\n");
+    fault_keyboard();
+}
+
+// Reclaim records whose claimant gave up (timed-out waits, detached streams).
+static void sweep_orphans() {
+    for (uint32_t i = 0; i < g_exec.capacity(); ++i) {
+        auto* entry = g_exec.at(i);
+        if (!entry->token || !(entry->flags & mochi::usb::kExecOrphan)) continue;
+        if (!(entry->flags & mochi::usb::kExecDone)) continue;
+        if (entry->token == g_keyboard.transfer) continue;
+        if (g_exec.reclaim(*entry, g_engine) != MX_OK) g_event_fault = true;
+    }
 }
 
 static bool send_keyboard_report(const UsbBootKeyboardReport* report) {
-    return report && g_hid.try_send(*report);
+    const bool sent = report && g_hid.try_send(*report);
+    if (sent)
+        mochi::log_counter("xhci.kbd.pub.mods",
+                           (static_cast<uint64_t>(report->modifiers) << 16) |
+                           (static_cast<uint64_t>(report->keys[0]) << 8) |
+                           report->keys[1]);
+    return sent;
 }
 
-static bool enumerate_port(uint8_t port) {
+static bool enumerate_port_inner(uint8_t port) {
     UsbDevice dev{};
     dev.port = port;
-    auto checked = [](bool success, uint32_t stage) {
-        if (!success) mochi::log_counter("xhci.enumeration.failure", stage);
+    auto checked = [port](bool success, uint32_t stage) {
+        if (!success)
+            mochi::log_counter("xhci.enum.fail.port.stage",
+                               static_cast<uint64_t>(port) * 100 + stage);
         return success;
     };
     if (!checked(reset_port(port, &dev.speed), 1)) return false;
     if (!checked(device_alloc(dev), 2)) return false;
+    if (!checked(install_control_grants(dev), 11)) return false;
     if (!checked(address_device(dev), 3)) return false;
 
     if (!checked(get_descriptor(dev, 1, 0, dev.control_buffer, 18), 4)) return false;
@@ -747,11 +1056,26 @@ static bool enumerate_port(uint8_t port) {
     if (!checked(configure_keyboard_endpoint(dev), 8)) return false;
     if (!checked(set_configuration(dev, dev.config_value), 9)) return false;
     if (!checked(hid_set_protocol(dev, dev.interface_number, 0), 10)) return false;
-    (void)hid_set_idle(dev, dev.interface_number);
+    const bool idle_ok = hid_set_idle(dev, dev.interface_number);
+    mochi::log_counter("xhci.kbd.setidle_ok", idle_ok ? 1 : 0);
+    uint8_t idle_value = 0xFF;
+    (void)usb_control(dev, 0xA1, 0x02, 0, dev.interface_number, &idle_value, 1, true);
+    mochi::log_counter("xhci.kbd.getidle", idle_value);
+    uint8_t proto_value = 0xFF;
+    (void)usb_control(dev, 0xA1, 0x03, 0, dev.interface_number, &proto_value, 1, true);
+    mochi::log_counter("xhci.kbd.getproto", proto_value);
 
+    g_keyboard.port = port;
     g_keyboard.ready = true;
     submit_keyboard_transfer();
     return true;
+}
+
+static bool enumerate_port(uint8_t port) {
+    g_enum_active = true;
+    const bool ok = enumerate_port_inner(port);
+    g_enum_active = false;
+    return ok;
 }
 
 static bool enumerate_keyboard() {
@@ -762,37 +1086,21 @@ static bool enumerate_keyboard() {
 }
 
 static void service_events() {
-    Trb event{};
-    bool any = false;
-    while (g_deferred_events.pop(&event) || event_poll(&event)) {
-        any = true;
-        if (event_type(event) == TRB_TRANSFER_EVENT) {
-            const uint32_t code = completion_code(event);
-            if (!g_keyboard.ready ||
-                event_slot(event) != g_keyboard.slot_id ||
-                event_endpoint(event) != g_keyboard.endpoint_id) {
-                continue;
-            }
-            if (code == CC_SUCCESS || code == CC_SHORT_PACKET) {
-                barrier();
-                const auto residual = event.status & 0xffffffu;
-                if (residual == 0) g_keyboard.report_pending = true;
-            }
-            (void)g_keyboard.interrupt_ring.retire(1);
-            if (code != CC_SUCCESS && code != CC_SHORT_PACKET) g_keyboard.ready = false;
-            else if (!g_keyboard.report_pending) submit_keyboard_transfer();
-        }
-    }
+    const uint32_t drained = pump_events();
+
+    settle_keyboard();
     if (g_keyboard.report_pending && send_keyboard_report(g_keyboard.report)) {
         g_keyboard.report_pending = false;
-        if (g_keyboard.ready) submit_keyboard_transfer();
+        settle_keyboard();
     }
+    sweep_orphans();
+
     if (g_event_fault) {
         // Do not recycle DMA or continue after losing event ownership.
         g_keyboard.ready = false;
         op_write(kXhciUsbCmd, op_read(kXhciUsbCmd) & ~kCmdRun);
     }
-    if (!any) mx_yield();
+    if (!drained) mx_yield();
 }
 
 extern "C" [[noreturn]] void _start() {
@@ -834,10 +1142,20 @@ extern "C" [[noreturn]] void _start() {
     g_dma_arena = mochi::Arena(g_dma_base, g_dma_size);
 
     mx_handle_t state_cap = MX_NULL_HANDLE;
-    if (mx_arena_create(4096, 0, &state_cap) != MX_OK ||
-        mx_map_page(state_cap, kVaXhciState, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK ||
-        !g_deferred_events.init(reinterpret_cast<Trb*>(kVaXhciState), 4096 / sizeof(Trb))) {
+    if (mx_arena_create(kStateBytes, 0, &state_cap) != MX_OK ||
+        mx_map_page(state_cap, kVaXhciState, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) {
         mochi::log_raw_marker("drv.usb.xhci: state arena allocation failed\n");
+        while (true) mx_yield();
+    }
+    g_state_arena = mochi::Arena(reinterpret_cast<void*>(kVaXhciState), kStateBytes);
+    auto* backlog_storage = g_state_arena.alloc<Trb>(256);
+    auto* exec_storage = g_state_arena.alloc<mochi::usb::ExecEntry>(16);
+    if (!backlog_storage || !exec_storage ||
+        !g_deferred_events.init(backlog_storage, 256) ||
+        !g_exec.init(exec_storage, 16) ||
+        !g_engine.init(g_state_arena, {8, 8, 16, kControlBufferBytes,
+                                       (1u << 0) | (1u << 2) | (1u << 3)})) {
+        mochi::log_raw_marker("drv.usb.xhci: transfer ledger allocation failed\n");
         while (true) mx_yield();
     }
 
@@ -883,6 +1201,7 @@ extern "C" [[noreturn]] void _start() {
     } else {
         mochi::log_raw_marker("drv.usb.xhci: keyboard not found\n");
     }
+    g_boot_enumerated = true;
 
     mochi::boot::ready(boot);
     while (true) {

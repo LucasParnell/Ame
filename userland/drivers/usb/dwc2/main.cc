@@ -24,7 +24,7 @@ struct Runtime {
     mx_u32_t fault_stage;
     mx_handle_t irq, wake;
     bool busy, pending;
-    bool diag_logged;
+    mx_u64_t diag_next;
 };
 bool transition(Runtime& r) {
     if (!r.busy) {
@@ -108,18 +108,6 @@ bool transition(Runtime& r) {
         r.busy = false;
         r.pending = true;
         r.reply.value = static_cast<mx_u32_t>(r.role);
-        if (!r.diag_logged && r.role == MxUsbRole::Device) {
-            r.diag_logged = true;
-            char line[128];
-            const int length =
-                libk::snprintf(line, sizeof(line), "drv.usb.dwc2: pcgcctl=%x dsts=%x otgctl=%x\n",
-                               static_cast<unsigned>(r.device.diag_pcgcctl),
-                               static_cast<unsigned>(r.device.diag_dsts),
-                               static_cast<unsigned>(r.device.diag_otgctl));
-            if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
-                mochi::log_raw_marker(line);
-            }
-        }
     }
     return true;
 }
@@ -170,6 +158,26 @@ extern "C" [[noreturn]] void _start() {
                 mochi::log_raw_marker(line);
             }
             mx_exit(MX_ERR_FAULT);
+        }
+        // Live bus-state readout for interactive runs (no retained trace):
+        // printed to the phone console every 10 s while the device role is up.
+        if (r->role == MxUsbRole::Device && !r->busy) {
+            const auto now = mx_clock_ns();
+            if (!r->diag_next || now >= r->diag_next) {
+                r->diag_next = now + 10000000000ull;
+                char line[144];
+                const int length = libk::snprintf(
+                    line, sizeof(line),
+                    "drv.usb.dwc2: pcgcctl=%x dctl=%x dsts=%x otgctl=%x gint=%x\n",
+                    static_cast<unsigned>(r->device.read(kPowerClock)),
+                    static_cast<unsigned>(r->device.read(kDeviceControl)),
+                    static_cast<unsigned>(r->device.read(kDeviceStatus)),
+                    static_cast<unsigned>(r->device.read(kOtgControl)),
+                    static_cast<unsigned>(r->device.read(kInterruptStatus)));
+                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+                    mochi::log_raw_marker(line);
+                }
+            }
         }
         if (r->pending && r->links[1].tx().try_push_msg(MX_ROLE_REPLY, r->reply)) {
             r->pending = false;

@@ -11,6 +11,7 @@ enum MxPlatformOp : mx_u32_t {
     MX_PLATFORM_USB_REFERENCE = 6,
     MX_PLATFORM_I2C_CLOCK_ON = 7,
     MX_PLATFORM_DISPLAY_HANDOFF = 8,
+    MX_PLATFORM_I2C_PINS = 9,
 };
 constexpr mx_u32_t MX_ANNE_USB_RESETS = (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) |
                                         (1u << 12) | (1u << 13) | (1u << 14) | (1u << 27);

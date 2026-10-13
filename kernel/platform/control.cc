@@ -1,6 +1,7 @@
 // Cold board mechanisms. A shared clock register is never mapped into an
 // individual driver. Hardware masks are fixed here; userland owns sequence.
 #include "anko/platform_control.h"
+#include "anko/log.h"
 #include "anko/spinlock.h"
 #include "libk/mmio.h"
 #include "libk/dma.h"
@@ -71,6 +72,29 @@ SysError control(Control& object, u32 op, u64 arg, u64 owner) {
     } else if (object.domain == Domain::I2c && op == MX_PLATFORM_I2C_CLOCK_ON && !arg) {
         crg.write32(0x20, 1u << 27);
         crg.write32(0x7c, 1u << 27);
+    } else if (object.domain == Domain::I2c && op == MX_PLATFORM_I2C_PINS && !arg) {
+        // i2c4 (fdf0d000) SCL/SDA are GPIO_037/038. Values mirror the deployed
+        // vendor DT: pmx function = 1, cfg = 0. Read-modify-write the 3-bit
+        // function field; readbacks (pads + clock/reset status) feed the log.
+        libk::Mmio pads{reinterpret_cast<volatile u8*>(0xe896c000), 4096};
+        u32 v = 0;
+        (void)pads.read32(0x88, &v);
+        pads.write32(0x88, (v & ~7u) | 1u);
+        (void)pads.read32(0x8c, &v);
+        pads.write32(0x8c, (v & ~7u) | 1u);
+        pads.write32(0x894, 0);
+        pads.write32(0x898, 0);
+        libk::dma::order_mmio();
+        u32 scl = 0, sda = 0, cfg0 = 0, cfg1 = 0, stat2 = 0, rst2 = 0;
+        (void)pads.read32(0x88, &scl);
+        (void)pads.read32(0x8c, &sda);
+        (void)pads.read32(0x894, &cfg0);
+        (void)pads.read32(0x898, &cfg1);
+        crg.read32(0x2c, &stat2);
+        crg.read32(0x80, &rst2);
+        anko::log::writef(anko::log::Level::Info, "kernel/platform",
+                          "i2c4 pins pmx=%08x/%08x cfg=%08x/%08x stat2=%08x rst2=%08x", scl, sda,
+                          cfg0, cfg1, stat2, rst2);
     } else if (object.domain == Domain::Display && op == MX_PLATFORM_DISPLAY_HANDOFF && !arg) {
 #ifdef ANKO_ANNE_FRAMEBUFFER
         anne::native_display::handoff_console();

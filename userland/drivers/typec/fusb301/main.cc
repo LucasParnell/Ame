@@ -15,20 +15,30 @@ struct Runtime {
 extern "C" [[noreturn]] void _start() {
     const auto* boot = mochi::boot::map();
     (void)mochi::log_map_from_boot(boot, mochi::va::native_driver::kLog, "drv.typec.fusb301");
+    constexpr auto service = "drv.typec.fusb301";
     auto arena = mochi::make_state(mochi::va::native_driver::kState, 16384);
     auto* r = arena.alloc<Runtime>();
     if (!r) {
-        mochi::boot::invalid_boot();
+        mochi::driver::startup_failed(service, "state arena", MX_ERR_NOMEM);
     }
     r->bus = {mochi::driver::link(boot, "i2c", mochi::va::native_driver::kLinks), mx_clock_ns(),
               static_cast<mx_u16_t>(mochi::driver::value(boot, "i2c.address"))};
     r->control = mochi::driver::link(
         boot, "typec", (mochi::va::native_driver::kLinks + mochi::va::native_driver::kLinkStride));
+    if (!r->control.valid()) mochi::driver::startup_failed(service, "typec link");
+    if (!r->bus.endpoint.valid()) mochi::driver::startup_failed(service, "i2c link");
     mx_u8_t id = 0;
-    if (!r->control.valid() || !r->bus.endpoint.valid() || !r->bus.read(1, id) || !id ||
-        id == 255 || !r->bus.write(2, 1u << 4)) {
-        mochi::boot::invalid_boot(); // DRP, never force DFP onto powered Mac
+    if (!r->bus.read(1, id)) mochi::driver::startup_failed(service, "device id read");
+    if (!id || id == 255) {
+        char line[80];
+        const int length = libk::snprintf(line, sizeof(line), "device id=0x%02x",
+                                          static_cast<unsigned>(id));
+        if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+            mochi::log_raw_marker(line);
+        }
+        mochi::driver::startup_failed(service, "device id");
     }
+    if (!r->bus.write(2, 1u << 4)) mochi::driver::startup_failed(service, "port mode write");
     mochi::boot::ready(boot);
     for (;;) {
         if (r->pending && r->control.tx().try_push_msg(MX_TYPEC_REPLY, r->reply)) {

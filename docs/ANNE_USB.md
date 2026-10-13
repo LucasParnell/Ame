@@ -35,6 +35,13 @@ A controller/PHY owner death asserts reset before capabilities and arenas are
 reclaimed. The kernel exposes fixed board clock/reset masks rather than shared
 CRG/PCTRL mappings. ABB gate changes use the firmware hardware lock.
 
+The FUSB301/Hi6523 bus is `fdf0d000` — the kernel DT labels the controller
+`i2c4` while Linux enumerates it as `i2c-2`. Its SCL/SDA pads are
+GPIO_037/GPIO_038; mux value 1 selects the I2C4 function and 0 parks them.
+`MX_PLATFORM_I2C_PINS` applies the function mux and pad-config defaults once
+at I2C service startup and logs pad, clock and reset readbacks; before V7 no
+native code programmed these pads.
+
 The verified physical framebuffer is handed to `io.framebuffer` with consistent
 Normal-NC aliases. Kernel screen painting stops at handoff while persistent
 native tracing continues. The signed terminal view is 59 columns by 61 rows,
@@ -113,6 +120,10 @@ was restored and verified in TWRP. V4 added console/progress corrections and
 cache snapshots. The root cause was a duplicate native CRG mapping that made
 bootstrap silently continue with MMU/caches off. V5 fixes the mapping and stops
 boot on MMU setup failure. It reached `tty.fb0: ready`; CDC/physical command
-entry are still pending, and stock restore was acknowledged again. Cortex-A53 CPUECTLR observations use
+entry remain pending, and stock restore was acknowledged again. V6 named the
+startup operations and the failing service, identifying `drv.typec.fusb301`
+as the first casualty of the unprogrammed I2C pads. V7 muxes those pads,
+names each Type-C/power startup stage and logs the controller id and abort
+source; its capture is pending. Cortex-A53 CPUECTLR observations use
 [Arm DDI 0500J, section 4.3.79](https://documentation-service.arm.com/static/6040c321ee937942ba301626);
 they preserve firmware-controlled coherency and retention settings.

@@ -218,7 +218,8 @@ bool map_bootstrap_identity(VmSpace& space) {
     // Fixed device pages used by capability-scoped kernel board mechanisms.
 #ifndef ANKO_ANNE_DIAG_TEST
     if (!map_identity_range(space, 0xfff35000, PAGE_SIZE, true) ||
-        !map_identity_range(space, 0xe8a09000, PAGE_SIZE, true)) return false;
+        !map_identity_range(space, 0xe8a09000, PAGE_SIZE, true) ||
+        !map_identity_range(space, 0xe896c000, PAGE_SIZE, true)) return false;
 #endif
     // Persistent native console lies in reserved RAM outside the allocator bank.
 #ifdef ANKO_ANNE_WATCHDOG

@@ -129,6 +129,11 @@ arguments cannot specify arbitrary physical addresses. IRQ routing, PIO register
 access, role policy and USB classes retain their separate contracts. A controller
 owner exit fences hardware before arena/capability reclamation.
 
+`MX_PLATFORM_I2C_PINS` (9) selects the fixed Type-C bus pad function
+(GPIO_037/038 -> I2C4) and pad-config defaults, then reports pad and
+clock/reset readbacks to the kernel log; it takes no arguments and is
+idempotent.
+
 Signed manifest bindings can name a declared hardware boot resource (`boot`) or
 an inline configuration value (`value`) as alternatives to a channel. Init grants
 only rights derived from its actual capability. The descriptor admits 32 service

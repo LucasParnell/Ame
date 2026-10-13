@@ -45,20 +45,30 @@ bool enable(Runtime& r) {
 extern "C" [[noreturn]] void _start() {
     const auto* boot = mochi::boot::map();
     (void)mochi::log_map_from_boot(boot, mochi::va::native_driver::kLog, "drv.power.hi6523");
+    constexpr auto service = "drv.power.hi6523";
     auto arena = mochi::make_state(mochi::va::native_driver::kState, 16384);
     auto* r = arena.alloc<Runtime>();
     if (!r) {
-        mochi::boot::invalid_boot();
+        mochi::driver::startup_failed(service, "state arena", MX_ERR_NOMEM);
     }
     r->bus = {mochi::driver::link(boot, "i2c", mochi::va::native_driver::kLinks), mx_clock_ns(),
               static_cast<mx_u16_t>(mochi::driver::value(boot, "i2c.address"))};
     r->control = mochi::driver::link(
         boot, "power", (mochi::va::native_driver::kLinks + mochi::va::native_driver::kLinkStride));
+    if (!r->control.valid()) mochi::driver::startup_failed(service, "power link");
+    if (!r->bus.endpoint.valid()) mochi::driver::startup_failed(service, "i2c link");
     mx_u8_t id = 0;
-    if (!r->control.valid() || !r->bus.endpoint.valid() || !r->bus.read(4, id) ||
-        (id != 1 && id != 2 && id != 3) || !disable(*r)) {
-        mochi::boot::invalid_boot();
+    if (!r->bus.read(4, id)) mochi::driver::startup_failed(service, "device id read");
+    if (id != 1 && id != 2 && id != 3) {
+        char line[80];
+        const int length = libk::snprintf(line, sizeof(line), "device id=0x%02x",
+                                          static_cast<unsigned>(id));
+        if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+            mochi::log_raw_marker(line);
+        }
+        mochi::driver::startup_failed(service, "device id");
     }
+    if (!disable(*r)) mochi::driver::startup_failed(service, "boost disable");
     mochi::boot::ready(boot);
     for (;;) {
         const auto now = mx_clock_ns();

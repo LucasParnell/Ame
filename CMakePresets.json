@@ -121,7 +121,7 @@
         "MOCHI_SYSTEM_PROFILE": "huawei-anne-usb",
         "ANKO_ANNE_DIAG_CAPTURE_SECONDS": "60",
         "ANKO_ANNE_DIAG_RESET_AT_READY": false,
-        "ANKO_ANNE_DIAG_RUN_TAG": "anne-usb-v6"
+        "ANKO_ANNE_DIAG_RUN_TAG": "anne-usb-v7"
       }
     }
   ],

@@ -13,6 +13,7 @@ struct Executor {
     MxI2cReply result;
     mx_u64_t deadline;
     mx_u32_t queued, received;
+    mx_u32_t abort_source;
     bool stop;
     mx_u32_t read(mx_u32_t reg) {
         mx_u32_t v = 0;
@@ -34,6 +35,7 @@ struct Executor {
         request = next;
         result = {next.id, MX_OK, 0, {}};
         queued = received = 0;
+        abort_source = 0;
         stop = false;
         deadline = now + 80000000ull;
         write(0x6c, 0);
@@ -62,7 +64,7 @@ struct Executor {
             write(0, 1 | (1 << 1) | (1 << 5) | (1 << 6));
             write(4, request.address);
             // Signed board clock is 120 MHz. Conservative 100 kHz timing;
-            // retain recovery pinmux rather than modifying unrelated IOMUX.
+            // pads are muxed once by MX_PLATFORM_I2C_PINS before first use.
             write(0x14, 600);
             write(0x18, 650);
             write(0x38, 0);
@@ -74,7 +76,7 @@ struct Executor {
         if (phase == Phase::Running) {
             const auto interrupts = read(0x34);
             if (interrupts & (1 << 6)) {
-                (void)read(0x80);
+                abort_source = read(0x80);
                 (void)read(0x54);
                 result.status = MX_ERR_FAULT;
                 write(0x6c, 0);

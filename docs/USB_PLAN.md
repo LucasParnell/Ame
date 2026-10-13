@@ -41,7 +41,9 @@ has not enumerated CDC. Stock restore was acknowledged; TWRP re-verification
 and retained service-startup trace collection are pending. Early diagnostics
 also recycle one row at overflow, and format CRC/SHA progress hooks let the
 boot layer feed the watchdog during cold authentication. Physical keyboard and
-Mac injection are not yet hardware verified.
+Mac injection are not yet hardware verified. V6 names startup operations and the
+failing service; V7 brings up the I2C4 pads explicitly (mux + readbacks) and names each
+Type-C/power startup stage. Capture pending.
 
 The live host path is split across three processes:
 

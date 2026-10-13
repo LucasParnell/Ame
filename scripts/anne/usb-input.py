@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Send keyboard usages to Ame's development USB input service.
+"""Talk to Ame's development USB endpoints from a Mac.
 
-CDC uses only Python's standard library on macOS. Optional bulk uses PyUSB and
-libusb. Both transports speak the same bounded AMK1 framing and wait for an ACK
-that proves ui.input's producer ring accepted each event. This does not turn the
-Mac USB controller into a HID peripheral; Ame's separate gadget receives bytes.
+`console` is the raw serial console served by dev.serial: the CDC serial port
+carries the Midix shell's input and output byte streams, so `screen
+/dev/cu.usbmodem*` works the same way (stdlib only, needs no PyUSB). The framed
+keycode commands (`text`, `key`, `interactive`, `release`) inject keyboard
+usages through the bulk function (--bulk, needs PyUSB and libusb) and wait for
+an ACK that proves ui.input's producer ring accepted each event. Framing does
+not turn the Mac USB controller into a HID peripheral; Ame's separate gadget
+receives bytes.
 """
 from __future__ import annotations
 
@@ -191,6 +195,71 @@ def interactive(sender: Sender):
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, previous)
 
 
+def write_all(fd: int, data: bytes, timeout: float = 3.0):
+    view = memoryview(data)
+    deadline = time.monotonic() + timeout
+    while view:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([], [fd], [], remaining)[1]:
+            raise TimeoutError("Ame serial write timed out")
+        try:
+            size = os.write(fd, view)
+        except BlockingIOError:
+            continue
+        if not size:
+            raise OSError("Ame serial disconnected")
+        view = view[size:]
+
+
+def console_mode(path: str, send: str | None, enter: bool, read_seconds: float) -> int:
+    """Raw serial console: full-duplex bytes between this terminal and the shell.
+
+    With --send the bytes are written, then incoming output is printed for
+    --read seconds. Without it the terminal is a live `screen`-style console;
+    Ctrl-] exits.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    previous = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        attrs = termios.tcgetattr(fd)
+        attrs[4] = attrs[5] = termios.B115200
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        if send is not None:
+            write_all(fd, send.encode() + (b"\r" if enter else b""))
+            end = time.monotonic() + read_seconds
+            out = bytearray()
+            while time.monotonic() < end:
+                if select.select([fd], [], [], 0.2)[0]:
+                    chunk = os.read(fd, 4096)
+                    if not chunk:
+                        break
+                    out.extend(chunk)
+            sys.stdout.write(out.decode(errors="replace"))
+            sys.stdout.flush()
+            return 0
+        print("Ame serial console; Ctrl-] exits.", file=sys.stderr)
+        while True:
+            ready, _, _ = select.select([sys.stdin, fd], [], [], 30)
+            for source in ready:
+                data = os.read(source.fileno(), 4096)
+                if not data:
+                    return 0
+                if source is sys.stdin:
+                    if b"\x1d" in data:
+                        head = data.split(b"\x1d", 1)[0]
+                        if head:
+                            write_all(fd, head)
+                        return 0
+                    write_all(fd, data)
+                else:
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, previous)
+        os.close(fd)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     transport = parser.add_mutually_exclusive_group()
@@ -203,19 +272,29 @@ def main() -> int:
     key = sub.add_parser("key"); key.add_argument("key", help="Named key, character or ctrl+letter")
     sub.add_parser("interactive")
     sub.add_parser("release")
+    console = sub.add_parser("console", help="Raw serial console for the Midix shell")
+    console.add_argument("--send", help="Send literal text instead of interacting; prints output")
+    console.add_argument("--enter", action="store_true", help="Append a carriage return to --send")
+    console.add_argument("--read", type=float, default=3.0,
+                         help="Seconds of output to print after --send")
     args = parser.parse_args()
     link = None
     try:
-        if args.bulk:
-            link = Bulk(args.vid, args.pid)
-        else:
+        if args.command == "console":
+            if args.bulk:
+                raise ValueError("console uses the CDC serial port; omit --bulk")
             path = args.serial
             if not path:
                 paths = glob.glob("/dev/cu.usbmodem*")
                 if len(paths) != 1:
                     raise ValueError("Use --serial with Ame's USB serial device")
                 path = paths[0]
-            link = Serial(path)
+            return console_mode(path, args.send, args.enter, args.read)
+        if not args.bulk:
+            raise ValueError(
+                "keycode framing moved to --bulk; the CDC serial port now serves "
+                "the raw shell console — use `console` or screen")
+        link = Bulk(args.vid, args.pid)
         sender = Sender(link)
         sender.request(HELLO)
         if args.command == "text":

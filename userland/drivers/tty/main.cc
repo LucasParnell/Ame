@@ -33,9 +33,12 @@ struct TtyState {
     mx_handle_t activation;
     mochi::framebuffer::Client fb;
     mochi::terminal::OutputSource mirror,shell_output;
+    mochi::terminal::InputSource serial_input;
+    mochi::terminal::OutputSink serial_output;
     mochi::input::EventSource input;
     mochi::terminal::InputSink shell_input;
     bool shell_attached,render_suppressed,cursor_visible,input_unlocked;
+    uint64_t serial_in_dropped, serial_out_dropped;
     uint32_t cursor_row,cursor_col,esc_streak;
 
     uint32_t cursor_x;
@@ -346,6 +349,25 @@ static bool handle_input_event(const InputEvent& event) {
     return false;
 }
 
+// Raw serial console input (dev.serial): bytes from the host terminal feed
+// the shell directly, the same sink the keyboard path writes into. A serial
+// terminal sends exactly what msh's line editor expects, so nothing is
+// translated; under shell backpressure bytes are dropped and counted.
+static bool drain_serial_input(uint32_t max_slots) {
+    if (!g_tty->serial_input.ring) return false;
+    bool any = false;
+    RingSlot slot{};
+    uint32_t drained = 0;
+    while (drained < max_slots && g_tty->serial_input.try_read(&slot)) {
+        if (!g_tty->shell_input.try_write_bytes(slot.payload, slot.length)) {
+            g_tty->serial_in_dropped += slot.length;
+        }
+        any = true;
+        ++drained;
+    }
+    return any;
+}
+
 static bool drain_input(uint32_t max_slots) {
     if (!g_tty->input.ring) return false;
     bool any = false;
@@ -379,6 +401,12 @@ static bool drain_shell_output(uint32_t max_slots) {
     uint32_t drained = 0;
     while (drained < max_slots && g_tty->shell_output.try_read(&slot)) {
         tty_write(reinterpret_cast<const char*>(slot.payload), slot.length);
+        // Mirror the same bytes to the serial console bridge when attached.
+        // The serial side drops under backpressure and never blocks rendering.
+        if (g_tty->serial_output.ring &&
+            !g_tty->serial_output.try_write_bytes(slot.payload, slot.length)) {
+            g_tty->serial_out_dropped += slot.length;
+        }
         any = true;
         ++drained;
     }
@@ -411,6 +439,10 @@ extern "C" [[noreturn]] void _start() {
         {"term.input.ring", kVaShellInputRing, "term.input.doorbell"})};
     g_tty->shell_output = {mochi::boot::map_ring(boot,
         {"term.output.ring", kVaShellOutputRing, "term.output.doorbell"})};
+    g_tty->serial_input = {mochi::boot::map_ring(boot,
+        {"serial.in.ring", kVaSerialInRing, "serial.in.doorbell"})};
+    g_tty->serial_output = {mochi::boot::map_ring(boot,
+        {"serial.out.ring", kVaSerialOutRing, "serial.out.doorbell"})};
     g_tty->shell_attached = g_tty->shell_input.valid() && g_tty->shell_output.valid();
     if (g_tty->shell_attached) {
         mochi::log_raw_marker("tty.fb0: shell terminal attached\n");
@@ -441,15 +473,17 @@ extern "C" [[noreturn]] void _start() {
     tty_cursor_show();
     fb_present();
 
-    mochi::SpscEndpoint readers[4]{};
+    mochi::SpscEndpoint readers[5]{};
     readers[0].rx_ring=g_tty->input.ring; readers[0].order=g_tty->input.order;
     readers[1].rx_ring=g_tty->mirror.ring; readers[1].order=g_tty->mirror.order;
     readers[2].rx_ring=g_tty->shell_output.ring; readers[2].order=g_tty->shell_output.order;
     readers[3].rx_ring=g_tty->fb.reply.ring; readers[3].order=g_tty->fb.reply.order;
+    readers[4].rx_ring=g_tty->serial_input.ring; readers[4].order=g_tty->serial_input.order;
     mochi::boot::ready(boot);
     while (true) {
         if(!g_tty->input_unlocked&&mx_doorbell_read(g_tty->activation)) g_tty->input_unlocked=true;
         const bool any_input = g_tty->input_unlocked&&drain_input(64);
+        const bool any_serial = g_tty->input_unlocked&&drain_serial_input(64);
         const bool any_shell = drain_shell_output(64);
         const uint32_t mirror_depth = g_tty->mirror.depth();
         const bool bulk_mirror = mirror_depth > 8;
@@ -460,11 +494,11 @@ extern "C" [[noreturn]] void _start() {
         if (bulk_mirror && any_mirror) {
             tty_redraw_all();
         }
-        if (any_mirror || any_input || any_shell) {
+        if (any_mirror || any_input || any_serial || any_shell) {
             tty_cursor_show();
             fb_present();
         } else {
-            mochi::driver::idle(readers,4,g_tty->input.doorbell,mx_clock_ns()+10000000);
+            mochi::driver::idle(readers,5,g_tty->input.doorbell,mx_clock_ns()+10000000);
         }
     }
 }

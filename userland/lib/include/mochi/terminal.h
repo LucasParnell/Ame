@@ -45,6 +45,15 @@ struct OutputSource : ByteEndpoint {
     }
 };
 
+// Read side: input bytes headed for the shell (shell <- serial bridge).
+struct InputSource : ByteEndpoint {
+    bool try_read(RingSlot* out) const {
+        if (!out || !ring) return false;
+        if (!try_pop(out)) return false;
+        return message_valid(*out) && out->type == MX_TERM_INPUT_BYTES;
+    }
+};
+
 // Write side: input bytes into the shell (ui.input/tty.fb0 -> msh).
 struct InputSink : ByteEndpoint {
     bool try_write_bytes(const void* data, uint32_t len) const {

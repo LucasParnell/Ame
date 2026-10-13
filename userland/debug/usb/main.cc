@@ -1,5 +1,9 @@
-// Development authority: opaque CDC/bulk bytes -> validated key events on its
-// OWN producer ring. ui.input remains the single layout/lock/terminal policy.
+// Development authority: opaque bulk bytes -> validated key events on its OWN
+// producer ring. ui.input remains the single layout/lock/terminal policy.
+//
+// The bulk function carries the framed keycode protocol (scripts/anne/
+// usb-input.py --bulk). The ACM stream belongs to dev.serial, which serves
+// the shell as a raw serial console.
 #include "mochi/driver.h"
 #include "mochi/input.h"
 #include "mochi/log.h"
@@ -17,15 +21,15 @@ struct Source {
     bool attached, held, reply_pending;
 };
 struct Runtime {
-    mochi::SpscEndpoint links[2];
+    mochi::SpscEndpoint link;
     mochi::input::EventSink input;
-    Source sources[2];
+    Source source;
 };
-void event(Source& s, mx_u32_t index, mx_u32_t type, mx_u32_t key = 0, mx_u32_t modifiers = 0) {
-    s.events[s.count++] = {type,         key,          modifiers, 0, 0xf000000000000001ull + index,
+void event(Source& s, mx_u32_t type, mx_u32_t key = 0, mx_u32_t modifiers = 0) {
+    s.events[s.count++] = {type,         key,          modifiers, 0, 0xf000000000000001ull,
                            s.generation, ++s.sequence, 7,         0};
 }
-void frame(Source& s, mx_u32_t index) {
+void frame(Source& s) {
     using namespace midix::debug;
     const auto* bytes = s.parser.bytes;
     const auto sequence = libk::load_le<mx_u32_t>(bytes + 4);
@@ -36,15 +40,15 @@ void frame(Source& s, mx_u32_t index) {
         status = MX_ERR_INVALID;
     } else if (type == kHello && !length) {
         if (s.attached) {
-            event(s, index, INPUT_SOURCE_RESET);
+            event(s, INPUT_SOURCE_RESET);
         }
         s.generation = mx_clock_ns();
         s.sequence = 0;
-        event(s, index, INPUT_SOURCE_ATTACHED);
+        event(s, INPUT_SOURCE_ATTACHED);
         s.attached = true;
     } else if (type == kRelease && !length) {
         if (s.attached) {
-            event(s, index, INPUT_SOURCE_RESET);
+            event(s, INPUT_SOURCE_RESET);
         }
         s.attached = false;
     } else if (type == kKey && length == 4 && s.attached) {
@@ -54,9 +58,9 @@ void frame(Source& s, mx_u32_t index) {
             status = MX_ERR_INVALID;
         } else {
             if (s.wire_sequence && sequence != s.wire_sequence + 1) {
-                event(s, index, INPUT_SOURCE_RESET);
+                event(s, INPUT_SOURCE_RESET);
             }
-            event(s, index, pressed ? INPUT_KEY_DOWN : INPUT_KEY_UP, key, modifiers);
+            event(s, pressed ? INPUT_KEY_DOWN : INPUT_KEY_UP, key, modifiers);
         }
     } else {
         status = MX_ERR_BAD_PROTOCOL;
@@ -76,48 +80,54 @@ void frame(Source& s, mx_u32_t index) {
     s.reply_pending = true;
     s.parser.reset();
 }
-void service(Runtime& r, mx_u32_t i) {
-    auto& s = r.sources[i];
+bool service(Runtime& r) {
+    auto& s = r.source;
+    bool progress = false;
     while (s.next < s.count) {
         if (!r.input.try_send(s.events[s.next])) {
-            return;
+            return progress;
         }
         ++s.next;
+        progress = true;
     }
     s.count = s.next = 0;
     if (s.reply_pending) {
-        if (!r.links[i].tx().try_push_msg(MX_FUNCTION_TX, s.reply)) {
-            return;
+        if (!r.link.tx().try_push_msg(MX_FUNCTION_TX, s.reply)) {
+            return progress;
         }
         s.reply_pending = false;
+        progress = true;
     }
     if (!s.held) {
         MxRingSlot slot{};
-        if (!r.links[i].try_recv(&slot)) {
-            return;
+        if (!r.link.try_recv(&slot)) {
+            return progress;
         }
+        progress = true;
         if (slot.type == MX_FUNCTION_RESET) {
             if (s.attached) {
-                event(s, i, INPUT_SOURCE_RESET);
+                event(s, INPUT_SOURCE_RESET);
             }
             s.attached = false;
             s.wire_sequence = 0;
             s.parser.reset();
-            return;
+            return progress;
         }
         if (!mochi::message_get(slot, &s.chunk, MX_FUNCTION_RX) || s.chunk.length > 32) {
-            return;
+            return progress;
         }
         s.position = 0;
         s.held = true;
     }
     while (s.position < s.chunk.length) {
+        progress = true;
         if (s.parser.push(s.chunk.data[s.position++])) {
-            frame(s, i);
-            return;
+            frame(s);
+            return progress;
         }
     }
     s.held = false;
+    return progress;
 }
 } // namespace
 extern "C" [[noreturn]] void _start() {
@@ -128,24 +138,25 @@ extern "C" [[noreturn]] void _start() {
     if (!r) {
         mochi::boot::invalid_boot();
     }
-    r->links[0] = mochi::driver::link(boot, "stream.0", mochi::va::native_driver::kLinks);
-    r->links[1] = mochi::driver::link(
-        boot, "stream.1",
-        (mochi::va::native_driver::kLinks + mochi::va::native_driver::kLinkStride));
+    r->link = mochi::driver::link(boot, "stream", mochi::va::native_driver::kLinks);
     r->input = {mochi::boot::map_ring(
         boot, {"test.input.ring",
-               (mochi::va::native_driver::kLinks + 2 * mochi::va::native_driver::kLinkStride),
+               (mochi::va::native_driver::kLinks + mochi::va::native_driver::kLinkStride),
                "test.input.doorbell"})};
-    if (!r->links[0].valid() || !r->links[1].valid() || !r->input.valid()) {
+    if (!r->link.valid() || !r->input.valid()) {
         mochi::boot::invalid_boot();
     }
-    for (auto& s : r->sources) {
-        s.generation = mx_clock_ns();
-    }
+    r->source.generation = mx_clock_ns();
     mochi::boot::ready(boot);
     for (;;) {
-        service(*r, 0);
-        service(*r, 1);
-        mochi::driver::idle(r->links, 2, r->links[0].rx_doorbell, mx_clock_ns() + 10000000);
+        if (mochi::driver::run_batch([&] { return service(*r); })) {
+            mx_yield();
+            continue;
+        }
+        const auto& source = r->source;
+        const bool retained = source.held || source.reply_pending || source.next < source.count;
+        mochi::driver::idle(&r->link, 1, r->link.rx_doorbell,
+                            retained ? mx_clock_ns() + mochi::driver::kBackpressureRetryNs : 0,
+                            retained ? 0u : 1u);
     }
 }

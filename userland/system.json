@@ -333,6 +333,20 @@
       "kind": "doorbell"
     },
     {
+      "name": "serial_in_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "serial_out_ring",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "serial_console_db",
+      "kind": "doorbell"
+    },
+    {
       "name": "i2c_typec_a",
       "kind": "ring",
       "order": 6
@@ -876,6 +890,38 @@
           "name": "console.activate",
           "rights": [
             "wait"
+          ]
+        },
+        {
+          "channel": "serial_in_ring",
+          "name": "serial.in.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "input_tty_db",
+          "name": "serial.in.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "serial_out_ring",
+          "name": "serial.out.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "serial_console_db",
+          "name": "serial.out.doorbell",
+          "rights": [
+            "notify"
           ]
         }
       ]
@@ -2275,7 +2321,7 @@
           ]
         },
         {
-          "channel": "usb_wake_9",
+          "channel": "serial_console_db",
           "name": "stream.tx.db",
           "rights": [
             "notify"
@@ -2386,40 +2432,8 @@
       "uses": [],
       "bindings": [
         {
-          "channel": "debug_acm_b",
-          "name": "stream.0.tx",
-          "rights": [
-            "read",
-            "write",
-            "map"
-          ]
-        },
-        {
-          "channel": "debug_acm_a",
-          "name": "stream.0.rx",
-          "rights": [
-            "read",
-            "write",
-            "map"
-          ]
-        },
-        {
-          "channel": "usb_wake_7",
-          "name": "stream.0.tx.db",
-          "rights": [
-            "notify"
-          ]
-        },
-        {
-          "channel": "usb_wake_9",
-          "name": "stream.0.rx.db",
-          "rights": [
-            "wait"
-          ]
-        },
-        {
           "channel": "debug_bulk_b",
-          "name": "stream.1.tx",
+          "name": "stream.tx",
           "rights": [
             "read",
             "write",
@@ -2428,7 +2442,7 @@
         },
         {
           "channel": "debug_bulk_a",
-          "name": "stream.1.rx",
+          "name": "stream.rx",
           "rights": [
             "read",
             "write",
@@ -2437,14 +2451,14 @@
         },
         {
           "channel": "usb_wake_8",
-          "name": "stream.1.tx.db",
+          "name": "stream.tx.db",
           "rights": [
             "notify"
           ]
         },
         {
           "channel": "usb_wake_9",
-          "name": "stream.1.rx.db",
+          "name": "stream.rx.db",
           "rights": [
             "wait"
           ]
@@ -2463,6 +2477,86 @@
           "name": "test.input.doorbell",
           "rights": [
             "notify"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "dev.serial",
+      "object": "dev.serial",
+      "bundle": "system",
+      "principal": "native_sandboxed",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "usb.fn.acm"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "debug_acm_b",
+          "name": "stream.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "debug_acm_a",
+          "name": "stream.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_7",
+          "name": "stream.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "serial_console_db",
+          "name": "stream.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "serial_in_ring",
+          "name": "serial.in.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "input_tty_db",
+          "name": "serial.in.doorbell",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "serial_out_ring",
+          "name": "serial.out.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "serial_console_db",
+          "name": "serial.out.doorbell",
+          "rights": [
+            "wait"
           ]
         }
       ]
@@ -2522,6 +2616,7 @@
         "usb.fn.acm",
         "usb.fn.bulk",
         "dev.usb-input",
+        "dev.serial",
         "msh"
       ],
       "overrides": {
@@ -2612,7 +2707,8 @@
                 "map"
               ]
             }
-          ]
+          ],
+          "affinity": 0
         },
         "io.framebuffer": {
           "bindings": [
@@ -2782,7 +2878,8 @@
               "name": "tty.scale",
               "value": 2
             }
-          ]
+          ],
+          "affinity": 0
         },
         "msh": {
           "start_after": [
@@ -2791,7 +2888,35 @@
             "io.usb.role",
             "dev.usb-input"
           ],
-          "uses": []
+          "uses": [],
+          "affinity": 0
+        },
+        "drv.usb.dwc2": {
+          "affinity": 0
+        },
+        "drv.usb.hid": {
+          "affinity": 0
+        },
+        "io.usb.gadget": {
+          "affinity": 0
+        },
+        "usb.fn.acm": {
+          "affinity": 0
+        },
+        "usb.fn.bulk": {
+          "affinity": 0
+        },
+        "dev.usb-input": {
+          "affinity": 0
+        },
+        "ui.input": {
+          "affinity": 0
+        },
+        "io.console": {
+          "bindings": []
+        },
+        "dev.serial": {
+          "affinity": 0
         }
       }
     }

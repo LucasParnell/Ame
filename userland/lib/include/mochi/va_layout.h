@@ -119,6 +119,8 @@ constexpr uint64_t kVaMirrorRing      = 0x1904'0000ull;
 constexpr uint64_t kVaInputRing       = 0x1906'0000ull;
 constexpr uint64_t kVaShellInputRing  = 0x1908'0000ull; // tty -> msh
 constexpr uint64_t kVaShellOutputRing = 0x190A'0000ull; // msh -> tty
+constexpr uint64_t kVaSerialInRing    = 0x190C'0000ull; // serial bridge -> tty (shell input)
+constexpr uint64_t kVaSerialOutRing   = 0x190E'0000ull; // tty -> serial bridge (shell output)
 }
 
 // --- msh -------------------------------------------------------------------

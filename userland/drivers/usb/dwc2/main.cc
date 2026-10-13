@@ -24,6 +24,7 @@ struct Runtime {
     mx_u32_t fault_stage;
     mx_handle_t irq, wake;
     bool busy, pending;
+    bool diag_logged;
 };
 bool transition(Runtime& r) {
     if (!r.busy) {
@@ -107,6 +108,18 @@ bool transition(Runtime& r) {
         r.busy = false;
         r.pending = true;
         r.reply.value = static_cast<mx_u32_t>(r.role);
+        if (!r.diag_logged && r.role == MxUsbRole::Device) {
+            r.diag_logged = true;
+            char line[128];
+            const int length =
+                libk::snprintf(line, sizeof(line), "drv.usb.dwc2: pcgcctl=%x dsts=%x otgctl=%x\n",
+                               static_cast<unsigned>(r.device.diag_pcgcctl),
+                               static_cast<unsigned>(r.device.diag_dsts),
+                               static_cast<unsigned>(r.device.diag_otgctl));
+            if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+                mochi::log_raw_marker(line);
+            }
+        }
     }
     return true;
 }

@@ -23,6 +23,7 @@ struct Device {
     mx_u8_t address;
     MxUsbSpeed speed;
     bool active, setup_pending, event_pending, setup_flushing;
+    mx_u32_t diag_pcgcctl, diag_dsts, diag_otgctl;
     mx_u32_t read(mx_u32_t reg) const {
         mx_u32_t v = 0;
         registers.read(registers.context, reg, &v);
@@ -47,6 +48,11 @@ struct Device {
         if (tx < 16) {
             return false;
         }
+        // Restart the PHY clock before touching the device state machine. The
+        // vendor device init does this first; PCGCCTL is not cleared by the
+        // core soft reset, so a PHY left gated by the bootloader would keep
+        // the bus silent (no D+ pull-up ever visible to the host).
+        write(kPowerClock, 0);
         write(kDeviceControl, read(kDeviceControl) | (1u << 1)); // disconnect during construction
         write(kRxFifoSize, rx);
         write(kNonperiodicTxSize, rx | (tx << 16));
@@ -67,6 +73,10 @@ struct Device {
         reset_endpoints();
         write(kDeviceControl, read(kDeviceControl) & ~(1u << 1));
         libk::dma::order_mmio();
+        // Cold-path readback for the bring-up log.
+        diag_pcgcctl = read(kPowerClock);
+        diag_dsts = read(kDeviceStatus);
+        diag_otgctl = read(kOtgControl);
         return true;
     }
     void reset_endpoints() {

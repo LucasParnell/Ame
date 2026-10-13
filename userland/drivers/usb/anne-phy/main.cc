@@ -148,7 +148,14 @@ extern "C" [[noreturn]] void _start() {
                 r->busy = true;
             }
         }
-        mochi::driver::idle(&r->control, 1, r->control.rx_doorbell,
-                            r->busy ? r->next : mx_clock_ns() + 1000000000);
+        // r.next is an absolute step time and is zero immediately after a
+        // request is accepted. idle() with a zero deadline means an unbounded
+        // sleep, which parked the state machine until the next request arrived
+        // (faulting at the expired deadline without ever running a step).
+        const mx_u64_t now_ns = mx_clock_ns();
+        const mx_u64_t wake = (r->busy && r->next > now_ns)
+                                  ? r->next
+                                  : now_ns + (r->busy ? 1000000ull : 1000000000ull);
+        mochi::driver::idle(&r->control, 1, r->control.rx_doorbell, wake);
     }
 }

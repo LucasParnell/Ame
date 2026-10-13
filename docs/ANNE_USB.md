@@ -126,8 +126,9 @@ as the first casualty of the unprogrammed I2C pads. V7 muxes those pads,
 names each Type-C/power startup stage and logs the controller id and abort
 source. The V7 capture shows the bus live and every service ready. The
 Type-C role transition then turned out to mix an inverted REG_TYPE mapping
-with an ABB lock that never acquires (its first hardware run); V8 named both
-and V9 fixes the mapping, makes the ABB reference best-effort and logs the
-raw lock status. Cortex-A53 CPUECTLR observations use
+with a PHY service that slept before its first step (a zero idle deadline);
+V9 fixed the mapping and V10 bounds the wake, so the PHY steps and the ABB
+reference (logged best-effort) now actually execute. Cortex-A53 CPUECTLR
+observations use
 [Arm DDI 0500J, section 4.3.79](https://documentation-service.arm.com/static/6040c321ee937942ba301626);
 they preserve firmware-controlled coherency and retention settings.

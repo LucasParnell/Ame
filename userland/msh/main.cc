@@ -2,6 +2,8 @@
 
 #include "msh.h"
 
+#include "mochi/uptime.h"
+
 // msh entry point.  The interactive state and the line/token buffers live in
 // the globals below (outside the 4 KiB initial thread stack); _start() maps
 // BootInfo, attaches the terminal/FS/service endpoints, and runs the REPL.
@@ -80,7 +82,28 @@ extern "C" [[noreturn]] void _start() {
         }
     }
 
-    putln("msh: Midix shell ready (libmochi BootInfo/rings/caps)");
+    // Boot time = kernel entry -> here, via libmochi's uptime (kernel
+    // DBG_BOOT_CS). Falls back to the plain banner when unavailable.
+    {
+        const uint64_t boot_cs = mochi::uptime_centiseconds();
+        char line[112];
+        const int length =
+            boot_cs > 0
+                ? libk::snprintf(line, sizeof(line),
+                                 "msh: Midix shell ready (libmochi BootInfo/rings/caps; boot %llu.%02llu s)",
+                                 static_cast<unsigned long long>(boot_cs / 100),
+                                 static_cast<unsigned long long>(boot_cs % 100))
+                : -1;
+        putln(length > 0 ? line : "msh: Midix shell ready (libmochi BootInfo/rings/caps)");
+        if (length > 0 && log_ready) {
+            // Also record the banner (with boot time) for headless logs/captures.
+            char logged[120];
+            const int n = libk::snprintf(logged, sizeof(logged), "msh ready; boot %llu.%02llu s\n",
+                                         static_cast<unsigned long long>(boot_cs / 100),
+                                         static_cast<unsigned long long>(boot_cs % 100));
+            if (n > 0) mochi::log_raw_marker(logged);
+        }
+    }
     putln("type `help` for commands");
 
     while (g.running) {

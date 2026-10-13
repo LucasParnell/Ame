@@ -137,7 +137,17 @@ static void fb_stage(u32 color) {
 
 } // namespace
 
+// Counter baseline for the userland-visible boot time (DBG_BOOT_CS): the
+// first CNTPCT reading of the kernel. Query-time conversion avoids needing
+// CNTFRQ before the timer is initialised.
+extern "C" u64 g_kernel_boot_cntpct = 0;
+
 extern "C" [[noreturn]] void kernel_main() {
+    {
+        u64 cnt = 0;
+        asm volatile("mrs %0, CNTPCT_EL0" : "=r"(cnt) :: "memory");
+        g_kernel_boot_cntpct = cnt;
+    }
     ANKO_BOOT_CHECKPOINT(KernelMain);
     {
         const u64 boot_cpu_id = 0;

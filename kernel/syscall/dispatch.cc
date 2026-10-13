@@ -11,6 +11,7 @@
 #include "anko/mm.h"
 #include "anko/init.h"
 #include "anko/platform.h"
+#include "anko/platform_clock.h"
 #include "anko/vm.h"
 #include "anko/log.h"
 #include "anko/panic.h"
@@ -22,6 +23,7 @@
 #include "libk/string.h"
 
 namespace drivers::timer { u64 tick_count(); }
+extern "C" u64 g_kernel_boot_cntpct;
 
 namespace {
 
@@ -1009,6 +1011,16 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         case DBG_IRQ_DELIVERED:         return ok(static_cast<long>(irq::delivered_count()));
         case DBG_IRQ_BOUND:             return ok(static_cast<long>(irq::binding_count()));
         case DBG_IRQ_SELFTEST:          return ok(static_cast<long>(irq::selftest_status()));
+        case DBG_BOOT_CS: {
+            // Centiseconds from kernel entry to now (the msh boot banner).
+            u64 now = 0, reported = 0;
+            asm volatile("mrs %0, CNTPCT_EL0" : "=r"(now) :: "memory");
+            asm volatile("mrs %0, CNTFRQ_EL0" : "=r"(reported));
+            const u64 freq = platform::counter_frequency(reported);
+            if (!freq || now <= g_kernel_boot_cntpct) return ok(0);
+            const u64 delta = now - g_kernel_boot_cntpct;
+            return ok(static_cast<long>((delta * 100ull) / freq));
+        }
         default: return err(E_INVALID);
         }
 

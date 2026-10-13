@@ -222,4 +222,6 @@ enum DebugCounter : unsigned {
     DBG_IRQ_DELIVERED         = 67,
     DBG_IRQ_BOUND             = 68,
     DBG_IRQ_SELFTEST          = 69,
+    // Centiseconds since kernel entry; the msh banner prints it as boot time.
+    DBG_BOOT_CS               = 70,
 };

@@ -53,6 +53,14 @@ struct Device {
         // core soft reset, so a PHY left gated by the bootloader would keep
         // the bus silent (no D+ pull-up ever visible to the host).
         write(kPowerClock, 0);
+        // Force VBUS-valid and B-valid into the core. This board routes the
+        // session comparators through glue we do not drive yet; without these
+        // the core refuses to attach even with SFTDISCON=0 (GOTGCTL.bits
+        // 2/3 = VBValid override, 6/7 = BValid override).
+        {
+            const mx_u32_t otg = read(kOtgControl);
+            write(kOtgControl, otg | (1u << 2) | (1u << 3) | (1u << 6) | (1u << 7));
+        }
         write(kDeviceControl, read(kDeviceControl) | (1u << 1)); // disconnect during construction
         write(kRxFifoSize, rx);
         write(kNonperiodicTxSize, rx | (tx << 16));

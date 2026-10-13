@@ -24,6 +24,7 @@ constexpr mx_u32_t kDeviceInterrupts = 0x818, kDeviceInterruptMask = 0x81c;
 constexpr mx_u32_t kInEndpointBase = 0x900, kOutEndpointBase = 0xb00;
 constexpr mx_u32_t kEndpointStride = 0x20, kFifoBase = 0x1000, kFifoStride = 0x1000;
 constexpr mx_u32_t kOtgControl = 0x000, kPowerClock = 0xe00;
+constexpr mx_u32_t kPhyStatus = 0x044; // AHB bc_sts2: vbus/session/dp/dm/id
 
 constexpr mx_u32_t kGlobalInterruptEnable = 1u << 0, kDmaEnable = 1u << 5;
 constexpr mx_u32_t kHostMode = 1u << 0, kSof = 1u << 3, kRxAvailable = 1u << 4;

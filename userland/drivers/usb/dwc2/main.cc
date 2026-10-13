@@ -165,14 +165,15 @@ extern "C" [[noreturn]] void _start() {
             const auto now = mx_clock_ns();
             if (!r->diag_next || now >= r->diag_next) {
                 r->diag_next = now + 10000000000ull;
-                char line[144];
+                char line[176];
                 const int length = libk::snprintf(
                     line, sizeof(line),
-                    "drv.usb.dwc2: pcgcctl=%x dctl=%x dsts=%x otgctl=%x gint=%x\n",
+                    "drv.usb.dwc2: pcgcctl=%x dctl=%x dsts=%x otgctl=%x gusbcfg=%x gint=%x\n",
                     static_cast<unsigned>(r->device.read(kPowerClock)),
                     static_cast<unsigned>(r->device.read(kDeviceControl)),
                     static_cast<unsigned>(r->device.read(kDeviceStatus)),
                     static_cast<unsigned>(r->device.read(kOtgControl)),
+                    static_cast<unsigned>(r->device.read(kUsbConfig)),
                     static_cast<unsigned>(r->device.read(kInterruptStatus)));
                 if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
                     mochi::log_raw_marker(line);

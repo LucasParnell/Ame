@@ -16,6 +16,7 @@ struct Runtime {
     mx_u64_t next, deadline;
     mx_u32_t step;
     bool busy, pending;
+    mx_u64_t diag_next;
 };
 bool operation(Runtime& r, mx_u32_t op, mx_u32_t arg = 0) {
     return mx_platform_control(r.authority, op, arg) == MX_OK;
@@ -146,6 +147,29 @@ extern "C" [[noreturn]] void _start() {
                 r->next = 0;
                 r->deadline = mx_clock_ns() + 1000000000ull;
                 r->busy = true;
+            }
+        }
+        // Live board-PHY readout (10 s) while a role is active: the control
+        // and BC status registers from the PHY's own window (bc_sts2 = 0x44
+        // reports vbus/session/dp/dm/id as the PHY sees them).
+        if (r->role != MxUsbRole::Detached) {
+            const auto diag_now = mx_clock_ns();
+            if (!r->diag_next || diag_now >= r->diag_next) {
+                r->diag_next = diag_now + 10000000000ull;
+                mx_u32_t c0 = 0, c2 = 0, c3 = 0, bc = 0;
+                (void)r->ahb.read32(0x0, &c0);
+                (void)r->ahb.read32(0x8, &c2);
+                (void)r->ahb.read32(0xc, &c3);
+                (void)r->ahb.read32(0x44, &bc);
+                char line[176];
+                const int length =
+                    libk::snprintf(line, sizeof(line),
+                                   "drv.usb.anne-phy: ctrl0=%x ctrl2=%x ctrl3=%x bc=%x\n",
+                                   static_cast<unsigned>(c0), static_cast<unsigned>(c2),
+                                   static_cast<unsigned>(c3), static_cast<unsigned>(bc));
+                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+                    mochi::log_raw_marker(line);
+                }
             }
         }
         // r.next is an absolute step time and is zero immediately after a

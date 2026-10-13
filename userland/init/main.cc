@@ -102,6 +102,7 @@ struct ServiceSpec {
     uint64_t retry_at;
     uint32_t uses;
     bool ready;
+    bool launching;
     bool desired;
     bool restart_pending;
     bool stopping;
@@ -1030,8 +1031,11 @@ static bool await_ready(ServiceSpec& svc) {
     return false;
 }
 
-static bool start_service_now(ServiceSpec& svc) {
-    if (svc.ready || !dependencies_ready(svc)) return false;
+// Two-phase launch for the boot path: prepare/resume every dependency-ready
+// service first (nothing waits), then await readiness, so independent services
+// overlap across CPUs. Supervision keeps using start_service_now, which is the
+// two phases back to back.
+static bool prepare_service_now(ServiceSpec& svc) {
     svc.desired = true;
     // A control request can race a death: the incarnation is gone but its exit
     // record has not been drained yet. Drop the stale generation before granting
@@ -1048,14 +1052,28 @@ static bool start_service_now(ServiceSpec& svc) {
     // must run after boot_init_for_service() has reserved slot 0.
     boot_init_for_service(svc, service_ordinal(&svc));
     refresh_exports();
-    if (wire_and_resume_service(svc) && await_ready(svc)) return true;
-    // The service came up but never reported ready (or wiring failed). Charge it
-    // like a crash so a persistent start failure backs off instead of spinning;
-    // the cleanup kill below is marked planned and leaves retry_at intact.
+    return wire_and_resume_service(svc);
+}
+
+// Charge a failed start like a crash so a persistent start failure backs off
+// instead of spinning; the cleanup kill is marked planned and leaves retry_at.
+static void charge_start_failure(ServiceSpec& svc) {
     if (svc.failures < supervision::kFailureCap) ++svc.failures;
     svc.retry_at = mx_clock_ns() + supervision::backoff_ns(svc.failures);
     svc.restart_pending = true;
     (void)stop_mask(1u << service_ordinal(&svc));
+}
+
+static bool start_service_now(ServiceSpec& svc) {
+    if (svc.ready || !dependencies_ready(svc)) return false;
+    if (!prepare_service_now(svc)) {
+        // Spawn failures keep the fast retry (nothing came up); wiring failures
+        // after a spawn are charged like a failed start.
+        if (svc.proc) charge_start_failure(svc);
+        return false;
+    }
+    if (await_ready(svc)) return true;
+    charge_start_failure(svc);
     return false;
 }
 
@@ -1074,16 +1092,32 @@ static bool restart_service_now(ServiceSpec& svc) {
 static void launch_prepared_services() {
     uint32_t remaining = g_rt.service_count;
     for (uint32_t pass = 0; pass < g_rt.service_count; ++pass) {
+        // Phase A: prepare and resume every service whose dependencies are
+        // ready. Nothing waits here, so independent services boot in parallel.
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
             auto& svc = g_rt.services[i];
-            if (svc.ready || !dependencies_ready(svc)) continue;
+            if (svc.ready || svc.launching || !dependencies_ready(svc)) continue;
             // Explicit activation is separate from log mirroring.
-            if (!start_service_now(svc)) {
+            if (!prepare_service_now(svc)) {
                 sys_debug_puts("init: failed service: ", 22);
                 sys_debug_puts(svc.name, slen(svc.name));
                 sys_debug_puts("\n", 1);
                 fail_halt("init: service launch failed\n");
             }
+            svc.launching = true;
+        }
+        // Phase B: wait for every launched service. Dependents pick their
+        // prerequisites up on the next pass once these report ready.
+        for (uint32_t i = 0; i < g_rt.service_count; ++i) {
+            auto& svc = g_rt.services[i];
+            if (svc.ready || !svc.launching) continue;
+            if (!await_ready(svc)) {
+                sys_debug_puts("init: failed service: ", 22);
+                sys_debug_puts(svc.name, slen(svc.name));
+                sys_debug_puts("\n", 1);
+                fail_halt("init: service launch failed\n");
+            }
+            svc.launching = false;
             if (streq(svc.name,"msh") || (streq(svc.name,"tty.fb0")&&!find_service(g_rt.services,g_rt.service_count,"msh"))) {
                 console_log("system ready\n"); (void)sys_notify(channel(ChannelId::console_activate_db)); (void)sys_notify(channel(ChannelId::input_tty_db));
             }

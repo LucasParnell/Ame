@@ -43,13 +43,19 @@ Verified facts — do not re-litigate:
 
 ## Status
 
-- **REMOVED (this checkpoint):** the three blocking LED holds plus the reset
+- **REMOVED (checkpoint 1):** the three blocking LED holds plus the reset
   hold. `boards/huawei-anne/minimal/timing.h` (`kLedHoldTicks = 0`) and
   `boards/huawei-anne/boot_diagnostics.cc` (`led_hold` no longer waits).
   LED colour transitions remain (set calls kept).
+- **DONE (checkpoint 2):** two-phase service launch in
+  `userland/init/main.cc` — `launch_prepared_services` prepares/resumes every
+  dependency-ready service first, then awaits readiness, so independent
+  services overlap across CPUs. Supervision keeps `start_service_now`
+  (prepare + await; unchanged semantics). Expect the 0.89 s tail to shrink to
+  ~0.3-0.4 s. Validated in QEMU (boot smoke + xHCI->HID keyboard chain).
 
-**FIRST ACTION: build + flash + measure to confirm entry->ready ~7.5 s.**
-If it is not ~7.5 s, re-derive with the stage table before any other work.
+**FIRST ACTION: build + flash + measure to confirm entry->ready ~7 s.**
+If it is not ~7 s, re-derive with the stage table before any other work.
 
 ## Tier 1 — explain `probe` (~3.08 s)
 
@@ -68,9 +74,7 @@ validation; alias/console walk; main walk; tail. One dev build answers it.
 - `reservations` 0.76 s: fold the DTB passes (`platform::probe` walk,
   `reserve_dtb_regions`, `discover_initrd`) into one traversal; skip
   unneeded subtrees early; avoid repeated string compares.
-- `services.ready` 0.89 s (`userland/init/main.cc`
-  `launch_prepared_services`): resume all dependency-ready services first,
-  then await readiness as a group; keep the exit-drain discipline.
+- `services.ready` 0.89 s: **DONE** — see checkpoint 2 above.
 - Bundle auth 0.29 s: overlap with other phases or split the SHA across
   CPUs (SMP is up before it runs).
 

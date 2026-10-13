@@ -5,7 +5,10 @@ namespace anne::minimal {
 // ANE-LX1: measured against recovery CLOCK_MONOTONIC and confirmed by the DTB.
 // CNTFRQ_EL0 says 16384 even though CNTPCT/CNTVCT advance at 1.92 MHz.
 constexpr std::uint64_t kCounterHz = 1920000;
-constexpr std::uint64_t kLedHoldTicks = 3 * kCounterHz;
+// Boot-path LED dwell removed: the previous 3 s blocking holds cost ~6 s of
+// the pre-ready time (plus one post-ready and one per reset). The LED is still
+// set for the colour transition; the boot no longer waits on it.
+constexpr std::uint64_t kLedHoldTicks = 0;
 constexpr std::uint64_t kBlinkTicks = kCounterHz / 4;
 constexpr bool elapsed(std::uint64_t start, std::uint64_t now, std::uint64_t ticks) {
     return now - start >= ticks;

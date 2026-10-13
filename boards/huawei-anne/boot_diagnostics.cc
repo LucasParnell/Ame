@@ -114,21 +114,14 @@ void cache_snapshot() {
     text("\n");
 }
 void led_hold(char led) {
+    // Set and record the LED, but do not dwell. The old 3-second blocking
+    // holds cost ~6 s before readiness (plus one after it and one per reset);
+    // the watchdog is fed by checkpoints and auth progress, so nothing here
+    // needs the loop. The colour transition remains visible to a human.
     anne::debug_led(led);
     text("LED "); raw_putc(led); text(" ctl="); hex(anne::debug_pmic_read(0x14d));
     text(" out="); hex(anne::debug_pmic_read(0x14e)); text("\n");
     anne::boot_log_flush();
-#ifndef ANKO_ANNE_DIAG_TEST
-#ifdef ANKO_ANNE_WATCHDOG
-    const u64 start = anne::minimal::counter();
-    while (!anne::minimal::elapsed(start, anne::minimal::counter(), anne::minimal::kLedHoldTicks)) {
-        anne::watchdog::poll();
-        asm volatile("nop");
-    }
-#else
-    anne::minimal::wait_ticks(anne::minimal::kLedHoldTicks);
-#endif
-#endif
 }
 void firmware_fiq_snapshot(const char* phase) {
     // This is the same reserved normal-world source word the vendor fatal FIQ

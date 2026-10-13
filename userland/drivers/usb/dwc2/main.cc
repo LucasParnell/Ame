@@ -4,6 +4,7 @@
 #include "device.h"
 #include "mochi/log.h"
 #include "mochi/boot_log.h"
+#include "libk/printf.h"
 #include "midix/abi/platform.h"
 #include "midix/abi/protocols/board_usb.h"
 namespace {
@@ -20,6 +21,7 @@ struct Runtime {
     MxBoardReply reply;
     mx_u64_t deadline;
     mx_u32_t stage;
+    mx_u32_t fault_stage;
     mx_handle_t irq, wake;
     bool busy, pending;
 };
@@ -29,6 +31,7 @@ bool transition(Runtime& r) {
     }
     const auto now = mx_clock_ns();
     if (now >= r.deadline) {
+        r.fault_stage = 99;
         return false;
     }
     if (r.stage == 0) {
@@ -43,11 +46,13 @@ bool transition(Runtime& r) {
         } else {
             if (r.desired != MxUsbRole::Detached) {
                 if (!identify(r.registers, &r.geometry)) {
+                    r.fault_stage = 20;
                     return false;
                 }
                 mx_u32_t cfg = 0;
                 r.registers.read(r.registers.context, kUsbConfig, &cfg);
                 if (r.geometry.high_speed_phy != 1 && r.geometry.high_speed_phy != 3) {
+                    r.fault_stage = 21;
                     return false;
                 }
                 const bool wide = r.geometry.utmi_width == 1;
@@ -61,6 +66,7 @@ bool transition(Runtime& r) {
                 libk::dma::order_mmio();
             }
             if (!r.reset.begin(r.registers, r.deadline)) {
+                r.fault_stage = 22;
                 return false;
             }
             r.stage = 1;
@@ -69,6 +75,7 @@ bool transition(Runtime& r) {
     if (r.stage == 1) {
         const auto state = r.reset.advance(r.registers, now);
         if (state == ResetState::Fault) {
+            r.fault_stage = 30;
             return false;
         }
         if (state != ResetState::Ready) {
@@ -86,9 +93,11 @@ bool transition(Runtime& r) {
             return true;
         }
         if (r.desired == MxUsbRole::Host && !r.host.activate(r.registers, r.geometry)) {
+            r.fault_stage = 40;
             return false;
         }
         if (r.desired == MxUsbRole::Device && !r.device.activate(r.registers, r.geometry)) {
+            r.fault_stage = 41;
             return false;
         }
         r.stage = 3;
@@ -137,6 +146,16 @@ extern "C" [[noreturn]] void _start() {
         r->host.poll();
         r->device.poll();
         if (!transition(*r)) {
+            char line[128];
+            const int length =
+                libk::snprintf(line, sizeof(line),
+                               "drv.usb.dwc2: transition fault stage=%u reason=%u desired=%u\n",
+                               static_cast<unsigned>(r->stage),
+                               static_cast<unsigned>(r->fault_stage),
+                               static_cast<unsigned>(r->desired));
+            if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+                mochi::log_raw_marker(line);
+            }
             mx_exit(MX_ERR_FAULT);
         }
         if (r->pending && r->links[1].tx().try_push_msg(MX_ROLE_REPLY, r->reply)) {
@@ -156,6 +175,12 @@ extern "C" [[noreturn]] void _start() {
                 r->busy = true;
                 r->stage = 0;
                 r->deadline = mx_clock_ns() + 2000000000ull;
+                char line[80];
+                const int length = libk::snprintf(line, sizeof(line), "role-set value=%u\n",
+                                                  static_cast<unsigned>(request.value));
+                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+                    mochi::log_raw_marker(line);
+                }
             }
         }
         // Owned device sources are drained before rearming this level IRQ.

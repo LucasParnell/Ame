@@ -124,6 +124,8 @@ entry remain pending, and stock restore was acknowledged again. V6 named the
 startup operations and the failing service, identifying `drv.typec.fusb301`
 as the first casualty of the unprogrammed I2C pads. V7 muxes those pads,
 names each Type-C/power startup stage and logs the controller id and abort
-source; its capture is pending. Cortex-A53 CPUECTLR observations use
+source. The V7 capture shows the bus live and every service ready; the
+remaining fault is the Type-C role transition, which V8 names per stage.
+Cortex-A53 CPUECTLR observations use
 [Arm DDI 0500J, section 4.3.79](https://documentation-service.arm.com/static/6040c321ee937942ba301626);
 they preserve firmware-controlled coherency and retention settings.

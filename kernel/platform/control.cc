@@ -93,7 +93,7 @@ SysError control(Control& object, u32 op, u64 arg, u64 owner) {
         crg.read32(0x2c, &stat2);
         crg.read32(0x80, &rst2);
         anko::log::writef(anko::log::Level::Info, "kernel/platform",
-                          "i2c4 pins pmx=%08x/%08x cfg=%08x/%08x stat2=%08x rst2=%08x", scl, sda,
+                          "i2c4 pins pmx=%x/%x cfg=%x/%x stat2=%x rst2=%x", scl, sda,
                           cfg0, cfg1, stat2, rst2);
     } else if (object.domain == Domain::Display && op == MX_PLATFORM_DISPLAY_HANDOFF && !arg) {
 #ifdef ANKO_ANNE_FRAMEBUFFER

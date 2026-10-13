@@ -95,6 +95,13 @@ extern "C" [[noreturn]] void _start() {
             }
             if (!ok) {
                 (void)disable(*r);
+                char line[96];
+                const int length = libk::snprintf(line, sizeof(line),
+                                                  "drv.power.hi6523: set %u failed\n",
+                                                  static_cast<unsigned>(request.value));
+                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+                    mochi::log_raw_marker(line);
+                }
             }
             if (ok && request.value) {
                 r->lease = mx_clock_ns() + 2000000000ull;

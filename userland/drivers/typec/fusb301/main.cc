@@ -9,6 +9,8 @@ struct Runtime {
     mochi::i2c::Client bus;
     mochi::SpscEndpoint control;
     MxBoardReply reply;
+    mx_u8_t observed0, observed1;
+    bool raw_logged;
     bool pending;
 };
 } // namespace
@@ -54,16 +56,31 @@ extern "C" [[noreturn]] void _start() {
             if (request.value || request.reserved ||
                 !r->bus.transaction(libk::as_bytes(&reg, 1), libk::as_bytes(bytes))) {
                 r->reply.status = MX_ERR_FAULT;
-            } else if (bytes[0] & 1) {
-                const auto orientation = (bytes[0] >> 4) & 3;
-                const auto type = bytes[1] & 0x18;
-                if (orientation == 0 || orientation == 3 || (type != 8 && type != 16)) {
-                    r->reply.status = MX_ERR_INVALID;
-                } else {
-                    r->reply.value =
-                        static_cast<mx_u32_t>(type == 8 ? MxUsbRole::Host : MxUsbRole::Device);
-                    r->reply.flags = MX_TYPEC_ATTACHED | ((bytes[0] & 8) ? MX_TYPEC_VBUS : 0) |
-                                     (orientation == 1 ? MX_TYPEC_CC1 : MX_TYPEC_CC2);
+            } else {
+                if (!r->raw_logged || bytes[0] != r->observed0 || bytes[1] != r->observed1) {
+                    r->raw_logged = true;
+                    r->observed0 = bytes[0];
+                    r->observed1 = bytes[1];
+                    char line[96];
+                    const int length = libk::snprintf(line, sizeof(line),
+                                                      "drv.typec.fusb301: raw 0x%02x/0x%02x\n",
+                                                      static_cast<unsigned>(bytes[0]),
+                                                      static_cast<unsigned>(bytes[1]));
+                    if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+                        mochi::log_raw_marker(line);
+                    }
+                }
+                if (bytes[0] & 1) {
+                    const auto orientation = (bytes[0] >> 4) & 3;
+                    const auto type = bytes[1] & 0x18;
+                    if (orientation == 0 || orientation == 3 || (type != 8 && type != 16)) {
+                        r->reply.status = MX_ERR_INVALID;
+                    } else {
+                        r->reply.value =
+                            static_cast<mx_u32_t>(type == 8 ? MxUsbRole::Host : MxUsbRole::Device);
+                        r->reply.flags = MX_TYPEC_ATTACHED | ((bytes[0] & 8) ? MX_TYPEC_VBUS : 0) |
+                                         (orientation == 1 ? MX_TYPEC_CC1 : MX_TYPEC_CC2);
+                    }
                 }
             }
             r->pending = true;

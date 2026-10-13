@@ -31,6 +31,14 @@ bool advance(Runtime& r) {
     bool ok = mx_clock_ns() < r.deadline;
     mx_u64_t delay = 0;
     if (!ok) {
+        char line[112];
+        const int length =
+            libk::snprintf(line, sizeof(line), "drv.usb.anne-phy: deadline step=%u desired=%u\n",
+                           static_cast<unsigned>(r.step ? r.step - 1 : 0),
+                           static_cast<unsigned>(r.desired));
+        if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+            mochi::log_raw_marker(line);
+        }
         r.reply.status = MX_ERR_FAULT;
         r.busy = false;
         r.pending = true;
@@ -87,6 +95,14 @@ bool advance(Runtime& r) {
     libk::dma::order_mmio();
     r.next = mx_clock_ns() + delay;
     if (!ok) {
+        char line[112];
+        const int length =
+            libk::snprintf(line, sizeof(line), "drv.usb.anne-phy: step %u failed desired=%u\n",
+                           static_cast<unsigned>(r.step ? r.step - 1 : 0),
+                           static_cast<unsigned>(r.desired));
+        if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+            mochi::log_raw_marker(line);
+        }
         (void)operation(r, MX_PLATFORM_RESET_ASSERT, MX_ANNE_USB_RESETS);
         r.role = MxUsbRole::Detached;
         r.reply.status = MX_ERR_FAULT;

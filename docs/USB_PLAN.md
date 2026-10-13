@@ -43,7 +43,8 @@ also recycle one row at overflow, and format CRC/SHA progress hooks let the
 boot layer feed the watchdog during cold authentication. Physical keyboard and
 Mac injection are not yet hardware verified. V6 names startup operations and the
 failing service; V7 brings up the I2C4 pads explicitly (mux + readbacks) and names each
-Type-C/power startup stage. Capture pending.
+Type-C/power startup stage. V7 capture: I2C bus live, all services ready;
+V8 names the Type-C role-transition stages.
 
 The live host path is split across three processes:
 

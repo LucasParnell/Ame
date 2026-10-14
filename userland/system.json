@@ -2859,6 +2859,38 @@
               ]
             },
             {
+              "channel": "serial_in_ring",
+              "name": "serial.in.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "input_tty_db",
+              "name": "serial.in.doorbell",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "serial_out_ring",
+              "name": "serial.out.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "serial_console_db",
+              "name": "serial.out.doorbell",
+              "rights": [
+                "notify"
+              ]
+            },
+            {
               "name": "tty.cols",
               "value": 59
             },

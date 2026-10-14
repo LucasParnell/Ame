@@ -21,7 +21,7 @@
 namespace {
 // MxFunctionChunk carries at most 32 inline bytes; the gadget enforces the same.
 constexpr mx_u32_t kChunkMax = 32;
-constexpr mx_u32_t kChunksPerTurn = 8;
+constexpr mx_u32_t kChunksPerTurn = 32;
 
 struct Runtime {
     mochi::SpscEndpoint stream;                 // usb.fn.acm stream (debug_acm_a/b)

@@ -340,7 +340,7 @@
     {
       "name": "serial_out_ring",
       "kind": "ring",
-      "order": 6
+      "order": 10
     },
     {
       "name": "serial_console_db",

@@ -39,7 +39,7 @@ struct TtyState {
     mochi::terminal::InputSink shell_input;
     bool shell_attached,render_suppressed,cursor_visible,input_unlocked;
     uint64_t serial_in_dropped, serial_out_dropped;
-    uint32_t cursor_row,cursor_col,esc_streak;
+    uint32_t cursor_row,cursor_col,esc_streak,scroll_pending;
 
     uint32_t cursor_x;
     uint32_t cursor_y;
@@ -95,19 +95,6 @@ static void fb_fill_cell(uint32_t row, uint32_t col) {
     cmd.height = g_tty->cell_h;
     cmd.color = kBg;
     (void)fb_send(FB_FILL_RECT, &cmd, sizeof(cmd));
-}
-
-static void fb_copy_rect(uint32_t src_x, uint32_t src_y, uint32_t dst_x,
-                         uint32_t dst_y, uint32_t width, uint32_t height) {
-    if (g_tty->render_suppressed) return;
-    FbCopyRectCmd cmd{};
-    cmd.src_x = g_tty->origin_x + src_x;
-    cmd.src_y = g_tty->origin_y + src_y;
-    cmd.dst_x = g_tty->origin_x + dst_x;
-    cmd.dst_y = g_tty->origin_y + dst_y;
-    cmd.width = width;
-    cmd.height = height;
-    (void)fb_send(FB_COPY_RECT, &cmd, sizeof(cmd));
 }
 
 static void fb_draw_text_run(uint32_t row, uint32_t col, const char* data, uint32_t len);
@@ -184,16 +171,13 @@ static void tty_redraw_all() {
     (void)fb_send(FB_PRESENT, nullptr, 0);
 }
 
-static void tty_scroll_pixels_up_one_row() {
-    fb_copy_rect(0, g_tty->cell_h, 0, 0, g_tty->cols * g_tty->cell_w, (g_tty->rows - 1u) * g_tty->cell_h);
-
-    FbFillRectCmd clear{};
-    clear.x = g_tty->origin_x;
-    clear.y = g_tty->origin_y + (g_tty->rows - 1u) * g_tty->cell_h;
-    clear.width = g_tty->cols * g_tty->cell_w;
-    clear.height = g_tty->cell_h;
-    clear.color = kBg;
-    (void)fb_send(FB_FILL_RECT, &clear, sizeof(clear));
+// Fold all deferred scrolls from this drain batch into one repaint of the
+// console region. The character grid is authoritative; the repaint reads only
+// it, so interleaved draws and scrolls within a batch stay consistent.
+static void flush_scroll() {
+    if (!g_tty->scroll_pending) return;
+    g_tty->scroll_pending = 0;
+    tty_redraw_all();
 }
 
 static void fb_present() {
@@ -212,7 +196,10 @@ static void tty_newline() {
                                     libk::as_bytes(line(r + 1),g_tty->cols));
         }
         libk::fill(libk::as_bytes(line(g_tty->rows - 1),g_tty->cols), ' ');
-        tty_scroll_pixels_up_one_row();
+        // Defer the pixel work: flush_scroll() folds a whole batch of scrolled
+        // lines into one repaint instead of moving the full pixel region
+        // (~7 MB) for every line.
+        ++g_tty->scroll_pending;
     }
 }
 
@@ -492,8 +479,10 @@ extern "C" [[noreturn]] void _start() {
         const bool any_mirror = drain_mirror(mirror_budget);
         g_tty->render_suppressed = false;
         if (bulk_mirror && any_mirror) {
+            g_tty->scroll_pending = 0; // covered by the whole-grid repaint below
             tty_redraw_all();
         }
+        flush_scroll();
         if (any_mirror || any_input || any_serial || any_shell) {
             tty_cursor_show();
             fb_present();

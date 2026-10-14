@@ -141,6 +141,10 @@ void issue_boot_caps(Process& init_proc,
     grant("vm.root", CAP_VM_ROOT, vm::root_object(),
                RIGHT_VM_CREATE | RIGHT_VM_INSPECT | RIGHT_DUP);
 
+    // 6b) System power authority: kernel-mediated shutdown/reset (PSCI).
+    grant("system.control", CAP_PLATFORM, platform::board_control(platform::Domain::System),
+          RIGHT_WRITE | RIGHT_DUP);
+
     // 7) Global log doorbell followed by one kernel log ring per supported CPU.
     Doorbell* log_db = ipc::doorbell_create_object(init_proc.pid);
     if (!log_db) panic("log doorbell allocation failed");

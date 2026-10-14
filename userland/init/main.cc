@@ -22,6 +22,7 @@
 #include "libk/text.h"
 #include "libk/str.h"
 #include "midix/abi/session.h"
+#include "midix/abi/platform.h"
 #include "mochi/boot.h"
 #include "midix/format/json.h"
 #include "midix/format/bundle.h"
@@ -60,6 +61,7 @@ using namespace mochi::va::init;
 // covers.
 
 static CapHandle kCapManifest, kCapInitrd, kCapSupervisor, kCapUart;
+static CapHandle kCapSystemControl = kNullCap;
 static CapHandle kCapVmRoot, kCapLogDoorbell, kCapFbMemory, kCapXhciMmio, kCapXhciIrq, kCapXhciDma;
 static CapHandle kCapVirtioBlkMmio, kCapVirtioBlkDma;
 static CapHandle kCapGpuFunction, kCapGpuIrq; // Phase E: appliance GPU authority
@@ -1173,13 +1175,26 @@ static void shutdown_system_now() {
         svc.main_thread = kNullCap;
         registry_sync(svc);
     }
+    if (kCapSystemControl != kNullCap) {
+        // Kernel-owned power sequence (PSCI SYSTEM_OFF). Only returns when the
+        // firmware refuses; fall through to a halted kernel in that case.
+        (void)mx_platform_control(kCapSystemControl, MX_PLATFORM_SYSTEM_OFF);
+        console_log("shutdown: kernel power off unavailable\n");
+    }
     while (true) sys_yield();
 }
 
 static bool reboot_userland_now() {
     console_log("reboot requested\n");
     for (uint32_t i = 0; i < g_rt.service_count; ++i) g_rt.services[i].desired = true;
-    return stop_mask((1u << g_rt.service_count) - 1);
+    const bool stopped = stop_mask((1u << g_rt.service_count) - 1);
+    if (kCapSystemControl != kNullCap) {
+        // Kernel-owned reset (PSCI SYSTEM_RESET). Only returns when the
+        // firmware refuses; userland remains restarted in that case.
+        (void)mx_platform_control(kCapSystemControl, MX_PLATFORM_SYSTEM_RESET);
+        console_log("reboot: kernel reset unavailable; userland restart stands\n");
+    }
+    return stopped;
 }
 
 static bool handle_svc_control_requests() {
@@ -1248,6 +1263,8 @@ extern "C" [[noreturn]] void _start() {
     kCapManifest = mochi::boot::require_handle(boot, "manifest");
     kCapInitrd = mochi::boot::require_handle(boot, "boot.initrd");
     kCapSupervisor = mochi::boot::require_handle(boot, "supervisor");
+    kCapSystemControl = mochi::boot::handle(boot, "system.control");
+    if (kCapSystemControl != kNullCap) (void)mx_platform_control(kCapSystemControl, MX_PLATFORM_CLAIM);
     kCapUart = mochi::boot::require_handle(boot, "uart.mmio");
     kCapVmRoot = mochi::boot::handle(boot, "vm.root");
     kCapLogDoorbell = mochi::boot::require_handle(boot, "log.doorbell");

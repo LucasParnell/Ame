@@ -12,6 +12,10 @@ enum MxPlatformOp : mx_u32_t {
     MX_PLATFORM_I2C_CLOCK_ON = 7,
     MX_PLATFORM_DISPLAY_HANDOFF = 8,
     MX_PLATFORM_I2C_PINS = 9,
+    // Machine power. The kernel owns the platform sequence (PSCI on arm64;
+    // board fallbacks live in the kernel's platform layer).
+    MX_PLATFORM_SYSTEM_OFF = 10,
+    MX_PLATFORM_SYSTEM_RESET = 11,
 };
 constexpr mx_u32_t MX_ANNE_USB_RESETS = (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) |
                                         (1u << 12) | (1u << 13) | (1u << 14) | (1u << 27);

@@ -26,8 +26,8 @@ const Builtin kBuiltins[] = {
     {"ring", cmd_ring, "ring stats"},
     {"doorbell", cmd_doorbell, "doorbell stats"},
     {"vm", cmd_vm, "VM tools"},
-    {"shutdown", cmd_shutdown, "stop userland services and halt init"},
-    {"reboot", cmd_reboot, "restart userland services"},
+    {"shutdown", cmd_shutdown, "power off the system"},
+    {"reboot", cmd_reboot, "reset the system"},
 };
 
 

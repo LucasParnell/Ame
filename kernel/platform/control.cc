@@ -1,6 +1,7 @@
 // Cold board mechanisms. A shared clock register is never mapped into an
 // individual driver. Hardware masks are fixed here; userland owns sequence.
 #include "anko/platform_control.h"
+#include "anko/smp.h"
 #include "anko/log.h"
 #include "anko/spinlock.h"
 #include "libk/mmio.h"
@@ -14,7 +15,8 @@ namespace {
 Control domains[] = {{Domain::UsbPhy, 0, 0},
                      {Domain::UsbController, 0, 0},
                      {Domain::I2c, 0, 0},
-                     {Domain::Display, 0, 0}};
+                     {Domain::Display, 0, 0},
+                     {Domain::System, 0, 0}};
 kernel::SpinLock domain_lock;
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
 u32 ref_logged;
@@ -35,6 +37,21 @@ SysError control(Control& object, u32 op, u64 arg, u64 owner) {
     }
     if (object.owner != owner) {
         return E_PERM;
+    }
+    // Machine power is a generic kernel mechanism (PSCI on arm64), not a board
+    // register dance: the platform layer owns the sequence.
+    if (object.domain == Domain::System) {
+        if (op == MX_PLATFORM_SYSTEM_OFF && !arg) {
+            anko::log::writef(anko::log::Level::Info, "kernel/platform",
+                              "system off requested");
+            smp::system_off();
+        }
+        if (op == MX_PLATFORM_SYSTEM_RESET && !arg) {
+            anko::log::writef(anko::log::Level::Info, "kernel/platform",
+                              "system reset requested");
+            smp::system_reset();
+        }
+        return E_INVALID;
     }
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
     libk::Mmio crg{reinterpret_cast<volatile u8*>(0xfff35000), 4096};

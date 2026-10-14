@@ -90,6 +90,28 @@ u32 cpu_count() {
     return sched::online_cpu_count();
 }
 
+// Machine power: firmware-owned. SYSTEM_OFF=0x84000008, SYSTEM_RESET=0x84000009.
+// Secondary CPUs are left to the firmware's power sequence; interrupts are
+// masked so nothing of ours runs after the call.
+void system_off() {
+    asm volatile("msr daifset, #2" ::: "memory");
+    if (g_info.psci_available) {
+        (void)psci_call(0x84000008ull, 0, 0, 0);
+        anko::log::writef(anko::log::Level::Error, "kernel/smp",
+                          "psci system_off returned");
+    }
+    for (;;) asm volatile("wfi");
+}
+void system_reset() {
+    asm volatile("msr daifset, #2" ::: "memory");
+    if (g_info.psci_available) {
+        (void)psci_call(0x84000009ull, 0, 0, 0);
+        anko::log::writef(anko::log::Level::Error, "kernel/smp",
+                          "psci system_reset returned");
+    }
+    for (;;) asm volatile("wfi");
+}
+
 void send_wake_ipi(u32 cpu_id) {
     sched::note_ipi_sent(cpu_id);
     drivers::gic::send_sgi(cpu_id, kWakeSgi);

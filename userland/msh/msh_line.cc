@@ -81,12 +81,12 @@ static bool add_match(const char* candidate, const char* prefix,
 
 static void print_completion_matches(const char** matches, uint32_t count) {
     if (count == 0) return;
-    put("\n");
+    put("\r\n");
     for (uint32_t i = 0; i < count; ++i) {
         if (i) put("  ");
         put(matches[i]);
     }
-    put("\n");
+    put("\r\n");
 }
 
 static uint32_t longest_common_prefix(const char** matches, uint32_t count) {
@@ -333,7 +333,7 @@ bool read_line(char* out, uint32_t cap) {
                 redraw();
                 continue;
             case kCtrlK: out[cursor] = '\0'; len = cursor; redraw(); continue;
-            case kCtrlL: for (uint32_t j = 0; j < kClearLines; ++j) put("\n"); redraw(); continue;
+            case kCtrlL: for (uint32_t j = 0; j < kClearLines; ++j) put("\r\n"); redraw(); continue;
             case '\b':
             case kDel:
                 if (cursor > 0) {
@@ -347,7 +347,7 @@ bool read_line(char* out, uint32_t cap) {
                 (void)try_complete_line(out, cap, &len, &cursor, prompt_text, &prev_render_len);
                 continue;
             case '\n':
-                put("\n");
+                put("\r\n");
                 out[len] = '\0';
                 history_push(out);
                 return true;

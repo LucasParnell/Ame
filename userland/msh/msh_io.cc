@@ -107,7 +107,7 @@ void put(const char* s) {
 
 void putln(const char* s) {
     put(s);
-    put("\n");
+    put("\r\n");
 }
 
 void put_dec(uint64_t v) {

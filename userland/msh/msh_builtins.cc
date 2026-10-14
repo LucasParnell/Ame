@@ -69,7 +69,7 @@ int cmd_echo(int argc, char** argv) {
         if (i != start) put(" ");
         put(argv[i]);
     }
-    if (newline) put("\n");
+    if (newline) put("\r\n");
     return 0;
 }
 
@@ -80,7 +80,7 @@ int cmd_printf(int argc, char** argv) {
         for (uint32_t j = 0; s[j]; ++j) {
             if (s[j] == '\\' && s[j + 1]) {
                 ++j;
-                if (s[j] == 'n') put("\n");
+                if (s[j] == 'n') put("\r\n");
                 else if (s[j] == 't') put("\t");
                 else put_bytes(&s[j], 1);
             } else {
@@ -92,7 +92,7 @@ int cmd_printf(int argc, char** argv) {
 }
 
 int cmd_clear(int, char**) {
-    for (uint32_t i = 0; i < 64; ++i) put("\n");
+    for (uint32_t i = 0; i < 64; ++i) put("\r\n");
     return 0;
 }
 

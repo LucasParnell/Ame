@@ -17,7 +17,7 @@ static void put_padded(const char* s, uint32_t width) {
 
 static void put_rule(uint32_t width) {
     for (uint32_t i = 0; i < width; ++i) put("-");
-    put("\n");
+    put("\r\n");
 }
 
 // " label=" + a hex/decimal value: the shape every field below prints.
@@ -46,7 +46,7 @@ static const char* svc_group_name(const char* name) {
 
 int cmd_bootinfo(int, char**) {
     if (!g.boot || !mochi::boot::valid(g.boot)) return 1;
-    put("BootInfo entries: "); put_dec(g.boot->entry_count); put("\n");
+    put("BootInfo entries: "); put_dec(g.boot->entry_count); put("\r\n");
     for_boot_entries(MX_BOOT_ENTRY_NONE, [](uint16_t i, const MxBootEntry& e) {
         put("  "); put_dec(i); put("  ");
         put(boot_type_name(e.type)); put("  ");
@@ -55,7 +55,7 @@ int cmd_bootinfo(int, char**) {
             field_hex(" aux0=", e.aux0);
             field_hex(" aux1=", e.aux1);
         }
-        put("\n");
+        put("\r\n");
     });
     return 0;
 }
@@ -63,7 +63,7 @@ int cmd_bootinfo(int, char**) {
 static const char* svc_state_name(mx_u32_t state);
 
 static void svc_print_section(const char* group_name) {
-    put(group_name); put("\n");
+    put(group_name); put("\r\n");
     put_rule(73);
     put_padded("NAME", 24);
     put_padded("STATE", 10);
@@ -83,7 +83,7 @@ static void svc_print_section(const char* group_name) {
         put_padded(e.restart, 10);
         putln(e.image);
     }
-    put("\n");
+    put("\r\n");
 }
 
 static int svc_list() {
@@ -162,7 +162,7 @@ static int svc_control(mx_u32_t op, const char* name, const char* verb) {
         return 1;
     }
     if (reply.status != MX_OK) {
-        put("svc "); put(verb); put(" "); put(name); put(": "); put_status(reply.status); put("\n");
+        put("svc "); put(verb); put(" "); put(name); put(": "); put_status(reply.status); put("\r\n");
         return 1;
     }
     put("svc "); put(verb); put(" "); put(name); put(" -> "); putln(svc_state_name(reply.state));
@@ -177,7 +177,7 @@ static int system_control(mx_u32_t op, const char* verb) {
         return 1;
     }
     if (reply.status != MX_OK) {
-        put("msh: "); put(verb); put(": "); put_status(reply.status); put("\n");
+        put("msh: "); put(verb); put(": "); put_status(reply.status); put("\r\n");
         return 1;
     }
     put(verb); putln(" requested");
@@ -232,7 +232,7 @@ int cmd_cap(int argc, char** argv) {
             if (e.handle == MX_NULL_HANDLE) return;
             put("  "); put_dec(i); put(" "); put(e.name); put(" "); put_hex(e.handle); put(" ");
             print_cap_info(e.handle);
-            put("\n");
+            put("\r\n");
         });
         return 0;
     }
@@ -245,7 +245,7 @@ int cmd_cap(int argc, char** argv) {
         bool ok = false;
         mx_handle_t h = parse_u64(argv[2], &ok);
         if (!ok) { putln("cap inspect: bad handle"); return 1; }
-        put_hex(h); put(" "); print_cap_info(h); put("\n");
+        put_hex(h); put(" "); print_cap_info(h); put("\r\n");
         return 0;
     }
     if (streq(argv[1], "revoke")) {
@@ -267,7 +267,7 @@ int cmd_arena(int argc, char** argv) {
         putln("ARENAS");
         for_boot_entries(MX_BOOT_ENTRY_ARENA, [](uint16_t, const MxBootEntry& e) {
             put("  "); put(e.name); field_hex(" ", e.handle);
-            put(" "); print_cap_info(e.handle); put("\n");
+            put(" "); print_cap_info(e.handle); put("\r\n");
         });
         return 0;
     }
@@ -280,7 +280,7 @@ int cmd_arena(int argc, char** argv) {
         }
         const MxBootEntry* e = mochi::boot::find_type(g.boot, argv[2], MX_BOOT_ENTRY_ARENA);
         if (!e) { put("arena not found: "); putln(argv[2]); return 1; }
-        put(e->name); put(" "); put_hex(e->handle); put(" "); print_cap_info(e->handle); put("\n");
+        put(e->name); put(" "); put_hex(e->handle); put(" "); print_cap_info(e->handle); put("\r\n");
         return 0;
     }
     putln("usage: arena ls|show NAME");
@@ -292,7 +292,7 @@ static int cmd_ring_stats(int, char**) {
     putln("RINGS");
     for_boot_entries(MX_BOOT_ENTRY_RING, [](uint16_t, const MxBootEntry& e) {
         put("  "); put(e.name); field_dec(" order=", e.aux0 ? e.aux0 : kDefaultOrder);
-        field_hex(" handle=", e.handle); put(" "); print_cap_info(e.handle); put("\n");
+        field_hex(" handle=", e.handle); put(" "); print_cap_info(e.handle); put("\r\n");
     });
     return 0;
 }
@@ -309,7 +309,7 @@ static int cmd_doorbell_stats(int, char**) {
     for_boot_entries(MX_BOOT_ENTRY_DOORBELL, [](uint16_t, const MxBootEntry& e) {
         put("  "); put(e.name); field_hex(" handle=", e.handle);
         field_dec(" counter=", mx_doorbell_read(e.handle));
-        put(" "); print_cap_info(e.handle); put("\n");
+        put(" "); print_cap_info(e.handle); put("\r\n");
     });
     return 0;
 }
@@ -329,7 +329,7 @@ int cmd_vm(int argc, char** argv) {
         if (created > 0) put("created     "); else put("uncreated   ");
         put("created="); put_dec(created > 0 ? static_cast<uint64_t>(created) : 0);
         put(" channels="); put_dec(channels > 0 ? static_cast<uint64_t>(channels) : 0);
-        put("\n");
+        put("\r\n");
         return 0;
     }
     if (streq(argv[1], "start")) {

@@ -219,7 +219,7 @@ int cmd_ls(int argc, char** argv) {
         }
         if (got && reply.name_len > sizeof(reply.name)) reply.status = MX_ERR_BAD_PROTOCOL;
         if (!got || reply.status != MX_OK) {
-            put("msh: ls: "); put_status(reply.status); put("\n");
+            put("msh: ls: "); put_status(reply.status); put("\r\n");
             close_resolved(r);
             return 1;
         }
@@ -227,7 +227,7 @@ int cmd_ls(int argc, char** argv) {
             if (reply.type == FS_INODE_DIR) put("d "); else put("- ");
             put_bytes(reply.name, reply.name_len);
             if (reply.flags & FS_READDIR_TRUNCATED) put("…");
-            put("\n");
+            put("\r\n");
             any = true;
         }
         if (reply.flags & FS_READDIR_EOF) break;
@@ -260,7 +260,7 @@ int cmd_cat(int argc, char** argv) {
             return 1;
         }
         if (read.status != MX_OK) {
-            put("msh: cat: "); put_status(read.status); put("\n");
+            put("msh: cat: "); put_status(read.status); put("\r\n");
             close_resolved(r);
             return 1;
         }

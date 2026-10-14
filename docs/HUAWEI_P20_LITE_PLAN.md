@@ -1,5 +1,10 @@
 # Ame for Huawei P20 Lite with TWRP
 
+The focused [Dango bring-up plan](HUAWEI_P20_LITE_DANGO_PLAN.md) covers EL2
+feasibility, host memory, a signed Linux guest, generic channels and native
+runtime acceptance. The verified phone entry is EL1; native Dango first needs
+a demonstrated route to an Ame-owned EL2 monitor.
+
 Native eight-core Ressha startup is now hardware-verified: all eight pinned
 workers completed on their assigned cores, every core handled timer ticks and
 IPIs, and init reached service readiness without faults. See [the framebuffer handoff](HUAWEI_FRAMEBUFFER_HANDOFF.md) for the latest

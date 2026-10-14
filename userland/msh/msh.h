@@ -10,6 +10,8 @@
 //   msh_builtins.cc the builtin registry and the core builtins
 //   msh_fs.cc       io.fs paths and the filesystem builtins
 //   msh_svc.cc      BootInfo, service, capability, ring, doorbell, VM tools
+//   msh_diag.cc     serial diagnostic report and retained boot log replay
+//   msh_power.cc    shutdown and reboot requests to init
 //   main.cc         globals, BootInfo wiring, and _start()
 //
 // Everything declared here is private to msh; the modules are linked into a
@@ -91,6 +93,7 @@ struct Shell {
     bool have_terminal;
     bool have_fs;
     bool have_svcctl;
+    bool output_failed; // Sticky until the next diagnostic report starts.
 };
 
 struct Builtin {
@@ -163,6 +166,8 @@ int cmd_cat(int argc, char** argv);
 int cmd_mkdir(int argc, char** argv);
 int cmd_rm(int argc, char** argv);
 int cmd_touch(int argc, char** argv);
+// Diagnostics (msh_diag.cc).
+int cmd_diag(int argc, char** argv);
 // Introspection builtins (msh_svc.cc).
 int cmd_bootinfo(int argc, char** argv);
 int cmd_svc(int argc, char** argv);
@@ -171,5 +176,6 @@ int cmd_arena(int argc, char** argv);
 int cmd_ring(int argc, char** argv);
 int cmd_doorbell(int argc, char** argv);
 int cmd_vm(int argc, char** argv);
+// Power requests (msh_power.cc).
 int cmd_shutdown(int argc, char** argv);
 int cmd_reboot(int argc, char** argv);

@@ -5,6 +5,7 @@
 #include "anko/interrupt_mask.h"
 #include "midix/abi/cpu_limits.h"
 #include "anko/sched.h"
+#include "midix/abi/diagnostics.h"
 #if defined(ANKO_ANNE_DISPLAY_CAPTURE) || defined(ANKO_ANNE_FRAMEBUFFER)
 #include "display_diagnostics.h"
 #endif
@@ -189,6 +190,23 @@ __attribute__((section(".data.anne_diag"))) volatile u32 anne_diag_fault_active[
 }
 
 namespace anne {
+void boot_log_info(u64* size, u64* capacity) {
+    IrqGuard guard;
+    *size = state.ready ? state.cursor[0] : 0;
+    *capacity = kDebugZoneSizes[0] - 12;
+}
+usize boot_log_read(u64 offset, char* out, usize size) {
+    IrqGuard guard;
+    if (!state.ready || !out || offset >= state.cursor[0]) return 0;
+    const u64 remaining = state.cursor[0] - offset;
+    if (size > MX_DIAG_READ_MAX) size = MX_DIAG_READ_MAX;
+    if (size > remaining) size = static_cast<usize>(remaining);
+    // The reserved log has a Normal NC mapping. The writer lock orders its
+    // cursor and bytes; do not invalidate or expose the physical mapping.
+    const auto* source = reinterpret_cast<const volatile char*>(kDebugZones[0] + 12);
+    for (usize i = 0; i < size; ++i) out[i] = source[offset + i];
+    return size;
+}
 void boot_log_flush() {
     if (!state.ready) return;
     IrqGuard guard;
@@ -376,6 +394,15 @@ extern "C" void anne_diag_init(u64 el, u64 dtb, u64 sctlr) {
     state.ready = 1;
     text("AMEANKO1 el="); number(el); text(" x0="); hex(dtb);
     text(" sctlr="); hex(sctlr); text(" counter_hz=1920000\n");
+    // Read only registers available at the recorded EL1/EL2 entry. This logs
+    // CPU capability without attempting to call an unknown firmware monitor.
+    u64 pfr, midr, mpidr;
+    asm volatile("mrs %0, ID_AA64PFR0_EL1" : "=r"(pfr));
+    asm volatile("mrs %0, MIDR_EL1" : "=r"(midr));
+    asm volatile("mrs %0, MPIDR_EL1" : "=r"(mpidr));
+    text("CPU_FEATURES midr="); hex(midr); text(" mpidr="); hex(mpidr);
+    text(" pfr0="); hex(pfr); text(" el2_field="); number((pfr >> 8) & 0xf);
+    text("\n");
     text("RUN tag="); text(ANKO_ANNE_DIAG_RUN_TAG); text("\n");
 #ifdef ANKO_ANNE_WATCHDOG
     anne::watchdog::adopt();

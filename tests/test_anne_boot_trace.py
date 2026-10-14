@@ -108,12 +108,17 @@ class NativeBootTrace(unittest.TestCase):
                     time.sleep(0.05)
                 else: self.fail('Boot trace did not reach expected state:\n' + record[-6000:])
                 self.assertIn(f'AMEANKO1 el={el}', record)
+                self.assertRegex(record, r'CPU_FEATURES midr=0x[0-9a-f]+ mpidr=0x[0-9a-f]+ pfr0=0x[0-9a-f]+ el2_field=[0-9]+')
+                if not fault or fault > 26:
+                    self.assertIn(f'boot_entry={el} monitor={1 if el == 2 else 0}', record)
                 self.assertIn(f'FIQ_SOURCE phase=entry word={fiq_source:#018x}', record)
                 if watchdog:
                     expected_status = 1 if watchdog_control else 0
                     self.assertRegex(record, rf'WATCHDOG phase=adopt status={expected_status} id=0x141805 control=0x{watchdog_control:x} load=0x10000000 .* feeds={1 if watchdog_control else 0}')
                 self.assertIn('BOOT 2 bss.begin', record)
                 self.assertIn('BOOT 3 bss.done', record)
+                if workload:
+                    self.assertIn('DIAG_READ complete records=8 retained_repeatable=1 bounds_checked=1', record)
                 if display:
                     self.assertIn('DISPLAY begin phase=entry', record)
                     self.assertIn('DISPLAY begin phase=mmu.done', record)

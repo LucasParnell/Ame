@@ -1,118 +1,63 @@
 #!/usr/bin/env bash
+# Build the single-vCPU hello appliance on a Linux host. All generated
+# files belong to a separate output tree; the supplied source stays read-only.
 set -euo pipefail
 
 AME="$(cd "$(dirname "$0")/../.." && pwd)"
-source "${AME}/scripts/linux/dango-load.env"
 : "${DANGO_LINUX_SRC:=$HOME/Code/linux}"
-: "${DANGO_LINUX_TAG:=v6.12}"
-export PATH="${AME}/scripts/linux/toolbin:${PATH}"
-
 OUT="${DANGO_LINUX_OUT:-${AME}/build/dango-linux}"
-KOUT="${DANGO_LINUX_SRC}/out-dango"
-: "${DANGO_LINUX_BOOTARGS:=console=ttyAMA0,115200n8 earlycon=pl011,0x09000000 loglevel=4 nosmp maxcpus=1 cma=0 coherent_pool=1M cpuidle.off=1 rdinit=/init panic=-1}"
-mkdir -p "${OUT}"
+KOUT="${DANGO_LINUX_KOUT:-${AME}/build/dango-linux-hello-kout}"
+FRAGMENT="${AME}/linux-artifacts/config/dango_hello_arm64.fragment"
+export DANGO_LINUX_OUT="${OUT}" DANGO_LINUX_PROFILE=hello DANGO_LINUX_GUEST=minimal
 
-if [[ ! -d "${DANGO_LINUX_SRC}/.git" ]]; then
-    mkdir -p "$(dirname "${DANGO_LINUX_SRC}")"
-    git clone --branch "${DANGO_LINUX_TAG}" --depth=1 \
-        https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
-        "${DANGO_LINUX_SRC}"
-fi
-
-if [[ ! -f "${DANGO_LINUX_SRC}/Makefile" ]]; then
-    echo "error: DANGO_LINUX_SRC does not look like a Linux source tree: ${DANGO_LINUX_SRC}" >&2
+if [[ "$(uname -s)" != Linux ]]; then
+    echo "error: use scripts/linux/build-hello-linux-docker.sh on macOS" >&2
     exit 1
 fi
-
-echo "[1/5] build dango-agent"
-"${AME}/scripts/linux/build-agent.sh"
-
-echo "[2/5] build initramfs"
-"${AME}/scripts/linux/build-initramfs.sh"
-
-echo "[3/5] configure/build linux"
-if [[ "${DANGO_LINUX_TRACE:-0}" != "0" ]]; then
-    DANGO_LINUX_SRC="${DANGO_LINUX_SRC}" "${AME}/scripts/linux/apply-dango-trace.py" "${DANGO_LINUX_SRC}"
+if [[ ! -f "${DANGO_LINUX_SRC}/Makefile" ]]; then
+    echo "error: provide a pinned Linux tree with DANGO_LINUX_SRC" >&2
+    exit 1
 fi
-# Start from defconfig for the first reliable guest boot, then apply the
-# hello-image fragment. The fragment removes obvious subsystems but lets Linux
-# keep whatever low-level options it needs to boot on arm64/QEMU virt.
-if [[ ! -f "${KOUT}/.dango-configured" || "${AME}/linux-artifacts/config/dango_hello_arm64.fragment" -nt "${KOUT}/.dango-configured" ]]; then
-    rm -f "${KOUT}/.dango-configured"
-    make LLVM=1 ARCH=arm64 O="${KOUT}" -C "${DANGO_LINUX_SRC}" defconfig
-    "${DANGO_LINUX_SRC}/scripts/kconfig/merge_config.sh" \
-        -m \
-        -O "${KOUT}" \
-        "${KOUT}/.config" \
-        "${AME}/linux-artifacts/config/dango_hello_arm64.fragment"
-    make LLVM=1 ARCH=arm64 O="${KOUT}" -C "${DANGO_LINUX_SRC}" olddefconfig
-    touch "${KOUT}/.dango-configured"
-fi
+mkdir -p "${OUT}" "${KOUT}"
 
-make LLVM=1 ARCH=arm64 O="${KOUT}" -C "${DANGO_LINUX_SRC}" -j"$(nproc)" Image
-
-cp "${KOUT}/arch/arm64/boot/Image" "${OUT}/Image"
-cp "${KOUT}/vmlinux" "${OUT}/vmlinux" || true
-cp "${KOUT}/System.map" "${OUT}/System.map" || true
-
-echo "[4/5] build dtb"
-# Build the DTB after initramfs exists so linux,initrd-end is correct.
-DANGO_LINUX_SRC="${DANGO_LINUX_SRC}" "${AME}/scripts/linux/build-dtb.sh"
-
-echo "[5/5] write manifest"
-image_size=$(stat -c%s "${OUT}/Image")
-initramfs_size=$(stat -c%s "${OUT}/initramfs.cpio")
-dtb_size=$(stat -c%s "${OUT}/dango-linux.dtb")
-image_text_offset=$(python3 - "${OUT}/Image" <<'PY_IMAGE_HEADER'
-import pathlib
-import struct
-import sys
-image = pathlib.Path(sys.argv[1]).read_bytes()[:64]
-if len(image) < 64 or image[56:60] != b'ARMd':
-    print('0')
-else:
-    print(str(struct.unpack_from('<Q', image, 8)[0]))
-PY_IMAGE_HEADER
-)
-
-if [[ -n "${DANGO_LINUX_KERNEL_LOAD:-}" ]]; then
-    KERNEL_LOAD="${DANGO_LINUX_KERNEL_LOAD}"
-elif [[ "${image_text_offset}" == "0" ]]; then
-    # Modern arm64 Images often report text_offset=0 and require a 2 MiB-aligned
-    # placement. Leave the first 2 MiB of guest RAM free for the tiny Dango
-    # diagnostic trampoline and load Linux at the next 2 MiB boundary.
-    KERNEL_LOAD="0x40200000"
+# All configuration, generated headers and objects belong to this build tree.
+MAKE_ARGS=(LLVM=1 ARCH=arm64 O="${KOUT}" -C "${DANGO_LINUX_SRC}")
+stamp="${KOUT}/.dango-hello-configured"
+if [[ ! -f "${stamp}" || "${FRAGMENT}" -nt "${stamp}" ]]; then
+    rm -f "${stamp}"
+    make "${MAKE_ARGS[@]}" defconfig
+    "${DANGO_LINUX_SRC}/scripts/kconfig/merge_config.sh" -m -O "${KOUT}" \
+        "${KOUT}/.config" "${FRAGMENT}"
+    make "${MAKE_ARGS[@]}" olddefconfig
+    python3 "${AME}/scripts/linux/check-minimal-config.py" --config "${KOUT}/.config" --flow hello
+    touch "${stamp}"
 else
-    # Older arm64 Images use a non-zero text_offset, commonly 0x80000. In that
-    # case the conventional placement is RAM_BASE + text_offset.
-    KERNEL_LOAD=$(printf '0x%x' $((0x40000000 + image_text_offset)))
+    python3 "${AME}/scripts/linux/check-minimal-config.py" --config "${KOUT}/.config" --flow hello
 fi
-echo "dango: linux Image text_offset=$(printf '0x%x' "${image_text_offset}") kernel_load=${KERNEL_LOAD}"
+make "${MAKE_ARGS[@]}" -j"${DANGO_LINUX_JOBS:-$(nproc)}" Image
+cp "${KOUT}/arch/arm64/boot/Image" "${OUT}/Image"
+cp "${KOUT}/vmlinux" "${OUT}/vmlinux"
+cp "${KOUT}/System.map" "${OUT}/System.map"
 
-cat > "${OUT}/manifest.toml" <<EOF_MANIFEST
-name = "dango-linux-hello"
-arch = "aarch64"
+"${AME}/scripts/linux/build-agent.sh"
+"${AME}/scripts/linux/build-initramfs.sh"
+"${AME}/scripts/linux/build-dtb.sh"
+# Use the same manifest writer as the GPU build so size/layout checks cannot
+# drift when an agent-only iteration changes the initramfs.
+"${AME}/scripts/linux/build-manifest.sh"
 
-kernel = "Image"
-dtb = "dango-linux.dtb"
-initramfs = "initramfs.cpio"
-
-kernel_size = ${image_size}
-initramfs_size = ${initramfs_size}
-dtb_size = ${dtb_size}
-
-memory_base = "0x40000000"
-memory_size = "0x08000000"
-
-kernel_load = "${KERNEL_LOAD}"
-initramfs_load = "${DANGO_INITRAMFS_LOAD}"
-dtb_load = "${DANGO_DTB_LOAD}"
-
-entry = "kernel_load"
-bootargs = "${DANGO_LINUX_BOOTARGS}"
-vcpus = 1
-EOF_MANIFEST
-
-"${AME}/scripts/linux/check-artifacts.sh" "${OUT}"
-echo "dango: linux manifest entry=$(awk -F= '/^entry[[:space:]]*=/{gsub(/[ "\t]/, "", $2); print $2}' "${OUT}/manifest.toml") kernel_load=${KERNEL_LOAD}"
-echo "dango: linux artifacts ready"
+# Record the exact source/config behind this hello Image. This cold build-time
+# metadata never adds work to the host/guest execution path.
+python3 - "${DANGO_LINUX_SRC}" "${KOUT}/.config" "${OUT}/build-info.json" <<'PY_INFO'
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+source, config, output = map(Path, sys.argv[1:])
+revision = subprocess.check_output(['git', '-c', f'safe.directory={source}',
+    '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+info = {'profile': 'hello', 'guest': 'minimal', 'source_revision': revision,
+        'config_sha256': hashlib.sha256(config.read_bytes()).hexdigest()}
+output.write_text(json.dumps(info, indent=2) + '\n')
+PY_INFO

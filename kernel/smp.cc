@@ -10,9 +10,13 @@
 #include "libk/string.h"
 #include "anko/cpu_topology.h"
 #include "anko/platform_clock.h"
+#include "anko/el2_boot.h"
+#include "anko/interrupt_mask.h"
+#include "midix/abi/platform.h"
 #ifdef ANKO_BOARD_HUAWEI_ANNE
 #include "boot_diagnostics.h"
 #include "debug_io.h"
+#include "power.h"
 #endif
 
 namespace drivers::gic { void init_cpu(); u32 cpu_target(u32 cpu); void send_sgi(u32 cpu_id, u32 sgi_id); }
@@ -90,26 +94,80 @@ u32 cpu_count() {
     return sched::online_cpu_count();
 }
 
-// Machine power: firmware-owned. SYSTEM_OFF=0x84000008, SYSTEM_RESET=0x84000009.
-// Secondary CPUs are left to the firmware's power sequence; interrupts are
-// masked so nothing of ours runs after the call.
-void system_off() {
-    asm volatile("msr daifset, #2" ::: "memory");
-    if (g_info.psci_available) {
-        (void)psci_call(0x84000008ull, 0, 0, 0);
-        anko::log::writef(anko::log::Level::Error, "kernel/smp",
-                          "psci system_off returned");
-    }
-    for (;;) asm volatile("wfi");
+SysError system_power_check(u32 operation) {
+    if (operation != MX_PLATFORM_SYSTEM_OFF && operation != MX_PLATFORM_SYSTEM_RESET &&
+        operation != MX_PLATFORM_SYSTEM_FASTBOOT) return E_INVALID;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    return E_OK;
+#else
+    if (operation == MX_PLATFORM_SYSTEM_FASTBOOT) return E_NOTIMPL;
+    const u64 function = operation == MX_PLATFORM_SYSTEM_OFF ? g_info.system_off : g_info.system_reset;
+    return g_info.psci_available && function ? E_OK : E_NOTIMPL;
+#endif
 }
-void system_reset() {
-    asm volatile("msr daifset, #2" ::: "memory");
-    if (g_info.psci_available) {
-        (void)psci_call(0x84000009ull, 0, 0, 0);
-        anko::log::writef(anko::log::Level::Error, "kernel/smp",
-                          "psci system_reset returned");
+
+namespace {
+struct PowerIrqGuard {
+    u64 saved;
+    PowerIrqGuard() { asm volatile("mrs %0, daif; msr daifset, #3" : "=r"(saved) :: "memory"); }
+    ~PowerIrqGuard() {
+        asm volatile("msr daif, %0" :: "r"(kernel::host_interrupt_state(saved)) : "memory");
     }
-    for (;;) asm volatile("wfi");
+};
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+void power_wait(u32 seconds) {
+    asm volatile("dsb sy" ::: "memory");
+    u64 reported; asm volatile("mrs %0, cntfrq_el0" : "=r"(reported));
+    const u64 ticks = platform::counter_frequency(reported) * seconds;
+    const u64 start = counter();
+    while (counter() - start < ticks) asm volatile("yield" ::: "memory");
+}
+SysError native_reset(u8 reason) {
+    const libk::Mmio pmic{reinterpret_cast<volatile u8*>(anne::kDebugPmicBase), PAGE_SIZE};
+    const libk::Mmio sctrl{reinterpret_cast<volatile u8*>(anne::kDebugSctrlBase), PAGE_SIZE};
+    if (!anne::power::set_reason(pmic, reason)) return E_FAULT;
+    anne::boot_log_flush();
+    if (!anne::power::pulse_reset(sctrl)) return E_FAULT;
+    // A normal reset uses one ordered pulse, not the fault handler's endless
+    // retry loop. If firmware refuses, restore interrupts and return an error.
+    power_wait(3);
+    return E_BUSY;
+}
+#endif
+}
+
+SysError system_off() {
+    const auto supported = system_power_check(MX_PLATFORM_SYSTEM_OFF);
+    if (supported != E_OK) return supported;
+    PowerIrqGuard guard;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    const libk::Mmio pmic{reinterpret_cast<volatile u8*>(anne::kDebugPmicBase), PAGE_SIZE};
+    const libk::Mmio gpio{reinterpret_cast<volatile u8*>(anne::power::kPowerholdBase), PAGE_SIZE};
+    if (!anne::power::set_reason(pmic, anne::power::kReasonOff)) return E_FAULT;
+    anne::boot_log_flush();
+    if (!anne::power::lower_powerhold(gpio)) return E_FAULT;
+    power_wait(1);
+    // Match the vendor path: external power can keep the PMIC alive. Request
+    // its charger boot mode after the power-hold attempt instead of hanging.
+    return native_reset(anne::power::kReasonCharger);
+#else
+    const auto result = psci_call(g_info.system_off, 0, 0, 0);
+    ANKO_LOGF_ERROR("kernel/smp", "PSCI system_off returned rc=%llx", (unsigned long long)result);
+    return E_NOTIMPL;
+#endif
+}
+
+SysError system_reset(bool fastboot) {
+    const auto supported = system_power_check(fastboot ? MX_PLATFORM_SYSTEM_FASTBOOT : MX_PLATFORM_SYSTEM_RESET);
+    if (supported != E_OK) return supported;
+    PowerIrqGuard guard;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    return native_reset(fastboot ? anne::power::kReasonFastboot : anne::power::kReasonNormal);
+#else
+    const auto result = psci_call(g_info.system_reset, 0, 0, 0);
+    ANKO_LOGF_ERROR("kernel/smp", "PSCI system_reset returned rc=%llx", (unsigned long long)result);
+    return E_NOTIMPL;
+#endif
 }
 
 void send_wake_ipi(u32 cpu_id) {
@@ -143,6 +201,9 @@ extern "C" [[noreturn]] void secondary_kernel_main(u64 cpu_id) {
         : "memory");
     drivers::gic::init_cpu();
     drivers::timer::init_cpu(g_hw.timer_irq);
+    ANKO_LOGF_INFO("kernel/smp", "cpu%u el2_entry=%llu el2_monitor=%u", (u32)cpu_id,
+                  (unsigned long long)vm::entry_level((u32)cpu_id),
+                  vm::monitor_ready((u32)cpu_id) ? 1u : 0u);
     ANKO_LOGF_INFO("kernel/smp", "cpu%u local GIC target=%x timer ready", (u32)cpu_id, drivers::gic::cpu_target(cpu_id));
     sched::mark_cpu_online(static_cast<u32>(cpu_id));
     __atomic_store_n(&g_cpu_started[cpu_id], 1u, __ATOMIC_RELEASE);

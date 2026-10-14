@@ -39,13 +39,19 @@ static_assert(MX_TERM_INLINE_BYTES == 48, "terminal byte budget changed");
 
 enum MxTermOpcode : mx_u32_t {
     // A run of input bytes flowing into the shell (tty.fb0/ui.input -> msh).
-    MX_TERM_INPUT_BYTES  = 0x54494E01u,
+    MX_TERM_INPUT_BYTES = 0x54494E01u,
     // A run of output bytes flowing out to the display (msh -> tty.fb0/io.console).
     MX_TERM_OUTPUT_BYTES = 0x544F5501u,
     // A character-cell geometry change (see MxTermResize).
-    MX_TERM_RESIZE       = 0x54525301u,
+    MX_TERM_RESIZE = 0x54525301u,
     // An out-of-band control code, never user bytes (see MxTermControl).
-    MX_TERM_CONTROL      = 0x54435401u,
+    MX_TERM_CONTROL = 0x54435401u,
+    // Optional generation-tagged terminal mirror/input. First eight inline
+    // bytes are a little-endian nonzero session generation; remaining bytes
+    // are the run. slot.length includes that header. Ordinary shell rings
+    // continue to use INPUT_BYTES/OUTPUT_BYTES with no session header.
+    MX_TERM_SESSION_INPUT_BYTES = 0x54534901u,
+    MX_TERM_SESSION_OUTPUT_BYTES = 0x54534F01u,
 };
 
 // --- RESIZE -----------------------------------------------------------------
@@ -66,17 +72,17 @@ static_assert(sizeof(MxTermResize) == 8, "resize size drift");
 // A small fixed vocabulary so neither end uses magic bytes for out-of-band
 // events. A code the reader does not know is dropped (never shown as bytes).
 enum MxTermControlCode : mx_u32_t {
-    MX_TERM_CONTROL_NONE     = 0,
-    MX_TERM_CONTROL_FLOW_ON  = 1, // resume output
+    MX_TERM_CONTROL_NONE = 0,
+    MX_TERM_CONTROL_FLOW_ON = 1,  // resume output
     MX_TERM_CONTROL_FLOW_OFF = 2, // suspend output (back-pressure)
-    MX_TERM_CONTROL_EOF      = 3, // input stream ended
-    MX_TERM_CONTROL_HANGUP   = 4, // peer detached
+    MX_TERM_CONTROL_EOF = 3,      // input stream ended
+    MX_TERM_CONTROL_HANGUP = 4,   // peer detached
 };
 
 struct MxTermControl {
-    mx_u32_t code;   // MxTermControlCode
-    mx_u32_t arg0;   // code-specific, else 0
-    mx_u32_t arg1;   // code-specific, else 0
+    mx_u32_t code; // MxTermControlCode
+    mx_u32_t arg0; // optional session generation: low 32 bits
+    mx_u32_t arg1; // optional session generation: high 32 bits
     mx_u32_t reserved0;
 };
 static_assert(sizeof(MxTermControl) <= MX_TERM_INLINE_BYTES, "control must fit one payload");
@@ -88,7 +94,8 @@ static_assert(sizeof(MxTermControl) == 16, "control size drift");
 // Every opcode value is unique; enumerated in one place so a copy/paste
 // duplicate or a renumbered opcode fails the build in every translation unit.
 constexpr mx_u32_t kMxTermOpcodeValues[] = {
-    MX_TERM_INPUT_BYTES, MX_TERM_OUTPUT_BYTES, MX_TERM_RESIZE, MX_TERM_CONTROL,
+    MX_TERM_INPUT_BYTES, MX_TERM_OUTPUT_BYTES,        MX_TERM_RESIZE,
+    MX_TERM_CONTROL,     MX_TERM_SESSION_INPUT_BYTES, MX_TERM_SESSION_OUTPUT_BYTES,
 };
 
 constexpr bool mx_term_opcodes_unique() {

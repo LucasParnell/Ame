@@ -6,7 +6,7 @@
 namespace mochi::usb::acm {
 struct Control {
     mx_u8_t coding[7];
-    mx_u16_t lines;
+    mx_u16_t lines, break_duration;
     void init() {
         libk::write_le<mx_u32_t>(libk::as_bytes(coding, 4), 115200);
         coding[6] = 8;
@@ -32,7 +32,11 @@ struct Control {
             }
         } else if (setup.request_type == 0x21 && !setup.length &&
                    (setup.request == 0x22 || setup.request == 0x23)) {
-            lines = setup.value;
+            if (setup.request == 0x22) {
+                lines = setup.value;
+            } else {
+                break_duration = setup.value;
+            }
             request.length = 0;
             request.status = MX_OK;
         }

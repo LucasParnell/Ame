@@ -20,6 +20,7 @@ const Builtin kBuiltins[] = {
     {"rm", cmd_rm, "remove an io.fs file or empty directory"},
     {"touch", cmd_touch, "create an empty io.fs file"},
     {"bootinfo", cmd_bootinfo, "show BootInfo entries"},
+    {"diag", cmd_diag, "serial diagnostics: all (default), el2, log"},
     {"svc", cmd_svc, "service registry: list/tree/groups/deps/log/start/stop/restart"},
     {"cap", cmd_cap, "capability tools: ls/tree/inspect/revoke"},
     {"arena", cmd_arena, "arena tools: ls/show"},
@@ -27,7 +28,7 @@ const Builtin kBuiltins[] = {
     {"doorbell", cmd_doorbell, "doorbell stats"},
     {"vm", cmd_vm, "VM tools"},
     {"shutdown", cmd_shutdown, "power off the system"},
-    {"reboot", cmd_reboot, "reset the system"},
+    {"reboot", cmd_reboot, "reset the system; fastboot/bootloader selects USB flashing"},
 };
 
 
@@ -48,7 +49,8 @@ int cmd_help(int, char**) {
     putln("  cap ls | cap tree | cap inspect HANDLE | cap revoke HANDLE");
     putln("  arena ls | arena show NAME");
     putln("  ring stats | doorbell stats");
-    putln("  shutdown | reboot");
+    putln("  diag [all|el2|log]");
+    putln("  shutdown | reboot [fastboot|bootloader]");
     putln("  vm list | vm start linux0 | vm console linux0");
     return 0;
 }

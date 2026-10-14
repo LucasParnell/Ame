@@ -8,20 +8,23 @@
 namespace {
 struct Runtime {
     mochi::SpscEndpoint links[2];
-    mochi::usb::PendingFrame pending[2];
+    mochi::usb::PendingFrame pending[2], control_reply;
     mochi::usb::acm::Control control;
 };
-// Both directions are serviced every turn. A setup reply uses direction 1,
-// so do not consume another gadget request until that reply has been accepted.
+// Control replies have their own retained row, so full byte-stream output
+// cannot prevent accepting lifecycle/control input from the gadget. One SPSC
+// producer still owns the gadget reply ring; control is published first.
 bool service(Runtime& r) {
-    bool progress = false;
+    bool progress = r.control_reply.flush(r.links[0].tx());
     for (mx_u32_t from = 0; from < 2; ++from) {
         auto& pending = r.pending[from];
         if (pending.held) {
-            progress |= pending.flush(r.links[from ^ 1].tx());
+            if (!from || !r.control_reply.held) {
+                progress |= pending.flush(r.links[from ^ 1].tx());
+            }
             continue;
         }
-        if (!from && r.pending[1].held) {
+        if (!from && r.control_reply.held) {
             continue;
         }
         MxRingSlot slot{};
@@ -35,10 +38,9 @@ bool service(Runtime& r) {
                 continue;
             }
             r.control.reply(request);
-            auto& reply = r.pending[1];
-            mochi::message_put(&reply.slot, MX_FUNCTION_SETUP_REPLY, request);
-            reply.slot.seq = slot.seq;
-            reply.held = true;
+            mochi::message_put(&r.control_reply.slot, MX_FUNCTION_SETUP_REPLY, request);
+            r.control_reply.slot.seq = slot.seq;
+            r.control_reply.held = true;
         } else {
             (void)pending.retain(slot);
         }
@@ -67,8 +69,9 @@ extern "C" [[noreturn]] void _start() {
             mx_yield();
             continue;
         }
-        const bool blocked = r->pending[0].held || r->pending[1].held;
-        const mx_u64_t readable = (!blocked ? 1u : 0u) | (!r->pending[1].held ? 2u : 0u);
+        const bool blocked = r->pending[0].held || r->pending[1].held || r->control_reply.held;
+        const mx_u64_t readable = (!r->pending[0].held && !r->control_reply.held ? 1u : 0u) |
+                                  (!r->pending[1].held ? 2u : 0u);
         mochi::driver::idle(r->links, 2, r->links[0].rx_doorbell,
                             blocked ? mx_clock_ns() + mochi::driver::kBackpressureRetryNs : 0,
                             readable);

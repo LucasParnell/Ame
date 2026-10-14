@@ -4,6 +4,7 @@
 #include "mochi/log.h"
 #include "libk/str.h"
 #include "midix/abi/cpu_limits.h"
+#include "midix/abi/diagnostics.h"
 #include "dango/vm.h"
 
 namespace {
@@ -18,6 +19,39 @@ volatile uint64_t results[MX_HOST_MAX_CPUS]{};
     marker(reason);
     sys_thread_exit(1);
     for (;;) sys_yield();
+}
+void check_diagnostics() {
+    MxDiagSystem info{};
+    if (sys_debug_read(MX_DIAG_SYSTEM, 0, &info, sizeof(info)) != sizeof(info) ||
+        info.version != MX_DIAG_VERSION || info.online_mask != online ||
+        info.cpu_limit != MX_HOST_MAX_CPUS || info.current_el != 1 ||
+        !info.boot_log_size || info.boot_log_size > info.boot_log_capacity)
+        fail("DIAG_READ system failed\n");
+    for (uint32_t cpu = 0; cpu < info.cpu_limit; ++cpu) {
+        MxDiagCpu record{};
+        if (sys_debug_read(MX_DIAG_CPU, cpu, &record, sizeof(record)) != sizeof(record) ||
+            record.version != MX_DIAG_VERSION || record.cpu != cpu || !record.online ||
+            (record.boot_entry_el != 1 && record.boot_entry_el != 2) ||
+            record.monitor_ready != (record.boot_entry_el == 2))
+            fail("DIAG_READ CPU failed\n");
+    }
+    char first[64]{}, second[64]{};
+    if (sys_debug_read(MX_DIAG_BOOT_LOG, 0, first, sizeof(first)) != sizeof(first) ||
+        sys_debug_read(MX_DIAG_BOOT_LOG, 0, second, sizeof(second)) != sizeof(second))
+        fail("DIAG_READ retained prefix failed\n");
+    for (uint32_t i = 0; i < sizeof(first); ++i)
+        if (first[i] != second[i]) fail("DIAG_READ prefix changed\n");
+    if (sys_debug_read(MX_DIAG_BOOT_LOG, ~uint64_t{0}, first, sizeof(first)) != 0 ||
+        sys_debug_read(MX_DIAG_SYSTEM, 0, &info, sizeof(info) - 1) != MX_ERR_INVALID ||
+        sys_debug_read(MX_DIAG_SYSTEM, 1, &info, sizeof(info)) != MX_ERR_INVALID ||
+        sys_debug_read(MX_DIAG_CPU, MX_HOST_MAX_CPUS, &info, sizeof(info)) != MX_ERR_INVALID ||
+        sys_debug_read(99, 0, &info, sizeof(info)) != MX_ERR_INVALID ||
+        sys_debug_read(MX_DIAG_BOOT_LOG, 0, first, MX_DIAG_READ_MAX + 1) != MX_ERR_INVALID ||
+        sys_debug_read(MX_DIAG_BOOT_LOG, 0, first, 0) != MX_ERR_INVALID ||
+        sys_debug_read(MX_DIAG_SYSTEM, 0, nullptr, sizeof(info)) != MX_ERR_INVALID ||
+        sys_debug_read(MX_DIAG_SYSTEM, 0, reinterpret_cast<void*>(0x1000), sizeof(info)) != MX_ERR_FAULT)
+        fail("DIAG_READ request validation failed\n");
+    marker("DIAG_READ complete records=8 retained_repeatable=1 bounds_checked=1\n");
 }
 void worker(uint64_t expected) {
     const int64_t observed = sys_thread_get_cpu();
@@ -48,6 +82,7 @@ extern "C" [[noreturn]] void _start() {
     const auto* count = mochi::boot::find(boot, "cpu.count");
     if (!mask || !count || count->aux0 != 8 || mask->aux0 != 0xff) fail("SMP_WORK expected eight CPUs\n");
     online = mask->aux0;
+    check_diagnostics();
     const auto db = sys_doorbell_create();
     if (db <= 0) fail("SMP_WORK doorbell create failed\n");
     completion = static_cast<CapHandle>(db);

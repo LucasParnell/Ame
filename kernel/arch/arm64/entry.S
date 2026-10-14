@@ -18,6 +18,7 @@
 
 .section .text.entry, "ax"
 #include "midix/abi/cpu_limits.h"
+#include "anko/el2_boot.h"
 .global _start
 _start:
     // AArch64 Linux Image header. QEMU -kernel and U-Boot both enter at the
@@ -41,6 +42,11 @@ _start:
     mov     x19, x0
     mrs     x20, CurrentEL
     lsr     x20, x20, #2
+    // Capture the firmware handoff independently from monitor availability.
+    adrp    x9, g_el2_boot_cpus
+    add     x9, x9, :lo12:g_el2_boot_cpus
+    str     x20, [x9, #ANKO_EL2_BOOT_ENTRY_OFFSET]
+    str     xzr, [x9, #ANKO_EL2_BOOT_READY_OFFSET]
 
 #ifdef ANKO_BOARD_HUAWEI_ANNE
     cmp     x20, #1
@@ -96,11 +102,9 @@ _start:
     lsl     x1, x1, #14
     add     x0, x0, x1
     mov     sp, x0
-#ifndef ANKO_BOARD_HUAWEI_ANNE
     adrp    x0, el2_vectors
     add     x0, x0, :lo12:el2_vectors
     msr     VBAR_EL2, x0
-#endif
     mov     x0, #(1 << 31)              // HCR_EL2.RW = 1 (EL1 is AArch64)
     msr     HCR_EL2, x0
     mov     x0, #0x33ff
@@ -115,6 +119,12 @@ _start:
     msr     SPSR_EL2, x0
     adr     x0, 1f
     msr     ELR_EL2, x0
+    isb
+    adrp    x9, g_el2_boot_cpus
+    add     x9, x9, :lo12:g_el2_boot_cpus
+    add     x9, x9, #ANKO_EL2_BOOT_READY_OFFSET
+    mov     x10, #1
+    stlr    x10, [x9]                 // Publish only an installed monitor.
     eret
 1:
 #ifdef ANKO_BOARD_HUAWEI_ANNE
@@ -233,6 +243,11 @@ secondary_start:
 
     mrs     x0, CurrentEL
     lsr     x0, x0, #2
+    adrp    x9, g_el2_boot_cpus
+    add     x9, x9, :lo12:g_el2_boot_cpus
+    add     x9, x9, x19, lsl #ANKO_EL2_BOOT_SHIFT
+    str     x0, [x9, #ANKO_EL2_BOOT_ENTRY_OFFSET]
+    str     xzr, [x9, #ANKO_EL2_BOOT_READY_OFFSET]
     cmp     x0, #2
     b.ne    5f
 
@@ -263,6 +278,13 @@ secondary_start:
     msr     SPSR_EL2, x0
     adr     x0, 5f
     msr     ELR_EL2, x0
+    isb
+    adrp    x9, g_el2_boot_cpus
+    add     x9, x9, :lo12:g_el2_boot_cpus
+    add     x9, x9, x19, lsl #ANKO_EL2_BOOT_SHIFT
+    add     x9, x9, #ANKO_EL2_BOOT_READY_OFFSET
+    mov     x10, #1
+    stlr    x10, [x9]
     eret
 
 5:
@@ -303,6 +325,12 @@ g_dtb_phys:
 .global g_boot_el
 g_boot_el:
     .quad 0
+
+// Keep these cold startup records outside BSS and on separate cache lines.
+.balign ANKO_EL2_BOOT_STRIDE
+.global g_el2_boot_cpus
+g_el2_boot_cpus:
+    .zero (MX_HOST_MAX_CPUS * ANKO_EL2_BOOT_STRIDE)
 
 // Boot stack — 16 KiB, 16-byte aligned bottom, top is what we load into SP.
 .section .bss

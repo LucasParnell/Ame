@@ -46,6 +46,7 @@
 
     timer {
         compatible = "arm,armv8-timer";
+        @DANGO_TIMER_FREQUENCY@
         interrupts = <1 13 0xf08>,
                      <1 14 0xf08>,
                      <1 11 0xf08>,

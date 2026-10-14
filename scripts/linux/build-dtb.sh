@@ -41,14 +41,27 @@ end_lo=$(( initrd_end & 0xffffffff ))
 
 bootargs_escaped=$(escape_sed_replacement "${DANGO_LINUX_BOOTARGS}")
 
+# Zero keeps the architectural register as the source of truth (QEMU). Anne
+# can explicitly supply its measured 1,920,000 Hz rate because its firmware
+# reports a different CNTFRQ value. Never silently apply a phone rate to QEMU.
+timer_hz="${DANGO_LINUX_TIMER_HZ:-0}"
+if ! [[ "${timer_hz}" =~ ^(0|[1-9][0-9]{0,9})$ ]] || (( timer_hz > 4294967295 )); then
+    echo "error: DANGO_LINUX_TIMER_HZ must be an unsigned 32-bit decimal" >&2
+    exit 1
+fi
+timer_property=""
+if (( timer_hz != 0 )); then
+    timer_property="clock-frequency = <${timer_hz}>;"
+fi
+
 # Guest binding substitutions (@DANGO_*@): read the current values out of the
 # shared ABI header so the device tree cannot drift from the driver/manager.
-# Templates without any @DANGO_*@ placeholder (the minimal profile) are
-# unaffected: the sed program simply matches nothing.
+# Templates without a given placeholder are unaffected by its substitution.
 "${AME}/scripts/linux/gen-dango-binding.sh" > "${DANGO_BINDING_SED}"
 
 sed \
   -e "s/@BOOTARGS@/${bootargs_escaped}/g" \
+  -e "s/@DANGO_TIMER_FREQUENCY@/${timer_property}/g" \
   -e "s/@INITRD_START_HI@/$(fmt32 "${start_hi}")/g" \
   -e "s/@INITRD_START_LO@/$(fmt32 "${start_lo}")/g" \
   -e "s/@INITRD_END_HI@/$(fmt32 "${end_hi}")/g" \

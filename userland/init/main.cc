@@ -1166,35 +1166,24 @@ static bool supervise_services() {
     return progress;
 }
 
-static void shutdown_system_now() {
-    console_log("shutdown requested\n");
-    for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-        ServiceSpec& svc = g_rt.services[i];
-        if (svc.proc != kNullCap) sys_kill(svc.proc);
-        svc.proc = kNullCap;
-        svc.main_thread = kNullCap;
-        registry_sync(svc);
+static void system_power_now(uint32_t operation) {
+    // Let the caller consume its acknowledgement and the terminal drain before
+    // stopping the shell/USB services. This is a bounded cold-path grace period.
+    const uint64_t deadline = mx_clock_ns() + 100000000ull;
+    while (mx_clock_ns() < deadline) sys_yield();
+    console_log("system power transition requested\n");
+    if (!stop_mask((1u << g_rt.service_count) - 1)) {
+        console_log("power transition aborted: services did not stop\n");
+        return;
     }
-    if (kCapSystemControl != kNullCap) {
-        // Kernel-owned power sequence (PSCI SYSTEM_OFF). Only returns when the
-        // firmware refuses; fall through to a halted kernel in that case.
-        (void)mx_platform_control(kCapSystemControl, MX_PLATFORM_SYSTEM_OFF);
-        console_log("shutdown: kernel power off unavailable\n");
-    }
-    while (true) sys_yield();
-}
-
-static bool reboot_userland_now() {
-    console_log("reboot requested\n");
-    for (uint32_t i = 0; i < g_rt.service_count; ++i) g_rt.services[i].desired = true;
-    const bool stopped = stop_mask((1u << g_rt.service_count) - 1);
-    if (kCapSystemControl != kNullCap) {
-        // Kernel-owned reset (PSCI SYSTEM_RESET). Only returns when the
-        // firmware refuses; userland remains restarted in that case.
-        (void)mx_platform_control(kCapSystemControl, MX_PLATFORM_SYSTEM_RESET);
-        console_log("reboot: kernel reset unavailable; userland restart stands\n");
-    }
-    return stopped;
+    const auto status = mx_platform_control(kCapSystemControl, operation);
+    char message[96];
+    libk::snprintf(message, sizeof(message), "power transition returned op=%u status=%lld; restoring services\n",
+                   operation, static_cast<long long>(status));
+    console_log(message);
+    // stop_mask preserves desired state and marks planned exits. On a refused
+    // transition normal supervision restarts the services that were running;
+    // do not leave the device in an IRQ-masked halt or pretend a reset occurred.
 }
 
 static bool handle_svc_control_requests() {
@@ -1212,8 +1201,8 @@ static bool handle_svc_control_requests() {
         // termination before any streq() walks off the end of the struct.
         req.name[sizeof(req.name) - 1] = '\0';
         ServiceSpec* svc = nullptr;
-        if (slot.type != mochi::svcctl::kRequestShutdown &&
-            slot.type != mochi::svcctl::kRequestReboot) {
+        const uint32_t power_op = mochi::svcctl::power_operation(slot.type);
+        if (!power_op) {
             svc = find_service(g_rt.services, g_rt.service_count, req.name);
             if (!svc) {
                 (void)g_rt.svcctl.send_reply(MX_ERR_NOT_FOUND, 0);
@@ -1222,8 +1211,7 @@ static bool handle_svc_control_requests() {
         }
         mx_i32_t status = MX_ERR_INVALID;
         mx_u32_t reply_state = 0;
-        bool do_shutdown = false;
-        bool do_reboot = false;
+        bool do_power = false;
         if (slot.type == mochi::svcctl::kRequestStart) {
             if (svc->proc != kNullCap || svc->main_thread != kNullCap) {
                 status = MX_ERR_BUSY;
@@ -1234,19 +1222,16 @@ static bool handle_svc_control_requests() {
             status = stop_service_now(*svc) ? MX_OK : MX_ERR_DEAD;
         } else if (slot.type == mochi::svcctl::kRequestRestart) {
             status = restart_service_now(*svc) ? MX_OK : MX_ERR_INVALID;
-        } else if (slot.type == mochi::svcctl::kRequestShutdown) {
-            status = MX_OK;
-            do_shutdown = true;
-        } else if (slot.type == mochi::svcctl::kRequestReboot) {
-            status = MX_OK;
-            do_reboot = true;
+        } else if (power_op) {
+            status = !streq(req.name, "system") ? MX_ERR_INVALID :
+                     kCapSystemControl == kNullCap ? MX_ERR_NOT_IMPLEMENTED :
+                     mx_platform_control(kCapSystemControl, MX_PLATFORM_SYSTEM_CHECK, power_op);
+            do_power = status == MX_OK;
         } else {
             status = MX_ERR_BAD_PROTOCOL;
         }
         if (svc) reply_state = registry_state_for(*svc);
-        (void)g_rt.svcctl.send_reply(status, reply_state);
-        if (do_shutdown) shutdown_system_now();
-        if (do_reboot) (void)reboot_userland_now();
+        if (g_rt.svcctl.send_reply(status, reply_state) && do_power) system_power_now(power_op);
     }
     return handled;
 }

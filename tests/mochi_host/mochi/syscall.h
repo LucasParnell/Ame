@@ -18,6 +18,7 @@ inline mx_i64_t (*host_on_wait)() = nullptr;
 inline mx_status_t (*host_on_map_page)(CapHandle, mx_vaddr_t, mx_rights_t) = nullptr;
 inline mx_status_t (*host_on_cap_info)(CapHandle, MxCapInfo*) = nullptr;
 inline mx_status_t (*host_on_map_mmio)(CapHandle, mx_vaddr_t, mx_rights_t) = nullptr;
+inline mx_i64_t (*host_on_debug_read)(mx_u64_t, mx_u64_t, void*, mx_u64_t) = nullptr;
 
 inline void sys_yield() {
     ++host_yields;
@@ -37,6 +38,9 @@ inline void mx_yield() { sys_yield(); }
 inline void mx_exit(mx_i32_t) {}
 inline void sys_debug_puts(const char*, mx_u64_t) {}
 inline mx_i64_t sys_debug_counter(mx_u64_t) { return 0; }
+inline mx_i64_t sys_debug_read(mx_u64_t request, mx_u64_t index, void* out, mx_u64_t size) {
+    return host_on_debug_read ? host_on_debug_read(request, index, out, size) : MX_ERR_NOT_IMPLEMENTED;
+}
 inline mx_status_t mx_cap_identify(CapHandle, mx_i64_t*) { return MX_ERR_INVALID; }
 inline mx_status_t mx_map_page(CapHandle cap, mx_vaddr_t va, mx_rights_t rights) {
     return host_on_map_page ? host_on_map_page(cap, va, rights) : MX_ERR_INVALID;

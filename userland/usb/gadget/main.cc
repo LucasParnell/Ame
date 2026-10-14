@@ -23,6 +23,7 @@ extern "C" [[noreturn]] void _start() {
     r->payload =
         mochi::usb::map_payload(boot, "device.payload", mochi::va::native_driver::kPayload);
     r->next_id = mx_clock_ns();
+    r->function_generation = r->next_id | 1;
     if (!r->payload.data || r->payload.size < 8192 || !r->links[0].valid() ||
         !r->links[1].valid() || !r->links[2].valid()) {
         mochi::boot::invalid_boot();

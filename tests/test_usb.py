@@ -13,7 +13,8 @@ class UsbCore(unittest.TestCase):
                                ('usb_debug_probe.cc','usb debug probe ok'),
                                ('usb_device_probe.cc','usb device probe ok'),
                                ('usb_gadget_probe.cc','usb gadget control probe ok'),
-                               ('usb_schedule_probe.cc','usb scheduling probe ok')]:
+                               ('usb_schedule_probe.cc','usb scheduling probe ok'),
+                               ('usb_serial_probe.cc','usb serial and terminal probe ok')]:
             with self.subTest(source=source), tempfile.TemporaryDirectory(prefix='ame-usb-') as work:
                 probe = str(Path(work) / 'probe')
                 result = subprocess.run([

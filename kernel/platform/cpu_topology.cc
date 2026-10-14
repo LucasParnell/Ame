@@ -20,7 +20,21 @@ struct Visitor {
     bool cpu_enabled = true;
     bool cpu_psci = false;
     bool conduit = false;
+    bool modern_psci = false;
+    bool has_system_off = false;
+    bool has_system_reset = false;
 };
+bool modern_compatible(const u8* data, u32 len) {
+    for (u32 offset = 0; offset < len;) {
+        u32 end = offset;
+        while (end < len && data[end]) ++end;
+        if (end == len) return false;
+        if (eq(data + offset, end - offset + 1, "arm,psci-0.2") ||
+            eq(data + offset, end - offset + 1, "arm,psci-1.0")) return true;
+        offset = end + 1;
+    }
+    return false;
+}
 bool begin(void* p, const char* name, u32 depth) {
     auto& v = *static_cast<Visitor*>(p);
     if (depth >= 16) return false;
@@ -43,7 +57,15 @@ void prop(void* p, const char* name, const u8* data, u32 len, u32 depth) {
     auto& v = *static_cast<Visitor*>(p);
     if (depth >= 16) return;
     const auto kind = v.kind[depth];
-    if (kind == 1 && libk::strcmp(name, "method") == 0) {
+    if (kind == 1 && libk::strcmp(name, "compatible") == 0) {
+        v.modern_psci = modern_compatible(data, len);
+    } else if (kind == 1 && libk::strcmp(name, "system_off") == 0) {
+        v.has_system_off = true;
+        if (len == 4 && libk::be32(data) == 0x84000008u) v.topology.system_off = libk::be32(data);
+    } else if (kind == 1 && libk::strcmp(name, "system_reset") == 0) {
+        v.has_system_reset = true;
+        if (len == 4 && libk::be32(data) == 0x84000009u) v.topology.system_reset = libk::be32(data);
+    } else if (kind == 1 && libk::strcmp(name, "method") == 0) {
         v.conduit = eq(data, len, "hvc") || eq(data, len, "smc");
         v.topology.psci_hvc = eq(data, len, "hvc");
     } else if (kind == 1 && libk::strcmp(name, "cpu_on") == 0 && len == 4) {
@@ -66,7 +88,7 @@ CpuTopology read_cpu_topology(PhysAddr dtb, u64 boot_mpidr) {
     Visitor v{}; v.topology.cpu_on = 0xc4000003ull;
     const u64 boot = boot_mpidr & kMpidrAffinityMask;
     if (!dtb || !fdt::walk(reinterpret_cast<const u8*>(dtb), {&v, begin, end, prop}))
-        return {1, {boot}, false, false, 0xc4000003ull};
+        return {1, {boot}, false, false, 0xc4000003ull, 0, 0};
     auto& t = v.topology;
     // Logical CPU zero is always the executing boot core, irrespective of DT order.
     u32 boot_at = t.count;
@@ -83,6 +105,11 @@ CpuTopology read_cpu_topology(PhysAddr dtb, u64 boot_mpidr) {
         t.mpidr[j] = key;
     }
     t.psci_available = v.conduit && t.cpu_on;
+    // Legacy PSCI firmware may supply these IDs explicitly. Do not infer
+    // system-power support merely from a working CPU_ON call.
+    if (v.modern_psci && !v.has_system_off) t.system_off = 0x84000008;
+    if (v.modern_psci && !v.has_system_reset) t.system_reset = 0x84000009;
+    if (!v.conduit) t.system_off = t.system_reset = 0;
     return t;
 }
 }

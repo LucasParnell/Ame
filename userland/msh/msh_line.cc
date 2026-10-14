@@ -62,6 +62,8 @@ enum CompletionKind {
     CompleteRingVerb,
     CompleteDoorbellVerb,
     CompleteVmVerb,
+    CompleteRebootTarget,
+    CompleteDiagSection,
 };
 
 
@@ -109,6 +111,8 @@ static CompletionKind completion_kind_for_tokens(uint32_t token_count, char toke
         if (streq(tokens[0], "ring")) return CompleteRingVerb;
         if (streq(tokens[0], "doorbell")) return CompleteDoorbellVerb;
         if (streq(tokens[0], "vm")) return CompleteVmVerb;
+        if (streq(tokens[0], "reboot")) return CompleteRebootTarget;
+        if (streq(tokens[0], "diag")) return CompleteDiagSection;
         return CompleteFirstToken;
     }
     if (streq(tokens[0], "svc") && token_count == 2 &&
@@ -181,6 +185,10 @@ static bool try_complete_line(char* line, uint32_t cap, uint32_t* len_io, uint32
         add_literal("stats");
     } else if (kind == CompleteVmVerb) {
         add_literal("list"); add_literal("start"); add_literal("console");
+    } else if (kind == CompleteRebootTarget) {
+        add_literal("fastboot"); add_literal("bootloader");
+    } else if (kind == CompleteDiagSection) {
+        add_literal("all"); add_literal("el2"); add_literal("log");
     } else if (kind == CompleteSvcName && g.svc_registry) {
         mochi::svc::RegistryEntry e{};
         const uint16_t count = svc_registry_entry_count();

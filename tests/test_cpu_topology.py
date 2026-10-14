@@ -20,13 +20,14 @@ class CpuTopology(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): cls.work.cleanup()
 
-    def topology(self, nodes, boot=0, conduit='smc', cells=2):
+    def topology(self, nodes, boot=0, conduit='smc', cells=2, compatible='"arm,psci"', power=''):
         cpu_nodes = ''.join(f'cpu@{reg:x} {{ device_type="cpu"; reg=<{"0 " if cells == 2 else ""}{reg}>; enable-method="psci"; {extra} }};' for reg, extra in nodes)
-        dts = f'/dts-v1/; / {{ cpus {{ #address-cells=<{cells}>; #size-cells=<0>; {cpu_nodes} }}; psci {{ compatible="arm,psci"; method="{conduit}"; cpu_on=<0xc4000003>; }}; }};'
+        dts = f'/dts-v1/; / {{ cpus {{ #address-cells=<{cells}>; #size-cells=<0>; {cpu_nodes} }}; psci {{ compatible={compatible}; method="{conduit}"; cpu_on=<0xc4000003>; {power} }}; }};'
         (self.dir/'input.dts').write_text(dts)
         subprocess.run(['dtc','-I','dts','-O','dtb','-o',str(self.dir/'input.dtb'),str(self.dir/'input.dts')],check=True,capture_output=True)
         r = subprocess.run([str(self.probe),str(self.dir/'input.dtb'),hex(boot)],check=True,capture_output=True,text=True)
         fields = r.stdout.split()
+        self.power_ids = tuple(int(x, 16) for x in r.stderr.split())
         return tuple(int(x) for x in fields[:3]), int(fields[3],16), [int(x,16) for x in fields[4:]]
 
     def test_huawei_two_clusters_and_dtb_order(self):
@@ -42,5 +43,25 @@ class CpuTopology(unittest.TestCase):
     def test_invalid_conduit_is_not_called(self):
         meta,_,ids = self.topology([(0,''),(1,'')],conduit='invalid')
         self.assertEqual(meta,(2,0,0)); self.assertEqual(ids,[0,1])
+
+    def test_legacy_cpu_on_does_not_imply_system_power(self):
+        self.topology([(0, '')])
+        self.assertEqual(self.power_ids, (0, 0))
+
+    def test_explicit_legacy_power_ids_from_phone(self):
+        self.topology([(0, '')], power='system_off=<0x84000008>; system_reset=<0x84000009>;')
+        self.assertEqual(self.power_ids, (0x84000008, 0x84000009))
+
+    def test_modern_psci_supplies_standard_power_ids(self):
+        for compat in ('"arm,psci-0.2", "arm,psci"', '"arm,psci-1.0"'):
+            self.topology([(0, '')], compatible=compat)
+            self.assertEqual(self.power_ids, (0x84000008, 0x84000009))
+
+    def test_invalid_power_ids_and_conduit_are_not_called(self):
+        self.topology([(0, '')], compatible='"arm,psci-0.2"',
+                      power='system_off=<0x12345678>; system_reset=<0>;')
+        self.assertEqual(self.power_ids, (0, 0))
+        self.topology([(0, '')], conduit='invalid', compatible='"arm,psci-0.2"')
+        self.assertEqual(self.power_ids, (0, 0))
 
 if __name__ == '__main__': unittest.main()

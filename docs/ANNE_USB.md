@@ -76,26 +76,87 @@ verified full stock restore image; it performs no phone writes. Native execution
 uses this phone's shared `kernel` partition. Restore stock before attempting to
 return to TWRP. Follow [the established capture/restore procedure](../boards/huawei-anne/BOOT_DIAGNOSTICS.md).
 
-## Mac key injection
+## Mac serial console and key injection
 
-After booting Ame, locate its `/dev/cu.usbmodem*` node. TWRP's ADB connection
-is a different gadget; the native sender requires Ame's diagnostic function.
+CDC ACM now carries a raw shell console. `dev.serial` connects opaque CDC bytes
+to the terminal; `tty.fb0` remains the single producer of the shell input ring.
+Keyboard layout/HID policy stays in its own services. From the Mac:
 
 ```sh
-python3 scripts/anne/usb-input.py --serial /dev/cu.usbmodemNN text 'help' --enter
-python3 scripts/anne/usb-input.py --serial /dev/cu.usbmodemNN key ctrl+c
-python3 scripts/anne/usb-input.py --serial /dev/cu.usbmodemNN interactive
+python3 scripts/anne/usb-input.py --serial /dev/cu.usbmodemNN console
+python3 scripts/anne/usb-input.py --serial /dev/cu.usbmodemNN console --send help --enter --read 3
 ```
 
-Interactive mode forwards the Mac terminal's keys; Ctrl-] exits. Command output
-appears on the phone. Each command is acknowledged only after its key events
-are accepted by the dedicated input ring. Disconnect/reset releases that source.
-Physical HID and diagnostic sources have independent generations and sequences.
+Interactive console mode sets both terminals raw, restores them on exit, and
+uses a bounded full-duplex relay; Ctrl-] exits. It prints command output on the
+Mac. Ordinary serial terminal applications can use the same CDC port. The Mac
+may request accessory approval before exposing the serial node.
 
-Optional vendor bulk uses `--bulk` and PyUSB/libusb, with interface 2 and
-endpoints `0x04/0x85`. CDC uses Python's standard library. The development USB
-identity is [pid.codes' private test PID](https://pid.codes/1209/0001/),
+The `diag` shell command sends a complete diagnostic report over the same raw
+CDC connection. It includes CPU feature/cache/timer registers, each CPU's actual
+boot entry level and installed EL2 monitor flag, all exported kernel/VM counters,
+shell endpoints, BootInfo/capabilities/rings/doorbells, service state, and the
+retained kernel and userland boot log. For example:
+
+```sh
+python3 scripts/anne/usb-input.py --serial /dev/cu.usbmodemNN console --send diag --enter --read 30 > out/anne-diagnostics.txt
+```
+
+`diag el2` prints just the CPU/EL2 report; `diag log` prints just the retained
+log. `diag all` is equivalent to `diag`. A complete capture ends with
+`=== diag end status=0 ===`; increase `--read` if the capture is incomplete.
+Live counters are individually sampled, not an atomic system snapshot. The
+log is read without consuming it, up to the length captured when the command
+starts. A full retained buffer is reported explicitly. These commands require
+a newly built kernel and shell containing the diagnostic read ABI.
+
+Power commands use `shutdown`, `reboot`, or `reboot fastboot` (alias
+`reboot bootloader`). Init checks platform support before stopping services.
+Native Anne reset selects the PMIC boot reason and pulses LPM3; shutdown lowers
+the measured power-hold GPIO, with the vendor's charger-boot fallback under
+external power. See [power mechanisms and validation](../boards/huawei-anne/POWER.md).
+
+Framed keyboard injection remains on the independent vendor bulk function:
+
+```sh
+python3 scripts/anne/usb-input.py --bulk text help --enter
+```
+
+Bulk requires PyUSB/libusb and interface 2, endpoints `0x04/0x85`. Its AMK1 ACK
+proves the dedicated input ring accepted the event; raw CDC bytes have no AMK1
+ACK. Physical HID, raw serial and diagnostic framing have separate ownership.
+The development USB identity is [pid.codes' private test PID](https://pid.codes/1209/0001/),
 `1209:0001`; it is shared and requires an allocated identity for distribution.
+
+## Serial ownership and rendering
+
+The serial bridge retains one input chunk and one output slot, returning progress
+only when a message is consumed or bytes are accepted. TTY retains shell input
+under backpressure rather than dropping it, and alternates serial/keyboard
+readers. A slow connected host backpressures the serial mirror and shell output;
+an offline mirror lets the local terminal continue. All buffers are fixed arena
+state, and ordinary SPSC release/acquire publication orders their CPU bytes.
+
+Function RESET reports configured versus inactive state and revokes a distinct
+function generation even when the controller generation is unchanged. The
+optional terminal session opcodes carry that generation with bytes. TTY output
+queued before a connection change retains its original generation; the bridge
+never relabels it for a new host. Connection control and bytes share their ordered
+terminal ring. The ordinary shell input/output opcodes remain unchanged.
+
+CDC retains control replies independently of stream bytes. Gadget lifecycle
+publication blocked by a full peer ring still drains obsolete reverse traffic,
+preventing a bidirectional reset deadlock. Ready function chunks coalesce into
+one endpoint-sized PIO packet (64 bytes at full speed, 512 at high speed) without
+waiting for additional bytes. Its payload stays owned through the matching
+completion ID, so an unrelated completion cannot recycle the slice.
+
+Terminal transport and rendering are separate modules. Rendering rotates rows
+on scroll, retains dirty column ranges, and publishes a bounded command burst.
+Full framebuffer rings leave those ranges pending; rendering never spins for
+space or drops commands. A byte burst produces batched text draws and one
+presentation after the cursor has been restored. No pixel memory or display
+cache maintenance is delegated to the terminal.
 
 ## Hardware references and limits
 
@@ -119,7 +180,7 @@ dedicated device FIFOs and enough endpoints, checked from GHWCFG before use.
 Unsupported hardware geometry fails closed. V18 hardware acceptance confirmed
 Mac enumeration, CDC binding, input ACKs and `help` output on the phone. Physical
 USB-C keyboard command entry remains unverified; the user could not connect it.
-The V19 refactor still requires its own native hardware regression.
+The current raw-serial/release revision requires its own native hardware regression.
 
 The first v2 hardware capture reached eight online CPUs but ended in a firmware
 watchdog FIQ during bundle authentication, before USB services started. Stock

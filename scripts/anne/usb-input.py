@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+from serial_console import Serial, console_mode
 import os
 import select
 import struct
@@ -41,45 +42,6 @@ def encode(sequence: int, kind: int, payload: bytes = b"") -> bytes:
         raise ValueError("invalid frame bounds")
     header = MAGIC + struct.pack("<IHH", sequence, kind, len(payload))
     return header + struct.pack("<I", zlib.crc32(header + payload)) + payload
-
-
-class Serial:
-    def __init__(self, path: str):
-        self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-        self.previous = termios.tcgetattr(self.fd)
-        tty.setraw(self.fd)
-        attrs = termios.tcgetattr(self.fd)
-        attrs[4] = attrs[5] = termios.B115200
-        termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
-
-    def write(self, data: bytes, deadline: float):
-        view = memoryview(data)
-        while view:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not select.select([], [self.fd], [], remaining)[1]:
-                raise TimeoutError("USB serial write timed out")
-            try:
-                size = os.write(self.fd, view)
-                if not size:
-                    raise OSError("USB serial closed")
-                view = view[size:]
-            except BlockingIOError:
-                continue
-
-    def read(self, deadline: float) -> bytes:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not select.select([self.fd], [], [], remaining)[0]:
-            raise TimeoutError("Ame input ACK timed out")
-        data = os.read(self.fd, 256)
-        if not data:
-            raise OSError("USB serial disconnected")
-        return data
-
-    def close(self):
-        try:
-            termios.tcsetattr(self.fd, termios.TCSANOW, self.previous)
-        finally:
-            os.close(self.fd)
 
 
 class Bulk:
@@ -193,71 +155,6 @@ def interactive(sender: Sender):
             sender.character(byte.decode("ascii"))
     finally:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, previous)
-
-
-def write_all(fd: int, data: bytes, timeout: float = 3.0):
-    view = memoryview(data)
-    deadline = time.monotonic() + timeout
-    while view:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not select.select([], [fd], [], remaining)[1]:
-            raise TimeoutError("Ame serial write timed out")
-        try:
-            size = os.write(fd, view)
-        except BlockingIOError:
-            continue
-        if not size:
-            raise OSError("Ame serial disconnected")
-        view = view[size:]
-
-
-def console_mode(path: str, send: str | None, enter: bool, read_seconds: float) -> int:
-    """Raw serial console: full-duplex bytes between this terminal and the shell.
-
-    With --send the bytes are written, then incoming output is printed for
-    --read seconds. Without it the terminal is a live `screen`-style console;
-    Ctrl-] exits.
-    """
-    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    previous = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        attrs = termios.tcgetattr(fd)
-        attrs[4] = attrs[5] = termios.B115200
-        termios.tcsetattr(fd, termios.TCSANOW, attrs)
-        if send is not None:
-            write_all(fd, send.encode() + (b"\r" if enter else b""))
-            end = time.monotonic() + read_seconds
-            out = bytearray()
-            while time.monotonic() < end:
-                if select.select([fd], [], [], 0.2)[0]:
-                    chunk = os.read(fd, 4096)
-                    if not chunk:
-                        break
-                    out.extend(chunk)
-            sys.stdout.write(out.decode(errors="replace"))
-            sys.stdout.flush()
-            return 0
-        print("Ame serial console; Ctrl-] exits.", file=sys.stderr)
-        while True:
-            ready, _, _ = select.select([sys.stdin, fd], [], [], 30)
-            for source in ready:
-                data = os.read(source.fileno(), 4096)
-                if not data:
-                    return 0
-                if source is sys.stdin:
-                    if b"\x1d" in data:
-                        head = data.split(b"\x1d", 1)[0]
-                        if head:
-                            write_all(fd, head)
-                        return 0
-                    write_all(fd, data)
-                else:
-                    sys.stdout.buffer.write(data)
-                    sys.stdout.buffer.flush()
-    finally:
-        termios.tcsetattr(fd, termios.TCSANOW, previous)
-        os.close(fd)
 
 
 def main() -> int:

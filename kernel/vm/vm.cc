@@ -1,12 +1,11 @@
 #include "anko/vm.h"
 #include "anko/log.h"
 #include "anko/interrupt_mask.h"
+#include "anko/el2_boot.h"
 #include "libk/string.h"
 #include "libk/printf.h"
 
 namespace drivers::timer { u64 tick_count(); }
-
-extern "C" u64 g_boot_el;
 
 namespace vm {
 static u32 g_call_lock;
@@ -99,8 +98,19 @@ void init() {
     u64 current_el = 0;
     asm volatile("mrs %0, CurrentEL" : "=r"(current_el));
     g_el_current = (current_el >> 2) & 0x3ull;
-    g_el2_available = (g_boot_el >= 2) ? 1 : 0;
+    g_el2_available = monitor_ready(0) ? 1 : 0;
     g_vhe_available = 0;
+    // These ID registers are safe at EL1. Hardware support, firmware entry and
+    // installed monitor state are separate facts; never probe EL2 with an HVC
+    // when no Ame handler has been installed.
+    u64 pfr, midr;
+    asm volatile("mrs %0, ID_AA64PFR0_EL1" : "=r"(pfr));
+    asm volatile("mrs %0, MIDR_EL1" : "=r"(midr));
+    ANKO_LOGF_INFO("kernel/vm", "EL2 hardware=%llu boot_entry=%llu monitor=%llu midr=%llx pfr0=%llx",
+        static_cast<unsigned long long>((pfr >> 8) & 0xf),
+        static_cast<unsigned long long>(entry_level(0)),
+        static_cast<unsigned long long>(g_el2_available),
+        static_cast<unsigned long long>(midr), static_cast<unsigned long long>(pfr));
     device_irq_init();
 }
 

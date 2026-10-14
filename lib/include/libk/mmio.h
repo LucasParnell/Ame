@@ -12,6 +12,17 @@ struct Mmio {
     volatile std::uint8_t* base = nullptr;
     std::size_t size = 0;
 
+    bool read8(std::size_t offset, std::uint8_t* out) const {
+        if (!out || !valid(offset, sizeof(*out))) return false;
+        *out = base[offset];
+        return true;
+    }
+    bool write8(std::size_t offset, std::uint8_t value) const {
+        if (!valid(offset, sizeof(value))) return false;
+        base[offset] = value;
+        return true;
+    }
+
     bool read32(std::size_t offset, std::uint32_t* out) const {
         if (!out || !valid(offset, sizeof(std::uint32_t))) return false;
         *out = *reinterpret_cast<volatile std::uint32_t*>(base + offset);

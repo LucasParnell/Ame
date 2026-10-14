@@ -7,7 +7,7 @@ a style one**, because it decides what a service author is allowed to reach for.
 ## Tiers
 
 1. **Advertised, safe** — `bytes.h`, `str.h`, `text.h`, `num.h`, `integer.h`, `endian.h`, `bits.h`, `slot_pool.h`, `dma.h`, `mmio.h`, `hash.h`, `printf.h`,
-   `metric.h`, `deadline.h`, `panic.h`.
+   `metric.h`, `deadline.h`, `byte_cursor.h`, `panic.h`.
    Byte operations check lengths against caller-supplied views. Array overloads
    infer the extent; pointer overloads require the caller to supply the real
    allocation size. Writers respect destination capacities. NUL-string readers
@@ -93,3 +93,6 @@ bytes after its declared payload are cleared by the ring producer.
 
 - `earlier_deadline` selects the earliest nonzero absolute timestamp. Zero means
   no timer. The caller owns the clock and must handle a deadline already due.
+
+- `ByteCursor` borrows stable storage and advances only by an accepted prefix.
+  It rejects over-advance; the owner must keep the view alive until empty.

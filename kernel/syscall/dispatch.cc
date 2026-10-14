@@ -13,6 +13,8 @@
 #include "anko/platform.h"
 #include "anko/platform_clock.h"
 #include "anko/vm.h"
+#include "anko/el2_boot.h"
+#include "midix/abi/diagnostics.h"
 #include "anko/log.h"
 #include "anko/panic.h"
 #ifdef ANKO_BOARD_HUAWEI_ANNE
@@ -22,8 +24,9 @@
 #include "libk/printf.h"
 #include "libk/string.h"
 
-namespace drivers::timer { u64 tick_count(); }
+namespace drivers::timer { u64 tick_count(); u64 cpu_tick_count(u32 cpu); }
 extern "C" u64 g_kernel_boot_cntpct;
+extern "C" u64 g_cpu_mpidrs[MX_HOST_MAX_CPUS];
 
 namespace {
 
@@ -962,6 +965,73 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     case SYS_VM_ASSIGN_DESTROY:
         return err(vm::device_destroy(*p, static_cast<CapHandle>(a0)));
+
+    case SYS_DEBUG_READ: {
+        // Fixed-size records and bounded log chunks keep stack use and time
+        // with IRQs masked small. Never copy directly into a user buffer while
+        // holding the retained-log lock.
+        if (!a2 || !a3 || a3 > MX_DIAG_READ_MAX) return err(E_INVALID);
+        switch (a0) {
+        case MX_DIAG_SYSTEM: {
+            if (a1 || a3 < sizeof(MxDiagSystem)) return err(E_INVALID);
+            MxDiagSystem info{};
+            info.version = MX_DIAG_VERSION;
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+            info.board = MX_DIAG_BOARD_ANNE;
+            anne::boot_log_info(&info.boot_log_size, &info.boot_log_capacity);
+#elif defined(ANKO_BOARD_SWITCH_T210)
+            info.board = MX_DIAG_BOARD_SWITCH;
+#else
+            info.board = MX_DIAG_BOARD_QEMU;
+#endif
+            info.cpu_limit = MX_HOST_MAX_CPUS;
+            info.sampled_cpu = sched::current_cpu_id();
+            info.online_mask = sched::online_cpu_mask();
+            asm volatile("mrs %0, CurrentEL" : "=r"(info.current_el));
+            info.current_el >>= 2;
+            asm volatile("mrs %0, MIDR_EL1" : "=r"(info.midr));
+            asm volatile("mrs %0, MPIDR_EL1" : "=r"(info.mpidr));
+            asm volatile("mrs %0, ID_AA64PFR0_EL1" : "=r"(info.pfr0));
+            asm volatile("mrs %0, ID_AA64MMFR0_EL1" : "=r"(info.mmfr0));
+            asm volatile("mrs %0, SCTLR_EL1" : "=r"(info.sctlr));
+            asm volatile("mrs %0, TCR_EL1" : "=r"(info.tcr));
+            asm volatile("mrs %0, MAIR_EL1" : "=r"(info.mair));
+            asm volatile("mrs %0, CTR_EL0" : "=r"(info.ctr));
+            asm volatile("mrs %0, CNTFRQ_EL0" : "=r"(info.counter_reported_hz));
+            info.counter_effective_hz = platform::counter_frequency(info.counter_reported_hz);
+            return copy_to_user(ua, a2, &info, sizeof(info)) ? ok(sizeof(info)) : err(E_FAULT);
+        }
+        case MX_DIAG_CPU: {
+            if (a1 >= MX_HOST_MAX_CPUS || a3 < sizeof(MxDiagCpu)) return err(E_INVALID);
+            const u32 cpu = static_cast<u32>(a1);
+            MxDiagCpu info{};
+            info.version = MX_DIAG_VERSION;
+            info.cpu = cpu;
+            info.online = (sched::online_cpu_mask() >> cpu) & 1;
+            info.mpidr = g_cpu_mpidrs[cpu];
+            // Read the release-published ready flag first so a concurrent
+            // secondary entry cannot report ready before its entry record.
+            info.monitor_ready = vm::monitor_ready(cpu);
+            info.boot_entry_el = vm::entry_level(cpu);
+            info.context_switches = sched::cpu_context_switch_count(cpu);
+            info.timer_preempts = sched::cpu_timer_preempt_count(cpu);
+            info.timer_ticks = drivers::timer::cpu_tick_count(cpu);
+            info.ipis_handled = sched::cpu_ipi_handled_count(cpu);
+            return copy_to_user(ua, a2, &info, sizeof(info)) ? ok(sizeof(info)) : err(E_FAULT);
+        }
+        case MX_DIAG_BOOT_LOG: {
+            if (!user_range_ok(ua, a2, a3, RIGHT_WRITE)) return err(E_FAULT);
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+            char bytes[MX_DIAG_READ_MAX];
+            const usize count = anne::boot_log_read(a1, bytes, a3);
+            return copy_to_user(ua, a2, bytes, count) ? ok(count) : err(E_FAULT);
+#else
+            return err(E_NOTIMPL);
+#endif
+        }
+        default: return err(E_INVALID);
+        }
+    }
 
     case SYS_DEBUG_COUNTERS:
         if (a0 >= vm::VM_DEBUG_CREATE_CALLS && a0 <= vm::VM_DEBUG_VM_DEVICE_MAX) {

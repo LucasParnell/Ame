@@ -48,6 +48,7 @@ enum Syscall : unsigned {
     // Debug (V0 bring-up only — spec §6)
     SYS_DEBUG_PUTS = MX_NR_DEBUG_PUTS,
     SYS_DEBUG_COUNTERS = MX_NR_DEBUG_COUNTERS,
+    SYS_DEBUG_READ = MX_NR_DEBUG_READ,
 
     // V0 support extensions. These keep the bring-up path small while the
     // base architecture is still being made spec-complete.
@@ -115,7 +116,7 @@ enum Syscall : unsigned {
     SYS_VM_SHARED_MEMORY_INSPECT = MX_NR_VM_SHARED_MEMORY_INSPECT, // (shared, SharedArenaInfo*, len)
     SYS_WAIT_DOORBELL_UNTIL = MX_NR_WAIT_DOORBELL_UNTIL,
     SYS_PLATFORM_CONTROL = MX_NR_PLATFORM_CONTROL,
-    SYS_COUNT = MX_NR_PLATFORM_CONTROL + 1,
+    SYS_COUNT = MX_NR_DEBUG_READ + 1,
 };
 
 static_assert(static_cast<unsigned>(SYS_YIELD) == static_cast<unsigned>(MX_NR_YIELD), "syscall number drift: YIELD");
@@ -180,48 +181,5 @@ struct SysResult {
 // ---------------------------------------------------------------------------
 // Debug counter indices for SYS_DEBUG_COUNTERS (a0 argument)
 // ---------------------------------------------------------------------------
-enum DebugCounter : unsigned {
-    DBG_SYSCALL_COUNT         = 0,
-    DBG_IPC_SYSCALL_COUNT     = 1,
-    DBG_CONTEXT_SWITCHES      = 2,
-    DBG_DEBUG_PUTS            = 3,
-    DBG_EL0_FAULTS            = 4,
-    DBG_DOORBELL_SLEEPS       = 5,
-    DBG_DOORBELL_WAKES        = 6,
-    DBG_TIMER_TICKS           = 7,
-    DBG_DOORBELL_WAIT_CALLS   = 8,
-    DBG_DOORBELL_WAIT_IMMED   = 9,
-    DBG_NOTIFY_CALLS          = 10,
-    DBG_NOTIFY_NO_WAITER      = 11,
-    DBG_NOTIFY_WOKE           = 12,
-    DBG_YIELD_COUNT           = 13,
-    DBG_BLOCK_SWITCHES        = 14,
-    DBG_TIMER_PREEMPTS        = 15,
-    DBG_EXIT_SWITCHES         = 16,
-    DBG_ONLINE_CPUS           = 17,
-    DBG_CPU0_CTX_SWITCHES     = 18,
-    DBG_CPU1_CTX_SWITCHES     = 19,
-    DBG_CPU0_TIMER_PREEMPTS   = 20,
-    DBG_CPU1_TIMER_PREEMPTS   = 21,
-    DBG_LOCAL_WAKES           = 22,
-    DBG_REMOTE_WAKES          = 23,
-    DBG_IPI_SENT              = 24,
-    DBG_IPI_HANDLED           = 25,
-    DBG_PENDING_WAKE_DRAINS   = 26,
-    DBG_DOORBELL_LOCAL_WAKES  = 27,
-    DBG_DOORBELL_REMOTE_WAKES = 28,
-    DBG_FAIRNESS_LAG          = 29,
-    DBG_PRINCIPAL_TRUSTED_RT  = 30,
-    DBG_PRINCIPAL_SANDBOX_RT  = 31,
-    // Keep scheduler counters out of vm::VM_DEBUG_*'s 32..54 range;
-    // SYS_DEBUG_COUNTERS checks that range before this enum's switch.
-    DBG_WAKE_DOORBELL         = 64,
-    DBG_WAKE_REMOTE           = 65,
-    DBG_WAKE_RESUME           = 66,
-    // IRQ → doorbell delivery (kernel/drivers/gic/irq_table.cc).
-    DBG_IRQ_DELIVERED         = 67,
-    DBG_IRQ_BOUND             = 68,
-    DBG_IRQ_SELFTEST          = 69,
-    // Centiseconds since kernel entry; the msh banner prints it as boot time.
-    DBG_BOOT_CS               = 70,
-};
+// Shared with the serial diagnostic command; IDs remain unchanged.
+#include "midix/abi/debug_counters.h"

@@ -133,7 +133,19 @@
         "MOCHI_SYSTEM_PROFILE": "huawei-anne-usb",
         "ANKO_ANNE_DIAG_CAPTURE_SECONDS": "0",
         "ANKO_ANNE_DIAG_RESET_AT_READY": false,
-        "ANKO_ANNE_DIAG_RUN_TAG": "anne-usb-v20-release"
+        "ANKO_ANNE_DIAG_RUN_TAG": "anne-usb-v21-release"
+      }
+    },
+    {
+      "name": "dango-hello-qemu-dev",
+      "inherits": "qemu-dev",
+      "binaryDir": "${sourceDir}/out/dango-hello-qemu-dev",
+      "cacheVariables": {
+        "MOCHI_SYSTEM_PROFILE": "dango-hello",
+        "DANGO_LINUX_PROFILE": "hello",
+        "DANGO_LINUX_GUEST": "minimal",
+        "ANKO_GUEST_LAYOUT": "minimal",
+        "DANGO_LINUX_ARTIFACT_DIR": "${sourceDir}/build/dango-linux-hello"
       }
     }
   ],
@@ -189,6 +201,10 @@
     {
       "name": "anne-usb-native-release",
       "configurePreset": "anne-usb-native-release"
+    },
+    {
+      "name": "dango-hello-qemu-dev",
+      "configurePreset": "dango-hello-qemu-dev"
     }
   ],
   "testPresets": [

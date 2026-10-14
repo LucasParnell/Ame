@@ -9,6 +9,8 @@ struct CpuTopology {
     bool psci_available;
     bool psci_hvc;
     u64 cpu_on;
+    u64 system_off;
+    u64 system_reset;
 };
 CpuTopology read_cpu_topology(PhysAddr dtb, u64 boot_mpidr);
 }

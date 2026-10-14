@@ -169,29 +169,6 @@ static int svc_control(mx_u32_t op, const char* name, const char* verb) {
     return 0;
 }
 
-static int system_control(mx_u32_t op, const char* verb) {
-    if (!g.have_svcctl) return notimpl(verb);
-    mochi::svcctl::Reply reply{};
-    if (!g.svcctl.request(op, "system", &reply)) {
-        put("msh: "); put(verb); putln(": control channel failure");
-        return 1;
-    }
-    if (reply.status != MX_OK) {
-        put("msh: "); put(verb); put(": "); put_status(reply.status); put("\r\n");
-        return 1;
-    }
-    put(verb); putln(" requested");
-    return 0;
-}
-
-int cmd_shutdown(int, char**) {
-    return system_control(mochi::svcctl::kRequestShutdown, "shutdown");
-}
-
-int cmd_reboot(int, char**) {
-    return system_control(mochi::svcctl::kRequestReboot, "reboot");
-}
-
 int cmd_svc(int argc, char** argv) {
     if (argc < 2 || streq(argv[1], "list")) return svc_list();
     if (streq(argv[1], "tree")) return svc_tree();

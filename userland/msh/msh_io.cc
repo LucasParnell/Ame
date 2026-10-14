@@ -95,7 +95,7 @@ uint64_t parse_u64(const char* s, bool* ok) {
 void put_bytes(const char* data, uint32_t len) {
     if (!data || len == 0) return;
     if (g.have_terminal && g.term.valid()) {
-        (void)g.term.write_bytes_spinning(data, len, 0xFFFFu);
+        if (!g.term.write_bytes_spinning(data, len, 0xFFFFu)) g.output_failed = true;
     } else {
         sys_debug_puts(data, len);
     }

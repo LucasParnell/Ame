@@ -167,6 +167,10 @@ static inline int64_t sys_thread_get_cpu() { return _svc1(NR_THREAD_GET_CPU, 0);
 static inline void sys_thread_exit(int32_t code) { _svc1(NR_THREAD_EXIT, static_cast<uint64_t>(code)); }
 static inline void sys_debug_puts(const char* s, uint64_t len) { _svc2(NR_DEBUG_PUTS, reinterpret_cast<uint64_t>(s), len); }
 static inline int64_t sys_debug_counter(uint64_t id) { return _svc1(NR_DEBUG_COUNTERS, id); }
+// Returns bytes copied (zero at log EOF), or a negative MX_ERR_* value.
+static inline int64_t sys_debug_read(uint64_t request, uint64_t index, void* out, uint64_t size) {
+    return _svc4(MX_NR_DEBUG_READ, request, index, reinterpret_cast<uint64_t>(out), size);
+}
 static inline int64_t sys_vm_assign_expose_ecam(CapHandle assignment, uint64_t ipa, uint64_t size) {
     return _svc3(NR_VM_ASSIGN_EXPOSE_ECAM, assignment, ipa, size);
 }

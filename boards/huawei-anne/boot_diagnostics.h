@@ -28,6 +28,10 @@ void boot_log_write(const char* text, usize size, bool mirror_screen = true);
 void boot_log_early(char level, const char* component, const char* message);
 void boot_secondary_online(u32 cpu, u64 mpidr);
 void boot_log_flush();
+// Copy a bounded prefix of the retained log under its existing writer lock.
+// The caller owns the destination; no user copy or serial I/O holds this lock.
+void boot_log_info(u64* size, u64* capacity);
+usize boot_log_read(u64 offset, char* out, usize size);
 void boot_log_fault(u64 esr, u64 pc, u64 far, u64 sp);
 void boot_log_panic(const char* message);
 [[noreturn]] void boot_fault_reset();

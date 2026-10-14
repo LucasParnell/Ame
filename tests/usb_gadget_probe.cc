@@ -163,10 +163,76 @@ static void configure_and_stall_backpressure() {
     assert(f.hardware.words[Device::reg(true, 0) / 4] & (1u << 21));
 }
 
+static void function_tx_batch_and_epoch() {
+    Fixture f;
+    Storage to_function[2], from_function[2];
+    for (unsigned i = 0; i < 2; ++i) {
+        f.policy.links[i + 1] = {&to_function[i].page, &from_function[i].page, 3, 1, 1};
+    }
+    f.device.speed = MxUsbSpeed::High;
+    f.setup({0, 9, 1, 0, 0});
+    f.device.poll();
+    const auto generation = f.policy.function_generation;
+    assert(generation);
+    MxFunctionChunk chunk{generation, 1, 32, 0, 0, {}};
+    for (unsigned i = 0; i < 8; ++i) {
+        chunk.data[0] = i;
+        assert(f.policy.links[1].rx().try_push_msg(MX_FUNCTION_TX, chunk));
+    }
+    gadget::service(f.policy);
+    assert(f.policy.functions[0].tx_bytes == 256 && f.policy.functions[0].tx_active);
+    f.device.poll();
+    assert(f.device.in[2].active && f.device.in[2].length == 256);
+    assert(f.hardware.tx_bytes == 256);
+    for (unsigned i = 0; i < 8; ++i) {
+        assert(f.hardware.tx[i * 32] == i);
+    }
+    const auto old_id = f.policy.functions[0].tx_id;
+    gadget::completion(
+        f.policy, {old_id + 1, f.policy.generation, MxUsbStatus::Success, 256, 0x82, 0, 0, {}});
+    assert(f.policy.functions[0].tx_active); // unrelated completion cannot retire its slice
+    f.hardware.ack_in(2);
+    f.device.poll();
+    gadget::service(f.policy);
+    assert(!f.policy.functions[0].tx_active && !f.policy.functions[0].tx_bytes);
+    gadget::reset_functions(f.policy);
+    assert(f.policy.function_generation != generation);
+    assert(f.policy.links[1].rx().try_push_msg(MX_FUNCTION_TX, chunk));
+    gadget::service(f.policy);
+    assert(!f.policy.functions[0].tx_bytes); // queued old-function bytes are discarded
+}
+
+static void reset_notice_backpressure_drains_obsolete_traffic() {
+    Fixture f;
+    Storage outgoing, incoming;
+    f.policy.links[1] = {&outgoing.page, &incoming.page, 3, 1, 1};
+    f.policy.configuration = 1;
+    gadget::reset_functions(f.policy);
+    const MxFunctionChunk old{f.policy.function_generation - 1, 1, 1, 0, 0, {'x'}};
+    for (unsigned i = 0; i < 8; ++i) {
+        assert(f.policy.links[1].tx().try_push_msg(MX_FUNCTION_RX, old));
+        assert(f.policy.links[1].rx().try_push_msg(MX_FUNCTION_TX, old));
+    }
+    assert(gadget::service_functions(f.policy));
+    assert(f.policy.functions[0].reset && !f.policy.links[1].rx().depth());
+    assert(!f.policy.functions[0].tx_bytes);
+    MxRingSlot slot{};
+    while (f.policy.links[1].tx().try_pop(&slot)) {
+    }
+    assert(gadget::service_functions(f.policy));
+    assert(!f.policy.functions[0].reset);
+    MxFunctionChunk reset{};
+    assert(f.policy.links[1].tx().try_pop(&slot));
+    assert(mochi::message_get(slot, &reset, MX_FUNCTION_RESET));
+    assert(reset.flags == MX_FUNCTION_CONFIGURED);
+}
+
 int main() {
     address_then_descriptor();
     staged_address_backpressure_and_abort();
     early_control_out_and_reset();
     configure_and_stall_backpressure();
+    function_tx_batch_and_epoch();
+    reset_notice_backpressure_drains_obsolete_traffic();
     std::puts("usb gadget control probe ok");
 }

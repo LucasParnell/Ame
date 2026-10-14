@@ -150,6 +150,8 @@ set(MSH_SOURCES
     msh/msh_builtins.cc
     msh/msh_fs.cc
     msh/msh_svc.cc
+    msh/msh_diag.cc
+    msh/msh_power.cc
 )
 mochi_service(msh "${MSH_SOURCES}" 0x10F00000)
 mochi_service(app.hello   app/hello/main.cc       0x11400000)
@@ -244,6 +246,9 @@ endif()
 
 if(DANGO_BUILD_LINUX_ARTIFACTS)
     set(DANGO_LINUX_BUILDER "${CMAKE_SOURCE_DIR}/scripts/linux/build-min-linux.sh")
+    if(CMAKE_HOST_APPLE)
+        set(DANGO_LINUX_BUILDER "${CMAKE_SOURCE_DIR}/scripts/linux/build-hello-linux-docker.sh")
+    endif()
     if(DANGO_LINUX_PROFILE STREQUAL "gpu")
         set(DANGO_LINUX_BUILDER "${CMAKE_SOURCE_DIR}/scripts/linux/build-gpu-linux.sh")
         if(CMAKE_HOST_APPLE)
@@ -259,6 +264,8 @@ if(DANGO_BUILD_LINUX_ARTIFACTS)
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         DEPENDS
             ${DANGO_LINUX_BUILDER}
+            ${CMAKE_SOURCE_DIR}/scripts/linux/build-min-linux.sh
+            ${CMAKE_SOURCE_DIR}/scripts/linux/build-hello-linux-docker.sh
             ${CMAKE_SOURCE_DIR}/scripts/linux/build-gpu-linux.sh
             ${CMAKE_SOURCE_DIR}/scripts/linux/build-agent.sh
             ${CMAKE_SOURCE_DIR}/scripts/linux/stage-gpu-source.py
@@ -266,6 +273,7 @@ if(DANGO_BUILD_LINUX_ARTIFACTS)
             ${CMAKE_SOURCE_DIR}/scripts/linux/check-profile.py
             ${CMAKE_SOURCE_DIR}/scripts/linux/check-minimal-config.py
             ${CMAKE_SOURCE_DIR}/shared/include/midix/abi/dango_channel_guest.h
+            ${CMAKE_SOURCE_DIR}/shared/include/midix/abi/dango_guest_layout.h
             ${CMAKE_SOURCE_DIR}/linux-artifacts/guest-driver/dango_channel.c
             ${CMAKE_SOURCE_DIR}/linux-artifacts/channel_test/channel_test.c
             ${CMAKE_SOURCE_DIR}/linux-artifacts/kms_test/kms_test.c
@@ -351,6 +359,12 @@ add_custom_target(mochi_system ALL
 
 # Regression processes are built explicitly and never included in system.mxb.
 if(ANKO_BUILD_DEV)
+    mochi_service(test.poweroff ${CMAKE_SOURCE_DIR}/tests/kernel/power.cc 0x11600000)
+    mochi_service(test.reboot ${CMAKE_SOURCE_DIR}/tests/kernel/power.cc 0x11600000)
+    target_compile_definitions(test.reboot PRIVATE MOCHI_TEST_POWER_OPERATION=MX_PLATFORM_SYSTEM_RESET)
+    add_custom_target(power_regressions DEPENDS
+        ${CMAKE_CURRENT_BINARY_DIR}/test.poweroff.mxi
+        ${CMAKE_CURRENT_BINARY_DIR}/test.reboot.mxi)
     mochi_service(test.lifecycle ${CMAKE_SOURCE_DIR}/tests/kernel/lifecycle.cc 0x11000000)
     mochi_service(test.busy ${CMAKE_SOURCE_DIR}/tests/kernel/busy.cc 0x11100000)
     mochi_service(test.share ${CMAKE_SOURCE_DIR}/tests/kernel/share.cc 0x11200000)

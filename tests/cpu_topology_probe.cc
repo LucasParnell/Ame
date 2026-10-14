@@ -13,4 +13,6 @@ int main(int argc, char** argv) {
     std::printf("%u %u %u %llx", t.count, t.psci_available, t.psci_hvc, (unsigned long long)t.cpu_on);
     for (u32 i = 0; i < t.count; ++i) std::printf(" %llx", (unsigned long long)t.mpidr[i]);
     std::puts("");
+    std::fprintf(stderr, "%llx %llx\n", (unsigned long long)t.system_off,
+                 (unsigned long long)t.system_reset);
 }

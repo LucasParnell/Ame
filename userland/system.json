@@ -2951,6 +2951,21 @@
           "affinity": 0
         }
       }
+    },
+    "dango-hello": {
+      "services": [
+        "nameservice",
+        "io.console",
+        "dango.manager",
+        "dango.auth_probe"
+      ],
+      "overrides": {
+        "dango.manager": {
+          "caps": [
+            "vm"
+          ]
+        }
+      }
     }
   },
   "endpoints": [

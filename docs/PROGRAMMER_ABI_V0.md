@@ -129,6 +129,15 @@ arguments cannot specify arbitrary physical addresses. IRQ routing, PIO register
 access, role policy and USB classes retain their separate contracts. A controller
 owner exit fences hardware before arena/capability reclamation.
 
+System-domain operations include `MX_PLATFORM_SYSTEM_OFF` (10),
+`MX_PLATFORM_SYSTEM_RESET` (11), `MX_PLATFORM_SYSTEM_FASTBOOT` (12), and the
+read-only `MX_PLATFORM_SYSTEM_CHECK` (13). CHECK takes a requested power operation
+as its argument and returns a status; transition operations require argument
+zero. Init checks before service teardown. Unsupported modes return
+`MX_ERR_NOT_IMPLEMENTED`; refused transitions return an error with host interrupt
+state restored. Successful transitions do not return. Firmware calls and
+board-specific PMIC/GPIO/NMI accesses remain in the kernel.
+
 `MX_PLATFORM_I2C_PINS` (9) selects the fixed Type-C bus pad function
 (GPIO_037/038 -> I2C4) and pad-config defaults, then reports pad and
 clock/reset readbacks to the kernel log; it takes no arguments and is
@@ -139,3 +148,29 @@ an inline configuration value (`value`) as alternatives to a channel. Init grant
 only rights derived from its actual capability. The descriptor admits 32 service
 definitions and 128 channels; a selected profile remains bounded by the 24-row
 service registry. Session directories admit eight clients and 32 exports.
+
+## Bring-up diagnostic reads
+
+`MX_NR_DEBUG_READ` (69), wrapped by `sys_debug_read(request, index, out, size)`,
+copies read-only observations into a writable user buffer and returns the byte
+count or a negative status. Layouts and request IDs are in
+[`midix/abi/diagnostics.h`](../shared/include/midix/abi/diagnostics.h).
+
+- `MX_DIAG_SYSTEM`, index zero: a versioned `MxDiagSystem` with the sampled CPU's
+  EL1-accessible registers, board, online mask, effective timer rate and retained
+  log length/capacity. These are observations, not firmware calls.
+- `MX_DIAG_CPU`, index a logical CPU: a versioned `MxDiagCpu` with boot entry EL,
+  installed monitor readiness and scheduler/timer counters. Offline slots are
+  readable; entry level zero means no entry was recorded.
+- `MX_DIAG_BOOT_LOG`, index a byte offset: a non-consuming retained-log read of
+  up to 256 bytes. Zero means EOF; boards without retention return
+  `MX_ERR_NOT_IMPLEMENTED` and advertise capacity zero.
+
+Every request is bounded to 256 output bytes. Fixed records require enough space
+for the whole structure. Invalid sizes/indices fail with `MX_ERR_INVALID`;
+unwritable user ranges fail with `MX_ERR_FAULT`. Log bytes are copied under the
+existing writer lock into kernel scratch storage before copying to userspace.
+The shell snapshots the log length before emitting its report so concurrent log
+growth cannot extend a capture indefinitely. Live counters are independent
+samples. This extends the existing bring-up debug interface; it grants no
+hardware-control capability.

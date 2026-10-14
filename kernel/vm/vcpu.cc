@@ -7,7 +7,7 @@
 #include "libk/string.h"
 #include "anko/arm64_esr.h"
 
-extern "C" u64 g_boot_el;
+#include "anko/el2_boot.h"
 extern "C" u64 vm_el2_run(vm::El2RunState* state);
 extern "C" void irq_dispatch();
 
@@ -1099,9 +1099,10 @@ SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budg
 
     metric_inc(VM_DEBUG_VCPU_RUN_ATTEMPTS);
 
-    if (g_boot_el < 2) {
-        libk::printf("dango vcpu run unavailable: host booted at EL%llu\n",
-                     static_cast<unsigned long long>(g_boot_el));
+    const u32 host_cpu = sched::current_cpu_id();
+    if (!monitor_ready(host_cpu)) {
+        libk::printf("dango vcpu run unavailable: cpu%u entered EL%llu without a monitor\n",
+                     host_cpu, static_cast<unsigned long long>(entry_level(host_cpu)));
         metric_inc(VM_DEBUG_VCPU_RUN_NOTIMPL);
         vcpu->last_exit_reason = static_cast<u64>(E_NOTIMPL);
         if (out) {

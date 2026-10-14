@@ -24,6 +24,25 @@ u32 ref_logged;
 } // namespace
 Control* board_control(Domain domain) { return &domains[static_cast<u32>(domain)]; }
 SysError control(Control& object, u32 op, u64 arg, u64 owner) {
+    if (object.domain == Domain::System && op != MX_PLATFORM_CLAIM) {
+        {
+            kernel::LockGuard guard(domain_lock);
+            if (!owner) return E_INVALID;
+            if (object.owner != owner) return E_PERM;
+        }
+        if (op == MX_PLATFORM_SYSTEM_CHECK) {
+            if (arg > 0xffffffffu) return E_INVALID;
+            return smp::system_power_check(static_cast<u32>(arg));
+        }
+        if (arg) return E_INVALID;
+        const auto supported = smp::system_power_check(op);
+        if (supported != E_OK) return supported;
+        // No global platform lock across firmware/hardware transitions. A
+        // refused operation must return with IRQ state and services recoverable.
+        ANKO_LOGF_INFO("kernel/platform", "system power requested op=%u", op);
+        if (op == MX_PLATFORM_SYSTEM_OFF) return smp::system_off();
+        return smp::system_reset(op == MX_PLATFORM_SYSTEM_FASTBOOT);
+    }
     kernel::LockGuard guard(domain_lock);
     if (!owner) {
         return E_INVALID;
@@ -37,21 +56,6 @@ SysError control(Control& object, u32 op, u64 arg, u64 owner) {
     }
     if (object.owner != owner) {
         return E_PERM;
-    }
-    // Machine power is a generic kernel mechanism (PSCI on arm64), not a board
-    // register dance: the platform layer owns the sequence.
-    if (object.domain == Domain::System) {
-        if (op == MX_PLATFORM_SYSTEM_OFF && !arg) {
-            anko::log::writef(anko::log::Level::Info, "kernel/platform",
-                              "system off requested");
-            smp::system_off();
-        }
-        if (op == MX_PLATFORM_SYSTEM_RESET && !arg) {
-            anko::log::writef(anko::log::Level::Info, "kernel/platform",
-                              "system reset requested");
-            smp::system_reset();
-        }
-        return E_INVALID;
     }
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
     libk::Mmio crg{reinterpret_cast<volatile u8*>(0xfff35000), 4096};

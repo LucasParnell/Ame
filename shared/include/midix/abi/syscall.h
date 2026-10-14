@@ -89,6 +89,7 @@ enum MxSyscall : mx_u64_t {
     MX_NR_VM_SHARED_MEMORY_INSPECT = 66,
     MX_NR_WAIT_DOORBELL_UNTIL = 67, // (doorbell, expected, absolute ns); expiry is a wake
     MX_NR_PLATFORM_CONTROL = 68, // (platform capability, operation, argument)
+    MX_NR_DEBUG_READ = 69, // (MxDiagRequest, index/offset, out, size) -> byte count
 };
 
 constexpr mx_u32_t MX_SPAWN_SUSPENDED = 1u << 0;

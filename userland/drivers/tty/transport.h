@@ -1,0 +1,92 @@
+#pragma once
+// Terminal transport ownership only. tty.fb0 is the sole producer of the
+// shell input ring; keyboard and serial bytes merge in this retained buffer.
+// Rendering, USB class handling and controller state are independent.
+#include "mochi/terminal_session.h"
+#include "libk/byte_cursor.h"
+namespace mochi::tty {
+struct InputBuffer {
+    mx_u8_t storage[MX_TERM_INLINE_BYTES];
+    libk::ByteCursor pending;
+    bool hold(libk::const_bytes bytes) {
+        if (!pending.empty() || !bytes.size || bytes.size > sizeof(storage)) {
+            return false;
+        }
+        if (!libk::copy_n(libk::as_bytes(storage), bytes, bytes.size)) {
+            return false;
+        }
+        pending.reset(libk::as_bytes(storage, bytes.size));
+        return true;
+    }
+    bool flush(const terminal::InputSink& sink) {
+        if (pending.empty()) {
+            return false;
+        }
+        const auto bytes = pending.next(MX_TERM_INLINE_BYTES);
+        const auto accepted = sink.push_bytes(MX_TERM_INPUT_BYTES, bytes.data, bytes.size);
+        (void)pending.advance(accepted);
+        return accepted != 0;
+    }
+};
+struct SerialMirror {
+    terminal::SessionSink output;
+    MxRingSlot slot;
+    libk::ByteCursor pending;
+    mx_u64_t generation;
+    void change(mx_u64_t next) {
+        generation = next;
+        pending.reset(); // delayed old output retains its old generation or is discarded
+    }
+    bool hold(const MxRingSlot& incoming) {
+        if (!pending.empty()) {
+            return false;
+        }
+        if (!generation || !output.valid()) {
+            return true; // local terminal still works offline
+        }
+        if (!message_valid(incoming) || incoming.type != MX_TERM_OUTPUT_BYTES) {
+            return false;
+        }
+        slot = incoming;
+        pending.reset(libk::as_bytes(slot.payload, slot.length));
+        return true;
+    }
+    bool flush() {
+        bool progress = false;
+        while (!pending.empty()) {
+            const auto accepted = output.try_write(MX_TERM_SESSION_OUTPUT_BYTES, generation,
+                                                   pending.next(terminal::kSessionRunBytes));
+            if (!accepted) {
+                break;
+            }
+            (void)pending.advance(accepted);
+            progress = true;
+        }
+        return progress;
+    }
+};
+inline bool accept_serial(const MxRingSlot& slot, SerialMirror& mirror, InputBuffer& input) {
+    if (slot.type == MX_TERM_CONTROL) {
+        MxTermControl control{};
+        if (!message_get(slot, &control, slot.type) || control.reserved0) {
+            return false;
+        }
+        if (control.code == MX_TERM_CONTROL_FLOW_OFF) {
+            mirror.change(0);
+        } else if (control.code == MX_TERM_CONTROL_FLOW_ON) {
+            const auto generation = terminal::session_generation(control);
+            if (!generation) {
+                return false;
+            }
+            mirror.change(generation);
+        } else {
+            return false;
+        }
+        return true;
+    }
+    mx_u64_t generation = 0;
+    libk::const_bytes bytes;
+    return terminal::session_bytes(slot, MX_TERM_SESSION_INPUT_BYTES, &generation, &bytes) &&
+           generation == mirror.generation && input.hold(bytes);
+}
+} // namespace mochi::tty

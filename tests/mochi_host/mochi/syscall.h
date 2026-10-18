@@ -41,6 +41,17 @@ inline mx_status_t mx_doorbell_notify(CapHandle cap) {
     ++host_notifies; return MX_OK;
 }
 inline mx_u64_t mx_clock_ns() { return host_now; }
+
+// Per-principal poll policy seam. Host probes can seed a budget and read it
+// back; the clamp matches the kernel's kIpcPollBudgetMax.
+struct SysPair { mx_i64_t value; mx_i64_t detail; };
+inline mx_u64_t host_ipc_budget = 0;
+inline mx_u64_t mx_ipc_policy_budget() { return host_ipc_budget; }
+inline mx_u64_t mx_ipc_policy_set_budget(mx_u64_t budget) {
+    host_ipc_budget = budget > 4096 ? 4096 : budget;
+    return host_ipc_budget;
+}
+inline SysPair mx_ipc_policy_counts() { return SysPair{0, 0}; }
 inline mx_u64_t sys_doorbell_read(CapHandle cap) {
     if (host_read_counter) return host_read_counter(cap);
     if (host_on_read) host_on_read();

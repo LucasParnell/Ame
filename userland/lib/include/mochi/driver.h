@@ -74,6 +74,22 @@ inline libk::Mmio registers(const MxBootInfo* boot, const char* name, mx_u64_t v
     }
     return {reinterpret_cast<volatile mx_u8_t*>(va), static_cast<size_t>(info.size)};
 }
+// Current drivers provide ordering but no cache clean/invalidate protocol.
+// Reject cached arenas before mapping; barriers alone cannot make them DMA-safe.
+// Publish metadata only after a successful map, leaving the output untouched
+// on errors. These checks run at device bind, never per descriptor/completion.
+inline bool map_dma(const MxBootInfo* boot, const char* name, mx_vaddr_t va,
+                    MxCapInfo* out) {
+    if (!out) return false;
+    const auto cap = boot::handle(boot, name);
+    MxCapInfo info{};
+    if (!cap || mx_cap_info(cap, &info) != MX_OK || info.type != MX_CAP_ARENA ||
+        info.attr != MX_ARENA_MEMORY_NONCACHEABLE || !info.size ||
+        mx_map_page(cap, va, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) return false;
+    *out = info;
+    return true;
+}
+
 // Arm every producer ring on a common receiver doorbell before checking work.
 // Expiry is a normal wake; the caller always rechecks hardware and messages.
 // A retained row can prevent consuming its input ring. Exclude that ring from

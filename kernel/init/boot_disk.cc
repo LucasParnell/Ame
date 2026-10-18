@@ -8,6 +8,7 @@
 #include "anko/mm.h"
 #include "anko/platform.h"
 #include "libk/string.h"
+#include "libk/hash.h"
 
 namespace kernel::init {
 
@@ -174,15 +175,7 @@ u64 align_up_u64(u64 value, u64 align) {
 }
 
 u32 crc32_ieee(const u8* data, usize len) {
-    u32 crc = 0xFFFF'FFFFu;
-    for (usize i = 0; i < len; ++i) {
-        crc ^= data[i];
-        for (u32 bit = 0; bit < 8; ++bit) {
-            const u32 mask = 0u - (crc & 1u);
-            crc = (crc >> 1) ^ (0xEDB8'8320u & mask);
-        }
-    }
-    return ~crc;
+    return libk::crc32_ieee(libk::as_bytes(data, len));
 }
 
 u32 name_hash(const char* name) {

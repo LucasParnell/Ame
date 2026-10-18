@@ -17,6 +17,7 @@
 #include "anko/hw_info.h"
 #include "anko/types.h"
 #include "anko/smp.h"
+#include "libk/cpu.h"
 #include "midix/abi/cpu_limits.h"
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
 #include "rpmb.h"
@@ -116,7 +117,7 @@ void send_sgi(u32 cpu_id, u32 sgi_id) {
     const u32 target = cpu_target(cpu_id);
     if (!g_dist || !target || sgi_id >= 16) return;
 #ifndef ANKO_HOST_TEST
-    asm volatile("dsb ishst" ::: "memory");
+    libk::cpu::data_store_sync();
 #endif
     g_dist[GICD_SGIR / 4] = (target << 16) | (sgi_id & 0xFu);
 }

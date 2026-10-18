@@ -12,9 +12,17 @@ inline unsigned host_yields = 0;
 inline unsigned host_notifies = 0;
 inline mx_u64_t host_wait_expected = 0, host_wait_deadline = 0;
 inline mx_u64_t host_now = 0;
+inline mx_status_t (*host_on_notify)(CapHandle) = nullptr;
+inline mx_u64_t (*host_read_counter)(CapHandle) = nullptr;
 inline void (*host_on_yield)() = nullptr;
 inline void (*host_on_read)() = nullptr;
 inline mx_i64_t (*host_on_wait)() = nullptr;
+inline mx_status_t (*host_on_doorbell_create)(mx_handle_t*) = nullptr;
+inline mx_status_t mx_doorbell_create(mx_handle_t* out) {
+    if (host_on_doorbell_create) return host_on_doorbell_create(out);
+    *out = 98;
+    return MX_OK;
+}
 inline mx_status_t (*host_on_map_page)(CapHandle, mx_vaddr_t, mx_rights_t) = nullptr;
 inline mx_status_t (*host_on_cap_info)(CapHandle, MxCapInfo*) = nullptr;
 inline mx_status_t (*host_on_map_mmio)(CapHandle, mx_vaddr_t, mx_rights_t) = nullptr;
@@ -28,19 +36,35 @@ inline void sys_yield() {
     ++host_now;
     if (host_on_yield) host_on_yield();
 }
-inline mx_status_t mx_doorbell_notify(CapHandle) { ++host_notifies; return MX_OK; }
+inline mx_status_t mx_doorbell_notify(CapHandle cap) {
+    if (host_on_notify) return host_on_notify(cap);
+    ++host_notifies; return MX_OK;
+}
 inline mx_u64_t mx_clock_ns() { return host_now; }
-inline mx_u64_t sys_doorbell_read(CapHandle) {
+inline mx_u64_t sys_doorbell_read(CapHandle cap) {
+    if (host_read_counter) return host_read_counter(cap);
     if (host_on_read) host_on_read();
     return host_notifies;
 }
-inline mx_i64_t sys_wait_doorbell(CapHandle, mx_u64_t) {
+inline mx_i64_t sys_wait_doorbell(CapHandle, mx_u64_t expected) {
+    host_wait_expected = expected;
     return host_on_wait ? host_on_wait() : MX_ERR_DEAD;
+}
+inline mx_i64_t (*host_on_wait_ring)(CapHandle, CapHandle, mx_u64_t, mx_u32_t) = nullptr;
+inline mx_i64_t sys_wait_ring(CapHandle ring, CapHandle db, mx_u64_t cursor, mx_u32_t direction) {
+    return host_on_wait_ring ? host_on_wait_ring(ring, db, cursor, direction) : MX_ERR_DEAD;
+}
+inline mx_i64_t sys_notify_wait(CapHandle notify, CapHandle ring, CapHandle db, mx_u64_t cursor, mx_u32_t = 0) {
+    const auto rc = mx_doorbell_notify(notify);
+    return rc < 0 ? rc : sys_wait_ring(ring, db, cursor, 0);
 }
 inline void mx_yield() { sys_yield(); }
 inline void mx_exit(mx_i32_t) {}
 inline void sys_debug_puts(const char*, mx_u64_t) {}
 inline mx_i64_t sys_debug_counter(mx_u64_t) { return 0; }
+inline mx_i64_t sys_cap_identify(CapHandle cap) {
+    return cap ? mx_i64_t{MX_CAP_PROCESS} : mx_i64_t{MX_ERR_NOT_FOUND};
+}
 inline mx_i64_t sys_debug_read(mx_u64_t request, mx_u64_t index, void* out, mx_u64_t size) {
     return host_on_debug_read ? host_on_debug_read(request, index, out, size) : MX_ERR_NOT_IMPLEMENTED;
 }

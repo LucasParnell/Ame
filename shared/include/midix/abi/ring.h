@@ -17,21 +17,33 @@ struct alignas(64) MxRingSlot {
     mx_u64_t seq;
     mx_u8_t  payload[48];
 };
+// V2 uses the formerly reserved line. Zero remains the original slot protocol.
+// Credits have a distinct writer-owned line from receiver sleep requests.
+struct alignas(64) MxRingSpaceLine {
+    mx_u32_t producer_about_to_sleep;
+    mx_u32_t features;
+    mx_u8_t pad[56];
+};
 struct MxRingPage {
     MxRingHeadLine  head;
     MxRingTailLine  tail;
     MxRingFlagsLine flags;
-    mx_u8_t         _res[64];
+    MxRingSpaceLine space;
 };
 static_assert(sizeof(MxRingHeadLine) == 64, "ring head must be one cache line");
 static_assert(sizeof(MxRingTailLine) == 64, "ring tail must be one cache line");
 static_assert(sizeof(MxRingFlagsLine) == 64, "ring flags must be one cache line");
 static_assert(sizeof(MxRingSlot) == 64, "ring slot must be one cache line");
+static_assert(sizeof(MxRingSpaceLine) == 64, "ring credits must be one cache line");
 static_assert(sizeof(MxRingPage) == 0x100, "ring page header must be 256 bytes");
 
 constexpr mx_u32_t MX_RING_INLINE_PAYLOAD = 48;
 constexpr mx_u32_t MX_RING_HEADER_SIZE = 0x100;
 constexpr mx_u32_t MX_DEFAULT_RING_ORDER = 6;
+constexpr mx_u32_t MX_DEFAULT_FRAMED_RING_ORDER = 7;
+constexpr mx_u32_t MX_RING_PACKED_FRAMES = 1u << 0;
+constexpr mx_u32_t MX_RING_WAIT_READABLE = 0;
+constexpr mx_u32_t MX_RING_WAIT_WRITABLE = 1;
 constexpr mx_u32_t MX_RING_ORDER_MIN = 4;  // kernel allocation bounds
 constexpr mx_u32_t MX_RING_ORDER_MAX = 10;
 

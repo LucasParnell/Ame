@@ -5,6 +5,7 @@
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
+#include "mochi/wait.h"
 #include "dango/vm.h"
 #include "mochi/va_layout.h"
 
@@ -42,5 +43,6 @@ extern "C" [[noreturn]] void _start() {
     console_log("authority check passed\n");
     (void)sys_notify(kAuthGateDoorbell);
     mochi::boot::ready(boot);
-    while (true) sys_yield();
+    // Keep the completed authority fixture alive without staying runnable.
+    mochi::park();
 }

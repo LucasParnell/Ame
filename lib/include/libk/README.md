@@ -96,3 +96,16 @@ bytes after its declared payload are cleared by the ring producer.
 
 - `ByteCursor` borrows stable storage and advances only by an accepted prefix.
   It rejects over-advance; the owner must keep the view alive until empty.
+
+- `hash.h` owns IEEE and Castagnoli CRC engines. Streaming state is the
+  uncomplemented checksum; the two polynomials are not interchangeable.
+  Tables are immutable, aligned, and shared by all callers in an image.
+- `spin.h` owns CPU relaxation and acquire/release lock-word operations.
+  Callers own IRQ masking, scheduling and lock ordering. Contended waiters
+  poll with shared reads instead of repeatedly invalidating the owner's line.
+- `cpu.h` owns instruction primitives (relax, AArch64 ISB and privileged WFI).
+  Idle policy and interrupt masking belong to the kernel; EL0 services use
+  protocol waits, or `mochi::park()` when there is no work source.
+- `mochi/framebuffer_raster.h` applies framebuffer protocol commands to a
+  validated pixel view. The device owner remains responsible for mapping,
+  cache maintenance and publishing to scanout.

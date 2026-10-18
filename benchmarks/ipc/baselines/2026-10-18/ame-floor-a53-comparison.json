@@ -1,0 +1,248 @@
+{
+  "schema": "ame.ipc-comparison/v1",
+  "cross_os": false,
+  "cases": [
+    {
+      "key": "rpc/different_cpu/blocking/0",
+      "baseline_ns": 92292.625,
+      "candidate_ns": 4119.25,
+      "change_percent": -95.53675063419206,
+      "speedup": 22.405201189536932,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "rpc/different_cpu/blocking/256",
+      "baseline_ns": 94039.375,
+      "candidate_ns": 82561.828125,
+      "change_percent": -12.205043764912304,
+      "speedup": 1.139017596093231,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "rpc/different_cpu/blocking/4096",
+      "baseline_ns": 350073.640625,
+      "candidate_ns": 163168.890625,
+      "change_percent": -53.390123765477384,
+      "speedup": 2.1454680440866056,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "rpc/different_cpu/blocking/48",
+      "baseline_ns": 55560.640625,
+      "candidate_ns": 5832.6484375,
+      "change_percent": -89.50219368983383,
+      "speedup": 9.525799680944683,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "rpc/different_cpu/blocking/8",
+      "baseline_ns": 55150.859375,
+      "candidate_ns": 4110.015625,
+      "change_percent": -92.54768525535782,
+      "speedup": 13.41864956413639,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "rpc/different_cpu/spin/0",
+      "baseline_ns": 1704.65625,
+      "candidate_ns": 1525.8671875,
+      "change_percent": -10.48827659535464,
+      "speedup": 1.1171720998817272,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "rpc/different_cpu/spin/256",
+      "baseline_ns": 11806.1171875,
+      "candidate_ns": 6771.9296875,
+      "change_percent": -42.64050085264326,
+      "speedup": 1.7433903971703044,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "rpc/different_cpu/spin/4096",
+      "baseline_ns": 121076.671875,
+      "candidate_ns": 80320.8046875,
+      "change_percent": -33.66120538032009,
+      "speedup": 1.5074135816500687,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "rpc/different_cpu/spin/48",
+      "baseline_ns": 2872.2109375,
+      "candidate_ns": 2726.6015625,
+      "change_percent": -5.069591968295328,
+      "speedup": 1.0534032463718286,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "rpc/different_cpu/spin/8",
+      "baseline_ns": 1793.3828125,
+      "candidate_ns": 1778.53125,
+      "change_percent": -0.8281311941033209,
+      "speedup": 1.0083504647444346,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "rpc/same_cpu/blocking/0",
+      "baseline_ns": 138238.3984375,
+      "candidate_ns": 60215.890625,
+      "change_percent": -56.44054668918589,
+      "speedup": 2.295712925652671,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "rpc/same_cpu/blocking/256",
+      "baseline_ns": 179507.8828125,
+      "candidate_ns": 66626.7578125,
+      "change_percent": -62.8836590524032,
+      "speedup": 2.6942310973268175,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "rpc/same_cpu/blocking/4096",
+      "baseline_ns": 1020866.59375,
+      "candidate_ns": 124954.78125,
+      "change_percent": -87.75993043410331,
+      "speedup": 8.169888207058904,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "rpc/same_cpu/blocking/48",
+      "baseline_ns": 158043.9140625,
+      "candidate_ns": 61573.0703125,
+      "change_percent": -61.0405306159715,
+      "speedup": 2.5667700710778973,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "rpc/same_cpu/blocking/8",
+      "baseline_ns": 159508.40625,
+      "candidate_ns": 60773.734375,
+      "change_percent": -61.899353266843896,
+      "speedup": 2.6246273639491156,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "stream/different_cpu/blocking/0",
+      "baseline_ns": 1351.5078125,
+      "candidate_ns": 1092.1796875,
+      "change_percent": -19.188059632470676,
+      "speedup": 1.2374408972882496,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "stream/different_cpu/blocking/256",
+      "baseline_ns": 4799.2578125,
+      "candidate_ns": 5070.6328125,
+      "change_percent": 5.654520148786024,
+      "speedup": 0.9464810389482329,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "stream/different_cpu/blocking/4096",
+      "baseline_ns": 67669.4296875,
+      "candidate_ns": 38253.6875,
+      "change_percent": -43.469765185465604,
+      "speedup": 1.7689648792028219,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "stream/different_cpu/blocking/48",
+      "baseline_ns": 1818.5625,
+      "candidate_ns": 1760.6484375,
+      "change_percent": -3.18460666048046,
+      "speedup": 1.0328935983280307,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "stream/different_cpu/blocking/8",
+      "baseline_ns": 1477.8203125,
+      "candidate_ns": 1215.234375,
+      "change_percent": -17.768461786520472,
+      "speedup": 1.216078431372549,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "stream/different_cpu/spin/0",
+      "baseline_ns": 393.0078125,
+      "candidate_ns": 480.3046875,
+      "change_percent": 22.212503727263687,
+      "speedup": 0.8182468810488134,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "stream/different_cpu/spin/256",
+      "baseline_ns": 4091.0859375,
+      "candidate_ns": 1939.515625,
+      "change_percent": -52.591667478263524,
+      "speedup": 2.1093338381844693,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "stream/different_cpu/spin/4096",
+      "baseline_ns": 42899.609375,
+      "candidate_ns": 29870.5078125,
+      "change_percent": -30.371142656820517,
+      "speedup": 1.4361861420061857,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "stream/different_cpu/spin/48",
+      "baseline_ns": 1100.6875,
+      "candidate_ns": 785.796875,
+      "change_percent": -28.608540116972346,
+      "speedup": 1.4007277644111273,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "stream/different_cpu/spin/8",
+      "baseline_ns": 597.734375,
+      "candidate_ns": 604.09375,
+      "change_percent": 1.0639132139589558,
+      "speedup": 0.9894728674150328,
+      "aggregate_intervals_overlap": true
+    },
+    {
+      "key": "stream/same_cpu/blocking/0",
+      "baseline_ns": 10463.828125,
+      "candidate_ns": 2310.0859375,
+      "change_percent": -77.92312803780882,
+      "speedup": 4.529627212191105,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "stream/same_cpu/blocking/256",
+      "baseline_ns": 35418.03125,
+      "candidate_ns": 8368.7265625,
+      "change_percent": -76.37156480147382,
+      "speedup": 4.23218885041687,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "stream/same_cpu/blocking/4096",
+      "baseline_ns": 515318.03125,
+      "candidate_ns": 121189.03125,
+      "change_percent": -76.48267207804986,
+      "speedup": 4.2521837655996615,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "stream/same_cpu/blocking/48",
+      "baseline_ns": 12531.4609375,
+      "candidate_ns": 3091.546875,
+      "change_percent": -75.32971701847912,
+      "speedup": 4.053459787020049,
+      "aggregate_intervals_overlap": false
+    },
+    {
+      "key": "stream/same_cpu/blocking/8",
+      "baseline_ns": 12421.953125,
+      "candidate_ns": 2675.09375,
+      "change_percent": -78.4647895296256,
+      "speedup": 4.643558052871978,
+      "aggregate_intervals_overlap": false
+    }
+  ],
+  "configuration_changes": {},
+  "note": "Compare complete workload semantics; different transports are not identical mechanisms. Overlapping/coarse intervals do not establish a performance change."
+}

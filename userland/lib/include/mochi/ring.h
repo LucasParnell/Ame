@@ -25,6 +25,7 @@
 #include "mochi/syscall.h"
 #include "mochi/message.h"
 #include "midix/abi/ring.h"
+#include "libk/cpu.h"
 
 // ---------------------------------------------------------------------------
 // Ring layout — must match kernel RingHeader / RingSlot exactly.
@@ -64,12 +65,32 @@ static inline void ring_write_slot(RingSlot& slot, uint32_t type, const void* da
     (void)libk::zero(libk::slice(payload, slot.length, payload.size - slot.length));
 }
 
-static inline void ring_publish(RingPage* r, uint64_t head, CapHandle doorbell) {
+static inline void ring_publish(RingPage* r, uint64_t head, CapHandle doorbell,
+                                bool* deferred_notify = nullptr) {
     __atomic_store_n(&r->head.v, head, __ATOMIC_RELEASE);
     // Keep the existing unconditional RMW handshake. A speculative flag load
     // before this exchange would need an additional wait/wake ordering proof.
-    if (__atomic_exchange_n(&r->flags.receiver_about_to_sleep, 0u, __ATOMIC_ACQ_REL))
-        (void)mx_doorbell_notify(doorbell);
+    if (__atomic_exchange_n(&r->flags.receiver_about_to_sleep, 0u, __ATOMIC_ACQ_REL)) {
+        if (deferred_notify) *deferred_notify = true;
+        else (void)mx_doorbell_notify(doorbell);
+    }
+}
+
+static inline void ring_release(RingPage* r, uint64_t tail, CapHandle space_doorbell = kNullCap) {
+    __atomic_store_n(&r->tail.v, tail, __ATOMIC_RELEASE);
+    if (space_doorbell &&
+        __atomic_exchange_n(&r->space.producer_about_to_sleep, 0u, __ATOMIC_ACQ_REL))
+        (void)mx_doorbell_notify(space_doorbell);
+}
+
+// Both ends use an acquire/release RMW on the one-shot sleep flag. If
+// publication wins, this acquire observes the producer's release and therefore
+// its head store. If arming wins, the producer observes 1 and notifies. A mere
+// release-store here permits the following head check to miss publication.
+static inline void ring_publish_sleep(RingPage* r, uint64_t counter) {
+    if (!r) return;
+    r->flags.doorbell_counter_snapshot = counter;
+    (void)__atomic_exchange_n(&r->flags.receiver_about_to_sleep, 1u, __ATOMIC_ACQ_REL);
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +103,8 @@ static inline void ring_publish(RingPage* r, uint64_t head, CapHandle doorbell) 
 // ---------------------------------------------------------------------------
 static inline bool ring_try_push(RingPage* r, uint32_t order,
                                  uint32_t type, const void* data, uint32_t len,
-                                 CapHandle doorbell_cap, const uint64_t* sequence = nullptr) {
+                                 CapHandle doorbell_cap, const uint64_t* sequence = nullptr,
+                                 bool* deferred_notify = nullptr) {
     if (!ring_valid(r, order) || (!data && len != 0)) return false;
     const uint64_t mask = mx_ring_mask(order);
 
@@ -106,7 +128,7 @@ static inline bool ring_try_push(RingPage* r, uint32_t order,
     // has not yet entered wait_doorbell(), this exchange still works because
     // sys_notify increments the doorbell counter.  The later wait sees the
     // counter changed and returns immediately instead of sleeping.
-    ring_publish(r, head + 1, doorbell_cap);
+    ring_publish(r, head + 1, doorbell_cap, deferred_notify);
 
     return true;
 }
@@ -156,13 +178,17 @@ static inline bool ring_push(RingPage* r, uint32_t order,
 // Consumer — non-blocking pop.
 // Returns false if ring is empty.  Does not yield, sleep, or touch doorbells.
 // ---------------------------------------------------------------------------
-static inline bool ring_pop(RingPage* r, uint32_t order, RingSlot* out) {
+static inline bool ring_pop_space(RingPage* r, uint32_t order, RingSlot* out,
+                                  CapHandle space_doorbell) {
     if (!ring_valid(r, order) || !out) return false;
     const uint64_t mask = mx_ring_mask(order);
     const uint64_t tail = __atomic_load_n(&r->tail.v, __ATOMIC_RELAXED);
     const uint64_t head = __atomic_load_n(&r->head.v, __ATOMIC_ACQUIRE);
 
-    if (tail == head) return false;
+    // Match the batch reader's contract. A corrupted producer cursor must not
+    // make an overwritten slot appear readable or advance consumer ownership.
+    const uint64_t pending = head - tail;
+    if (!pending || pending > mask + 1) return false;
 
     RingSlot* src = ring_slots(r) + (tail & mask);
     out->type = src->type;
@@ -170,8 +196,12 @@ static inline bool ring_pop(RingPage* r, uint32_t order, RingSlot* out) {
     out->seq = src->seq;
     (void)libk::copy_exact(libk::as_bytes(out->payload), libk::as_bytes(src->payload));
 
-    __atomic_store_n(&r->tail.v, tail + 1, __ATOMIC_RELEASE);
+    ring_release(r, tail + 1, space_doorbell);
     return true;
+}
+
+static inline bool ring_pop(RingPage* r, uint32_t order, RingSlot* out) {
+    return ring_pop_space(r, order, out, kNullCap);
 }
 
 // Backward-compatible spelling for older call sites.  The doorbell argument is
@@ -184,7 +214,8 @@ static inline bool ring_pop(RingPage* r, uint32_t order,
 // Copy a bounded snapshot, then release the consumed slots together. No pointer
 // into shared storage escapes; producers may reuse it as soon as tail advances.
 static inline uint32_t ring_pop_batch(RingPage* r, uint32_t order,
-                                      RingSlot* out, uint32_t count) {
+                                      RingSlot* out, uint32_t count,
+                                      CapHandle space_doorbell = kNullCap) {
     if (!ring_valid(r, order) || !out || !count) return 0;
     const uint64_t capacity = mx_ring_capacity(order), mask = capacity - 1;
     const uint64_t tail = __atomic_load_n(&r->tail.v, __ATOMIC_RELAXED);
@@ -194,7 +225,7 @@ static inline uint32_t ring_pop_batch(RingPage* r, uint32_t order,
     const uint32_t taken = pending < count ? static_cast<uint32_t>(pending) : count;
     const auto* slots = ring_slots(r);
     for (uint32_t i = 0; i < taken; ++i) out[i] = slots[(tail + i) & mask];
-    __atomic_store_n(&r->tail.v, tail + taken, __ATOMIC_RELEASE);
+    ring_release(r, tail + taken, space_doorbell);
     return taken;
 }
 
@@ -293,8 +324,7 @@ static inline bool ring_wait_readable(RingPage* r, uint32_t order, CapHandle doo
     for (;;) {
         if (readable()) return true;
         const uint64_t counter = sys_doorbell_read(doorbell);
-        r->flags.doorbell_counter_snapshot = counter;
-        __atomic_store_n(&r->flags.receiver_about_to_sleep, 1u, __ATOMIC_RELEASE);
+        ring_publish_sleep(r, counter);
         if (readable()) {
             __atomic_store_n(&r->flags.receiver_about_to_sleep, 0u, __ATOMIC_RELEASE);
             return true;
@@ -331,6 +361,11 @@ struct Ring {
     RingPage* ring = nullptr;
     uint32_t order = 0;
     CapHandle doorbell = kNullCap;
+    CapHandle handle = kNullCap;
+    CapHandle space_doorbell = kNullCap;
+    // Exclusive sender-owned storage, never placed in shared memory. A caller
+    // deferring a wake must flush it before blocking or leaving the operation.
+    bool* deferred_notify = nullptr;
 
     bool valid() const { return ring_valid(ring, order); }
     RingPage* raw() const { return ring; }
@@ -339,7 +374,7 @@ struct Ring {
 
     // --- publish (producer) -------------------------------------------------
     bool try_push(uint32_t type, const void* data, uint32_t len) const {
-        return ring != nullptr && ring_try_push(ring, order, type, data, len, doorbell);
+        return ring != nullptr && ring_try_push(ring, order, type, data, len, doorbell, nullptr, deferred_notify);
     }
     bool try_push_frame(const RingSlot& frame) const {
         return ring != nullptr && ring_try_push_frame(ring, order, frame, doorbell);
@@ -377,18 +412,60 @@ struct Ring {
     }
 
     // --- consume (consumer) -------------------------------------------------
-    bool try_pop(RingSlot* out) const { return ring != nullptr && ring_pop(ring, order, out); }
+    bool try_pop(RingSlot* out) const { return ring != nullptr && ring_pop_space(ring, order, out, space_doorbell); }
     uint32_t try_pop_batch(RingSlot* out, uint32_t count) const {
-        return ring_pop_batch(ring, order, out, count);
+        return ring_pop_batch(ring, order, out, count, space_doorbell);
     }
-    bool wait_readable() const { return ring_wait_readable(ring, order, doorbell); }
+    bool wait_readable(uint32_t poll_budget = 0) const {
+        if (!handle) return ring_wait_readable(ring, order, doorbell);
+        return wait_cursor(false, 1, poll_budget);
+    }
+    bool wait_readable_after_notify(CapHandle notify, uint32_t flags = 0) const {
+        if (!handle) return mx_doorbell_notify(notify) == MX_OK && wait_readable();
+        if (!valid() || !doorbell) return false;
+        const uint64_t tail = __atomic_load_n(&ring->tail.v, __ATOMIC_RELAXED);
+        (void)__atomic_exchange_n(&ring->flags.receiver_about_to_sleep, 1u, __ATOMIC_ACQ_REL);
+        const auto rc = sys_notify_wait(notify, handle, doorbell, tail, flags);
+        __atomic_store_n(&ring->flags.receiver_about_to_sleep, 0u, __ATOMIC_RELEASE);
+        return rc >= 0;
+    }
+    bool wait_writable(uint32_t slots = 1, uint32_t poll_budget = 0) const {
+        if (!handle || !space_doorbell) return false;
+        return wait_cursor(true, slots, poll_budget);
+    }
+    bool wait_cursor(bool writable, uint32_t slots = 1, uint32_t poll_budget = 0) const {
+        if (!valid() || !slots || slots > capacity()) return false;
+        auto* flag = writable ? &ring->space.producer_about_to_sleep : &ring->flags.receiver_about_to_sleep;
+        for (;;) {
+            const uint64_t head = __atomic_load_n(&ring->head.v, __ATOMIC_ACQUIRE);
+            const uint64_t tail = __atomic_load_n(&ring->tail.v, __ATOMIC_ACQUIRE);
+            if (head - tail > capacity()) return false;
+            if (writable ? head - tail <= capacity() - slots : head != tail) return true;
+            // Opt-in only when the peer can run concurrently. Exhaustion falls
+            // through to the same race-free kernel wait; there is no busy wait
+            // while a same-core peer is descheduled.
+            if (poll_budget) {
+                --poll_budget;
+                libk::cpu::relax();
+                continue;
+            }
+            (void)__atomic_exchange_n(flag, 1u, __ATOMIC_ACQ_REL);
+            const auto cursor = writable ? tail : head;
+            const auto rc = sys_wait_ring(handle, writable ? space_doorbell : doorbell,
+                                           cursor, writable ? MX_RING_WAIT_WRITABLE : MX_RING_WAIT_READABLE);
+            __atomic_store_n(flag, 0u, __ATOMIC_RELEASE);
+            if (rc < 0) return false;
+        }
+    }
     bool wait_pop(RingSlot* out) const {
-        return ring != nullptr && doorbell != kNullCap && ring_wait_pop(ring, order, out, doorbell);
+        if (!ring || !doorbell || !out) return false;
+        do { if (try_pop(out)) return true; } while (wait_readable());
+        return false;
     }
     bool pop_bounded(RingSlot* out, mx_u64_t deadline_ns) const {
         if (!valid() || !out) return false;
         for (;;) {
-            if (ring_pop(ring, order, out)) return true;
+            if (try_pop(out)) return true;
             if (mx_clock_ns() >= deadline_ns) return false;
             sys_yield();
         }
@@ -426,9 +503,7 @@ struct Ring {
     // --- doorbell / receiver-sleep flag -------------------------------------
     uint64_t doorbell_counter() const { return sys_doorbell_read(doorbell); }
     void publish_sleep(uint64_t counter) const {
-        if (!ring) return;
-        ring->flags.doorbell_counter_snapshot = counter;
-        __atomic_store_n(&ring->flags.receiver_about_to_sleep, 1u, __ATOMIC_RELEASE);
+        ring_publish_sleep(ring, counter);
     }
     void clear_sleep() const {
         if (!ring) return;

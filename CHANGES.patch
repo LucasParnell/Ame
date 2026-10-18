@@ -1,0 +1,2810 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 36aab0b..89ccb4e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -107,6 +107,9 @@ endif()
+ # ---------------------------------------------------------------------------
+ # Global flags — freestanding, no exceptions/RTTI
+ # ---------------------------------------------------------------------------
++if(AME_CPU_TUNE)
++    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-mtune=${AME_CPU_TUNE}>)
++endif()
+ add_compile_options(
+     -ffreestanding
+     $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>
+diff --git a/README.md b/README.md
+index 16ddc5e..ca27ff7 100644
+--- a/README.md
++++ b/README.md
+@@ -13,6 +13,8 @@ See [the IPC benchmark guide](docs/IPC_BENCHMARK.md) and [initial raw baselines]
+ for two-process latency/throughput measurements and reproducible comparisons.
+ The [IPC and scheduler refactor](docs/IPC_REFACTOR.md) describes the current
+ fast paths, wakeup ordering and validation.
++See [Cortex-A53 IPC execution paths](docs/IPC_FLOOR.md) for the P20 Lite-oriented
++ASID, framing, combined IPC and scheduler changes.
+ 
+ ## Build
+ 
+diff --git a/benchmarks/ipc/ame.cc b/benchmarks/ipc/ame.cc
+index 4d05dee..bc6406e 100644
+--- a/benchmarks/ipc/ame.cc
++++ b/benchmarks/ipc/ame.cc
+@@ -28,7 +28,8 @@
+ namespace {
+ using namespace ipc_bench;
+ using u8 = std::uint8_t;
+-constexpr u32 kOrder = MX_DEFAULT_RING_ORDER;
++constexpr u32 kOrder = AME_IPC_BENCH_REFERENCE_FRAMING ? MX_DEFAULT_RING_ORDER : MX_DEFAULT_FRAMED_RING_ORDER;
++[[maybe_unused]] constexpr u32 kPollBudget = AME_IPC_BENCH_SERVER_CPU ? 64 : 0;
+ 
+ [[noreturn]] void failure(const char* why) {
+     constexpr char prefix[] = "IPC_BENCH_ERROR: ";
+@@ -46,6 +47,7 @@ struct Ame {
+     u32 cpus;
+     u64 identity, peer;
+     bool spin = false;
++    bool pending_notify = false, server_role = false;
+     const char* transport() const { return "ame_mochi_ring_framed"; }
+     const char* diagnostic_scope() const { return "isolated_system"; }
+     u32 client_cpu() const { return 0; }
+@@ -79,6 +81,12 @@ struct Ame {
+         result.values[LocalWakes] = sys_debug_counter(DBG_LOCAL_WAKES);
+         return result;
+     }
++    void flush_notify() {
++        if (pending_notify) {
++            check(mx_doorbell_notify(outgoing.doorbell) == MX_OK, "flush deferred notify");
++            pending_notify = false;
++        }
++    }
+     void send(const Message& message) {
+ #if AME_IPC_BENCH_REFERENCE_FRAMING
+         ipc_bench::slotwise::send(*this, message);
+@@ -88,9 +96,21 @@ struct Ame {
+         for (;;) {
+             const auto result = writer.push(outgoing);
+             check(result != mochi::FrameProgress::Invalid, "outgoing frame/ring");
+-            if (result == mochi::FrameProgress::Complete) return;
++            if (result == mochi::FrameProgress::Complete) {
++                if (message.kind == Closed) {
++                    flush_notify();
++                    // The final response has no following receive to complete
++                    // a synchronous reply token. Resolve it before process exit;
++                    // ordinary/cross-core peers have no token and return INVALID.
++                    const auto replied = sys_reply_handoff(MX_OK);
++                    check(replied == MX_OK || replied == MX_ERR_INVALID, "closing handoff");
++                }
++                return;
++            }
+             if (result == mochi::FrameProgress::Blocked) {
+-                if (spin) libk::cpu::relax(); else sys_yield();
++                flush_notify();
++                if (spin) libk::cpu::relax();
++                else check(outgoing.wait_writable(writer.required_space(outgoing), kPollBudget), "producer space wait");
+             }
+         }
+ #endif
+@@ -99,14 +119,22 @@ struct Ame {
+ #if AME_IPC_BENCH_REFERENCE_FRAMING
+         ipc_bench::slotwise::receive(*this, message);
+ #else
++        if (pending_notify) {
++            if (spin) flush_notify();
++            else {
++                const uint32_t flags = server_role ? MX_IPC_EXCHANGE_REPLY : MX_IPC_EXCHANGE_HANDOFF;
++                check(incoming.wait_readable_after_notify(outgoing.doorbell, flags), "exchange/wait");
++                pending_notify = false;
++            }
++        }
+         mochi::FrameReader reader(message.payload, kMaxPayload);
+         for (;;) {
+-            const auto result = reader.pop(incoming);
++            const auto result = reader.pop(incoming, 16, !spin);
+             check(result != mochi::FrameProgress::Invalid, "incoming frame/ring");
+             if (result == mochi::FrameProgress::Complete) break;
+             if (result == mochi::FrameProgress::Blocked) {
+                 if (spin) libk::cpu::relax();
+-                else check(ring_wait_readable(incoming.raw(), incoming.order, incoming.doorbell), "ring receive/wait");
++                else check(incoming.wait_readable(kPollBudget), "ring receive/wait");
+             }
+         }
+         message.kind = reader.type(); message.sequence = reader.sequence(); message.size = reader.size();
+@@ -115,7 +143,7 @@ struct Ame {
+ };
+ 
+ struct Child { CapHandle process, thread; u64 identity; };
+-struct Channel { CapHandle requests, replies, request_db, reply_db; };
++struct Channel { CapHandle requests, replies, request_db, reply_db, request_space, reply_space; };
+ Child spawn(const u8* image, size_t size, CapHandle supervisor) {
+     static const char name[32] = "bench.ipc";
+     const auto result = sys_spawn(image, size, MX_POLICY_PRINCIPAL_NATIVE_TRUSTED,
+@@ -149,6 +177,10 @@ void wire(Child child, Child peer, const Channel& channel, bool server, u32 cpus
+         cap(sys_doorbell_share(server ? channel.reply_db : channel.request_db, child.process, RIGHT_NOTIFY)));
+     add("bench.rx.db", MX_BOOT_ENTRY_DOORBELL,
+         cap(sys_doorbell_share(server ? channel.request_db : channel.reply_db, child.process, RIGHT_WAIT)));
++    add("bench.tx.space", MX_BOOT_ENTRY_DOORBELL,
++        cap(sys_doorbell_share(server ? channel.reply_space : channel.request_space, child.process, RIGHT_WAIT)));
++    add("bench.rx.space", MX_BOOT_ENTRY_DOORBELL,
++        cap(sys_doorbell_share(server ? channel.request_space : channel.reply_space, child.process, RIGHT_NOTIFY)));
+     add("thread.self", MX_BOOT_ENTRY_HANDLE,
+         cap(sys_cap_grant(child.process, child.thread, RIGHT_READ | RIGHT_THREAD_CONTROL)));
+     add("role", MX_BOOT_ENTRY_VALUE, 0, server ? 2 : 1);
+@@ -165,12 +197,19 @@ extern "C" [[noreturn]] void _start() {
+         auto* state = memory.alloc<State>(1);
+         check(state, "benchmark state arena");
+         const auto link = mochi::boot::map_endpoint(boot,
+-            {"bench.tx", 0x18000000, "bench.tx.db"}, {"bench.rx", 0x18010000, "bench.rx.db"});
++            {"bench.tx", 0x18000000, "bench.tx.db", kOrder, "bench.tx.space"},
++            {"bench.rx", 0x18010000, "bench.rx.db", kOrder, "bench.rx.space"});
+         check(link.valid(), "benchmark endpoint");
+         Ame backend{link.tx(), link.rx(), mochi::boot::require_handle(boot, "thread.self"),
+                     static_cast<u32>(mochi::boot::find(boot, "cpu.count")->aux0),
+                     mochi::boot::find(boot, "self.identity")->aux0,
+                     mochi::boot::find(boot, "peer.identity")->aux0};
++        backend.server_role = role->aux0 == 2;
++#if !AME_IPC_BENCH_REFERENCE_FRAMING && AME_IPC_BENCH_SERVER_CPU == 0
++        // Cross-core consumers can overlap their work with production. Wake
++        // them on first publication instead of deferring until the whole window.
++        backend.outgoing.deferred_notify = &backend.pending_notify;
++#endif
+         if (role->aux0 == 2) ipc_bench::server(backend, *state);
+         else {
+             const Config config{AME_IPC_BENCH_ITERATIONS, AME_IPC_BENCH_WARMUP, AME_IPC_BENCH_SAMPLES,
+@@ -194,8 +233,10 @@ extern "C" [[noreturn]] void _start() {
+     const auto supervisor = mochi::boot::require_handle(boot, "supervisor");
+     const auto client = spawn(bundle.data + object.offset, object.size, supervisor);
+     const auto server = spawn(bundle.data + object.offset, object.size, supervisor);
+-    const Channel channel{cap(sys_ring_create(kOrder, 0)), cap(sys_ring_create(kOrder, 0)),
+-                          cap(sys_doorbell_create()), cap(sys_doorbell_create())};
++    constexpr u32 features = AME_IPC_BENCH_REFERENCE_FRAMING ? 0 : MX_RING_PACKED_FRAMES;
++    const Channel channel{cap(sys_ring_create(kOrder, features)), cap(sys_ring_create(kOrder, features)),
++                          cap(sys_doorbell_create(MX_IPC_HINT_LATENCY | MX_IPC_HINT_HANDOFF_OK | MX_IPC_HINT_SERVER)),
++                          cap(sys_doorbell_create()), cap(sys_doorbell_create()), cap(sys_doorbell_create())};
+     const auto cpus = static_cast<u32>(mochi::boot::find(boot, "cpu.count")->aux0);
+     check(cpus && cpus <= 8, "CPU count");
+     wire(client, server, channel, false, cpus, 0x30000000);
+diff --git a/benchmarks/ipc/baselines/2026-10-18/ame-floor-a53-validation.json b/benchmarks/ipc/baselines/2026-10-18/ame-floor-a53-validation.json
+new file mode 100644
+index 0000000..d18ebdd
+--- /dev/null
++++ b/benchmarks/ipc/baselines/2026-10-18/ame-floor-a53-validation.json
+@@ -0,0 +1,27 @@
++{
++  "full_suite": {
++    "tests": 279,
++    "expected_skips": 39,
++    "initial_errors": 1,
++    "cause": "ZIP shell execute permissions",
++    "affected_group_retest": {
++      "tests": 25,
++      "passed": true
++    }
++  },
++  "final_transport_group": {
++    "tests": 6,
++    "passed": true
++  },
++  "a53_asid_el1_el2": true,
++  "a53_eight_cpu_boot": true,
++  "simd_el1_el2_two_four_cpus": true,
++  "huawei_release_build": true,
++  "measured_kernel_lifecycle_simd": true,
++  "kernel_sha256": "6e7aaa2f9f318aa36952543571cd8fe0df3be791df128d831c5d07496ad191e0",
++  "residual_cases": [
++    "stream/different_cpu/blocking/256",
++    "stream/different_cpu/spin/0",
++    "stream/different_cpu/spin/8"
++  ]
++}
+diff --git a/boards/huawei-anne/board.cmake b/boards/huawei-anne/board.cmake
+index edd058a..b79425d 100644
+--- a/boards/huawei-anne/board.cmake
++++ b/boards/huawei-anne/board.cmake
+@@ -5,3 +5,6 @@ set(ANKO_IMAGE_TEXT_OFFSET 0x00080000)
+ set(ANKO_CONSOLE_KIND PL011)
+ set(ANKO_FB_WIDTH 1080)
+ set(ANKO_FB_HEIGHT 2280)
++# Kirin 659 uses Cortex-A53 cores. Tune scheduling without enabling ARMv8.1
++# features (notably LSE) absent from the primary device.
++set(AME_CPU_TUNE cortex-a53)
+diff --git a/boards/huawei-anne/boot_diagnostics.cc b/boards/huawei-anne/boot_diagnostics.cc
+index 2693750..a47822a 100644
+--- a/boards/huawei-anne/boot_diagnostics.cc
++++ b/boards/huawei-anne/boot_diagnostics.cc
+@@ -342,25 +342,46 @@ void boot_log_panic(const char* message) {
+     anne_diag_reset();
+ }
+ void boot_timer_tick() {
++    const u32 bit = 1u << cpu_id();
++#if ANKO_ANNE_DIAG_CAPTURE_SECONDS == 0
++    // IRQ entry already excludes local interrupts. Completed one-time records
++    // need no global diagnostic lock; watchdog ownership remains on CPU zero.
++    if (__atomic_load_n(&state.tick_seen, __ATOMIC_ACQUIRE) & bit) {
++#ifdef ANKO_ANNE_WATCHDOG
++        watchdog::poll();
++#endif
++        return;
++    }
++#endif
+     IrqGuard guard;
+ #ifdef ANKO_ANNE_WATCHDOG
+     watchdog::poll();
+ #endif
+     capture_poll();
+-    const u32 bit = 1u << cpu_id();
+     if (state.tick_seen & bit) return;
+-    state.tick_seen |= bit;
++    __atomic_store_n(&state.tick_seen, state.tick_seen | bit, __ATOMIC_RELEASE);
+     boot_checkpoint(BootStage::FirstTimerTick);
+ }
+ void boot_syscall(u64 nr) {
++#if ANKO_ANNE_DIAG_CAPTURE_SECONDS == 0
++    // Native steady-state IPC must not serialize all eight A53 cores through
++    // the boot logger. SVC entry masks IRQs, so CPU-zero watchdog polling can
++    // continue without the logger's cross-CPU lock.
++    if (__atomic_load_n(&state.syscall_seen, __ATOMIC_ACQUIRE)) {
++#ifdef ANKO_ANNE_WATCHDOG
++        watchdog::poll();
++#endif
++        return;
++    }
++#endif
+     IrqGuard guard;
+ #ifdef ANKO_ANNE_WATCHDOG
+     watchdog::poll();
+ #endif
+     if (!state.syscall_seen) {
+-        state.syscall_seen = 1;
+         u64 saved_pstate; asm volatile("mrs %0, spsr_el1" : "=r"(saved_pstate));
+         text("\nEL0 first_svc="); number(nr); text(" saved_pstate="); hex(saved_pstate); text("\n"); boot_log_flush();
++        __atomic_store_n(&state.syscall_seen, 1u, __ATOMIC_RELEASE);
+     }
+     capture_poll();
+ }
+diff --git a/docs/IPC_BENCHMARK.md b/docs/IPC_BENCHMARK.md
+index d8648f5..4b80c94 100644
+--- a/docs/IPC_BENCHMARK.md
++++ b/docs/IPC_BENCHMARK.md
+@@ -6,6 +6,11 @@ address spaces. The same C++ workload runs on Ame rings, Linux Unix-domain
+ waits by default. It is suitable for comparing that service contract across OSes
+ on a matching machine, and for measuring regressions within Ame.
+ 
++The default QEMU model is now Cortex-A53, matching the primary P20 Lite ISA.
++Use `--cpu cortex-a57` only when reproducing the historical emulator setup.
++See [the current IPC paths](IPC_FLOOR.md) for ASIDs, packed framing and combined
++waits; the saved baseline documents describe the earlier implementation.
++
+ [The initial results](IPC_BASELINE.md) include raw timings and configuration. Ame
+ was measured under QEMU TCG; the Linux references ran on the host. Those results
+ are separate baselines and must not be used to rank the operating systems.
+@@ -138,12 +143,15 @@ warning about uncertainty, not a formal significance test.
+ 
+ ## Transport and diagnostic details
+ 
+-Ame uses the production Mochi SPSC ring and doorbell library, with a 64-slot
+-ring and 48-byte inline payload. Logical messages above 48 bytes are fragmented
+-into native slots with sequence/type and FIRST/LAST flags, then copied into a
+-receiver buffer. A 4096-byte message requires 86 slots, exceeding ring capacity.
+-Blocking receive uses `ring_wait_pop`. The ring has no producer-space wake API,
+-so a full TX ring uses `sys_yield`; the optional spin adapter uses CPU relax.
++Ame uses the production Mochi SPSC ring and doorbell library, with a 128-slot
++framed ring and a 48-byte inline payload. Larger messages use copied packed
++records, with a single sequence/type/length header and wrap-safe payload copies.
++A 4096-byte message requires 65 cursor units and fits in one publication.
++Blocking data and producer-credit waits compare retained ring cursors in the
++kernel. Notification can share that entry, and eligible same-core RPCs use
++bounded request/reply handoff. The optional spin adapter uses CPU relax.
++`--reference-framing` retains the old 64-slot fragment-at-a-time adapter as an
++explicit implementation control; it is not the production default.
+ It does not execute WFI while waiting in userland. Blocked workers let the kernel
+ use its normal idle/WFI behavior. The bootstrap parent parks and normal userland
+ services do not run, isolating communication and scheduler behavior.
+diff --git a/docs/IPC_FLOOR.md b/docs/IPC_FLOOR.md
+new file mode 100644
+index 0000000..abd8c93
+--- /dev/null
++++ b/docs/IPC_FLOOR.md
+@@ -0,0 +1,153 @@
++# IPC execution paths for Cortex-A53
++
++The primary device is the Huawei P20 Lite (Kirin 659, Cortex-A53). These changes
++use ARMv8.0 instructions and the mandatory eight-bit ASID facility. They do not
++require LSE, newer wait instructions, speculative SIMD ownership, or a DMA
++engine. QEMU Cortex-A53 validates execution and ordering protocols; TCG timings
++do not establish physical-device latency or the architectural floor.
++
++## Address spaces
++
++The 64 reserved live process IDs are also ASIDs 1–64. ASID zero belongs to the
++kernel root. Process IDs remain reserved until the old process's execution and
++lifetime references retire. Creating a new incarnation completes `ASIDE1IS`
++before publishing it. A tagged context is `vm_context(root, pid)`; physical
++page-table walkers continue to receive the untagged root.
++
++Normal switches write TTBR0 and execute ISB without invalidating translations.
++Mapping changes invalidate only the affected ASID. Root teardown detaches each
++subtree and completes its shootdown before reclaiming its pages. Changes that
++affect all kernel roots retain their global shootdowns. Kernel identity leaves
++are non-global too: late MMIO mappings can differ between roots while TTBR1
++separation remains unimplemented. Temporary VM kernel-root scopes restore the
++caller's tagged context.
++
++`test_asid.py` executes production activation/shootdown/setup code at EL1 and
++EL2 on Cortex-A53, alternating different backing pages at the same VA and then
++reusing all 64 ASIDs. It also checks that activation contains no TLBI.
++
++## Copied records and credits
++
++`MX_RING_PACKED_FRAMES` opts a ring into packed framing. The formerly reserved
++header line carries the feature and a separate producer sleep request. Existing
++head/tail/receiver-flag offsets and the 256-byte header size are unchanged.
++Feature-zero rings retain the original interoperable FIRST/LAST slot protocol.
++
++Packed logical messages above 48 bytes have one 16-byte header and contiguous
++payload, with at most two copies at ring wrap. Their occupancy is
++`ceil((16 + payload_size) / 64)` cursor units. A 4096-byte message uses 65 units,
++one publication and one release instead of 86 individually framed slots.
++Publication requires room for the whole record. Larger-than-capacity records
++fall back to bounded legacy fragmentation. Readers validate bounds, feature,
++flags and available occupancy before copying or advancing ownership. Invalid
++framing poisons the reader.
++
++The default framed geometry is order 7: an 8 KiB data area per direction. This
++fits a full 4 KiB record while limiting the A53 cache footprint. Existing inline
++service rings retain order 6. Bulk services can explicitly choose a larger
++supported order; allocation and mapping remain outside the exchange path.
++
++Optional space doorbells let a producer arm, compare the tail, and block for
++the actual required room. Readers publish tail progress before claiming the
++producer's one-shot wake request. A separate line prevents contention with the
++receiver's data wake request. Both directions preserve the acquire/release RMW
++handshake; a speculative zero-flag load is not a substitute. No per-message
++cache clean/invalidate is used for coherent normal CPU memory.
++
++## Kernel entries and synchronous RPC
++
++`WAIT_RING(ring, doorbell, cursor, direction)` compares a retained kernel-backed
++ring cursor while registering its doorbell waiter. It needs no preceding
++counter-read syscall and never dereferences an arbitrary userspace pointer.
++Readable waits compare head; credit waits compare tail. Callers arm their
++shared wake request first. Publication preceding registration makes the syscall
++return immediately; publication after registration produces a notification.
++
++`NOTIFY_WAIT(notify, ring, wait, cursor, flags)` validates all three capabilities
++before any notification side effect. It combines notification with conditional
++waiting. `REPLY_WAIT` selects reply mode. The production `Channel::call` uses
++ordinary combined notification/waiting when endpoint handles are available;
++legacy/deadline endpoints keep their existing behavior.
++
++Trusted creators may configure scheduling hints in `sys_doorbell_create(hints)`.
++Handoff is an explicit server protocol: the receiver must use `reply_handoff`
++or reply-and-wait. It cannot be enabled transparently for an arbitrary server.
++Requests use same-core handoff only when affinity, ownership, principal and
++context budgets permit it. Already-readable replies skip request handoff.
++Reply-and-wait rearms the server before directly returning to its caller.
++Cross-core and ineligible exchanges retain the normal wake/dispatch path.
++
++An exclusive sender may defer a wake claimed by `FrameWriter` or `Ring::try_push`
++and carry it into its next receive syscall. It must flush before waiting for
++space, switching to polling, terminating, or abandoning the operation. The
++benchmark adapter follows these rules, including its final `Closed` response.
++It defers only same-core wakes. Cross-core publication wakes the receiver
++immediately so production and consumption overlap. When both peers explicitly
++negotiate polling, readers omit credit notifications because producers never
++park for space in that policy.
++Blocking cross-core waits may poll for at most 64 cursor checks before parking;
++same-core waits poll zero times. This avoids waking a core for data arriving
++just after its empty check. The budget is recorded in benchmark metadata, and
++does not turn blocking waits into unlimited spin waits. Energy is not measured.
++The closing server also completes any synchronous reply token before exiting;
++otherwise teardown correctly aborts that token even if response bytes exist.
++An end-to-end A53 integrity test covers this shutdown handshake, partial stream
++windows, both placements and polling as well as blocking data/credit waits.
++
++## Scheduler, assembly and working sets
++
++The scheduler saves the outgoing full GPR and SIMD state before relinquishing
++execution ownership, as before. ARM return assembly restores straight from the
++selected thread's saved frame, eliminating the copy back to the CPU exception
++stack. Host probes retain a compatibility wrapper that materializes that copy.
++Huawei's FIQ return mask remains in the assembly path.
++
++Reply and RT queue links fill the 24-byte alignment gap following `CpuContext`,
++avoiding accesses beyond the cold SIMD file. Direct handoff bypass is limited to
++eight consecutive transfers when other runnable work exists. Queued real-time
++work always forces normal selection. Budgets, donation deadlines, termination
++and deferred remote-wake ownership checks remain active.
++
++Steady-state IPC, clock and yield dispatch avoid the large cold VM/control
++dispatcher. Syscall statistics use separate cache lines per CPU and atomic
++load/store updates under exception-entry IRQ exclusion. General IPC counters
++retain their atomic updates where kernel notifications can be reentrant.
++
++Aligned byte copies use scalar AArch64 LDP/STP pairs without overreading,
++touching FP/SIMD state, or depending on unaligned kernel accesses. Unaligned and
++short copies retain bounded byte handling. The Huawei build also schedules C++
++instructions for Cortex-A53 without enabling a newer ISA.
++Inline frames have separate inlined readers/writers; packed copying and partial
++fragment handling stay in non-inlined helpers. Empty/small messages therefore
++avoid the bulk handlers' register spills and instruction footprint.
++
++With capture disabled, Huawei syscall/timer hooks return after their one-time
++records instead of acquiring the boot logger's global lock on every entry.
++CPU-zero watchdog polling continues under exception-entry IRQ exclusion.
++Capture mode retains its original serialized observation/reset path.
++
++## Verification and measurements
++
++Run correctness first:
++
++```sh
++python3 -m unittest discover -s tests -p 'test_*.py' -v
++python3 scripts/test/simd.py --build out/architectural --cpus 2 4 --entry-el 1 2
++```
++
++New coverage includes packed and fragmented concurrency, cursor wrap, buffer
++guards, malformed records, real blocking data/credit races, combined syscall
++authority failures, handoff/reply ownership, fair competitors and RT precedence.
++The normal lifecycle bundle additionally exercises 100 process restart cycles.
++
++Performance collection follows implementation and correctness validation:
++
++```sh
++python3 scripts/test/ipc-bench.py ame --cpu cortex-a53 --build-type Release \
++  --output out/ipc-results/final
++```
++
++Use a freshly built original snapshot with the same compiler, QEMU, CPU model,
++workload, parameters and build type for the before/after comparison. Retain raw
++samples, independent runs, binaries and logs. The supplied older A57/TCG
++collection is historical context and is not a matched A53 baseline.
+diff --git a/docs/IPC_FLOOR_RESULTS.md b/docs/IPC_FLOOR_RESULTS.md
+new file mode 100644
+index 0000000..b0efb94
+--- /dev/null
++++ b/docs/IPC_FLOOR_RESULTS.md
+@@ -0,0 +1,87 @@
++# Cortex-A53 IPC results — verified checkpoint
++
++These are matched QEMU TCG observations, not physical P20 Lite latency or proof of the hardware floor. Original means the supplied IPC-refactor ZIP, rebuilt with the same Release compiler settings and workload. The final implementation includes a bounded 64-check poll only for cross-core blocking waits; same-core waits poll zero times. Energy and CPU utilization are not measured.
++
++## Configuration
++
++- Cortex-A53, two vCPUs, 512 MiB, EL2, QEMU QEMU emulator version 10.0.13 (Debian 1:10.0.13+ds-0+deb13u1).
++- Clang 19.1.7; Release kernel, unchanged `-O2` portable workload.
++- Five independent boots per placement; 512 warmup operations, five rounds of 2,048 operations, 4,096 separate RTT samples, stream window 32.
++- All 30 cases completed, including separately labeled unlimited polling cases. Payload and sequence validation stayed inside the timed workload.
++- Builds/tests did not run concurrently with accepted timed measurements. Configuration comparison found no compiler/build-mode differences.
++
++RPC figures below are microseconds per complete round trip. Streaming figures are microseconds per logical delivered message, including completion ACK overhead. They are medians of independent run medians, not RTT divided by two. Clock instrumentation is not subtracted.
++
++## Full matrix
++
++| Case | Original µs | Checkpoint µs | Speedup | Aggregate 95% intervals overlap |
++| --- | ---: | ---: | ---: | :---: |
++| rpc/different_cpu/blocking/0 | 92.293 | 4.119 | 22.41× | no |
++| rpc/different_cpu/blocking/256 | 94.039 | 82.562 | 1.14× | no |
++| rpc/different_cpu/blocking/4096 | 350.074 | 163.169 | 2.15× | yes |
++| rpc/different_cpu/blocking/48 | 55.561 | 5.833 | 9.53× | yes |
++| rpc/different_cpu/blocking/8 | 55.151 | 4.110 | 13.42× | no |
++| rpc/different_cpu/spin/0 | 1.705 | 1.526 | 1.12× | yes |
++| rpc/different_cpu/spin/256 | 11.806 | 6.772 | 1.74× | no |
++| rpc/different_cpu/spin/4096 | 121.077 | 80.321 | 1.51× | yes |
++| rpc/different_cpu/spin/48 | 2.872 | 2.727 | 1.05× | yes |
++| rpc/different_cpu/spin/8 | 1.793 | 1.779 | 1.01× | yes |
++| rpc/same_cpu/blocking/0 | 138.238 | 60.216 | 2.30× | no |
++| rpc/same_cpu/blocking/256 | 179.508 | 66.627 | 2.69× | no |
++| rpc/same_cpu/blocking/4096 | 1020.867 | 124.955 | 8.17× | no |
++| rpc/same_cpu/blocking/48 | 158.044 | 61.573 | 2.57× | no |
++| rpc/same_cpu/blocking/8 | 159.508 | 60.774 | 2.62× | no |
++| stream/different_cpu/blocking/0 | 1.352 | 1.092 | 1.24× | yes |
++| stream/different_cpu/blocking/256 | 4.799 | 5.071 | 0.95× | yes |
++| stream/different_cpu/blocking/4096 | 67.669 | 38.254 | 1.77× | yes |
++| stream/different_cpu/blocking/48 | 1.819 | 1.761 | 1.03× | yes |
++| stream/different_cpu/blocking/8 | 1.478 | 1.215 | 1.22× | yes |
++| stream/different_cpu/spin/0 | 0.393 | 0.480 | 0.82× | yes |
++| stream/different_cpu/spin/256 | 4.091 | 1.940 | 2.11× | yes |
++| stream/different_cpu/spin/4096 | 42.900 | 29.871 | 1.44× | yes |
++| stream/different_cpu/spin/48 | 1.101 | 0.786 | 1.40× | yes |
++| stream/different_cpu/spin/8 | 0.598 | 0.604 | 0.99× | yes |
++| stream/same_cpu/blocking/0 | 10.464 | 2.310 | 4.53× | no |
++| stream/same_cpu/blocking/256 | 35.418 | 8.369 | 4.23× | no |
++| stream/same_cpu/blocking/4096 | 515.318 | 121.189 | 4.25× | no |
++| stream/same_cpu/blocking/48 | 12.531 | 3.092 | 4.05× | no |
++| stream/same_cpu/blocking/8 | 12.422 | 2.675 | 4.64× | no |
++
++## Remaining slower estimates
++
++Three median estimates are slower. Their coarse five-run uncertainty intervals overlap; this does not prove equivalence or a regression. They are being investigated separately rather than omitted:
++
++- `stream/different_cpu/blocking/256`: +5.65% (4.7993 → 5.0706 µs).
++- `stream/different_cpu/spin/0`: +22.21% (0.3930 → 0.4803 µs).
++- `stream/different_cpu/spin/8`: +1.06% (0.5977 → 0.6041 µs).
++
++Several cases exceed 10% run CV; cross-core results are particularly noisy. Pooled RTT samples are correlated observations, not independent repetitions. The raw records retain independent-run distributions, p99/p99.9, counters and all warnings.
++
++## Structural results
++
++- Same-core 4 KiB RPC `context_switches` per operation: 12.5234 → 2.0000.
++- Same-core 4 KiB RPC `ipc_syscalls` per operation: 19.6172 → 2.0000.
++- Same-core 4 KiB RPC `yields` per operation: 4.2290 → 0.0000.
++
++Normal address-space activation contains no TLBI. Production ASID activation/reuse passed on A53 at EL1 and EL2. Packed 4 KiB records use 65 cursor units instead of 86 fragments and fit in one publication. Inline frame handlers are separated from cold packed/fragmented code. See [implementation details](IPC_FLOOR.md).
++
++## Correctness
++
++- Full suite: 279 tests, 39 expected skips, one initial error caused by missing shell execute bits in the supplied ZIP. Shell execute permissions were restored; the entire affected 25-test Huawei/guest-timer group then passed.
++- New end-to-end A53 integrity test passed all 30 cases, partial windows, both placements, polling/blocking and synchronous shutdown.
++- Final framing, real blocking data/credit race, end-to-end IPC and Mochi-ring group: six tests passed. IPC rights/lifetimes and 2,000 registration races passed; legacy/current benchmark fixtures both compile.
++- Eight-core A53 normal boot, EL1/EL2 SIMD matrix, 100-restart lifecycle and the Release Huawei native build passed.
++- The exact measured kernel subsequently passed four-core lifecycle and SIMD workloads without its SHA256 changing.
++
++Host scheduler probes used Clang 19 with CX16 enabled on x86-64 for native 128-bit budget atomics. Cross-builds used the ordinary ARMv8.0 toolchain. Optional skipped tests include missing external emulation/oracle dependencies.
++
++## Artifacts and provenance
++
++- [Original matched A53 data](../benchmarks/ipc/baselines/2026-10-18/ame-original-a53.json)
++- [Checkpoint A53 data](../benchmarks/ipc/baselines/2026-10-18/ame-floor-a53.json)
++- [Guarded comparison](../benchmarks/ipc/baselines/2026-10-18/ame-floor-a53-comparison.json)
++- The delivered ZIP includes accepted serial/build logs and exact benchmark binaries under `performance-artifacts/`.
++- Failed shutdown captures and diagnostic intermediate candidates are excluded from the accepted collection.
++- Measured kernel SHA256: `6e7aaa2f9f318aa36952543571cd8fe0df3be791df128d831c5d07496ad191e0`.
++
++The adapter, ring library, framing library and measured kernel hashes were checked against the delivered source/binary files. The older saved A57 collections are historical context, not the matched baseline used here.
+diff --git a/docs/IPC_REFACTOR.md b/docs/IPC_REFACTOR.md
+index e481997..77e0d0d 100644
+--- a/docs/IPC_REFACTOR.md
++++ b/docs/IPC_REFACTOR.md
+@@ -1,5 +1,9 @@
+ # IPC and scheduler refactor
+ 
++The subsequent [Cortex-A53 IPC execution-path changes](IPC_FLOOR.md) add ASIDs,
++packed records, producer credits, combined waits and bounded direct replies.
++The results below describe the supplied earlier refactor, not that later pass.
++
+ This pass reduces copied-message overhead and scheduler work while preserving
+ the existing IPC workload contract, capability checks, affinity, budget policy,
+ and exception-frame ownership rules. Native Linux/Mach performance leadership
+diff --git a/kernel/arch/arm64/syscall.S b/kernel/arch/arm64/syscall.S
+index c401496..2ed34d4 100644
+--- a/kernel/arch/arm64/syscall.S
++++ b/kernel/arch/arm64/syscall.S
+@@ -11,7 +11,7 @@
+ 
+ .extern syscall_dispatch
+ .extern syscall_fault
+-.extern post_syscall
++.extern post_syscall_frame
+ .extern irq_dispatch
+ 
+ // Stack frame layout (288 bytes):
+@@ -82,12 +82,13 @@ syscall_entry:
+ 2:
+     // post_syscall(current_frame) -> next_frame
+     mov     x0, sp
+-    bl      post_syscall
++    bl      post_syscall_frame
+ 
+-    // Write system regs first (x9/x10/x11 used as scratch, frame still valid).
+-    ldr     x9,  [sp, #248]
+-    ldr     x10, [sp, #256]
+-    ldr     x11, [sp, #264]
++    // x0 selects the live stack frame or the next thread-owned frame.
++    mov     x30, x0
++    ldr     x9,  [x30, #248]
++    ldr     x10, [x30, #256]
++    ldr     x11, [x30, #264]
+     msr     ELR_EL1,  x9
+ #if ANKO_HOST_FIQ_MASK
+     orr     x10, x10, #ANKO_HOST_FIQ_MASK
+@@ -96,25 +97,25 @@ syscall_entry:
+     msr     SP_EL0,   x11
+ 
+ 
+-    // Restore ALL GP registers (including x9/x10/x11).
+-    ldp     x0,  x1,  [sp, #0]
+-    ldp     x2,  x3,  [sp, #16]
+-    ldp     x4,  x5,  [sp, #32]
+-    ldp     x6,  x7,  [sp, #48]
+-    ldp     x8,  x9,  [sp, #64]
+-    ldp     x10, x11, [sp, #80]
+-    ldp     x12, x13, [sp, #96]
+-    ldp     x14, x15, [sp, #112]
+-    ldp     x16, x17, [sp, #128]
+-    ldp     x18, x19, [sp, #144]
+-    ldp     x20, x21, [sp, #160]
+-    ldp     x22, x23, [sp, #176]
+-    ldp     x24, x25, [sp, #192]
+-    ldp     x26, x27, [sp, #208]
+-    ldp     x28, x29, [sp, #224]
+-    ldr     x30,      [sp, #240]
+-
++    // Release this CPU exception stack; restore the selected register file.
+     add     sp, sp, #288
++    ldp     x0,  x1,  [x30, #0]
++    ldp     x2,  x3,  [x30, #16]
++    ldp     x4,  x5,  [x30, #32]
++    ldp     x6,  x7,  [x30, #48]
++    ldp     x8,  x9,  [x30, #64]
++    ldp     x10, x11, [x30, #80]
++    ldp     x12, x13, [x30, #96]
++    ldp     x14, x15, [x30, #112]
++    ldp     x16, x17, [x30, #128]
++    ldp     x18, x19, [x30, #144]
++    ldp     x20, x21, [x30, #160]
++    ldp     x22, x23, [x30, #176]
++    ldp     x24, x25, [x30, #192]
++    ldp     x26, x27, [x30, #208]
++    ldp     x28, x29, [x30, #224]
++    ldr     x30,      [x30, #240]
++
+     eret
+ 
+ irq_entry:
+@@ -147,12 +148,13 @@ irq_entry:
+     bl      irq_dispatch
+ 
+     mov     x0, sp
+-    bl      post_syscall
++    bl      post_syscall_frame
+ 
+-    // Write system regs first (x9/x10/x11 used as scratch, frame still valid).
+-    ldr     x9,  [sp, #248]
+-    ldr     x10, [sp, #256]
+-    ldr     x11, [sp, #264]
++    // x0 selects the live stack frame or the next thread-owned frame.
++    mov     x30, x0
++    ldr     x9,  [x30, #248]
++    ldr     x10, [x30, #256]
++    ldr     x11, [x30, #264]
+     msr     ELR_EL1,  x9
+ #if ANKO_HOST_FIQ_MASK
+     orr     x10, x10, #ANKO_HOST_FIQ_MASK
+@@ -161,25 +163,25 @@ irq_entry:
+     msr     SP_EL0,   x11
+ 
+ 
+-    // Restore ALL GP registers (including x9/x10/x11).
+-    ldp     x0,  x1,  [sp, #0]
+-    ldp     x2,  x3,  [sp, #16]
+-    ldp     x4,  x5,  [sp, #32]
+-    ldp     x6,  x7,  [sp, #48]
+-    ldp     x8,  x9,  [sp, #64]
+-    ldp     x10, x11, [sp, #80]
+-    ldp     x12, x13, [sp, #96]
+-    ldp     x14, x15, [sp, #112]
+-    ldp     x16, x17, [sp, #128]
+-    ldp     x18, x19, [sp, #144]
+-    ldp     x20, x21, [sp, #160]
+-    ldp     x22, x23, [sp, #176]
+-    ldp     x24, x25, [sp, #192]
+-    ldp     x26, x27, [sp, #208]
+-    ldp     x28, x29, [sp, #224]
+-    ldr     x30,      [sp, #240]
+-
++    // Release this CPU exception stack; restore the selected register file.
+     add     sp, sp, #288
++    ldp     x0,  x1,  [x30, #0]
++    ldp     x2,  x3,  [x30, #16]
++    ldp     x4,  x5,  [x30, #32]
++    ldp     x6,  x7,  [x30, #48]
++    ldp     x8,  x9,  [x30, #64]
++    ldp     x10, x11, [x30, #80]
++    ldp     x12, x13, [x30, #96]
++    ldp     x14, x15, [x30, #112]
++    ldp     x16, x17, [x30, #128]
++    ldp     x18, x19, [x30, #144]
++    ldp     x20, x21, [x30, #160]
++    ldp     x22, x23, [x30, #176]
++    ldp     x24, x25, [x30, #192]
++    ldp     x26, x27, [x30, #208]
++    ldp     x28, x29, [x30, #224]
++    ldr     x30,      [x30, #240]
++
+     eret
+ 
+ irq_entry_kernel:
+diff --git a/kernel/include/anko/ipc.h b/kernel/include/anko/ipc.h
+index 84a6834..6b2b5d8 100644
+--- a/kernel/include/anko/ipc.h
++++ b/kernel/include/anko/ipc.h
+@@ -17,6 +17,7 @@
+ #include "anko/types.h"
+ #include "anko/cap.h"
+ #include "anko/syscall.h"
++#include "midix/abi/ring.h"
+ 
+ struct Thread;
+ 
+@@ -74,7 +75,7 @@ struct RingHeader {
+     RingHeadLine  head;      // offset 0x000
+     RingTailLine  tail;      // offset 0x040
+     RingFlagsLine flags;     // offset 0x080
+-    u8            _reserved[64]; // offset 0x0C0
++    MxRingSpaceLine space;       // offset 0x0C0
+ };                           // total 0x100
+ static_assert(sizeof(RingHeader) == 0x100);
+ static_assert(__builtin_offsetof(RingHeader, head)  == 0x000);
+@@ -135,15 +136,21 @@ cap::Borrow<Ring> ring_from_cap(u32 pid, CapHandle cap);
+ Ring* ring_create_object(u32 pid, u32 order, u32 flags);
+ CapHandle ring_cap_alloc(u32 target_pid, Ring* ring, u32 rights);
+ 
+-CapHandle doorbell_create(u32 pid);
++CapHandle doorbell_create(u32 pid, u32 hints = 0);
+ CapHandle doorbell_share(u32 owner_pid, CapHandle db_cap, u32 target_pid, u32 rights);
+ Doorbell* doorbell_create_object(u32 pid);
+ CapHandle doorbell_cap_alloc(u32 target_pid, Doorbell* db, u32 rights);
+ SysError notify(CapHandle cap, u32 caller_pid);
+ SysError notify_object(Doorbell* db);
+ SysError notify_handoff(CapHandle cap, u64 payload_word, u32 caller_pid);
++SysError notify_handoff_object(Doorbell* db, u64 payload_word);
+ SysError reply_handoff(u64 reply_val, u32 caller_pid);
+ SysError wait_doorbell_until(CapHandle handle, u64 expected, u64 deadline, u32 caller_pid);
++SysError wait_doorbell_object(const cap::Ref& authority, u64 expected, u64 deadline,
++                             const Ring* ring = nullptr, u64 cursor = 0, bool writable = false);
++SysError wait_ring(CapHandle ring, CapHandle doorbell, u64 cursor, u32 direction, u32 caller_pid);
++SysError exchange_ring(CapHandle notify, CapHandle ring, CapHandle wait, u64 cursor,
++                       u32 flags, u32 caller_pid);
+ void poll_deadline_waiters();
+ SysError wait_doorbell(CapHandle cap, u64 expected, u32 caller_pid);
+ u64 doorbell_counter(CapHandle cap, u32 caller_pid);
+diff --git a/kernel/include/anko/mm.h b/kernel/include/anko/mm.h
+index 1404475..72d06f1 100644
+--- a/kernel/include/anko/mm.h
++++ b/kernel/include/anko/mm.h
+@@ -130,6 +130,12 @@ bool vm_map_device_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32
+ void vm_unmap(VmSpace& space, VirtAddr va);
+ void vm_unmap_owned_range(VmSpace& space, VirtAddr va, u64 size);
+ void vm_space_destroy(VmSpace& space);
++// The process registry has at most 64 live IDs. Reserve ASID zero for the
++// kernel and use the mandatory eight-bit ASID range; no ARMv8.1 dependency.
++// PID reuse is invalidated before publishing a newly created address space.
++constexpr u64 vm_context(PhysAddr root, u32 pid) {
++    return root | (static_cast<u64>(pid) << 48);
++}
+ void vm_activate(PhysAddr pgd_phys);
+ // Make data written by the kernel visible to instruction fetch before a page
+ // is entered as executable code. On AArch64, D-cache and I-cache are not
+diff --git a/kernel/include/anko/sched.h b/kernel/include/anko/sched.h
+index 8ef903d..fd90323 100644
+--- a/kernel/include/anko/sched.h
++++ b/kernel/include/anko/sched.h
+@@ -157,12 +157,12 @@ enum LatencyHint : u8 {
+ // ---------------------------------------------------------------------------
+ enum IpcSchedHint : u32 {
+     IPC_HINT_NONE        = 0,
+-    IPC_HINT_LATENCY     = 1u << 0, // wake receiver with credit
+-    IPC_HINT_THROUGHPUT  = 1u << 1, // prefer separate CPUs
+-    IPC_HINT_WAKE_AFFINE = 1u << 2, // colocate receiver with waker
+-    IPC_HINT_HANDOFF_OK  = 1u << 3, // allow synchronous handoff
+-    IPC_HINT_SERVER      = 1u << 4, // receiver is a server loop
+-    IPC_HINT_NO_STEAL    = 1u << 5, // don't migrate this receiver
++    IPC_HINT_LATENCY     = MX_IPC_HINT_LATENCY,
++    IPC_HINT_THROUGHPUT  = MX_IPC_HINT_THROUGHPUT,
++    IPC_HINT_WAKE_AFFINE = MX_IPC_HINT_WAKE_AFFINE,
++    IPC_HINT_HANDOFF_OK  = MX_IPC_HINT_HANDOFF_OK,
++    IPC_HINT_SERVER      = MX_IPC_HINT_SERVER,
++    IPC_HINT_NO_STEAL    = MX_IPC_HINT_NO_STEAL,
+ };
+ 
+ // ---------------------------------------------------------------------------
+@@ -345,6 +345,11 @@ enum SwitchReason : u8 {
+ // ---------------------------------------------------------------------------
+ struct alignas(64) Thread {
+     CpuContext ctx; // assembly-referenced context, offset zero
++    // Fill the context's alignment gap with latency-sensitive links. Handoff
++    // and RT dispatch no longer fetch a line beyond the cold SIMD register file.
++    Thread* reply_target;
++    Thread* next;
++    Thread* process_next;
+ 
+     // Exactly one coherence line for cross-CPU wake/dispatch ownership. No
+     // unrelated thread can share this line through the slab allocator.
+@@ -384,9 +389,6 @@ struct alignas(64) Thread {
+ 
+     alignas(64) TrapFrame tf;
+     alignas(64) fpsimd::State fpsimd;
+-    Thread* next;         // RT queue link
+-    Thread* process_next;
+-    Thread* reply_target;
+ };
+ static_assert(__is_trivially_constructible(Thread));
+ static_assert(__builtin_offsetof(Thread, ctx) == 0);
+@@ -433,6 +435,7 @@ struct alignas(64) Eki {
+     Thread* current;
+     Thread* idle;
+     Thread* handoff_next;        // non-null: post_syscall uses this instead of pick
++    u32 handoff_streak;          // bounded bypass while other runnable work exists
+ 
+     // --- Queues ---
+     RtQueue              rt;
+@@ -587,6 +590,7 @@ void drain_pending_wakes();
+ 
+ void request_switch(bool requeue_current, SwitchReason reason);
+ extern "C" void post_syscall(void* frame_ptr);
++extern "C" TrapFrame* post_syscall_frame(void* frame_ptr);
+ void mark_current_dead(bool whole_process = false);
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/kernel/include/anko/syscall.h b/kernel/include/anko/syscall.h
+index e95e5f8..edc46a8 100644
+--- a/kernel/include/anko/syscall.h
++++ b/kernel/include/anko/syscall.h
+@@ -44,6 +44,9 @@ enum Syscall : unsigned {
+     SYS_DOORBELL_SHARE = MX_NR_DOORBELL_SHARE,
+     SYS_NOTIFY = MX_NR_NOTIFY,
+     SYS_WAIT_DOORBELL = MX_NR_WAIT_DOORBELL,
++    SYS_WAIT_RING = MX_NR_WAIT_RING,
++    SYS_NOTIFY_WAIT = MX_NR_NOTIFY_WAIT,
++    SYS_REPLY_WAIT = MX_NR_REPLY_WAIT,
+ 
+     // Debug (V0 bring-up only — spec §6)
+     SYS_DEBUG_PUTS = MX_NR_DEBUG_PUTS,
+diff --git a/kernel/ipc/doorbell.cc b/kernel/ipc/doorbell.cc
+index d8e1c96..e4fec3c 100644
+--- a/kernel/ipc/doorbell.cc
++++ b/kernel/ipc/doorbell.cc
+@@ -97,9 +97,12 @@ CapHandle doorbell_cap_alloc(u32 target_pid, Doorbell* db, u32 rights) {
+     return cap::alloc(*target->cap_table, CAP_DOORBELL, db, requested, db->lifetime);
+ }
+ 
+-CapHandle doorbell_create(u32 pid) {
++CapHandle doorbell_create(u32 pid, u32 hints) {
++    if (hints & ~(IPC_HINT_LATENCY | IPC_HINT_THROUGHPUT | IPC_HINT_WAKE_AFFINE |
++                  IPC_HINT_HANDOFF_OK | IPC_HINT_SERVER | IPC_HINT_NO_STEAL)) return kNullCap;
+     Doorbell* db = doorbell_create_object(pid);
+     if (!db) return kNullCap;
++    db->sched_hints = hints;
+     CapHandle handle = doorbell_cap_alloc(pid, db, RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP);
+     object::release(db->lifetime); // transfer the creator root to the capability
+     return handle;
+@@ -186,12 +189,14 @@ SysError notify(CapHandle handle, u32 caller_pid) {
+ // return E_OK so the sender continues normally.
+ // ---------------------------------------------------------------------------
+ SysError notify_handoff(CapHandle handle, u64 payload_word, u32 caller_pid) {
+-    auto& stats = local_metrics();
+-    metric_inc(stats.notifies);
+-
+     cap::Ref ce = resolve_doorbell_entry(caller_pid, handle, RIGHT_NOTIFY);
+     if (!ce) return E_NOTFOUND;
+-    Doorbell* db = static_cast<Doorbell*>(ce->target);
++    return notify_handoff_object(static_cast<Doorbell*>(ce->target), payload_word);
++}
++
++SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
++    auto& stats = local_metrics();
++    metric_inc(stats.notifies);
+     if (!db) return E_NOTFOUND;
+ 
+     Thread* sender = sched::current();
+@@ -289,12 +294,7 @@ SysError notify_handoff(CapHandle handle, u64 payload_word, u32 caller_pid) {
+ // Writes reply_val into sender's x0 trapframe register so that when the
+ // sender resumes, sys_notify_handoff() returns reply_val.
+ // ---------------------------------------------------------------------------
+-SysError reply_handoff(u64 reply_val, u32 caller_pid) {
+-    (void)caller_pid;
+-    Thread* cur = sched::current();
+-    if (!cur) return E_DEAD;
+-    ANKO_ASSERT(cur->state == TS_RUNNING);
+-
++static SysError complete_reply(Thread* cur, u64 reply_val) {
+     Thread* sender = cur->reply_target;
+     if (!sender) return E_INVALID;
+     if (sender->state != TS_BLOCKED) return E_INVALID;
+@@ -307,14 +307,28 @@ SysError reply_handoff(u64 reply_val, u32 caller_pid) {
+     cur->reply_target = nullptr;
+     sender->reply_target = nullptr;
+ 
+-    // Re-enqueue sender on the local CPU (same-CPU handoff guarantee).
+-    sched::wake_local(sender);
+-
+-    // Requeue current thread and switch: post_syscall picks winner.
+-    sched::request_switch(true, SWITCH_REPLY);
++    const u32 cpu = sched::current_cpu_id();
++    if (sender->cpu_id == cpu && sender->execution_cpu == kInvalidCpu &&
++        !__atomic_load_n(&sender->terminate_requested, __ATOMIC_ACQUIRE) &&
++        (!sender->affinity_mask || ((sender->affinity_mask >> cpu) & 1u)) &&
++        !sched::principal_throttled(sender->principal_id)) {
++        sched::set_handoff_next(sender);
++    } else sched::wake(sender);
++    // reply-and-wait has already parked the server. Plain reply preserves its
++    // historical continue-after-reply behavior by requeueing it.
++    sched::request_switch(cur->state == TS_RUNNING, SWITCH_REPLY);
+     return E_OK;
+ }
+ 
++SysError reply_handoff(u64 reply_val, u32 caller_pid) {
++    (void)caller_pid;
++    kernel::InterruptGuard irq;
++    Thread* cur = sched::current();
++    if (!cur) return E_DEAD;
++    ANKO_ASSERT(cur->state == TS_RUNNING);
++    return complete_reply(cur, reply_val);
++}
++
+ // Timer admission/polling is CPU-owned. A hot occupancy word skips every empty
+ // slot, deadline keys form a dense column, and retained object links stay in a
+ // separate cold column. Empty ticks do not read the clock or any object records.
+@@ -372,15 +386,28 @@ void poll_deadline_waiters() {
+     }
+ }
+ SysError wait_doorbell_until(CapHandle handle, u64 expected, u64 deadline, u32 caller_pid) {
++    cap::Ref e = resolve_doorbell_entry(caller_pid, handle, RIGHT_WAIT);
++    return wait_doorbell_object(e, expected, deadline);
++}
++
++SysError wait_doorbell_object(const cap::Ref& e, u64 expected, u64 deadline,
++                             const Ring* ring, u64 cursor, bool writable) {
+     auto& stats = local_metrics();
+     metric_inc(stats.waits);
+-    cap::Ref e = resolve_doorbell_entry(caller_pid, handle, RIGHT_WAIT);
+     Doorbell* db = e ? static_cast<Doorbell*>(e->target) : nullptr;
+     if (!db) return E_NOTFOUND;
+     Thread* cur = sched::current();
+     if (!cur) return E_DEAD;
+     ANKO_ASSERT(cur->state == TS_RUNNING);
+-    if (!deadline && __atomic_load_n(&db->counter, __ATOMIC_ACQUIRE) != expected) {
++    const auto changed = [&] {
++        if (!ring) return __atomic_load_n(&db->counter, __ATOMIC_ACQUIRE) != expected;
++        // Kernel-created physical backing is retained by the ring capability;
++        // no untrusted VA is dereferenced while holding the doorbell lock.
++        const auto* page = reinterpret_cast<const RingHeader*>(ring->phys_base);
++        return __atomic_load_n(writable ? &page->tail.tail : &page->head.head,
++                               __ATOMIC_ACQUIRE) != cursor;
++    };
++    if (!deadline && changed()) {
+         metric_inc(stats.immediate);
+         return E_OK;
+     }
+@@ -396,7 +423,7 @@ SysError wait_doorbell_until(CapHandle handle, u64 expected, u64 deadline, u32 c
+     // A changed counter already satisfies the wait. Keep this common syscall
+     // return off the doorbell lock and timer admission path; recheck after
+     // locking below to cover a notify racing with actual sleep registration.
+-    if (__atomic_load_n(&db->counter, __ATOMIC_ACQUIRE) != expected) {
++    if (changed()) {
+         metric_inc(stats.immediate);
+         local_irq_restore(irq); return E_OK;
+     }
+@@ -406,7 +433,7 @@ SysError wait_doorbell_until(CapHandle handle, u64 expected, u64 deadline, u32 c
+         timer = __builtin_ctzll(available);
+     }
+     lock(db);
+-    if (__atomic_load_n(&db->counter, __ATOMIC_ACQUIRE) != expected) {
++    if (changed()) {
+         metric_inc(stats.immediate);
+         unlock(db); local_irq_restore(irq); return E_OK;
+     }
+@@ -434,6 +461,43 @@ SysError wait_doorbell_until(CapHandle handle, u64 expected, u64 deadline, u32 c
+     local_irq_restore(irq);
+     return E_OK;
+ }
++
++SysError wait_ring(CapHandle ring_handle, CapHandle doorbell, u64 cursor,
++                   u32 direction, u32 caller_pid) {
++    if (direction > MX_RING_WAIT_WRITABLE) return E_INVALID;
++    auto ring = resolve_entry(caller_pid, ring_handle, CAP_SHARED_RING,
++                              direction == MX_RING_WAIT_WRITABLE ? RIGHT_WRITE : RIGHT_READ);
++    auto db = resolve_doorbell_entry(caller_pid, doorbell, RIGHT_WAIT);
++    if (!ring || !db) return E_NOTFOUND;
++    return wait_doorbell_object(db, 0, 0, static_cast<Ring*>(ring->target), cursor,
++                                direction == MX_RING_WAIT_WRITABLE);
++}
++
++SysError exchange_ring(CapHandle notify_handle, CapHandle ring_handle, CapHandle wait_handle,
++                       u64 cursor, u32 flags, u32 caller_pid) {
++    if (flags & ~(MX_IPC_EXCHANGE_HANDOFF | MX_IPC_EXCHANGE_REPLY)) return E_INVALID;
++    if (flags == (MX_IPC_EXCHANGE_HANDOFF | MX_IPC_EXCHANGE_REPLY)) return E_INVALID;
++    auto ring = resolve_entry(caller_pid, ring_handle, CAP_SHARED_RING, RIGHT_READ);
++    auto wait = resolve_doorbell_entry(caller_pid, wait_handle, RIGHT_WAIT);
++    auto notify = resolve_doorbell_entry(caller_pid, notify_handle, RIGHT_NOTIFY);
++    // All failure-prone authority checks precede notification/reply side effects.
++    if (!ring || !wait || !notify) return E_NOTFOUND;
++    kernel::InterruptGuard irq;
++    Thread* cur = sched::current();
++    if (!cur) return E_DEAD;
++    if ((flags & MX_IPC_EXCHANGE_REPLY) && cur->reply_target) {
++        if (cur->reply_target->state != TS_BLOCKED) return E_INVALID;
++        const auto rc = wait_doorbell_object(wait, 0, 0, static_cast<Ring*>(ring->target), cursor, false);
++        if (rc != E_OK) return rc;
++        return complete_reply(cur, E_OK);
++    }
++    auto* db = static_cast<Doorbell*>(notify->target);
++    const auto* page = reinterpret_cast<const RingHeader*>(static_cast<Ring*>(ring->target)->phys_base);
++    const bool ready = __atomic_load_n(&page->head.head, __ATOMIC_ACQUIRE) != cursor;
++    const auto rc = (flags & MX_IPC_EXCHANGE_HANDOFF) && !ready ? notify_handoff_object(db, 0) : notify_object(db);
++    if (rc != E_OK || cur->state == TS_BLOCKED) return rc;
++    return wait_doorbell_object(wait, 0, 0, static_cast<Ring*>(ring->target), cursor, false);
++}
+ SysError wait_doorbell(CapHandle handle, u64 expected, u32 caller_pid) {
+     return wait_doorbell_until(handle, expected, 0, caller_pid);
+ }
+diff --git a/kernel/ipc/ring.cc b/kernel/ipc/ring.cc
+index c8c285f..e91155a 100644
+--- a/kernel/ipc/ring.cc
++++ b/kernel/ipc/ring.cc
+@@ -29,7 +29,7 @@ static cap::Ref resolve_ring_entry(u32 pid, CapHandle ring_cap, u32 need_rights)
+ }
+ 
+ Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
+-    (void)flags;
++    if (flags & ~MX_RING_PACKED_FRAMES) return nullptr;
+     if (order < MX_RING_ORDER_MIN || order > MX_RING_ORDER_MAX) return nullptr;
+ 
+     auto owner = process_reference(pid);
+@@ -42,6 +42,7 @@ Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
+     const PhysAddr base = mm::alloc_pages_contiguous_for(pid, pages);
+     if (!base) return nullptr;
+     libk::memset(reinterpret_cast<void*>(base), 0, pages * PAGE_SIZE);
++    reinterpret_cast<RingHeader*>(base)->space.features = flags;
+ 
+     Ring* ring = static_cast<Ring*>(mm::slab_alloc(sizeof(Ring), alignof(Ring)));
+     if (!ring) {
+diff --git a/kernel/mm/vm_space.cc b/kernel/mm/vm_space.cc
+index e93ad19..ad0b247 100644
+--- a/kernel/mm/vm_space.cc
++++ b/kernel/mm/vm_space.cc
+@@ -136,6 +136,7 @@ bool is_table_desc(u64 desc) {
+ }
+ 
+ void tlbi_all();
++void tlbi_space(u32 pid);
+ 
+ u64 user_page_attrs(u32 rights, PhysAddr pa) {
+     const bool writable = (rights & RIGHT_WRITE) != 0;
+@@ -162,7 +163,9 @@ u64 kernel_page_attrs(bool device, PhysAddr pa) {
+         (pa >= anne::native_display::kCrgBase && pa - anne::native_display::kCrgBase < PAGE_SIZE)) device = true;
+ #endif
+ #endif
+-    u64 attrs = (device ? ATTR_DEVICE : normal_attrs(pa)) | PTE_AF | PTE_UXN;
++    // Kernel roots can acquire different late MMIO mappings. Keep even these
++    // identity translations ASID-tagged until a shared TTBR1 is installed.
++    u64 attrs = (device ? ATTR_DEVICE : normal_attrs(pa)) | PTE_AF | PTE_UXN | PTE_NG;
+     if (!device) attrs |= PTE_SH_INNER;
+     if (device) attrs |= PTE_PXN;
+     return attrs;
+@@ -184,7 +187,7 @@ bool map_page_raw(VmSpace& space, VirtAddr va, PhysAddr pa, u64 attrs) {
+     auto rollback = [&]() {
+         // Remove only tables created by this walk. Existing mappings are intact.
+         for (u32 i = 0; i < created_count; ++i) *created_links[i] = 0;
+-        if (created_count) tlbi_all();
++        if (created_count) tlbi_space(space.pid);
+         for (u32 i = 0; i < created_count; ++i) free_page(created_pages[i]);
+         return false;
+     };
+@@ -291,7 +294,7 @@ bool emit_identity_batch(VmSpace& space, PhysAddr begin, PhysAddr end, u64 attri
+     u32 created_count = 0;
+     auto rollback = [&]() {
+         for (u32 i = 0; i < created_count; ++i) *created_links[i] = 0;
+-        if (created_count) tlbi_all();
++        if (created_count) tlbi_space(space.pid);
+         for (u32 i = 0; i < created_count; ++i) free_page(created_pages[i]);
+         return false;
+     };
+@@ -517,6 +520,19 @@ void tlbi_all() {
+ #endif
+ }
+ 
++void tlbi_space(u32 pid) {
++#ifdef ANKO_HOST_TEST
++    (void)pid;
++    anko_vm_test_tlbi();
++#else
++    const u64 operand = static_cast<u64>(pid) << 48;
++    asm volatile("dsb ishst\n"
++                 "tlbi aside1is, %0\n"
++                 "dsb ish\n"
++                 "isb\n" :: "r"(operand) : "memory");
++#endif
++}
++
+ } // namespace
+ 
+ void sync_icache_range(PhysAddr pa, usize len) {
+@@ -616,7 +632,7 @@ bool unmap_page_raw(VmSpace& space, VirtAddr va, bool free_owned) {
+     }
+     // Remote CPUs must discard cached translations before any backing or page
+     // table can be returned to the allocator and used for a different object.
+-    tlbi_all();
++    tlbi_space(space.pid);
+     for (u32 i = 0; i < count; ++i) free_page(retired[i]);
+     if (free_owned && (pte & PTE_SW_OWNED)) free_page_for(space.pid, pte & PTE_ADDR_MASK);
+     return true;
+@@ -628,12 +644,15 @@ void destroy_table(VmSpace& space, PhysAddr table_pa, u32 level) {
+     for (u32 i = 0; i < 512; ++i) {
+         const u64 desc = table[i];
+         if ((desc & PTE_VALID) == 0) continue;
++        // Detach each populated root subtree and complete its shootdown before
++        // freeing anything beneath it. No cached walk may reach recycled tables.
++        table[i] = 0;
++        if (level == 0) tlbi_space(space.pid);
+         if (level < 3 && is_table_desc(desc)) {
+             destroy_table(space, desc & PTE_ADDR_MASK, level + 1);
+         } else if (level == 3 && (desc & PTE_SW_OWNED)) {
+             free_page_for(space.pid, desc & PTE_ADDR_MASK);
+         }
+-        table[i] = 0;
+     }
+     free_page(table_pa);
+ }
+@@ -720,7 +739,11 @@ VmSpace vm_space_create(u32 pid) {
+     // Serialize lazy plan rebuilding with NC registration and other creators.
+     kernel::LockGuard guard(g_vm_lock);
+     VmSpace s{};
++    if (!pid || pid > 64) return s;
+     s.pid = pid;
++    // IDs are reserved until the old process and all its execution references
++    // have retired. Flush the previous incarnation on every CPU before reuse.
++    tlbi_space(pid);
+     s.pgd_phys = alloc_page();
+     if (s.pgd_phys) {
+         clear_table(s.pgd_phys);
+@@ -733,7 +756,7 @@ bool vm_map(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights) {
+     if (!valid_user_rights(rights, false)) return false;
+     kernel::LockGuard guard(g_vm_lock);
+     const bool ok = map_page_raw(space, va, pa, user_page_attrs(rights, pa));
+-    if (ok) tlbi_all();
++    if (ok) tlbi_space(space.pid);
+     return ok;
+ }
+ 
+@@ -741,7 +764,7 @@ bool vm_map_owned(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights) {
+     if (!valid_user_rights(rights, false)) return false;
+     kernel::LockGuard guard(g_vm_lock);
+     const bool ok = map_page_raw(space, va, pa, user_page_attrs(rights, pa) | PTE_SW_OWNED);
+-    if (ok) tlbi_all();
++    if (ok) tlbi_space(space.pid);
+     return ok;
+ }
+ 
+@@ -761,12 +784,12 @@ bool vm_map_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32 rights
+             for (u64 undo = 0; undo < mapped; undo += PAGE_SIZE) {
+                 (void)unmap_page_raw(space, va + undo, false);
+             }
+-            if (mapped) tlbi_all();
++            if (mapped) tlbi_space(space.pid);
+             return false;
+         }
+         mapped += PAGE_SIZE;
+     }
+-    tlbi_all();
++    tlbi_space(space.pid);
+     return true;
+ }
+ 
+@@ -787,18 +810,18 @@ bool vm_map_device_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32
+             for (u64 undo = 0; undo < mapped; undo += PAGE_SIZE) {
+                 (void)unmap_page_raw(space, va + undo, false);
+             }
+-            if (mapped) tlbi_all();
++            if (mapped) tlbi_space(space.pid);
+             return false;
+         }
+         mapped += PAGE_SIZE;
+     }
+-    tlbi_all();
++    tlbi_space(space.pid);
+     return true;
+ }
+ 
+ void vm_unmap(VmSpace& space, VirtAddr va) {
+     kernel::LockGuard guard(g_vm_lock);
+-    if (unmap_page_raw(space, va, true)) tlbi_all();
++    (void)unmap_page_raw(space, va, true);
+ }
+ 
+ void vm_unmap_owned_range(VmSpace& space, VirtAddr va, u64 size) {
+@@ -811,7 +834,7 @@ void vm_unmap_owned_range(VmSpace& space, VirtAddr va, u64 size) {
+     for (u64 off = 0; off < rounded; off += PAGE_SIZE) {
+         changed = unmap_page_raw(space, va + off, true) || changed;
+     }
+-    if (changed) tlbi_all();
++    if (changed) tlbi_space(space.pid);
+ }
+ 
+ void vm_space_destroy(VmSpace& space) {
+@@ -819,19 +842,15 @@ void vm_space_destroy(VmSpace& space) {
+     if (!space.pgd_phys) return;
+     destroy_table(space, space.pgd_phys, 0);
+     space.pgd_phys = 0;
+-    tlbi_all();
++    tlbi_space(space.pid);
+ }
+ 
+ void vm_activate(PhysAddr pgd_phys) {
+     if (!pgd_phys) pgd_phys = g_kernel_root;
+ #ifndef ANKO_HOST_TEST
+     asm volatile(
+-        "dsb ishst\n"
+         "msr ttbr0_el1, %0\n"
+         "isb\n"
+-        "tlbi vmalle1is\n"
+-        "dsb ish\n"
+-        "isb\n"
+         :
+         : "r"(pgd_phys)
+         : "memory");
+diff --git a/kernel/sched/runqueue.cc b/kernel/sched/runqueue.cc
+index fef5a59..2f24990 100644
+--- a/kernel/sched/runqueue.cc
++++ b/kernel/sched/runqueue.cc
+@@ -19,6 +19,7 @@
+ #include "libk/counter_scale.h"
+ #include "libk/printf.h"
+ #include "libk/string.h"
++#include "libk/bytes.h"
+ 
+ namespace sched {
+ 
+@@ -639,7 +640,7 @@ void collect_terminations(Eki& e, Thread* protected_thread) {
+             handoff_forget(e, t);
+             t->state = TS_DEAD;
+         }
+-        if (!e.current && t->owner && active_ttbr0() == t->owner->ttbr0)
++        if (!e.current && t->owner && active_ttbr0() == mm::vm_context(t->owner->ttbr0, t->owner->pid))
+             mm::vm_activate(0);
+         handoff_abort_reply(t);
+         finish_thread(t);
+@@ -691,7 +692,8 @@ static u64 active_ttbr0() {
+ static void activate_thread_space(Thread* t) {
+     if (!t) return;
+     if (t->owner) {
+-        if (active_ttbr0() != t->owner->ttbr0) mm::vm_activate(t->owner->ttbr0);
++        const u64 context = mm::vm_context(t->owner->ttbr0, t->owner->pid);
++        if (active_ttbr0() != context) mm::vm_activate(context);
+     }
+     else ANKO_LOGF_WARN("kernel/sched",
+                         "activate: no process for tid=%u pid=%u", t->tid, t->pid);
+@@ -899,12 +901,12 @@ void mark_current_dead(bool whole_process) {
+ // post_syscall — called on every syscall return.
+ // Saves TrapFrame, performs context switch if needed.
+ // ---------------------------------------------------------------------------
+-extern "C" void post_syscall(void* frame_ptr) {
++extern "C" TrapFrame* post_syscall_frame(void* frame_ptr) {
+     irq_disable();
+     Eki& e = current_eki();
+     drain_pending_wakes(e);
+     Thread* cur = e.current;
+-    if (!frame_ptr || !cur) return;
++    if (!frame_ptr || !cur) return static_cast<TrapFrame*>(frame_ptr);
+     collect_terminations(e, cur);
+     auto* frame = static_cast<TrapFrame*>(frame_ptr);
+     if (e.switch_pending || cur->state != TS_RUNNING ||
+@@ -913,12 +915,13 @@ extern "C" void post_syscall(void* frame_ptr) {
+     if (__atomic_load_n(&cur->terminate_requested, __ATOMIC_ACQUIRE)) cur->state = TS_DEAD;
+     if (!e.switch_pending && cur->state != TS_RUNNING)
+         request_switch(false, cur->state == TS_DEAD ? SWITCH_EXIT : SWITCH_BLOCK);
+-    if (!e.switch_pending) { activate_thread_space(cur); return; }
++    if (!e.switch_pending) { activate_thread_space(cur); return frame; }
+     // A same-thread return uses the live exception frame directly. Copy all
+     // registers only when dispatch may relinquish execution ownership; deferred
+     // remote wakes still cannot observe the thread until this save completes.
+     fpsimd::save(&cur->fpsimd);
+-    cur->tf = *frame;
++    (void)libk::copy_exact(libk::as_bytes(&cur->tf, sizeof(cur->tf)),
++                           libk::as_bytes(frame, sizeof(*frame)));
+     // Retain only on the switch path. After remote publication this CPU uses
+     // the pointer only for identity comparison, unless it owns the retirement.
+     // Running execution owns the thread's creator reference until finish_thread.
+@@ -979,17 +982,23 @@ extern "C" void post_syscall(void* frame_ptr) {
+     // Direct handoff must obey the same eligibility and timing contracts as
+     // queue dispatch. The receiver remains sleeping until this point.
+     if (next) {
++        const bool competing = __atomic_load_n(&e.published_load, __ATOMIC_RELAXED) != 0;
+         if (__atomic_load_n(&next->terminate_requested, __ATOMIC_ACQUIRE) ||
+-            next->execution_cpu != kInvalidCpu || !thread_budget_available(next)) {
++            next->execution_cpu != kInvalidCpu || !thread_budget_available(next) ||
++            (competing && (e.rt.bitmap || e.handoff_streak >= 8))) {
+             if (!next->terminate_requested) wake_local(next);
+             next = nullptr;
+         } else {
++            e.handoff_streak = competing ? e.handoff_streak + 1 : 0;
+             next->state = TS_RUNNABLE_QUEUED;
+             next->slice_ns = compute_slice_ns(next, 1);
+             next->handoff_deadline_ns = sched_clock_ns() + kIpcDrainQuantumNs;
+         }
+     }
+-    if (!next) next = pick_next(e);
++    if (!next) {
++        e.handoff_streak = 0;
++        next = pick_next(e);
++    }
+     while (!next) {
+         if (cur && retiring_current) {
+             mm::vm_activate(0);
+@@ -1034,7 +1043,6 @@ extern "C" void post_syscall(void* frame_ptr) {
+         ipc_drain_quantum_begin(next, next->last_start_ns);
+     }
+     activate_thread_space(next);
+-    *frame = next->tf;
+     e.switch_pending = false;
+     e.requeue_current = false;
+     e.pending_reason = SWITCH_NONE;
+@@ -1043,6 +1051,14 @@ extern "C" void post_syscall(void* frame_ptr) {
+         current_reference.reset();
+     }
+     fpsimd::restore(&next->fpsimd);
++    return &next->tf;
++}
++
++// Compatibility boundary for host probes and architecture-independent callers.
++// The assembly path restores straight from the selected thread's owned frame.
++extern "C" void post_syscall(void* frame_ptr) {
++    auto* selected = post_syscall_frame(frame_ptr);
++    if (selected && selected != frame_ptr) *static_cast<TrapFrame*>(frame_ptr) = *selected;
+ }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/kernel/syscall/dispatch.cc b/kernel/syscall/dispatch.cc
+index 0f203a8..ee9a95b 100644
+--- a/kernel/syscall/dispatch.cc
++++ b/kernel/syscall/dispatch.cc
+@@ -38,10 +38,22 @@ extern "C" u64 g_cpu_mpidrs[MX_HOST_MAX_CPUS];
+ 
+ namespace {
+ 
+-u64 g_syscall_count = 0;
+-u64 g_ipc_syscall_count = 0;
+-u64 g_debug_puts_count = 0;
+-u64 g_el0_fault_count = 0;
++// Single-CPU writers avoid a shared counter line on every cross-core IPC.
++struct alignas(64) SyscallMetrics {
++    u64 calls, ipc, debug_puts, faults;
++};
++static SyscallMetrics syscall_metrics[MX_HOST_MAX_CPUS]{};
++static SyscallMetrics& local_syscall_metrics() { return syscall_metrics[sched::current_cpu_id()]; }
++static void syscall_metric_inc(u64& counter) {
++    // SVC/synchronous-fault entry masks IRQs. This CPU is the sole writer;
++    // diagnostic readers still use atomic loads, without an A53 LL/SC loop.
++    __atomic_store_n(&counter, __atomic_load_n(&counter, __ATOMIC_RELAXED) + 1, __ATOMIC_RELAXED);
++}
++static u64 syscall_metric_total(u64 SyscallMetrics::* member) {
++    u64 value = 0;
++    for (auto& cpu : syscall_metrics) value += libk::metric_load(cpu.*member);
++    return value;
++}
+ constexpr u64 kUserCopyMin = 0x1000'0000ull;
+ constexpr u64 kUserCopyMax = 0x4000'0000ull;
+ constexpr u64 kMaxUserElfSize = 16ull * 1024ull * 1024ull;
+@@ -286,18 +298,81 @@ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
+                         static_cast<unsigned long long>(tf ? tf->x[22] : 0));
+     }
+ 
+-    metric_inc(g_el0_fault_count);
++    syscall_metric_inc(local_syscall_metrics().faults);
+     sched::record_exit(p, static_cast<long>(esr));
+     sched::mark_current_dead(true);
+ }
+ 
++// Keep steady-state IPC outside the large cold control/VM dispatch body.
++// The caller has already validated process/execution ownership.
++static SysResult ipc_dispatch_hot(Process* p, u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4) {
++    syscall_metric_inc(local_syscall_metrics().ipc);
++    switch (static_cast<Syscall>(nr)) {
++    case SYS_NOTIFY: {
++        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
++        if (!e) return err(E_NOTFOUND);
++        if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
++        const SysError rc = ipc::notify_object(static_cast<Doorbell*>(e->target));
++        if (rc != E_OK) return err(rc);
++        return ok(E_OK);
++    }
++
++    case SYS_WAIT_DOORBELL: {
++        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
++        if (!e) return err(E_NOTFOUND);
++        if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
++        const SysError rc = ipc::wait_doorbell_object(e, a1, 0);
++        if (rc != E_OK) return err(rc);
++        return ok(E_OK);
++    }
++
++    case SYS_DOORBELL_READ: {
++        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
++        if (!e) return err(E_NOTFOUND);
++        if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
++        return ok(static_cast<long>(__atomic_load_n(&static_cast<Doorbell*>(e->target)->counter, __ATOMIC_ACQUIRE)));
++    }
++
++    case SYS_NOTIFY_HANDOFF: {
++        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
++        if (!e) return err(E_NOTFOUND);
++        if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
++        const SysError rc = ipc::notify_handoff_object(static_cast<Doorbell*>(e->target), a1);
++        if (rc != E_OK) return err(rc);
++        return ok(E_OK);
++    }
++
++    case SYS_REPLY_HANDOFF: {
++        const SysError rc = ipc::reply_handoff(a0, p->pid);
++        if (rc != E_OK) return err(rc);
++        return ok(E_OK);
++    }
++
++    case SYS_WAIT_RING:
++        return ok(ipc::wait_ring(a0, a1, a2, a3, p->pid));
++
++    case SYS_NOTIFY_WAIT:
++        return ok(ipc::exchange_ring(a0, a1, a2, a3, a4, p->pid));
++
++    case SYS_REPLY_WAIT:
++        return ok(ipc::exchange_ring(a0, a1, a2, a3, MX_IPC_EXCHANGE_REPLY, p->pid));
++
++
++
++    default: return err(E_INVALID);
++    }
++}
++
++[[gnu::noinline]] static SysResult syscall_dispatch_cold(Process* p, u64 nr, u64 a0, u64 a1,
++                                                         u64 a2, u64 a3, u64 a4, u64 a5);
++
+ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
+                                       u64 a3, u64 a4, u64 a5) {
+ #ifdef ANKO_BOARD_HUAWEI_ANNE
+     anne::boot_syscall(nr);
+ #endif
+     (void)a5;
+-    metric_inc(g_syscall_count);
++    syscall_metric_inc(local_syscall_metrics().calls);
+ 
+     Process* p = cur_proc();
+     if (!p && nr != SYS_DEBUG_PUTS && nr != SYS_DEBUG_COUNTERS) {
+@@ -313,6 +388,17 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
+         ANKO_ASSERT(t && t->state == TS_RUNNING);
+     }
+     if (p && __atomic_load_n(&p->dying, __ATOMIC_ACQUIRE)) return err(E_DEAD);
++    if (nr == SYS_CLOCK_NS) return ok(static_cast<long>(sched::sched_clock_ns()));
++    if (nr == SYS_YIELD) { sched::yield(); return ok(E_OK); }
++    if ((nr >= SYS_NOTIFY && nr <= SYS_WAIT_DOORBELL) || nr == SYS_DOORBELL_READ ||
++        nr == SYS_NOTIFY_HANDOFF || nr == SYS_REPLY_HANDOFF ||
++        (nr >= SYS_WAIT_RING && nr <= SYS_REPLY_WAIT))
++        return ipc_dispatch_hot(p, nr, a0, a1, a2, a3, a4);
++    return syscall_dispatch_cold(p, nr, a0, a1, a2, a3, a4, a5);
++}
++
++[[gnu::noinline]] static SysResult syscall_dispatch_cold(Process* p, u64 nr, u64 a0, u64 a1,
++                                                         u64 a2, u64 a3, u64 a4, u64 a5) {
+     const UserAccess ua = user_access_for(p);
+ 
+     vm::CallGuard vm_call((nr >= SYS_VM_CREATE && nr <= SYS_VM_MEMORY_WRITE) ||
+@@ -591,14 +677,14 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
+     }
+ 
+     case SYS_RING_CREATE: {
+-        metric_inc(g_ipc_syscall_count);
++        syscall_metric_inc(local_syscall_metrics().ipc);
+         CapHandle h = ipc::ring_create(p->pid, static_cast<u32>(a0), static_cast<u32>(a1));
+         if (h == kNullCap) return err(E_NOMEM);
+         return ok(static_cast<long>(h));
+     }
+ 
+     case SYS_RING_SHARE: {
+-        metric_inc(g_ipc_syscall_count);
++        syscall_metric_inc(local_syscall_metrics().ipc);
+         cap::Ref target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
+         if (!target_e) return err(E_BADTYPE);
+         if (!has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
+@@ -611,14 +697,16 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
+     }
+ 
+     case SYS_DOORBELL_CREATE: {
+-        metric_inc(g_ipc_syscall_count);
+-        CapHandle h = ipc::doorbell_create(p->pid);
++        syscall_metric_inc(local_syscall_metrics().ipc);
++        if (a0 && p->principal_class != PRINCIPAL_NATIVE_TRUSTED && p->principal_class != PRINCIPAL_KERNEL)
++            return err(E_PERM);
++        CapHandle h = ipc::doorbell_create(p->pid, static_cast<u32>(a0));
+         if (h == kNullCap) return err(E_NOMEM);
+         return ok(static_cast<long>(h));
+     }
+ 
+     case SYS_DOORBELL_SHARE: {
+-        metric_inc(g_ipc_syscall_count);
++        syscall_metric_inc(local_syscall_metrics().ipc);
+         cap::Ref target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
+         if (!target_e) return err(E_BADTYPE);
+         if (!has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
+@@ -630,15 +718,6 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
+         return ok(static_cast<long>(h));
+     }
+ 
+-    case SYS_NOTIFY: {
+-        metric_inc(g_ipc_syscall_count);
+-        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+-        if (!e) return err(E_NOTFOUND);
+-        if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
+-        const SysError rc = ipc::notify(static_cast<CapHandle>(a0), p->pid);
+-        if (rc != E_OK) return err(rc);
+-        return ok(E_OK);
+-    }
+ 
+     case SYS_PLATFORM_CONTROL: {
+         auto entry = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PLATFORM);
+@@ -652,23 +731,8 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
+         return ok(ipc::wait_doorbell_until(static_cast<CapHandle>(a0), a1, a2, p->pid));
+     }
+ 
+-    case SYS_WAIT_DOORBELL: {
+-        metric_inc(g_ipc_syscall_count);
+-        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+-        if (!e) return err(E_NOTFOUND);
+-        if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
+-        const SysError rc = ipc::wait_doorbell(static_cast<CapHandle>(a0), a1, p->pid);
+-        if (rc != E_OK) return err(rc);
+-        return ok(E_OK);
+-    }
+ 
+-    case SYS_DOORBELL_READ: {
+-        metric_inc(g_ipc_syscall_count);
+-        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+-        if (!e) return err(E_NOTFOUND);
+-        if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
+-        return ok(static_cast<long>(ipc::doorbell_counter(static_cast<CapHandle>(a0), p->pid)));
+-    }
++
+ 
+     case SYS_SUPERVISOR_BIND_DOORBELL: {
+         auto authority = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_SUPERVISOR);
+@@ -1011,7 +1075,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
+         if (!a0 || len > 4096) return err(E_INVALID);
+         if (!user_range_ok(ua, a0, len)) return err(E_FAULT);
+         const char* s = reinterpret_cast<const char*>(a0);
+-        metric_inc(g_debug_puts_count);
++        syscall_metric_inc(local_syscall_metrics().debug_puts);
+ #ifdef ANKO_BOARD_HUAWEI_ANNE
+         anne::boot_log_write(s, len);
+ #else
+@@ -2233,11 +2297,11 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
+         // Phase L shared-arena counters (attached / number registered SharedGpu).
+         case 202: return ok(static_cast<long>(vm::shared_arena_stats().attached));
+         case 203: return ok(static_cast<long>(vm::shared_arena_stats().dma_registered));
+-        case DBG_SYSCALL_COUNT:         return ok(static_cast<long>(metric_load(g_syscall_count)));
+-        case DBG_IPC_SYSCALL_COUNT:     return ok(static_cast<long>(metric_load(g_ipc_syscall_count)));
++        case DBG_SYSCALL_COUNT:         return ok(static_cast<long>(syscall_metric_total(&SyscallMetrics::calls)));
++        case DBG_IPC_SYSCALL_COUNT:     return ok(static_cast<long>(syscall_metric_total(&SyscallMetrics::ipc)));
+         case DBG_CONTEXT_SWITCHES:      return ok(static_cast<long>(sched::context_switch_count()));
+-        case DBG_DEBUG_PUTS:            return ok(static_cast<long>(metric_load(g_debug_puts_count)));
+-        case DBG_EL0_FAULTS:            return ok(static_cast<long>(metric_load(g_el0_fault_count)));
++        case DBG_DEBUG_PUTS:            return ok(static_cast<long>(syscall_metric_total(&SyscallMetrics::debug_puts)));
++        case DBG_EL0_FAULTS:            return ok(static_cast<long>(syscall_metric_total(&SyscallMetrics::faults)));
+         case DBG_DOORBELL_SLEEPS:       return ok(static_cast<long>(ipc::doorbell_sleep_count()));
+         case DBG_DOORBELL_WAKES:        return ok(static_cast<long>(ipc::doorbell_wake_count()));
+         case DBG_TIMER_TICKS:           return ok(static_cast<long>(drivers::timer::tick_count()));
+@@ -2284,22 +2348,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
+         default: return err(E_INVALID);
+         }
+ 
+-    case SYS_NOTIFY_HANDOFF: {
+-        metric_inc(g_ipc_syscall_count);
+-        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+-        if (!e) return err(E_NOTFOUND);
+-        if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
+-        const SysError rc = ipc::notify_handoff(static_cast<CapHandle>(a0), a1, p->pid);
+-        if (rc != E_OK) return err(rc);
+-        return ok(E_OK);
+-    }
+ 
+-    case SYS_REPLY_HANDOFF: {
+-        metric_inc(g_ipc_syscall_count);
+-        const SysError rc = ipc::reply_handoff(a0, p->pid);
+-        if (rc != E_OK) return err(rc);
+-        return ok(E_OK);
+-    }
+ 
+     case SYS_MAP_MMIO: {
+         // a0 = mmio_cap, a1 = va, a2 = rights
+diff --git a/kernel/vm/vm_memory.cc b/kernel/vm/vm_memory.cc
+index c0eb464..e479777 100644
+--- a/kernel/vm/vm_memory.cc
++++ b/kernel/vm/vm_memory.cc
+@@ -163,7 +163,7 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
+     PhysAddr* backing = nullptr;
+     bool backing_ok = false;
+     {
+-        KernelAddressSpaceGuard kernel_space(caller.ttbr0);
++        KernelAddressSpaceGuard kernel_space(mm::vm_context(caller.ttbr0, caller.pid));
+         backing_ok = alloc_backing_pages(pages, &backing);
+     }
+     if (!backing_ok) {
+@@ -411,7 +411,7 @@ SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset,
+ 
+     u64 copied = 0;
+     {
+-        KernelAddressSpaceGuard kernel_space(caller.ttbr0);
++        KernelAddressSpaceGuard kernel_space(mm::vm_context(caller.ttbr0, caller.pid));
+         while (copied < len) {
+             const u64 off = guest_offset + copied;
+             const usize page_index = static_cast<usize>(off / PAGE_SIZE);
+diff --git a/lib/include/libk/bytes.h b/lib/include/libk/bytes.h
+index ec7a766..348b791 100644
+--- a/lib/include/libk/bytes.h
++++ b/lib/include/libk/bytes.h
+@@ -68,7 +68,30 @@ inline bytes slice(bytes b, std::size_t offset, std::size_t length) {
+ // at least `n` bytes.
+ inline bool copy_n(bytes dst, const_bytes src, std::size_t n) {
+     if (n > dst.size || n > src.size || (n != 0 && (!dst.data || !src.data))) return false;
+-    for (std::size_t i = 0; i < n; ++i) dst.data[i] = src.data[i];
++    std::size_t i = 0;
++#if defined(__aarch64__)
++    // A53-friendly scalar pairs. Both endpoints must be naturally aligned:
++    // this also works with the kernel's strict-alignment/SIMD-free contract.
++    // No overread, destination padding access, or FP register ownership change.
++    if (((reinterpret_cast<std::uintptr_t>(dst.data) |
++          reinterpret_cast<std::uintptr_t>(src.data)) & 7) == 0) {
++        auto* d = dst.data;
++        const auto* s = src.data;
++        for (; n - i >= 32; i += 32) {
++            std::uint64_t a, b, c, e;
++            asm volatile("ldp %0, %1, [%4]\n"
++                         "ldp %2, %3, [%4, #16]\n"
++                         "stp %0, %1, [%5]\n"
++                         "stp %2, %3, [%5, #16]"
++                         : "=&r"(a), "=&r"(b), "=&r"(c), "=&r"(e)
++                         : "r"(s + i), "r"(d + i) : "memory");
++        }
++        using Word = std::uint64_t __attribute__((__may_alias__));
++        for (; n - i >= 8; i += 8)
++            *reinterpret_cast<Word*>(d + i) = *reinterpret_cast<const Word*>(s + i);
++    }
++#endif
++    for (; i < n; ++i) dst.data[i] = src.data[i];
+     return true;
+ }
+ 
+diff --git a/scripts/build-all-and-launch.sh b/scripts/build-all-and-launch.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/build-ame-disk.sh b/scripts/build-ame-disk.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/build-hekate-package.sh b/scripts/build-hekate-package.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/build-switch-atf.sh b/scripts/build-switch-atf.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/build-switch-payload.sh b/scripts/build-switch-payload.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/build-u-boot-qemu-arm64.sh b/scripts/build-u-boot-qemu-arm64.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/ame-build.sh b/scripts/claude/ame-build.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/ame-context-audit.sh b/scripts/claude/ame-context-audit.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/ame-files.sh b/scripts/claude/ame-files.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/ame-handoff.sh b/scripts/claude/ame-handoff.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/ame-log.sh b/scripts/claude/ame-log.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/ame-rg.sh b/scripts/claude/ame-rg.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/ame-run.sh b/scripts/claude/ame-run.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/ame-statusline.sh b/scripts/claude/ame-statusline.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/install-arch-tools.sh b/scripts/claude/install-arch-tools.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/install-context-mode-notes.sh b/scripts/claude/install-context-mode-notes.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/claude/install-optional-token-tools-arch.sh b/scripts/claude/install-optional-token-tools-arch.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/host.sh b/scripts/host.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/install-ame-vfs.sh b/scripts/install-ame-vfs.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/build-agent.sh b/scripts/linux/build-agent.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/build-dtb.sh b/scripts/linux/build-dtb.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/build-gpu-linux-docker.sh b/scripts/linux/build-gpu-linux-docker.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/build-gpu-linux.sh b/scripts/linux/build-gpu-linux.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/build-hello-linux-docker.sh b/scripts/linux/build-hello-linux-docker.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/build-initramfs.sh b/scripts/linux/build-initramfs.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/build-manifest.sh b/scripts/linux/build-manifest.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/build-min-linux.sh b/scripts/linux/build-min-linux.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/build-vkd-docker.sh b/scripts/linux/build-vkd-docker.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/build-vkd.sh b/scripts/linux/build-vkd.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/check-artifacts.sh b/scripts/linux/check-artifacts.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/gen-dango-binding.sh b/scripts/linux/gen-dango-binding.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/linux/run-qemu-linux.sh b/scripts/linux/run-qemu-linux.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/make-release-key.sh b/scripts/make-release-key.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/run-qemu.sh b/scripts/run-qemu.sh
+old mode 100644
+new mode 100755
+diff --git a/scripts/test/ipc-bench.py b/scripts/test/ipc-bench.py
+index b9e6047..8455e58 100644
+--- a/scripts/test/ipc-bench.py
++++ b/scripts/test/ipc-bench.py
+@@ -218,13 +218,14 @@ def run_ame(args):
+     results.require(cache['CMAKE_BUILD_TYPE'] == args.build_type and cache['ANKO_BOARD'] == 'qemu-virt',
+                     'benchmark build configuration mismatch')
+     common_hash = digest(ROOT / 'benchmarks/ipc/workload.h')
++    packed = not args.reference_framing and 'kFramePacked' in (ROOT / 'userland/lib/include/mochi/framed_ring.h').read_text()
+     metadata = {**host_metadata(), 'os': 'Ame', 'execution_kind': 'qemu-tcg',
+-                'machine_id': args.machine_id, 'isa': 'aarch64', 'cpu_model': 'cortex-a57',
++                'machine_id': args.machine_id, 'isa': 'aarch64', 'cpu_model': args.cpu,
+                 'cpus': args.cpus, 'worker_cpus': min(2, args.cpus), 'memory_mib': 512, 'entry_el': 2,
+                 'qemu_version': version(['qemu-system-aarch64', '--version']),
+                 'qemu_acceleration': 'TCG default (no KVM); guest timer values are not physical CPU cycles',
+-                'framing_implementation': 'slotwise_reference' if args.reference_framing else 'mochi_batched',
+-                'framing_max_publication_slots': 1 if args.reference_framing else 16,
++                'framing_implementation': 'slotwise_reference' if args.reference_framing else ('mochi_packed' if packed else 'mochi_batched'),
++                'framing_max_publication_slots': 1 if args.reference_framing else (128 if packed else 16),
+                 'ring_library_sha256': digest(ROOT / 'userland/lib/include/mochi/ring.h'),
+                 'framing_library_sha256': digest(ROOT / 'userland/lib/include/mochi/framed_ring.h'),
+                 'reference_library_sha256': digest(ROOT / 'benchmarks/ipc/slotwise_reference.h'),
+@@ -232,9 +233,11 @@ def run_ame(args):
+                 'build_type': cache['CMAKE_BUILD_TYPE'], 'benchmark_optimization': '-O2',
+                 'compiler': version([cache.get('AARCH64_GXX') if cache.get('AARCH64_GXX', '').endswith('g++') else cache.get('CLANGXX_BIN', 'clang++'), '--version']),
+                 'configure_command': command, 'development_kernel': True,
+-                'ring_order': 6, 'inline_slot_payload_bytes': 48,
+-                'transport_framing': 'FIRST/LAST native ring slots; copied reassembly for logical payloads over 48 bytes',
+-                'tx_backpressure': 'yield when full in blocking mode; CPU relax in spin mode',
++                'ring_order': 7 if packed else 6, 'inline_slot_payload_bytes': 48,
++                'transport_framing': 'copied packed records; legacy FIRST/LAST fallback' if packed else 'FIRST/LAST native ring slots; copied reassembly for logical payloads over 48 bytes',
++                'tx_backpressure': 'cursor/credit wait in blocking mode; CPU relax in spin mode' if packed else 'yield when full in blocking mode; CPU relax in spin mode',
++                'adaptive_poll_max_iterations': 64 if packed else 0,
++                'adaptive_poll_placement': 'different_cpu only; zero same_cpu polling',
+                 'clock_implementation': 'mx_clock_ns syscall; platform-corrected monotonic system counter',
+                 'background': 'isolated bundle: bootstrap parent parks; two trusted worker processes; ordinary services absent'}
+     runs = []
+@@ -258,7 +261,7 @@ def run_ame(args):
+             with contextlib.redirect_stdout(io.StringIO()):
+                 ok = boot.run(build, 'direct', args.cpus, args.timeout,
+                               bundle=build / 'ipc-bench.mxb', markers=['IPC_BENCH_DONE'], output=destination,
+-                              cpu='cortex-a57')
++                              cpu=args.cpu)
+             results.require(ok, f'Ame benchmark failed or timed out; see {destination}')
+             runs.append(results.parse_log((destination / 'host.log').read_text(),
+                                          {**config, 'contract_sha256': common_hash}))
+@@ -301,6 +304,8 @@ def parser():
+             item.add_argument('--server-cpu', type=int)
+             item.add_argument('--execution-kind', choices=('native', 'qemu-tcg', 'other-vm'), default='native')
+         else:
++            item.add_argument('--cpu', choices=('cortex-a53', 'cortex-a57', 'max'), default='cortex-a53',
++                              help='A53 matches the primary P20 Lite ISA; TCG timings are not physical cycles')
+             item.add_argument('--build-type', choices=('Release', 'RelWithDebInfo'), default='Release',
+                               help='kernel compiler configuration; Release by default')
+             item.add_argument('--reference-framing', action='store_true',
+diff --git a/scripts/verify.sh b/scripts/verify.sh
+old mode 100644
+new mode 100755
+diff --git a/shared/include/midix/abi/ring.h b/shared/include/midix/abi/ring.h
+index 7006437..c357a3e 100644
+--- a/shared/include/midix/abi/ring.h
++++ b/shared/include/midix/abi/ring.h
+@@ -17,21 +17,33 @@ struct alignas(64) MxRingSlot {
+     mx_u64_t seq;
+     mx_u8_t  payload[48];
+ };
++// V2 uses the formerly reserved line. Zero remains the original slot protocol.
++// Credits have a distinct writer-owned line from receiver sleep requests.
++struct alignas(64) MxRingSpaceLine {
++    mx_u32_t producer_about_to_sleep;
++    mx_u32_t features;
++    mx_u8_t pad[56];
++};
+ struct MxRingPage {
+     MxRingHeadLine  head;
+     MxRingTailLine  tail;
+     MxRingFlagsLine flags;
+-    mx_u8_t         _res[64];
++    MxRingSpaceLine space;
+ };
+ static_assert(sizeof(MxRingHeadLine) == 64, "ring head must be one cache line");
+ static_assert(sizeof(MxRingTailLine) == 64, "ring tail must be one cache line");
+ static_assert(sizeof(MxRingFlagsLine) == 64, "ring flags must be one cache line");
+ static_assert(sizeof(MxRingSlot) == 64, "ring slot must be one cache line");
++static_assert(sizeof(MxRingSpaceLine) == 64, "ring credits must be one cache line");
+ static_assert(sizeof(MxRingPage) == 0x100, "ring page header must be 256 bytes");
+ 
+ constexpr mx_u32_t MX_RING_INLINE_PAYLOAD = 48;
+ constexpr mx_u32_t MX_RING_HEADER_SIZE = 0x100;
+ constexpr mx_u32_t MX_DEFAULT_RING_ORDER = 6;
++constexpr mx_u32_t MX_DEFAULT_FRAMED_RING_ORDER = 7;
++constexpr mx_u32_t MX_RING_PACKED_FRAMES = 1u << 0;
++constexpr mx_u32_t MX_RING_WAIT_READABLE = 0;
++constexpr mx_u32_t MX_RING_WAIT_WRITABLE = 1;
+ constexpr mx_u32_t MX_RING_ORDER_MIN = 4;  // kernel allocation bounds
+ constexpr mx_u32_t MX_RING_ORDER_MAX = 10;
+ 
+diff --git a/shared/include/midix/abi/syscall.h b/shared/include/midix/abi/syscall.h
+index 40f20a6..747e79a 100644
+--- a/shared/include/midix/abi/syscall.h
++++ b/shared/include/midix/abi/syscall.h
+@@ -96,11 +96,28 @@ enum MxSyscall : mx_u64_t {
+     // (own supervisor, notify doorbell or 0): signal after child teardown has
+     // published a pollable exit. Binding retains the doorbell until unbound.
+     MX_NR_SUPERVISOR_BIND_DOORBELL = 71,
++    // Compare a retained shared-ring cursor under the doorbell registration
++    // lock. Eliminates a preceding counter-read syscall. direction: 0=head,
++    // 1=tail. The caller publishes its sleep request before entering.
++    MX_NR_WAIT_RING = 72,
++    // Validate both capabilities before notifying; then conditionally wait.
++    MX_NR_NOTIFY_WAIT = 73,
++    MX_NR_REPLY_WAIT = 74,
+ };
+ 
+ constexpr mx_u32_t MX_SPAWN_SUSPENDED = 1u << 0;
+ constexpr mx_u32_t MX_SPAWN_KILL_WITH_SUPERVISOR = 1u << 1;
+ constexpr mx_u32_t MX_THREAD_SUSPENDED = 1u << 0;
++constexpr mx_u32_t MX_IPC_EXCHANGE_HANDOFF = 1u << 0;
++constexpr mx_u32_t MX_IPC_EXCHANGE_REPLY = 1u << 1;
++// Optional trusted-creator scheduling policy. A handoff server must complete
++// synchronous requests with reply_handoff or a reply-and-wait exchange.
++constexpr mx_u32_t MX_IPC_HINT_LATENCY = 1u << 0;
++constexpr mx_u32_t MX_IPC_HINT_THROUGHPUT = 1u << 1;
++constexpr mx_u32_t MX_IPC_HINT_WAKE_AFFINE = 1u << 2;
++constexpr mx_u32_t MX_IPC_HINT_HANDOFF_OK = 1u << 3;
++constexpr mx_u32_t MX_IPC_HINT_SERVER = 1u << 4;
++constexpr mx_u32_t MX_IPC_HINT_NO_STEAL = 1u << 5;
+ 
+ // SYS_VM_MEMORY_CREATE flags (a2). MX_VM_MEMORY_FLAG_SHARED_STAGING marks the
+ // object as the VM's shared staging window: its pages stay out of every DMA
+diff --git a/tests/asid_qemu.cc b/tests/asid_qemu.cc
+new file mode 100644
+index 0000000..d0b0985
+--- /dev/null
++++ b/tests/asid_qemu.cc
+@@ -0,0 +1,55 @@
++// Execute production TTBR activation, ASID shootdowns, TCR setup and leaf
++// attributes on an ARMv8.0 CPU. Unused VM/allocator paths are link-time GC'd.
++#include "../kernel/mm/vm_space.cc"
++
++HwInfo g_hw{};
++struct alignas(4096) Tables { u64 root[512], l1[512], l2[512], l3[512]; } tables[3];
++alignas(4096) static u64 payload[2][512];
++static void (*volatile activate)(PhysAddr) = mm::vm_activate;
++
++[[noreturn]] static void finish(u64 code) {
++    const u64 args[]{0x20026, code};
++    register u64 operation asm("x0") = 0x20;
++    register const u64* data asm("x1") = args;
++    asm volatile("hlt #0xf000" : "+r"(operation) : "r"(data) : "memory");
++    for (;;) asm volatile("wfe");
++}
++static void require(bool value, u64 code) { if (!value) finish(code); }
++static PhysAddr address(const void* pointer) { return reinterpret_cast<PhysAddr>(pointer); }
++
++extern "C" void boot_cache_test(PhysAddr) {
++    constexpr u64 va = 0x20000000;
++    constexpr u64 first = 0x123456789abcdef0, second = 0xfedcba9876543210;
++    payload[0][0] = first; payload[1][0] = second;
++    const u64 attrs = mm::kernel_page_attrs(false, address(payload));
++    require(attrs & mm::PTE_NG, 1);
++    for (u32 i = 0; i < 3; ++i) {
++        auto& t = tables[i];
++        t.root[0] = address(t.l1) | mm::DESC_TABLE;
++        // Identity-map RAM, code, stacks and tables with the production attrs.
++        t.l1[1] = 0x40000000 | attrs | mm::PTE_VALID;
++        t.l1[0] = address(t.l2) | mm::DESC_TABLE;
++        t.l2[(va >> 21) & 511] = address(t.l3) | mm::DESC_TABLE;
++        t.l3[(va >> 12) & 511] = address(payload[i == 2 ? 1 : 0]) | attrs | mm::DESC_PAGE;
++    }
++    asm volatile("dsb sy" ::: "memory");
++    mm::enable_mmu(address(tables[0].root));
++    auto* value = reinterpret_cast<volatile u64*>(va);
++    require(*value == first, 2);
++    for (u32 round = 0; round < 1000; ++round) {
++        activate(mm::vm_context(address(tables[1].root), 1));
++        require(*value == first, 3);
++        activate(mm::vm_context(address(tables[2].root), 2));
++        require(*value == second, 4);
++    }
++    // Reuse every process ASID for a different root, including cached aliases.
++    for (u32 generation = 0; generation < 3; ++generation) {
++        for (u32 pid = 1; pid <= 64; ++pid) {
++            const bool odd = (generation + pid) & 1;
++            mm::tlbi_space(pid);
++            activate(mm::vm_context(address(tables[odd ? 2 : 1].root), pid));
++            require(*value == (odd ? second : first), 5);
++        }
++    }
++    finish(0);
++}
+diff --git a/tests/framed_ring_probe.cc b/tests/framed_ring_probe.cc
+index 67dcfee..61663c7 100644
+--- a/tests/framed_ring_probe.cc
++++ b/tests/framed_ring_probe.cc
+@@ -134,8 +134,43 @@ static void interoperability() {
+     }
+ }
+ 
+-static void concurrent() {
+-    Storage<6> storage;
++static void packed_records() {
++    Storage<7> storage;
++    storage.page.space.features = MX_RING_PACKED_FRAMES;
++    auto ring = storage.view();
++    uint8_t source[4096], destination[4098];
++    for (unsigned i = 0; i < sizeof(source); ++i) source[i] = static_cast<uint8_t>(i * 37);
++    for (uint64_t cursor : {uint64_t{0}, uint64_t{127}, ~uint64_t{0} - 17}) {
++        for (unsigned bytes : {0u, 8u, 48u, 49u, 256u, 4096u}) {
++            storage.page.head.v = storage.page.tail.v = cursor;
++            std::memset(destination, 0xa5, sizeof(destination));
++            mochi::FrameWriter writer(3, 119, source, bytes);
++            assert(writer.push(ring) == FrameProgress::Complete);
++            const uint64_t count = bytes > 48 ? mochi::frame_slots(bytes) : 1;
++            assert(storage.page.head.v - cursor == count);
++            mochi::FrameReader reader(destination + 1, bytes);
++            assert(reader.pop(ring) == FrameProgress::Complete);
++            assert(reader.type() == 3 && reader.sequence() == 119 && reader.size() == bytes);
++            assert(!std::memcmp(source, destination + 1, bytes));
++            assert(destination[0] == 0xa5 && destination[bytes + 1] == 0xa5);
++            assert(storage.page.head.v == storage.page.tail.v);
++        }
++    }
++    storage.page.tail.v = 0; storage.page.head.v = 64;
++    mochi::FrameWriter writer(3, 0, source, sizeof(source));
++    assert(writer.required_space(ring) == 65);
++    assert(writer.push(ring) == FrameProgress::Blocked && storage.page.head.v == 64);
++    storage.page.tail.v = 1;
++    assert(writer.push(ring) == FrameProgress::Complete);
++    storage.page.tail.v = 64;
++    storage.slots[64].length = 4097;
++    mochi::FrameReader invalid(destination, 4096);
++    assert(invalid.pop(ring) == FrameProgress::Invalid && storage.page.tail.v == 64);
++}
++
++template <unsigned Order> static void concurrent(bool packed = false) {
++    Storage<Order> storage;
++    storage.page.space.features = packed ? MX_RING_PACKED_FRAMES : 0;
+     storage.page.head.v = storage.page.tail.v = ~uint64_t{0} - 27;
+     auto ring = storage.view();
+     constexpr unsigned messages = 3000;
+@@ -170,4 +205,7 @@ static void concurrent() {
+     assert(storage.page.head.v == storage.page.tail.v);
+ }
+ 
+-int main() { boundaries(); invalid_frames(); interoperability(); concurrent(); }
++int main() {
++    boundaries(); invalid_frames(); interoperability(); packed_records();
++    concurrent<6>(); concurrent<7>(true);
++}
+diff --git a/tests/ipc_benchmark.cc b/tests/ipc_benchmark.cc
+index 3df9d25..9a78e5b 100644
+--- a/tests/ipc_benchmark.cc
++++ b/tests/ipc_benchmark.cc
+@@ -1,6 +1,8 @@
+ // Same real IPC/scheduler fixture as regression tests, optimized host timings.
+ #define main ipc_regression_main
++#define AME_IPC_LEGACY_BENCH_FIXTURE 1
+ #include "ipc_probe.cc"
++#undef AME_IPC_LEGACY_BENCH_FIXTURE
+ #undef main
+ #include <chrono>
+ 
+diff --git a/tests/ipc_probe.cc b/tests/ipc_probe.cc
+index 8d37253..e2b41c9 100644
+--- a/tests/ipc_probe.cc
++++ b/tests/ipc_probe.cc
+@@ -256,6 +256,55 @@ static void handoff_and_reply() {
+     std::puts("same-CPU request/reply handoff preserves payload, return value, and ownership");
+ }
+ 
++#ifndef AME_IPC_LEGACY_BENCH_FIXTURE
++static void ring_waits_and_exchange() {
++    Fixture f;
++    auto& receiver = f.thread(); auto& sender = f.thread();
++    dispatch(receiver);
++    const auto request = ipc::ring_create(1, 7, MX_RING_PACKED_FRAMES);
++    const auto reply = ipc::ring_create(1, 7, MX_RING_PACKED_FRAMES);
++    const auto request_db = ipc::doorbell_create(1, IPC_HINT_HANDOFF_OK | IPC_HINT_SERVER);
++    const auto reply_db = ipc::doorbell_create(1);
++    const auto space_db = ipc::doorbell_create(1);
++    auto req = ipc::ring_from_cap(1, request), rep = ipc::ring_from_cap(1, reply);
++    auto* request_page = reinterpret_cast<RingHeader*>(req->phys_base);
++    auto* reply_page = reinterpret_cast<RingHeader*>(rep->phys_base);
++    assert(request_page->space.features == MX_RING_PACKED_FRAMES);
++    assert(ipc::wait_ring(request, request_db, 0, 2, 1) == E_INVALID);
++    // Publication that wins before waiter registration needs no notification.
++    request_page->head.head = 1;
++    assert(ipc::wait_ring(request, request_db, 0, MX_RING_WAIT_READABLE, 1) == E_OK);
++    assert(receiver.state == TS_RUNNING);
++    request_page->tail.tail = 1;
++    sched::enqueue(&sender);
++    assert(ipc::wait_ring(request, request_db, 1, MX_RING_WAIT_READABLE, 1) == E_OK);
++    TrapFrame frame{};
++    sched::post_syscall(&frame);
++    assert(sched::current() == &sender);
++    request_page->head.head = 2;
++    // Invalid authority must leave the real notify counter and waiter untouched.
++    assert(ipc::exchange_ring(request_db, reply, kNullCap, 0, 0, 1) == E_NOTFOUND);
++    assert(ipc::doorbell_counter(request_db, 1) == 0);
++    assert(ipc::exchange_ring(request_db, reply, reply_db, 0, MX_IPC_EXCHANGE_HANDOFF, 1) == E_OK);
++    assert(sender.state == TS_BLOCKED && sender.reply_target == &receiver);
++    sched::post_syscall(&frame);
++    assert(sched::current() == &receiver);
++    request_page->tail.tail = 2;
++    reply_page->head.head = 1;
++    assert(ipc::exchange_ring(reply_db, request, request_db, 2, MX_IPC_EXCHANGE_REPLY, 1) == E_OK);
++    assert(receiver.state == TS_SLEEPING && !receiver.on_runqueue);
++    sched::post_syscall(&frame);
++    assert(sched::current() == &sender && !sender.reply_target && !receiver.reply_target);
++    // Producer credit waits compare the tail, not head or a doorbell snapshot.
++    reply_page->head.head = 128;
++    assert(ipc::wait_ring(reply, space_db, 0, MX_RING_WAIT_WRITABLE, 1) == E_OK);
++    f.park(sender);
++    reply_page->tail.tail = 1;
++    assert(ipc::notify(space_db, 1) == E_OK && sender.on_runqueue);
++    std::puts("ring cursor waits, producer credits, atomic exchange/reply, and authority failures pass");
++}
++#endif
++
+ static void concurrent_notifications() {
+     Fixture f; auto& runner=f.thread(); dispatch(runner);
+     Doorbell* independent[kMaxCpus]{};
+@@ -313,6 +362,10 @@ int main() {
+     static_assert(sizeof(Doorbell)==64);
+     rights_and_allocation(); allocation_failures(); frame_and_timeout();
+     counter_wrap();
+-    deadline_capacity(); handoff_and_reply(); concurrent_notifications(); registration_race();
++    deadline_capacity(); handoff_and_reply();
++#ifndef AME_IPC_LEGACY_BENCH_FIXTURE
++    ring_waits_and_exchange();
++#endif
++    concurrent_notifications(); registration_race();
+     return 0;
+ }
+diff --git a/tests/mochi_host/mochi/syscall.h b/tests/mochi_host/mochi/syscall.h
+index c844a32..4c6a1a6 100644
+--- a/tests/mochi_host/mochi/syscall.h
++++ b/tests/mochi_host/mochi/syscall.h
+@@ -50,6 +50,14 @@ inline mx_i64_t sys_wait_doorbell(CapHandle, mx_u64_t expected) {
+     host_wait_expected = expected;
+     return host_on_wait ? host_on_wait() : MX_ERR_DEAD;
+ }
++inline mx_i64_t (*host_on_wait_ring)(CapHandle, CapHandle, mx_u64_t, mx_u32_t) = nullptr;
++inline mx_i64_t sys_wait_ring(CapHandle ring, CapHandle db, mx_u64_t cursor, mx_u32_t direction) {
++    return host_on_wait_ring ? host_on_wait_ring(ring, db, cursor, direction) : MX_ERR_DEAD;
++}
++inline mx_i64_t sys_notify_wait(CapHandle notify, CapHandle ring, CapHandle db, mx_u64_t cursor, mx_u32_t = 0) {
++    const auto rc = mx_doorbell_notify(notify);
++    return rc < 0 ? rc : sys_wait_ring(ring, db, cursor, 0);
++}
+ inline void mx_yield() { sys_yield(); }
+ inline void mx_exit(mx_i32_t) {}
+ inline void sys_debug_puts(const char*, mx_u64_t) {}
+diff --git a/tests/packed_ring_blocking_probe.cc b/tests/packed_ring_blocking_probe.cc
+new file mode 100644
+index 0000000..073505d
+--- /dev/null
++++ b/tests/packed_ring_blocking_probe.cc
+@@ -0,0 +1,64 @@
++// Exercise both sides of the production credit/record protocol with real
++// sleeping host threads. The syscall seam checks cursors under its notify lock.
++#include "mochi/framed_ring.h"
++#include <cassert>
++#include <chrono>
++#include <condition_variable>
++#include <mutex>
++#include <thread>
++
++struct Storage { RingPage page{}; RingSlot slots[128]{}; } storage;
++static std::mutex lock;
++static std::condition_variable progress;
++
++int main() {
++    storage.page.space.features = MX_RING_PACKED_FRAMES;
++    storage.page.head.v = storage.page.tail.v = ~uint64_t{0} - 47;
++    mochi::Ring ring{&storage.page, 7, 1, 9, 2};
++    host_on_notify = [](CapHandle) -> mx_status_t {
++        std::lock_guard guard(lock);
++        progress.notify_all();
++        return MX_OK;
++    };
++    host_on_wait_ring = [](CapHandle handle, CapHandle db, uint64_t cursor, uint32_t direction) -> mx_i64_t {
++        assert(handle == 9 && db == (direction ? 2 : 1));
++        std::unique_lock guard(lock);
++        const bool ready = progress.wait_for(guard, std::chrono::seconds(3), [&] {
++            return __atomic_load_n(direction ? &storage.page.tail.v : &storage.page.head.v,
++                                   __ATOMIC_ACQUIRE) != cursor;
++        });
++        assert(ready && "missed data/credit publication");
++        return MX_OK;
++    };
++    constexpr unsigned count = 6000;
++    std::thread producer([&] {
++        alignas(16) uint8_t bytes[4096];
++        for (unsigned n = 0; n < count; ++n) {
++            const unsigned length = n % 3 == 0 ? 4096 : n % 257;
++            for (unsigned i = 0; i < length; ++i) bytes[i] = static_cast<uint8_t>(n + i * 31);
++            mochi::FrameWriter writer(17, n, bytes, length);
++            for (;;) {
++                const auto result = writer.push(ring);
++                assert(result != mochi::FrameProgress::Invalid);
++                if (result == mochi::FrameProgress::Complete) break;
++                if (result == mochi::FrameProgress::Blocked)
++                    assert(ring.wait_writable(writer.required_space(ring), 64));
++            }
++        }
++    });
++    alignas(16) uint8_t bytes[4096];
++    for (unsigned n = 0; n < count; ++n) {
++        mochi::FrameReader reader(bytes, sizeof(bytes));
++        for (;;) {
++            const auto result = reader.pop(ring);
++            assert(result != mochi::FrameProgress::Invalid);
++            if (result == mochi::FrameProgress::Complete) break;
++            if (result == mochi::FrameProgress::Blocked) assert(ring.wait_readable(64));
++        }
++        const unsigned length = n % 3 == 0 ? 4096 : n % 257;
++        assert(reader.sequence() == n && reader.type() == 17 && reader.size() == length);
++        for (unsigned i = 0; i < length; ++i) assert(bytes[i] == static_cast<uint8_t>(n + i * 31));
++    }
++    producer.join();
++    assert(storage.page.head.v == storage.page.tail.v && host_yields == 0);
++}
+diff --git a/tests/scheduler_probe.cc b/tests/scheduler_probe.cc
+index 5021176..2550f28 100644
+--- a/tests/scheduler_probe.cc
++++ b/tests/scheduler_probe.cc
+@@ -250,7 +250,40 @@ void remote_batch_checks() {
+     std::puts("concurrent remote wake batches retain every thread and coalesce IPIs until drain");
+ }
+ 
++static void handoff_fairness_checks() {
++    for (bool realtime : {false, true}) {
++        reset();
++        const auto pid = sched::allocate_principal(PRINCIPAL_NATIVE_TRUSTED, 1024, 0, 0);
++        auto first = make_thread(pid, SCHED_BAND_FAIR);
++        auto second = make_thread(pid, SCHED_BAND_FAIR);
++        auto competitor = make_thread(pid, realtime ? SCHED_BAND_RT_NATIVE : SCHED_BAND_FAIR);
++        dispatch(first);
++        sched::enqueue(&competitor);
++        bool ran = false;
++        for (unsigned i = 0; i < 9; ++i) {
++            auto* current = sched::current();
++            auto* next = current == &first ? &second : &first;
++            current->state = TS_BLOCKED;
++            next->state = TS_SLEEPING;
++            sched::set_handoff_next(next);
++            sched::request_switch(false, SWITCH_HANDOFF);
++            ++audit_now;
++            TrapFrame frame{};
++            sched::post_syscall(&frame);
++            if (sched::current() == &competitor) { ran = true; break; }
++            assert(!realtime && "handoff bypassed queued realtime work");
++            assert(sched::current() == next);
++        }
++        assert(ran && "unbounded handoff chain starved queued work");
++        sched::current_eki().current = nullptr;
++        sched::dequeue_thread(&first); sched::dequeue_thread(&second); sched::dequeue_thread(&competitor);
++        sched::release_principal(pid);
++    }
++    std::puts("handoff bursts yield to fair competitors and never bypass queued realtime work");
++}
++
+ int main() {
++    handoff_fairness_checks();
+     heap_checks();
+     compact_dispatch_checks();
+     queue_capacity_checks();
+diff --git a/tests/test_asid.py b/tests/test_asid.py
+new file mode 100644
+index 0000000..09f08dc
+--- /dev/null
++++ b/tests/test_asid.py
+@@ -0,0 +1,42 @@
++"""Run real ASID switching/reuse through the production VM primitives."""
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++import unittest
++from test_boot_cache import llvm_tool
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++@unittest.skipUnless(shutil.which('qemu-system-aarch64') and all(llvm_tool(name) for name in
++                     ('clang++', 'ld.lld', 'llvm-objcopy', 'llvm-objdump')),
++                     'requires QEMU and cross-linking LLVM')
++class Asid(unittest.TestCase):
++    def test_a53_isolation_and_all_64_asids_reused_at_el1_and_el2(self):
++        with tempfile.TemporaryDirectory(prefix='ame-asid-') as directory:
++            elf, image = Path(directory) / 'probe', Path(directory) / 'Image'
++            command = [llvm_tool('clang++'), '--target=aarch64-none-elf',
++                       '--ld-path=' + llvm_tool('ld.lld'), '-std=c++23', '-O2',
++                       '-ffreestanding', '-fno-exceptions', '-fno-rtti', '-nostdlib',
++                       '-mgeneral-regs-only', '-mstrict-align', '-ffunction-sections', '-fdata-sections',
++                       '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'shared/include'),
++                       '-I' + str(ROOT / 'lib/include'), str(ROOT / 'tests/boot_cache_entry.S'),
++                       str(ROOT / 'tests/asid_qemu.cc'), '-Wl,--gc-sections',
++                       '-Wl,-T,' + str(ROOT / 'scripts/linker/kernel.ld'),
++                       '-Wl,--defsym,ANKO_LOAD_BASE=0x40080000', '-o', str(elf)]
++            build = subprocess.run(command, capture_output=True, text=True)
++            self.assertEqual(build.returncode, 0, build.stderr)
++            subprocess.run([llvm_tool('llvm-objcopy'), '-O', 'binary', str(elf), str(image)], check=True)
++            assembly = subprocess.check_output([llvm_tool('llvm-objdump'), '-d',
++                                                '--disassemble-symbols=_ZN2mm11vm_activateEm', str(elf)], text=True)
++            self.assertNotIn('tlbi', assembly.lower())
++            self.assertIn('ttbr0_el1', assembly.lower())
++            for virtualization in ('off', 'on'):
++                with self.subTest(virtualization=virtualization):
++                    run = subprocess.run(['qemu-system-aarch64', '-machine',
++                        'virt,gic-version=2,virtualization=' + virtualization, '-cpu', 'cortex-a53',
++                        '-m', '128M', '-display', 'none', '-serial', 'none', '-monitor', 'none',
++                        '-semihosting-config', 'enable=on,target=native', '-kernel', str(image)],
++                        capture_output=True, text=True, timeout=15)
++                    self.assertEqual(run.returncode, 0, run.stderr)
+diff --git a/tests/test_framed_ring.py b/tests/test_framed_ring.py
+index ceab1ec..7071fe7 100644
+--- a/tests/test_framed_ring.py
++++ b/tests/test_framed_ring.py
+@@ -14,6 +14,9 @@ class FramedRing(unittest.TestCase):
+     def test_blocking_wakeup_race_across_single_multi_and_inbox_waits(self):
+         self.run_probe('ring_blocking_probe.cc')
+ 
++    def test_packed_records_block_for_data_and_credits_without_yielding(self):
++        self.run_probe('packed_ring_blocking_probe.cc')
++
+     def run_probe(self, source):
+         with tempfile.TemporaryDirectory(prefix='ame-framed-ring-') as work:
+             binary = str(Path(work) / 'probe')
+diff --git a/tests/test_ipc_benchmark_ame.py b/tests/test_ipc_benchmark_ame.py
+new file mode 100644
+index 0000000..0c6568b
+--- /dev/null
++++ b/tests/test_ipc_benchmark_ame.py
+@@ -0,0 +1,38 @@
++"""End-to-end correctness, including closing a synchronous handoff before exit.
++
++The deliberately short workload is not an accepted performance collection.
++"""
++import json
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++import tempfile
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++@unittest.skipUnless(all(shutil.which(name) for name in
++                     ('clang++', 'cmake', 'ninja', 'qemu-system-aarch64', 'ld.lld', 'llvm-objcopy')),
++                     'requires QEMU and the freestanding build tools')
++class AmeIpcIntegrity(unittest.TestCase):
++    def test_records_credits_placements_polling_partial_windows_and_shutdown(self):
++        with tempfile.TemporaryDirectory(prefix='ame-ipc-integrity-') as directory:
++            output = Path(directory) / 'capture'
++            run = subprocess.run([sys.executable, str(ROOT / 'scripts/test/ipc-bench.py'),
++                'ame', '--cpu', 'cortex-a53', '--cpus', '4', '--runs', '1',
++                '--iterations', '33', '--warmup', '5', '--samples', '32', '--rounds', '3',
++                '--window', '16', '--include-spin', '--jobs', '2', '--timeout', '40',
++                '--build', str(ROOT / 'out/ipc-bench-smoke'), '--output', str(output)],
++                capture_output=True, text=True, timeout=180)
++            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
++            report = json.loads((output / 'results.json').read_text())
++            self.assertEqual(len(report['summary']['cases']), 30)
++            for row in report['summary']['cases']:
++                self.assertEqual(row['independent_runs'], 1)
++                if row['spec']['wait_policy'] == 'blocking':
++                    self.assertEqual(row['counters_per_operation']['yields'], 0)
++            for serial in output.glob('cpu*-run-*/host.log'):
++                self.assertIn('IPC_BENCH_DONE', serial.read_text())
++                self.assertNotIn('IPC_BENCH_ERROR', serial.read_text())
+diff --git a/userland/lib/include/mochi/boot.h b/userland/lib/include/mochi/boot.h
+index 4c75d3e..590d53f 100644
+--- a/userland/lib/include/mochi/boot.h
++++ b/userland/lib/include/mochi/boot.h
+@@ -125,11 +125,14 @@ struct RingMapping {
+     mx_vaddr_t address;
+     const char* doorbell;
+     uint32_t default_order = MX_DEFAULT_RING_ORDER;
++    const char* space_doorbell = nullptr;
+ };
+ 
+ inline Ring map_ring(const MxBootInfo* info, const RingMapping& mapping) {
+     Ring result{};
+     result.doorbell = handle(info, mapping.doorbell);
++    result.handle = handle(info, mapping.name);
++    if (mapping.space_doorbell) result.space_doorbell = handle(info, mapping.space_doorbell);
+     result.ring = map_ring(info, mapping.name, mapping.address,
+                            mapping.default_order, &result.order);
+     return result;
+@@ -143,7 +146,8 @@ inline SpscEndpoint map_endpoint(const MxBootInfo* info, const RingMapping& tx_s
+     const Ring tx = map_ring(info, tx_spec);
+     const Ring rx = map_ring(info, rx_spec);
+     if (tx.valid() && rx.valid() && tx.order == rx.order && tx.doorbell && rx.doorbell) {
+-        return {tx.ring, rx.ring, tx.order, tx.doorbell, rx.doorbell};
++        return {tx.ring, rx.ring, tx.order, tx.doorbell, rx.doorbell,
++                tx.handle, rx.handle, tx.space_doorbell, rx.space_doorbell};
+     }
+     if (tx.ring) (void)sys_unmap_page(tx_spec.address);
+     if (rx.ring) (void)sys_unmap_page(rx_spec.address);
+diff --git a/userland/lib/include/mochi/channel.h b/userland/lib/include/mochi/channel.h
+index f1ebc8c..747d1ed 100644
+--- a/userland/lib/include/mochi/channel.h
++++ b/userland/lib/include/mochi/channel.h
+@@ -77,7 +77,21 @@ struct Channel {
+     template <typename TReq, typename TReply>
+     bool call(mx_u32_t req_type, const TReq& req, mx_u32_t reply_type, TReply* reply,
+               mx_u64_t deadline_ns = 0) const {
+-        if (!reply) return false;
++        if (!reply || !valid()) return false;
++        // A synchronous copied request can carry its notification into the
++        // receive wait. Legacy endpoints and deadline calls retain their ABI.
++        if (!deadline_ns && ep.rx_handle && ep.tx_handle) {
++            auto tx = ep.tx();
++            bool pending = false;
++            tx.deferred_notify = &pending;
++            uint32_t retries = 1024;
++            while (!tx.try_push(req_type, &req, message_size<TReq>())) {
++                if (!retries--) return false;
++                sys_yield();
++            }
++            if (pending && !ep.rx().wait_readable_after_notify(tx.doorbell)) return false;
++            return receive(reply_type, reply, 0);
++        }
+         const bool sent = deadline_ns != 0 ? send_bounded(req_type, req, deadline_ns)
+                                           : send(req_type, req);
+         return sent && receive(reply_type, reply, deadline_ns);
+diff --git a/userland/lib/include/mochi/endpoint.h b/userland/lib/include/mochi/endpoint.h
+index 832482d..90406ee 100644
+--- a/userland/lib/include/mochi/endpoint.h
++++ b/userland/lib/include/mochi/endpoint.h
+@@ -14,14 +14,16 @@ struct SpscEndpoint {
+     uint32_t order = 0;
+     CapHandle tx_doorbell = kNullCap;
+     CapHandle rx_doorbell = kNullCap;
++    CapHandle tx_handle = kNullCap, rx_handle = kNullCap;
++    CapHandle tx_space_doorbell = kNullCap, rx_space_doorbell = kNullCap;
+ 
+     // The two halves as Rings. Ring carries the whole operation set (try /
+     // spinning / deadline publish, try / blocking / deadline consume, byte runs,
+     // typed messages, depth, sleep flag), so every endpoint operation below is a
+     // thin delegation and nothing is lost by using the endpoint instead of the
+     // raw ring helpers.
+-    Ring tx() const { return Ring{tx_ring, order, tx_doorbell}; }
+-    Ring rx() const { return Ring{rx_ring, order, rx_doorbell}; }
++    Ring tx() const { return Ring{tx_ring, order, tx_doorbell, tx_handle, tx_space_doorbell}; }
++    Ring rx() const { return Ring{rx_ring, order, rx_doorbell, rx_handle, rx_space_doorbell}; }
+ 
+     bool valid() const {
+         return tx().valid() && rx().valid() && tx_doorbell != kNullCap && rx_doorbell != kNullCap;
+diff --git a/userland/lib/include/mochi/framed_ring.h b/userland/lib/include/mochi/framed_ring.h
+index 39d9d86..8a01599 100644
+--- a/userland/lib/include/mochi/framed_ring.h
++++ b/userland/lib/include/mochi/framed_ring.h
+@@ -8,9 +8,36 @@
+ namespace mochi {
+ constexpr uint32_t kFrameFirst = 1u << 30;
+ constexpr uint32_t kFrameLast = 1u << 31;
+-constexpr uint32_t kFrameFlags = kFrameFirst | kFrameLast;
++constexpr uint32_t kFramePacked = 1u << 29;
++constexpr uint32_t kFrameFlags = kFrameFirst | kFrameLast | kFramePacked;
+ enum class FrameProgress { Blocked, Progress, Complete, Invalid };
+ 
++// Packed records reuse the same cursor units and protection boundary. Only the
++// first slot has metadata; the remaining bytes contain payload, including wrap.
++inline uint64_t frame_slots(uint32_t bytes) { return (uint64_t{bytes} + 16 + 63) / 64; }
++inline void frame_copy_into(RingPage* page, uint32_t order, uint64_t cursor,
++                            const void* data, uint32_t bytes) {
++    auto* base = reinterpret_cast<uint8_t*>(ring_slots(page));
++    const uint64_t capacity = uint64_t{mx_ring_capacity(order)} * 64;
++    const uint64_t begin = (cursor & mx_ring_mask(order)) * 64 + 16;
++    const auto first = static_cast<uint32_t>(bytes < capacity - begin ? bytes : capacity - begin);
++    (void)libk::copy_n(libk::as_bytes(base + begin, first), libk::as_bytes(data, bytes), first);
++    if (bytes > first)
++        (void)libk::copy_n(libk::as_bytes(base, bytes - first),
++                          libk::as_bytes(static_cast<const uint8_t*>(data) + first, bytes - first), bytes - first);
++}
++inline void frame_copy_out(const RingPage* page, uint32_t order, uint64_t cursor,
++                           void* data, uint32_t bytes) {
++    const auto* base = reinterpret_cast<const uint8_t*>(mx_ring_slots(page));
++    const uint64_t capacity = uint64_t{mx_ring_capacity(order)} * 64;
++    const uint64_t begin = (cursor & mx_ring_mask(order)) * 64 + 16;
++    const auto first = static_cast<uint32_t>(bytes < capacity - begin ? bytes : capacity - begin);
++    (void)libk::copy_n(libk::as_bytes(data, bytes), libk::as_bytes(base + begin, first), first);
++    if (bytes > first)
++        (void)libk::copy_n(libk::as_bytes(static_cast<uint8_t*>(data) + first, bytes - first),
++                          libk::as_bytes(base, bytes - first), bytes - first);
++}
++
+ class FrameWriter {
+     const uint8_t* data_;
+     uint32_t length_, offset_ = 0, type_, batch_slots_;
+@@ -20,7 +47,34 @@ public:
+     FrameWriter(uint32_t type, uint64_t sequence, const void* data, uint32_t length, uint32_t batch_slots = 16)
+         : data_(static_cast<const uint8_t*>(data)), length_(length), type_(type), batch_slots_(batch_slots), sequence_(sequence) {}
+ 
+-    FrameProgress push(const Ring& ring) {
++    uint32_t required_space(const Ring& ring) const {
++        return !offset_ && length_ > MX_RING_INLINE_PAYLOAD && ring.valid() &&
++               (ring.raw()->space.features & MX_RING_PACKED_FRAMES) && frame_slots(length_) <= ring.capacity()
++                   ? static_cast<uint32_t>(frame_slots(length_)) : 1;
++    }
++
++    [[gnu::always_inline]] FrameProgress push(const Ring& ring) {
++        if (!ring.valid() || !batch_slots_ || (type_ & kFrameFlags) || (!data_ && length_))
++            return FrameProgress::Invalid;
++        if (complete_) return FrameProgress::Complete;
++        if (length_ > MX_RING_INLINE_PAYLOAD) return push_large(ring);
++        auto* page = ring.raw();
++        const uint64_t head = __atomic_load_n(&page->head.v, __ATOMIC_RELAXED);
++        const uint64_t tail = __atomic_load_n(&page->tail.v, __ATOMIC_ACQUIRE);
++        const uint64_t pending = head - tail;
++        if (pending > ring.capacity()) return FrameProgress::Invalid;
++        if (pending == ring.capacity()) return FrameProgress::Blocked;
++        ring_write_slot(ring_slots(page)[head & ring.mask()], type_ | kFrameFirst | kFrameLast,
++                        data_, length_, sequence_);
++        complete_ = true;
++        ring_publish(page, head + 1, ring.doorbell, ring.deferred_notify);
++        return FrameProgress::Complete;
++    }
++
++private:
++    // Keep bulk copying and partial-fragment state out of the inline-record
++    // register allocation and instruction footprint.
++    [[gnu::noinline]] FrameProgress push_large(const Ring& ring) {
+         if (!ring.valid() || !batch_slots_ || (type_ & kFrameFlags) || (!data_ && length_)) return FrameProgress::Invalid;
+         if (complete_) return FrameProgress::Complete;
+         auto* page = ring.raw();
+@@ -29,6 +83,19 @@ public:
+         const uint64_t tail = __atomic_load_n(&page->tail.v, __ATOMIC_ACQUIRE);
+         const uint64_t pending = head - tail;
+         if (pending > capacity) return FrameProgress::Invalid;
++        if (!offset_ && length_ > MX_RING_INLINE_PAYLOAD &&
++            (page->space.features & MX_RING_PACKED_FRAMES) && frame_slots(length_) <= capacity) {
++            const uint64_t needed = frame_slots(length_);
++            if (needed > capacity - pending) return FrameProgress::Blocked;
++            auto& slot = ring_slots(page)[head & mask];
++            slot.type = type_ | kFrameFirst | kFrameLast | kFramePacked;
++            slot.length = length_;
++            slot.seq = sequence_;
++            frame_copy_into(page, ring.order, head, data_, length_);
++            ring_publish(page, head + needed, ring.doorbell, ring.deferred_notify);
++            complete_ = true;
++            return FrameProgress::Complete;
++        }
+         if (pending == capacity) return FrameProgress::Blocked;
+         const uint32_t room = static_cast<uint32_t>(capacity - pending);
+         const uint32_t available = room < batch_slots_ ? room : batch_slots_;
+@@ -47,7 +114,7 @@ public:
+         } while (!complete_ && written < available);
+         // Publish one bounded available run once. Retain the established atomic
+         // sleep-flag claim; batching must not weaken the wait/wake handshake.
+-        ring_publish(page, head + written, ring.doorbell);
++        ring_publish(page, head + written, ring.doorbell, ring.deferred_notify);
+         return complete_ ? FrameProgress::Complete : FrameProgress::Progress;
+     }
+ };
+@@ -63,7 +130,36 @@ public:
+     uint32_t type() const { return type_; }
+     uint64_t sequence() const { return sequence_; }
+ 
+-    FrameProgress pop(const Ring& ring, uint32_t max_slots = 16) {
++    // notify_credits=false is for an explicitly negotiated polling producer;
++    // it must never block waiting for a space notification in that policy.
++    [[gnu::always_inline]] FrameProgress pop(const Ring& ring, uint32_t max_slots = 16,
++                                            bool notify_credits = true) {
++        if (invalid_ || !ring.valid() || !max_slots || (!data_ && capacity_)) return FrameProgress::Invalid;
++        if (complete_) return FrameProgress::Complete;
++        auto* page = ring.raw();
++        const uint64_t tail = __atomic_load_n(&page->tail.v, __ATOMIC_RELAXED);
++        const uint64_t head = __atomic_load_n(&page->head.v, __ATOMIC_ACQUIRE);
++        const uint64_t pending = head - tail;
++        if (pending > ring.capacity()) { invalid_ = true; return FrameProgress::Invalid; }
++        if (!pending) return FrameProgress::Blocked;
++        const auto& slot = ring_slots(page)[tail & ring.mask()];
++        const uint32_t length = slot.length, flags = slot.type & kFrameFlags;
++        if (!started_ && flags == (kFrameFirst | kFrameLast) &&
++            length <= MX_RING_INLINE_PAYLOAD && length <= capacity_) {
++            type_ = slot.type & ~kFrameFlags;
++            sequence_ = slot.seq;
++            if (length) (void)libk::copy_n(libk::as_bytes(data_, capacity_),
++                                          libk::as_bytes(slot.payload), length);
++            size_ = length;
++            started_ = complete_ = true;
++            ring_release(page, tail + 1, notify_credits ? ring.space_doorbell : kNullCap);
++            return FrameProgress::Complete;
++        }
++        return pop_slow(ring, max_slots, notify_credits);
++    }
++
++private:
++    [[gnu::noinline]] FrameProgress pop_slow(const Ring& ring, uint32_t max_slots, bool notify_credits) {
+         if (invalid_ || !ring.valid() || !max_slots || (!data_ && capacity_)) return FrameProgress::Invalid;
+         if (complete_) return FrameProgress::Complete;
+         auto* page = ring.raw();
+@@ -73,6 +169,24 @@ public:
+         const uint64_t pending = head - tail;
+         if (pending > capacity) { invalid_ = true; return FrameProgress::Invalid; }
+         if (!pending) return FrameProgress::Blocked;
++        const auto& first_slot = ring_slots(page)[tail & mask];
++        if (first_slot.type & kFramePacked) {
++            const uint32_t length = first_slot.length;
++            const uint64_t needed = frame_slots(length);
++            if (!(page->space.features & MX_RING_PACKED_FRAMES) || started_ ||
++                (first_slot.type & kFrameFlags) != kFrameFlags || length <= MX_RING_INLINE_PAYLOAD ||
++                length > capacity_ || needed > capacity || needed > pending) {
++                invalid_ = true;
++                return FrameProgress::Invalid;
++            }
++            type_ = first_slot.type & ~kFrameFlags;
++            sequence_ = first_slot.seq;
++            frame_copy_out(page, ring.order, tail, data_, length);
++            size_ = length;
++            started_ = complete_ = true;
++            ring_release(page, tail + needed, notify_credits ? ring.space_doorbell : kNullCap);
++            return FrameProgress::Complete;
++        }
+         // Release a bounded copy run so a producer on another CPU can refill
+         // while this reader continues a large message.
+         const uint32_t limit = pending < max_slots ? static_cast<uint32_t>(pending) : max_slots;
+@@ -82,7 +196,7 @@ public:
+             const auto& slot = slots[(tail + taken) & mask];
+             const uint32_t length = slot.length, kind = slot.type & ~kFrameFlags;
+             const bool first = (slot.type & kFrameFirst) != 0, last = (slot.type & kFrameLast) != 0;
+-            if (length > MX_RING_INLINE_PAYLOAD || length > capacity_ - size_ || first == started_ ||
++            if ((slot.type & kFramePacked) || length > MX_RING_INLINE_PAYLOAD || length > capacity_ - size_ || first == started_ ||
+                 (started_ && (kind != type_ || slot.seq != sequence_)) || (!length && (started_ || !last))) {
+                 invalid_ = true;
+                 break;
+@@ -96,7 +210,7 @@ public:
+             ++taken;
+             complete_ = last;
+         } while (!complete_ && taken < limit);
+-        if (taken) __atomic_store_n(&page->tail.v, tail + taken, __ATOMIC_RELEASE);
++        if (taken) ring_release(page, tail + taken, notify_credits ? ring.space_doorbell : kNullCap);
+         // Invalid framing poisons this reader. Callers must abandon the stream
+         // rather than guessing a new message boundary or silently dropping it.
+         if (invalid_) return FrameProgress::Invalid;
+diff --git a/userland/lib/include/mochi/ring.h b/userland/lib/include/mochi/ring.h
+index a60ad8c..dbf5d24 100644
+--- a/userland/lib/include/mochi/ring.h
++++ b/userland/lib/include/mochi/ring.h
+@@ -25,6 +25,7 @@
+ #include "mochi/syscall.h"
+ #include "mochi/message.h"
+ #include "midix/abi/ring.h"
++#include "libk/cpu.h"
+ 
+ // ---------------------------------------------------------------------------
+ // Ring layout — must match kernel RingHeader / RingSlot exactly.
+@@ -64,12 +65,22 @@ static inline void ring_write_slot(RingSlot& slot, uint32_t type, const void* da
+     (void)libk::zero(libk::slice(payload, slot.length, payload.size - slot.length));
+ }
+ 
+-static inline void ring_publish(RingPage* r, uint64_t head, CapHandle doorbell) {
++static inline void ring_publish(RingPage* r, uint64_t head, CapHandle doorbell,
++                                bool* deferred_notify = nullptr) {
+     __atomic_store_n(&r->head.v, head, __ATOMIC_RELEASE);
+     // Keep the existing unconditional RMW handshake. A speculative flag load
+     // before this exchange would need an additional wait/wake ordering proof.
+-    if (__atomic_exchange_n(&r->flags.receiver_about_to_sleep, 0u, __ATOMIC_ACQ_REL))
+-        (void)mx_doorbell_notify(doorbell);
++    if (__atomic_exchange_n(&r->flags.receiver_about_to_sleep, 0u, __ATOMIC_ACQ_REL)) {
++        if (deferred_notify) *deferred_notify = true;
++        else (void)mx_doorbell_notify(doorbell);
++    }
++}
++
++static inline void ring_release(RingPage* r, uint64_t tail, CapHandle space_doorbell = kNullCap) {
++    __atomic_store_n(&r->tail.v, tail, __ATOMIC_RELEASE);
++    if (space_doorbell &&
++        __atomic_exchange_n(&r->space.producer_about_to_sleep, 0u, __ATOMIC_ACQ_REL))
++        (void)mx_doorbell_notify(space_doorbell);
+ }
+ 
+ // Both ends use an acquire/release RMW on the one-shot sleep flag. If
+@@ -92,7 +103,8 @@ static inline void ring_publish_sleep(RingPage* r, uint64_t counter) {
+ // ---------------------------------------------------------------------------
+ static inline bool ring_try_push(RingPage* r, uint32_t order,
+                                  uint32_t type, const void* data, uint32_t len,
+-                                 CapHandle doorbell_cap, const uint64_t* sequence = nullptr) {
++                                 CapHandle doorbell_cap, const uint64_t* sequence = nullptr,
++                                 bool* deferred_notify = nullptr) {
+     if (!ring_valid(r, order) || (!data && len != 0)) return false;
+     const uint64_t mask = mx_ring_mask(order);
+ 
+@@ -116,7 +128,7 @@ static inline bool ring_try_push(RingPage* r, uint32_t order,
+     // has not yet entered wait_doorbell(), this exchange still works because
+     // sys_notify increments the doorbell counter.  The later wait sees the
+     // counter changed and returns immediately instead of sleeping.
+-    ring_publish(r, head + 1, doorbell_cap);
++    ring_publish(r, head + 1, doorbell_cap, deferred_notify);
+ 
+     return true;
+ }
+@@ -166,7 +178,8 @@ static inline bool ring_push(RingPage* r, uint32_t order,
+ // Consumer — non-blocking pop.
+ // Returns false if ring is empty.  Does not yield, sleep, or touch doorbells.
+ // ---------------------------------------------------------------------------
+-static inline bool ring_pop(RingPage* r, uint32_t order, RingSlot* out) {
++static inline bool ring_pop_space(RingPage* r, uint32_t order, RingSlot* out,
++                                  CapHandle space_doorbell) {
+     if (!ring_valid(r, order) || !out) return false;
+     const uint64_t mask = mx_ring_mask(order);
+     const uint64_t tail = __atomic_load_n(&r->tail.v, __ATOMIC_RELAXED);
+@@ -183,10 +196,14 @@ static inline bool ring_pop(RingPage* r, uint32_t order, RingSlot* out) {
+     out->seq = src->seq;
+     (void)libk::copy_exact(libk::as_bytes(out->payload), libk::as_bytes(src->payload));
+ 
+-    __atomic_store_n(&r->tail.v, tail + 1, __ATOMIC_RELEASE);
++    ring_release(r, tail + 1, space_doorbell);
+     return true;
+ }
+ 
++static inline bool ring_pop(RingPage* r, uint32_t order, RingSlot* out) {
++    return ring_pop_space(r, order, out, kNullCap);
++}
++
+ // Backward-compatible spelling for older call sites.  The doorbell argument is
+ // intentionally ignored: this helper is a try-pop now, not a blocking wait.
+ static inline bool ring_pop(RingPage* r, uint32_t order,
+@@ -197,7 +214,8 @@ static inline bool ring_pop(RingPage* r, uint32_t order,
+ // Copy a bounded snapshot, then release the consumed slots together. No pointer
+ // into shared storage escapes; producers may reuse it as soon as tail advances.
+ static inline uint32_t ring_pop_batch(RingPage* r, uint32_t order,
+-                                      RingSlot* out, uint32_t count) {
++                                      RingSlot* out, uint32_t count,
++                                      CapHandle space_doorbell = kNullCap) {
+     if (!ring_valid(r, order) || !out || !count) return 0;
+     const uint64_t capacity = mx_ring_capacity(order), mask = capacity - 1;
+     const uint64_t tail = __atomic_load_n(&r->tail.v, __ATOMIC_RELAXED);
+@@ -207,7 +225,7 @@ static inline uint32_t ring_pop_batch(RingPage* r, uint32_t order,
+     const uint32_t taken = pending < count ? static_cast<uint32_t>(pending) : count;
+     const auto* slots = ring_slots(r);
+     for (uint32_t i = 0; i < taken; ++i) out[i] = slots[(tail + i) & mask];
+-    __atomic_store_n(&r->tail.v, tail + taken, __ATOMIC_RELEASE);
++    ring_release(r, tail + taken, space_doorbell);
+     return taken;
+ }
+ 
+@@ -343,6 +361,11 @@ struct Ring {
+     RingPage* ring = nullptr;
+     uint32_t order = 0;
+     CapHandle doorbell = kNullCap;
++    CapHandle handle = kNullCap;
++    CapHandle space_doorbell = kNullCap;
++    // Exclusive sender-owned storage, never placed in shared memory. A caller
++    // deferring a wake must flush it before blocking or leaving the operation.
++    bool* deferred_notify = nullptr;
+ 
+     bool valid() const { return ring_valid(ring, order); }
+     RingPage* raw() const { return ring; }
+@@ -351,7 +374,7 @@ struct Ring {
+ 
+     // --- publish (producer) -------------------------------------------------
+     bool try_push(uint32_t type, const void* data, uint32_t len) const {
+-        return ring != nullptr && ring_try_push(ring, order, type, data, len, doorbell);
++        return ring != nullptr && ring_try_push(ring, order, type, data, len, doorbell, nullptr, deferred_notify);
+     }
+     bool try_push_frame(const RingSlot& frame) const {
+         return ring != nullptr && ring_try_push_frame(ring, order, frame, doorbell);
+@@ -389,18 +412,60 @@ struct Ring {
+     }
+ 
+     // --- consume (consumer) -------------------------------------------------
+-    bool try_pop(RingSlot* out) const { return ring != nullptr && ring_pop(ring, order, out); }
++    bool try_pop(RingSlot* out) const { return ring != nullptr && ring_pop_space(ring, order, out, space_doorbell); }
+     uint32_t try_pop_batch(RingSlot* out, uint32_t count) const {
+-        return ring_pop_batch(ring, order, out, count);
++        return ring_pop_batch(ring, order, out, count, space_doorbell);
++    }
++    bool wait_readable(uint32_t poll_budget = 0) const {
++        if (!handle) return ring_wait_readable(ring, order, doorbell);
++        return wait_cursor(false, 1, poll_budget);
++    }
++    bool wait_readable_after_notify(CapHandle notify, uint32_t flags = 0) const {
++        if (!handle) return mx_doorbell_notify(notify) == MX_OK && wait_readable();
++        if (!valid() || !doorbell) return false;
++        const uint64_t tail = __atomic_load_n(&ring->tail.v, __ATOMIC_RELAXED);
++        (void)__atomic_exchange_n(&ring->flags.receiver_about_to_sleep, 1u, __ATOMIC_ACQ_REL);
++        const auto rc = sys_notify_wait(notify, handle, doorbell, tail, flags);
++        __atomic_store_n(&ring->flags.receiver_about_to_sleep, 0u, __ATOMIC_RELEASE);
++        return rc >= 0;
++    }
++    bool wait_writable(uint32_t slots = 1, uint32_t poll_budget = 0) const {
++        if (!handle || !space_doorbell) return false;
++        return wait_cursor(true, slots, poll_budget);
++    }
++    bool wait_cursor(bool writable, uint32_t slots = 1, uint32_t poll_budget = 0) const {
++        if (!valid() || !slots || slots > capacity()) return false;
++        auto* flag = writable ? &ring->space.producer_about_to_sleep : &ring->flags.receiver_about_to_sleep;
++        for (;;) {
++            const uint64_t head = __atomic_load_n(&ring->head.v, __ATOMIC_ACQUIRE);
++            const uint64_t tail = __atomic_load_n(&ring->tail.v, __ATOMIC_ACQUIRE);
++            if (head - tail > capacity()) return false;
++            if (writable ? head - tail <= capacity() - slots : head != tail) return true;
++            // Opt-in only when the peer can run concurrently. Exhaustion falls
++            // through to the same race-free kernel wait; there is no busy wait
++            // while a same-core peer is descheduled.
++            if (poll_budget) {
++                --poll_budget;
++                libk::cpu::relax();
++                continue;
++            }
++            (void)__atomic_exchange_n(flag, 1u, __ATOMIC_ACQ_REL);
++            const auto cursor = writable ? tail : head;
++            const auto rc = sys_wait_ring(handle, writable ? space_doorbell : doorbell,
++                                           cursor, writable ? MX_RING_WAIT_WRITABLE : MX_RING_WAIT_READABLE);
++            __atomic_store_n(flag, 0u, __ATOMIC_RELEASE);
++            if (rc < 0) return false;
++        }
+     }
+-    bool wait_readable() const { return ring_wait_readable(ring, order, doorbell); }
+     bool wait_pop(RingSlot* out) const {
+-        return ring != nullptr && doorbell != kNullCap && ring_wait_pop(ring, order, out, doorbell);
++        if (!ring || !doorbell || !out) return false;
++        do { if (try_pop(out)) return true; } while (wait_readable());
++        return false;
+     }
+     bool pop_bounded(RingSlot* out, mx_u64_t deadline_ns) const {
+         if (!valid() || !out) return false;
+         for (;;) {
+-            if (ring_pop(ring, order, out)) return true;
++            if (try_pop(out)) return true;
+             if (mx_clock_ns() >= deadline_ns) return false;
+             sys_yield();
+         }
+diff --git a/userland/lib/include/mochi/syscall.h b/userland/lib/include/mochi/syscall.h
+index 615cb9f..c99df0f 100644
+--- a/userland/lib/include/mochi/syscall.h
++++ b/userland/lib/include/mochi/syscall.h
+@@ -154,11 +154,18 @@ static inline int64_t sys_cap_identify(CapHandle cap) { return _svc1(NR_CAP_IDEN
+ static inline int64_t sys_cap_grant(CapHandle proc, CapHandle src, uint32_t rights) { return _svc3(NR_CAP_GRANT, proc, src, rights); }
+ static inline int64_t sys_ring_create(uint32_t order, uint32_t flags) { return _svc2(NR_RING_CREATE, order, flags); }
+ static inline int64_t sys_ring_share(CapHandle ring, CapHandle proc, uint32_t rights) { return _svc3(NR_RING_SHARE, ring, proc, rights); }
+-static inline int64_t sys_doorbell_create() { return _svc1(NR_DOORBELL_CREATE, 0); }
++static inline int64_t sys_doorbell_create(uint32_t hints = 0) { return _svc1(NR_DOORBELL_CREATE, hints); }
+ static inline int64_t sys_doorbell_share(CapHandle db, CapHandle proc, uint32_t rights) { return _svc3(NR_DOORBELL_SHARE, db, proc, rights); }
+ static inline int64_t sys_notify(CapHandle db) { return _svc1(NR_NOTIFY, db); }
+ static inline int64_t sys_wait_doorbell(CapHandle db, uint64_t expected) { return _svc2(NR_WAIT_DOORBELL, db, expected); }
+ static inline uint64_t sys_doorbell_read(CapHandle db) { return static_cast<uint64_t>(_svc1(NR_DOORBELL_READ, db)); }
++static inline int64_t sys_wait_ring(CapHandle ring, CapHandle db, uint64_t cursor, uint32_t direction) {
++    return _svc4(MX_NR_WAIT_RING, ring, db, cursor, direction);
++}
++static inline int64_t sys_notify_wait(CapHandle notify, CapHandle ring, CapHandle wait,
++                                     uint64_t cursor, uint32_t flags = 0) {
++    return _svc5(MX_NR_NOTIFY_WAIT, notify, ring, wait, cursor, flags);
++}
+ static inline SysPair sys_supervisor_poll(CapHandle supervisor) { return _svc1_pair(NR_SUPERVISOR_POLL, supervisor); }
+ static inline mx_status_t sys_supervisor_bind_doorbell(CapHandle supervisor, CapHandle doorbell) {
+     return _svc2(MX_NR_SUPERVISOR_BIND_DOORBELL, supervisor, doorbell);

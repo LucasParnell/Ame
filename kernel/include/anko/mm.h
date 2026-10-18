@@ -130,6 +130,12 @@ bool vm_map_device_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32
 void vm_unmap(VmSpace& space, VirtAddr va);
 void vm_unmap_owned_range(VmSpace& space, VirtAddr va, u64 size);
 void vm_space_destroy(VmSpace& space);
+// The process registry has at most 64 live IDs. Reserve ASID zero for the
+// kernel and use the mandatory eight-bit ASID range; no ARMv8.1 dependency.
+// PID reuse is invalidated before publishing a newly created address space.
+constexpr u64 vm_context(PhysAddr root, u32 pid) {
+    return root | (static_cast<u64>(pid) << 48);
+}
 void vm_activate(PhysAddr pgd_phys);
 // Make data written by the kernel visible to instruction fetch before a page
 // is entered as executable code. On AArch64, D-cache and I-cache are not

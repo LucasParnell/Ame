@@ -99,8 +99,7 @@ void principal_mirror_weights(u32 cpu_id) {
 // Runtime accounting — charge elapsed time to thread / process / principal.
 // Called before every context switch and on tick.
 // ---------------------------------------------------------------------------
-static void account_owned(Eki& e, Thread* t) {
-    const u64 now = sched_clock_ns();
+static void account_owned(Eki& e, Thread* t, u64 now) {
     const u64 delta = now - t->last_start_ns;
     t->last_start_ns = now;
     t->runtime_ns += delta;
@@ -117,8 +116,11 @@ static void account_owned(Eki& e, Thread* t) {
     const bool exhausted = ps.budget_ns && ps.budget_window.charge(
         delta, now, ps.period_ns).used_ns >= ps.budget_ns;
     PrincipalEntity& pe = e.principal_entities[pid];
-    pe.weight = principal_weight(pid);
-    const u64 principal_delta = delta * NICE_0_WEIGHT / pe.weight;
+    // A queued/running thread pins immutable principal policy. Reuse the
+    // station's generation-checked weight instead of rereading a shared line.
+    if (!t->principal_generation || pe.generation != t->principal_generation)
+        pe.weight = principal_weight(pid);
+    const u64 principal_delta = pe.weight == NICE_0_WEIGHT ? delta : delta * NICE_0_WEIGHT / pe.weight;
     // This shared clock orders every band containing the principal. Legacy
     // per-band clocks and a second runtime total had no selection/metric reader;
     // keep the authoritative totals above and the clocks used by the picker.
@@ -129,7 +131,7 @@ static void account_owned(Eki& e, Thread* t) {
         if (pe.in_queue[b]) fpq_resift(band_for(e, static_cast<SchedBand>(b)), &pe);
 
     const u32 tw = t->sched.weight ? t->sched.weight : NICE_0_WEIGHT;
-    t->vruntime_ns += delta * NICE_0_WEIGHT / tw;
+    t->vruntime_ns += tw == NICE_0_WEIGHT ? delta : delta * NICE_0_WEIGHT / tw;
     u64 minimum = t->vruntime_ns;
     for (u32 b = 1; b < NUM_BANDS; ++b) {
         if (auto* queued = ftq_peek_min(band_threads(e, pe, static_cast<SchedBand>(b)))) {
@@ -146,22 +148,31 @@ static void account_owned(Eki& e, Thread* t) {
         request_switch(true, SWITCH_BUDGET);
 }
 
-void account_current(Eki& e) {
-    // IRQ exclusion protects the single CPU writer, including syscall callers
-    // outside post_syscall. It does not wait for any other CPU.
-    kernel::InterruptGuard irq;
+static void account_current_owned_at(Eki& e, u64 now) {
     Thread* t = e.current;
     if (!t || t == e.idle) return;
     if (t->state == TS_RUNNING) {
         // Wakers and context binders cannot change a running thread. Its owner
         // can charge without acquiring a lock that those remote paths may hold.
-        account_owned(e, t);
+        account_owned(e, t, now);
     } else {
         // Blocking has exposed wake metadata before the frame is published.
         // Serialize the final charge with that exceptional transition.
         kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
-        account_owned(e, t);
+        account_owned(e, t, now);
     }
+}
+
+void account_current_at(Eki& e, u64 now) {
+    kernel::InterruptGuard irq;
+    account_current_owned_at(e, now);
+}
+
+void account_current(Eki& e) {
+    // Take the timestamp inside IRQ exclusion so an interrupt cannot charge a
+    // newer interval before this call applies an older sample.
+    kernel::InterruptGuard irq;
+    account_current_owned_at(e, sched_clock_ns());
 }
 
 // ---------------------------------------------------------------------------

@@ -13,7 +13,6 @@ inline int64_t sys_thread_create(CapHandle, uint64_t, uint64_t, uint32_t) {
 }
 inline int64_t sys_thread_set_affinity(CapHandle, uint64_t) { return MX_ERR_NOT_IMPLEMENTED; }
 inline int64_t sys_thread_resume(CapHandle) { return MX_ERR_NOT_IMPLEMENTED; }
-inline mx_status_t mx_doorbell_create(CapHandle* out) { *out = 98; return MX_OK; }
 static unsigned revoked;
 #include "../userland/msh/msh_diag.cc"
 

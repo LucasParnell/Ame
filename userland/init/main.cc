@@ -7,8 +7,8 @@
 // and no other authority.
 //
 // Responsibilities:
-//   1. Parse the boot manifest (static TOML-like structure, not code).
-//   2. Spawn services in order: nameservice → io.console → demo.pong → demo.ping.
+//   1. Parse the authenticated JSON boot manifest.
+//   2. Prepare suspended services, then launch each ready dependency wave.
 //   3. Assign principals and pass declared capabilities to each service.
 //   4. Register services with nameservice.
 //   5. Supervise children: on death, apply restart policy.
@@ -574,10 +574,10 @@ static void create_sessions() {
         server.directory = reinterpret_cast<MxSessionDirectory*>(va);
         *server.directory = {};
         server.directory->magic = MX_SESSION_MAGIC;
-        if (server.use == 2) {
-            server.wake = as_cap(sys_doorbell_create());
-            if (!server.wake) fail_halt("init: discovery wake create failed\n");
-        }
+        // One wake source per server; request payloads remain in separate SPSC
+        // rings. Both discovery and filesystem can sleep without polling clients.
+        server.wake = as_cap(sys_doorbell_create());
+        if (!server.wake) fail_halt("init: session wake create failed\n");
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
             auto& svc = g_rt.services[i];
             if (!(svc.uses & server.use)) continue;
@@ -1133,6 +1133,9 @@ static bool restart_service_now(ServiceSpec& svc) {
 }
 
 static void launch_prepared_services() {
+    const uint64_t started = mx_clock_ns();
+    uint64_t longest_wait = 0;
+    const char* slowest = "none";
     uint32_t remaining = 0;
     for (uint32_t i = 0; i < g_rt.service_count; ++i) remaining += g_rt.services[i].desired;
     for (uint32_t pass = 0; pass < g_rt.service_count; ++pass) {
@@ -1155,12 +1158,15 @@ static void launch_prepared_services() {
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
             auto& svc = g_rt.services[i];
             if (svc.ready || !svc.launching) continue;
+            const uint64_t wait_started = mx_clock_ns();
             if (!await_ready(svc)) {
                 sys_debug_puts("init: failed service: ", 22);
                 sys_debug_puts(svc.name, slen(svc.name));
                 sys_debug_puts("\n", 1);
                 fail_halt("init: service launch failed\n");
             }
+            const uint64_t waited = mx_clock_ns() - wait_started;
+            if (waited > longest_wait) { longest_wait = waited; slowest = svc.name; }
             svc.launching = false;
             if (streq(svc.name,"msh") || (streq(svc.name,"tty.fb0")&&!find_service(g_rt.services,g_rt.service_count,"msh"))) {
                 console_log("system ready\n"); (void)sys_notify(channel(ChannelId::console_activate_db)); (void)sys_notify(channel(ChannelId::input_tty_db));
@@ -1169,6 +1175,14 @@ static void launch_prepared_services() {
         }
     }
     if (remaining) fail_halt("init: services not ready\n");
+    // Boot-only summary: observed waits include concurrent service work, not
+    // exclusive CPU time. Keep profiling state off steady-state service rows.
+    char timing[160];
+    libk::str::Buffer line(timing);
+    line.format("boot.launch_ns=%llu longest_wait_ns=%llu service=%s",
+                static_cast<unsigned long long>(mx_clock_ns() - started),
+                static_cast<unsigned long long>(longest_wait), slowest);
+    console_log(line.data);
     console_log("all services ready\n");
 }
 
@@ -1336,6 +1350,7 @@ static bool handle_fido2_demand() {
 }
 
 extern "C" [[noreturn]] void _start() {
+    const uint64_t started = mx_clock_ns();
     const MxBootInfo* boot = mochi::boot::map();
     g_rt.boot = boot;
     if (const auto* entry = mochi::boot::find(boot, "cpu.count")) g_cpu_count = entry->aux0;
@@ -1397,6 +1412,7 @@ extern "C" [[noreturn]] void _start() {
         services[i].image_sha256_valid = services[i].image_data != nullptr;
     }
 
+    const uint64_t parsed = mx_clock_ns();
     for (uint32_t i = 0; i < service_count; ++i) {
         if (!services[i].image_data || services[i].image_size == 0) {
             fail_halt("init: manifest failed\n");
@@ -1404,6 +1420,7 @@ extern "C" [[noreturn]] void _start() {
         if (services[i].desired && !spawn_service(services[i], MX_SPAWN_SUSPENDED)) fail_halt("init: spawn failed\n");
     }
 
+    const uint64_t spawned = mx_clock_ns();
     const CapHandle registry = create_service_registry(services, service_count);
     g_rt.svc_registry_cap = registry;
     g_rt.svc_registry = reinterpret_cast<mochi::svc::RegistryPage*>(kVaSvcRegistry);
@@ -1435,6 +1452,13 @@ extern "C" [[noreturn]] void _start() {
     require_ok(sys_supervisor_bind_doorbell(kCapSupervisor, g_rt.svcctl.ep.rx_doorbell),
                "init: exit wake bind failed\n");
     parse_dependencies();
+    char timing[144];
+    libk::str::Buffer line(timing);
+    line.format("boot.parse_ns=%llu spawn_ns=%llu wiring_ns=%llu",
+                static_cast<unsigned long long>(parsed - started),
+                static_cast<unsigned long long>(spawned - parsed),
+                static_cast<unsigned long long>(mx_clock_ns() - spawned));
+    console_log(line.data);
     launch_prepared_services();
     while (true) {
         // Exit notifications and control messages converge on one doorbell.

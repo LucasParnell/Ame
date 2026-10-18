@@ -163,7 +163,7 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
     PhysAddr* backing = nullptr;
     bool backing_ok = false;
     {
-        KernelAddressSpaceGuard kernel_space(caller.ttbr0);
+        KernelAddressSpaceGuard kernel_space(mm::vm_context(caller.ttbr0, caller.pid));
         backing_ok = alloc_backing_pages(pages, &backing);
     }
     if (!backing_ok) {
@@ -411,7 +411,7 @@ SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset,
 
     u64 copied = 0;
     {
-        KernelAddressSpaceGuard kernel_space(caller.ttbr0);
+        KernelAddressSpaceGuard kernel_space(mm::vm_context(caller.ttbr0, caller.pid));
         while (copied < len) {
             const u64 off = guest_offset + copied;
             const usize page_index = static_cast<usize>(off / PAGE_SIZE);

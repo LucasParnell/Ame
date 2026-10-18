@@ -1,0 +1,772 @@
+{
+  "baseline_archive_revision": "7bd9ed13d2d2f3e1ce293bb0c70f3c1a9e1ccc18",
+  "date_utc": "2026-10-18",
+  "tools": {
+    "clang": "19.1.7",
+    "cmake": "3.31.6",
+    "qemu": "10.0.13",
+    "python": "3.12.14"
+  },
+  "boot_qemu_debug": {
+    "kind": "Interleave direct QEMU boots and measure Linux host CPU use after readiness.\n\nCPU seconds are QEMU host process time, not guest profiling or device power.\nCompare on an otherwise quiet host; TCG and host scheduling affect both metrics.\n",
+    "cpus": 2,
+    "samples": {
+      "baseline": [
+        {
+          "ready_seconds": 1.8142974360002881,
+          "idle_host_cpu_seconds_per_second": 1.745049289058936,
+          "phases_ns": {},
+          "logs": "out/qemu-dev/refactor-boot-final/baseline-0"
+        },
+        {
+          "ready_seconds": 1.713928870000018,
+          "idle_host_cpu_seconds_per_second": 1.725165987431238,
+          "phases_ns": {},
+          "logs": "out/qemu-dev/refactor-boot-final/baseline-1"
+        },
+        {
+          "ready_seconds": 1.6135384760000306,
+          "idle_host_cpu_seconds_per_second": 1.719560492798295,
+          "phases_ns": {},
+          "logs": "out/qemu-dev/refactor-boot-final/baseline-2"
+        }
+      ],
+      "current": [
+        {
+          "ready_seconds": 1.3583462779997717,
+          "idle_host_cpu_seconds_per_second": 0.02992900040503019,
+          "phases_ns": {
+            "verify_ns": 422504752,
+            "boot.parse_ns": 49051392,
+            "spawn_ns": 207317248,
+            "wiring_ns": 86402416,
+            "boot.launch_ns": 414501728,
+            "longest_wait_ns": 155515248
+          },
+          "logs": "out/qemu-dev/refactor-boot-final/current-0"
+        },
+        {
+          "ready_seconds": 1.3613285100000212,
+          "idle_host_cpu_seconds_per_second": 0.03989457805885179,
+          "phases_ns": {
+            "verify_ns": 427039488,
+            "boot.parse_ns": 49812560,
+            "spawn_ns": 214101680,
+            "wiring_ns": 88799536,
+            "boot.launch_ns": 412372640,
+            "longest_wait_ns": 162508672
+          },
+          "logs": "out/qemu-dev/refactor-boot-final/current-1"
+        },
+        {
+          "ready_seconds": 1.4124773650000861,
+          "idle_host_cpu_seconds_per_second": 0.034909780925120565,
+          "phases_ns": {
+            "verify_ns": 406859056,
+            "boot.parse_ns": 54775552,
+            "spawn_ns": 231123520,
+            "wiring_ns": 94260864,
+            "boot.launch_ns": 443269024,
+            "longest_wait_ns": 172629760
+          },
+          "logs": "out/qemu-dev/refactor-boot-final/current-2"
+        }
+      ]
+    },
+    "medians": {
+      "baseline": {
+        "ready_seconds": 1.713928870000018,
+        "idle_host_cpu_seconds_per_second": 1.725165987431238
+      },
+      "current": {
+        "ready_seconds": 1.3613285100000212,
+        "idle_host_cpu_seconds_per_second": 0.034909780925120565
+      }
+    }
+  },
+  "checksum_cached_host_O3": {
+    "kind": "cached host integrity workload",
+    "optimization": "-O3",
+    "baseline": {
+      "ieee_4k": {
+        "samples_ns_per_byte": [
+          13.9005,
+          4.9307,
+          4.8845,
+          5.2894,
+          5.1995,
+          6.1837,
+          4.8796
+        ],
+        "median_ns_per_byte": 5.1995
+      },
+      "crc32c_1m": {
+        "samples_ns_per_byte": [
+          4.4098,
+          4.3804,
+          4.4951,
+          4.3441,
+          5.0288,
+          4.4442,
+          4.3871
+        ],
+        "median_ns_per_byte": 4.4098
+      },
+      "crc32c_zero_1m": {
+        "samples_ns_per_byte": [
+          4.3194,
+          4.8211,
+          4.3512,
+          4.4457,
+          4.5111,
+          4.3258,
+          4.3411
+        ],
+        "median_ns_per_byte": 4.3512
+      },
+      "sha256_1m": {
+        "samples_ns_per_byte": [
+          3.9321,
+          3.7247,
+          3.9227,
+          4.0231,
+          3.9684,
+          3.8789,
+          3.7948
+        ],
+        "median_ns_per_byte": 3.9227
+      }
+    },
+    "current": {
+      "ieee_4k": {
+        "samples_ns_per_byte": [
+          2.1879,
+          2.1839,
+          2.1925,
+          2.189,
+          2.2036,
+          2.1995,
+          2.1922
+        ],
+        "median_ns_per_byte": 2.1922
+      },
+      "crc32c_1m": {
+        "samples_ns_per_byte": [
+          2.2296,
+          2.3647,
+          2.3554,
+          2.4189,
+          2.3086,
+          2.4103,
+          3.0195
+        ],
+        "median_ns_per_byte": 2.3647
+      },
+      "crc32c_zero_1m": {
+        "samples_ns_per_byte": [
+          2.2423,
+          2.3409,
+          2.4297,
+          2.3899,
+          2.3246,
+          2.307,
+          2.7336
+        ],
+        "median_ns_per_byte": 2.3409
+      },
+      "sha256_1m": {
+        "samples_ns_per_byte": [
+          3.6562,
+          3.712,
+          3.8151,
+          3.8203,
+          3.7979,
+          4.1593,
+          3.9182
+        ],
+        "median_ns_per_byte": 3.8151
+      }
+    },
+    "speedup": {
+      "ieee_4k": 2.371818264756865,
+      "crc32c_1m": 1.8648454349388928,
+      "crc32c_zero_1m": 1.8587722670767655,
+      "sha256_1m": 1.02820371680952
+    }
+  },
+  "ipc_cached_host_O3": {
+    "kind": "host IPC hot/cold stress; no phone prediction",
+    "baseline": {
+      "notify_empty_small_registry": {
+        "samples_ns": [
+          25.48,
+          26.18,
+          26.36,
+          26.59,
+          27.84,
+          25.59,
+          28.26
+        ],
+        "median_ns": 26.36
+      },
+      "notify_empty": {
+        "samples_ns": [
+          25.02,
+          27.38,
+          24.91,
+          26.27,
+          31.43,
+          28.21,
+          27.73
+        ],
+        "median_ns": 27.38
+      },
+      "counter_read": {
+        "samples_ns": [
+          18.21,
+          18.88,
+          20.97,
+          19.12,
+          21.18,
+          18.12,
+          18.3
+        ],
+        "median_ns": 18.88
+      },
+      "wait_immediate": {
+        "samples_ns": [
+          21.68,
+          20.32,
+          22.14,
+          35.5,
+          23.64,
+          21.61,
+          20.95
+        ],
+        "median_ns": 21.68
+      },
+      "notify_deferred_waiter": {
+        "samples_ns": [
+          25.37,
+          20.82,
+          19.86,
+          19.87,
+          21.75,
+          18.91,
+          20.26
+        ],
+        "median_ns": 20.26
+      },
+      "timer_empty": {
+        "samples_ns": [
+          2.97,
+          4.49,
+          2.71,
+          3.23,
+          3.9,
+          2.93,
+          2.86
+        ],
+        "median_ns": 2.97
+      },
+      "doorbell_create_share_revoke": {
+        "samples_ns": [
+          96.53,
+          115.75,
+          96.04,
+          96.42,
+          128.09,
+          112.83,
+          97.16
+        ],
+        "median_ns": 97.16
+      },
+      "ring_create_share_revoke": {
+        "samples_ns": [
+          171.31,
+          185.11,
+          214.49,
+          161.76,
+          190.05,
+          212.49,
+          171.5
+        ],
+        "median_ns": 185.11
+      },
+      "cap_clear_empty": {
+        "samples_ns": [
+          34.69,
+          38.5,
+          38.32,
+          37.62,
+          39.18,
+          34.7,
+          36.32
+        ],
+        "median_ns": 37.62
+      },
+      "cap_full_reject": {
+        "samples_ns": [
+          4.29,
+          4.24,
+          4.39,
+          5.04,
+          4.49,
+          4.38,
+          4.15
+        ],
+        "median_ns": 4.38
+      },
+      "independent_cpu_notify": {
+        "samples_ns": [
+          4.61,
+          4.89,
+          5.08,
+          5.48,
+          5.77,
+          5.82,
+          5.59
+        ],
+        "median_ns": 5.48
+      },
+      "ring_16_slot_roundtrip": {
+        "samples_ns": [
+          10.96,
+          10.94,
+          10.26,
+          10.49,
+          10.05,
+          10.44,
+          10.98
+        ],
+        "median_ns": 10.49
+      },
+      "ring_single_roundtrip": {
+        "samples_ns": [
+          2.61,
+          2.45,
+          2.34,
+          2.33,
+          2.53,
+          2.21,
+          2.21
+        ],
+        "median_ns": 2.34
+      },
+      "ring_parallel_roundtrip": {
+        "samples_ns": [
+          12.47,
+          15.24,
+          14.35,
+          12.16,
+          11.27,
+          12.62,
+          15.41
+        ],
+        "median_ns": 12.62
+      }
+    },
+    "current": {
+      "notify_empty_small_registry": {
+        "samples_ns": [
+          24.52,
+          24.72,
+          24.29,
+          26.7,
+          25.98,
+          24.46,
+          25.17
+        ],
+        "median_ns": 24.72
+      },
+      "notify_empty": {
+        "samples_ns": [
+          24.02,
+          24.35,
+          24.73,
+          24.14,
+          24.64,
+          24.59,
+          25.17
+        ],
+        "median_ns": 24.59
+      },
+      "counter_read": {
+        "samples_ns": [
+          19.14,
+          18.69,
+          18.39,
+          18.44,
+          18.39,
+          18.47,
+          19.26
+        ],
+        "median_ns": 18.47
+      },
+      "wait_immediate": {
+        "samples_ns": [
+          22.95,
+          20.98,
+          20.52,
+          20.43,
+          20.59,
+          20.41,
+          21.37
+        ],
+        "median_ns": 20.59
+      },
+      "notify_deferred_waiter": {
+        "samples_ns": [
+          23.4,
+          19.84,
+          19.74,
+          19.91,
+          19.84,
+          19.75,
+          19.49
+        ],
+        "median_ns": 19.84
+      },
+      "timer_empty": {
+        "samples_ns": [
+          2.71,
+          2.77,
+          2.81,
+          2.89,
+          2.71,
+          3.08,
+          2.77
+        ],
+        "median_ns": 2.77
+      },
+      "doorbell_create_share_revoke": {
+        "samples_ns": [
+          97.55,
+          101.08,
+          101.51,
+          96.03,
+          99.95,
+          94.85,
+          95.54
+        ],
+        "median_ns": 97.55
+      },
+      "ring_create_share_revoke": {
+        "samples_ns": [
+          170.09,
+          165.8,
+          164.2,
+          172.95,
+          158.65,
+          162.09,
+          161.13
+        ],
+        "median_ns": 164.2
+      },
+      "cap_clear_empty": {
+        "samples_ns": [
+          34.72,
+          35.96,
+          36.35,
+          34.74,
+          34.73,
+          40.58,
+          34.73
+        ],
+        "median_ns": 34.74
+      },
+      "cap_full_reject": {
+        "samples_ns": [
+          4.25,
+          4.11,
+          4.14,
+          4.13,
+          4.27,
+          4.09,
+          4.29
+        ],
+        "median_ns": 4.14
+      },
+      "independent_cpu_notify": {
+        "samples_ns": [
+          5.68,
+          5.56,
+          5.52,
+          5.59,
+          5.46,
+          5.47,
+          4.63
+        ],
+        "median_ns": 5.52
+      },
+      "ring_16_slot_roundtrip": {
+        "samples_ns": [
+          10.59,
+          10.21,
+          10.16,
+          10.34,
+          10.43,
+          10.89,
+          10.63
+        ],
+        "median_ns": 10.43
+      },
+      "ring_single_roundtrip": {
+        "samples_ns": [
+          2.2,
+          2.23,
+          2.2,
+          2.2,
+          2.2,
+          2.2,
+          2.46
+        ],
+        "median_ns": 2.2
+      },
+      "ring_parallel_roundtrip": {
+        "samples_ns": [
+          11.5,
+          12.91,
+          12.54,
+          15.1,
+          13.15,
+          12.66,
+          12.63
+        ],
+        "median_ns": 12.66
+      }
+    },
+    "speedup": {
+      "notify_empty_small_registry": 1.0663430420711975,
+      "notify_empty": 1.1134607564050427,
+      "counter_read": 1.022198159177044,
+      "wait_immediate": 1.052938319572608,
+      "notify_deferred_waiter": 1.0211693548387097,
+      "timer_empty": 1.072202166064982,
+      "doorbell_create_share_revoke": 0.9960020502306509,
+      "ring_create_share_revoke": 1.127344701583435,
+      "cap_clear_empty": 1.082901554404145,
+      "cap_full_reject": 1.0579710144927537,
+      "independent_cpu_notify": 0.992753623188406,
+      "ring_16_slot_roundtrip": 1.00575263662512,
+      "ring_single_roundtrip": 1.0636363636363635,
+      "ring_parallel_roundtrip": 0.9968404423380726
+    }
+  },
+  "scheduler_cached_host_O3": {
+    "kind": "warm host dispatch stress benchmark",
+    "baseline": {
+      "1": {
+        "samples_ns": [
+          143.2,
+          175.3,
+          159.3,
+          154.5,
+          131.9,
+          145.4,
+          138.9,
+          137.3,
+          134.2
+        ],
+        "principal_bytes": 64,
+        "station_bytes": 207808,
+        "timing": "dispatch_ns",
+        "median_ns": 143.2
+      },
+      "8": {
+        "samples_ns": [
+          195.4,
+          201.6,
+          190.8,
+          210.2,
+          186.1,
+          190.7,
+          211.0,
+          269.4,
+          186.3
+        ],
+        "principal_bytes": 64,
+        "station_bytes": 207808,
+        "timing": "dispatch_ns",
+        "median_ns": 195.4
+      },
+      "32": {
+        "samples_ns": [
+          199.1,
+          205.1,
+          197.7,
+          191.3,
+          189.0,
+          206.8,
+          203.4,
+          283.7,
+          189.8
+        ],
+        "principal_bytes": 64,
+        "station_bytes": 207808,
+        "timing": "dispatch_ns",
+        "median_ns": 199.1
+      },
+      "shared_unbudgeted": {
+        "samples_ns": [
+          21.2,
+          21.5,
+          19.4,
+          18.1,
+          19.2,
+          34.3,
+          18.1,
+          19.8,
+          20.1
+        ],
+        "principal_bytes": 64,
+        "station_bytes": 207808,
+        "timing": "accounting_ns",
+        "median_ns": 19.8
+      },
+      "shared_budgeted": {
+        "samples_ns": [
+          38.9,
+          34.4,
+          36.1,
+          35.3,
+          35.2,
+          34.8,
+          34.9,
+          39.2,
+          35.1
+        ],
+        "principal_bytes": 64,
+        "station_bytes": 207808,
+        "timing": "accounting_ns",
+        "median_ns": 35.2
+      }
+    },
+    "current": {
+      "1": {
+        "samples_ns": [
+          152.8,
+          157.9,
+          168.8,
+          145.1,
+          144.1,
+          142.4,
+          134.2,
+          134.5,
+          134.9
+        ],
+        "principal_bytes": 64,
+        "station_bytes": 207808,
+        "timing": "dispatch_ns",
+        "median_ns": 144.1
+      },
+      "8": {
+        "samples_ns": [
+          242.7,
+          200.8,
+          218.9,
+          212.7,
+          187.6,
+          189.8,
+          187.0,
+          187.2,
+          204.0
+        ],
+        "principal_bytes": 64,
+        "station_bytes": 207808,
+        "timing": "dispatch_ns",
+        "median_ns": 200.8
+      },
+      "32": {
+        "samples_ns": [
+          213.3,
+          197.7,
+          235.3,
+          220.7,
+          194.1,
+          193.0,
+          193.6,
+          196.8,
+          229.4
+        ],
+        "principal_bytes": 64,
+        "station_bytes": 207808,
+        "timing": "dispatch_ns",
+        "median_ns": 197.7
+      },
+      "shared_unbudgeted": {
+        "samples_ns": [
+          17.8,
+          18.7,
+          18.9,
+          25.6,
+          17.5,
+          16.6,
+          16.8,
+          18.6,
+          20.1
+        ],
+        "principal_bytes": 64,
+        "station_bytes": 207808,
+        "timing": "accounting_ns",
+        "median_ns": 18.6
+      },
+      "shared_budgeted": {
+        "samples_ns": [
+          28.4,
+          33.3,
+          34.5,
+          36.4,
+          29.6,
+          27.8,
+          28.2,
+          41.0,
+          35.0
+        ],
+        "principal_bytes": 64,
+        "station_bytes": 207808,
+        "timing": "accounting_ns",
+        "median_ns": 33.3
+      }
+    },
+    "speedup": {
+      "1": 0.9937543372657877,
+      "8": 0.9731075697211156,
+      "32": 1.0070814365199798,
+      "shared_unbudgeted": 1.064516129032258,
+      "shared_budgeted": 1.0570570570570572
+    }
+  },
+  "validation": {
+    "host_tests": 262,
+    "host_skipped": 39,
+    "host_result": "pass",
+    "address_sanitizer": true,
+    "undefined_behavior_sanitizer": true,
+    "leak_sanitizer": false,
+    "qemu_acceptance": {
+      "usb_keys_releases_two_reconnects": true,
+      "simd_1_2_4_cpus_el1_el2": true,
+      "lifecycle_1_cpus": true,
+      "lifecycle_2_cpus": true,
+      "lifecycle_4_cpus": true,
+      "supervision_restart": true,
+      "durable_write_reboot_read_3_mib": true,
+      "capability_manifest": true
+    },
+    "durability": {
+      "success": true,
+      "write_phase": true,
+      "read_phase": true,
+      "elapsed": 8.845658210000238,
+      "disk": "(discarded)"
+    },
+    "board_builds": [
+      "qemu-dev",
+      "anne-native-dev",
+      "switch"
+    ],
+    "usb_trace_final": "OFF",
+    "physical_hardware_tested": false
+  }
+}

@@ -125,11 +125,14 @@ struct RingMapping {
     mx_vaddr_t address;
     const char* doorbell;
     uint32_t default_order = MX_DEFAULT_RING_ORDER;
+    const char* space_doorbell = nullptr;
 };
 
 inline Ring map_ring(const MxBootInfo* info, const RingMapping& mapping) {
     Ring result{};
     result.doorbell = handle(info, mapping.doorbell);
+    result.handle = handle(info, mapping.name);
+    if (mapping.space_doorbell) result.space_doorbell = handle(info, mapping.space_doorbell);
     result.ring = map_ring(info, mapping.name, mapping.address,
                            mapping.default_order, &result.order);
     return result;
@@ -143,7 +146,8 @@ inline SpscEndpoint map_endpoint(const MxBootInfo* info, const RingMapping& tx_s
     const Ring tx = map_ring(info, tx_spec);
     const Ring rx = map_ring(info, rx_spec);
     if (tx.valid() && rx.valid() && tx.order == rx.order && tx.doorbell && rx.doorbell) {
-        return {tx.ring, rx.ring, tx.order, tx.doorbell, rx.doorbell};
+        return {tx.ring, rx.ring, tx.order, tx.doorbell, rx.doorbell,
+                tx.handle, rx.handle, tx.space_doorbell, rx.space_doorbell};
     }
     if (tx.ring) (void)sys_unmap_page(tx_spec.address);
     if (rx.ring) (void)sys_unmap_page(rx_spec.address);

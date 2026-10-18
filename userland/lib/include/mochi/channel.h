@@ -77,7 +77,21 @@ struct Channel {
     template <typename TReq, typename TReply>
     bool call(mx_u32_t req_type, const TReq& req, mx_u32_t reply_type, TReply* reply,
               mx_u64_t deadline_ns = 0) const {
-        if (!reply) return false;
+        if (!reply || !valid()) return false;
+        // A synchronous copied request can carry its notification into the
+        // receive wait. Legacy endpoints and deadline calls retain their ABI.
+        if (!deadline_ns && ep.rx_handle && ep.tx_handle) {
+            auto tx = ep.tx();
+            bool pending = false;
+            tx.deferred_notify = &pending;
+            uint32_t retries = 1024;
+            while (!tx.try_push(req_type, &req, message_size<TReq>())) {
+                if (!retries--) return false;
+                sys_yield();
+            }
+            if (pending && !ep.rx().wait_readable_after_notify(tx.doorbell)) return false;
+            return receive(reply_type, reply, 0);
+        }
         const bool sent = deadline_ns != 0 ? send_bounded(req_type, req, deadline_ns)
                                           : send(req_type, req);
         return sent && receive(reply_type, reply, deadline_ns);

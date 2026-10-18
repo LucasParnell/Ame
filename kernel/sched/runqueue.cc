@@ -15,8 +15,11 @@
 #include "anko/panic.h"
 #include "anko/spinlock.h"
 #include "libk/metric.h"
+#include "libk/cpu.h"
+#include "libk/counter_scale.h"
 #include "libk/printf.h"
 #include "libk/string.h"
+#include "libk/bytes.h"
 
 namespace sched {
 
@@ -25,7 +28,8 @@ namespace sched {
 // ---------------------------------------------------------------------------
 static Eki   g_eki[kMaxCpus]{};
 static u64   g_online_cpu_mask = 1;
-static u64   g_cntfrq = 0;          // cached at init
+static u64   g_cntfrq = 0;          // read once at init
+static libk::CounterScale g_counter_scale;
 
 using libk::metric_inc;
 
@@ -33,29 +37,26 @@ using libk::metric_inc;
 // Clock
 // ---------------------------------------------------------------------------
 u64 sched_clock_ns() {
-    u64 cnt;
-    asm volatile("mrs %0, CNTPCT_EL0" : "=r"(cnt) :: "memory");
-    if (!g_cntfrq) return cnt; // before init; return ticks
-    // Avoid 128-bit division (no __udivti3 in freestanding runtime):
-    // split into whole-second and sub-second parts, both fit in u64.
-    // rem < g_cntfrq ≤ 1 GHz, so rem * 1e9 < 2^60 — no overflow.
-    const u64 sec = cnt / g_cntfrq;
-    const u64 rem = cnt % g_cntfrq;
-    return sec * 1000000000ULL + rem * 1000000000ULL / g_cntfrq;
+    return g_counter_scale.nanoseconds(libk::cpu::counter_ticks());
 }
 
 // ---------------------------------------------------------------------------
 // Misc helpers
 // ---------------------------------------------------------------------------
-static inline void send_event()          { asm volatile("sev" ::: "memory"); }
-static inline void irq_enable()          { asm volatile("msr DAIFClr, #2" ::: "memory"); }
-static inline void irq_disable()         { asm volatile("msr DAIFSet, #2" ::: "memory"); }
+static inline void send_event()          { libk::cpu::send_event(); }
+static inline void irq_enable()          { libk::cpu::interrupt_enable(); }
+static inline void irq_disable()         { libk::cpu::interrupt_disable(); }
 
-// Only enable IRQs for the event wait. Scheduler queue mutation must
-// resume with IRQs masked, otherwise timer/IPI paths can reenter queue code.
+// Queue inspection reaches here with IRQs masked. WFI observes pending IRQs
+// even when DAIF.I is set: keep it masked until the wait so an IPI cannot be
+// handled between the empty check and sleep. Remote publication always sends
+// an SGI; timer IRQs also cover budget replenishment. SEV alone is not a wake.
 static inline void wait_for_interrupt()  {
+    libk::cpu::wait_for_interrupt();
     irq_enable();
-    asm volatile("wfe" ::: "memory");
+    // Take the pending interrupt before masking again. Queue mutations outside
+    // its handler must resume with IRQs masked to prevent scheduler reentry.
+    libk::cpu::instruction_sync();
     irq_disable();
 }
 
@@ -337,6 +338,10 @@ static void maybe_request_preemption_on_wake(Eki& e, Thread* woken);
 // can starve a newly-resumed VM runner indefinitely.
 // ---------------------------------------------------------------------------
 static void drain_pending_wakes(Eki& e) {
+    // Remote publishers always signal an empty-to-nonempty transition. A
+    // publication racing this read remains queued and carries its own IPI.
+    // Avoid acquiring exclusive cache-line ownership on every empty syscall.
+    if (!__atomic_load_n(&e.pending_wakes.head, __ATOMIC_ACQUIRE)) return;
     Thread* list = __atomic_exchange_n(&e.pending_wakes.head, nullptr, __ATOMIC_ACQ_REL);
     if (!list) return;
     metric_inc(e.pending_wake_drains);
@@ -383,14 +388,17 @@ static void drain_pending_wakes(Eki& e) {
 // ---------------------------------------------------------------------------
 // Pending-wake push (lock-free CAS, called from remote CPUs)
 // ---------------------------------------------------------------------------
-void pending_push(Eki& target, Thread* t) {
-    Thread* old;
+bool pending_push(Eki& target, Thread* t) {
+    Thread* old = __atomic_load_n(&target.pending_wakes.head, __ATOMIC_RELAXED);
     do {
-        old = __atomic_load_n(&target.pending_wakes.head, __ATOMIC_ACQUIRE);
         t->remote_next = old;
     } while (!__atomic_compare_exchange_n(&target.pending_wakes.head,
-                                          &old, t, false,
+                                          &old, t, true,
                                           __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+    // Only the empty-transition publisher sends an IPI. If the receiver drains
+    // concurrently, CAS observes null and the new list gets a fresh signal.
+    // A nonempty predecessor's signal covers all nodes in the published chain.
+    return old == nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -474,8 +482,9 @@ static void apply_wake_metadata_locked(Thread* t, WakeReason reason, u32 sched_h
     const ThreadState state = t->state;
     if (t->terminate_requested || state == TS_RUNNING || state == TS_RUNNABLE_QUEUED ||
         state == TS_RUNNABLE_PENDING_REMOTE || t->on_runqueue) return;
+    const u64 now = sched_clock_ns();
     t->last_wake_reason = reason;
-    t->last_wake_ns     = sched_clock_ns();
+    t->last_wake_ns     = now;
 
     // Only doorbell and IRQ wakes get credit.  The credit remains non-transferable
     // per thread and is charged away as the receiver's principal runs.
@@ -490,7 +499,7 @@ static void apply_wake_metadata_locked(Thread* t, WakeReason reason, u32 sched_h
     if (t->wake_credit_ns > cap) t->wake_credit_ns = cap;
 
     // Mark IPC hot window for stickiness (resist work stealing)
-    t->ipc_hot_until_ns = sched_clock_ns() + 2000000ULL; // 2 ms
+    t->ipc_hot_until_ns = now + 2000000ULL; // 2 ms
 }
 
 void apply_wake_metadata(Thread* t, WakeReason reason, u32 hints) {
@@ -558,9 +567,9 @@ static void wake_locked(Thread* t, u32 target_cpu) {
     if (target_cpu != source.cpu_id) {
         t->state = TS_RUNNABLE_PENDING_REMOTE;
         t->cpu_id = target_cpu;
-        pending_push(eki_for_cpu(target_cpu), t);
+        const bool signal = pending_push(eki_for_cpu(target_cpu), t);
         metric_inc(source.remote_wakes);
-        smp::send_wake_ipi(target_cpu);
+        if (signal) smp::send_wake_ipi(target_cpu);
         return;
     }
     t->state = TS_RUNNABLE_QUEUED;
@@ -631,7 +640,7 @@ void collect_terminations(Eki& e, Thread* protected_thread) {
             handoff_forget(e, t);
             t->state = TS_DEAD;
         }
-        if (!e.current && t->owner && active_ttbr0() == t->owner->ttbr0)
+        if (!e.current && t->owner && active_ttbr0() == mm::vm_context(t->owner->ttbr0, t->owner->pid))
             mm::vm_activate(0);
         handoff_abort_reply(t);
         finish_thread(t);
@@ -683,7 +692,8 @@ static u64 active_ttbr0() {
 static void activate_thread_space(Thread* t) {
     if (!t) return;
     if (t->owner) {
-        if (active_ttbr0() != t->owner->ttbr0) mm::vm_activate(t->owner->ttbr0);
+        const u64 context = mm::vm_context(t->owner->ttbr0, t->owner->pid);
+        if (active_ttbr0() != context) mm::vm_activate(context);
     }
     else ANKO_LOGF_WARN("kernel/sched",
                         "activate: no process for tid=%u pid=%u", t->tid, t->pid);
@@ -713,6 +723,7 @@ void init() {
     ANKO_LOG_INFO("kernel/sched", "ressha/eki v2 init");
     asm volatile("mrs %0, CNTFRQ_EL0" : "=r"(g_cntfrq));
     g_cntfrq = platform::counter_frequency(g_cntfrq);
+    g_counter_scale.configure(static_cast<u32>(g_cntfrq));
     for (u32 i = 0; i < kMaxCpus; ++i) init_eki(i);
 
     principal_init_bootstrap();
@@ -742,6 +753,8 @@ void init() {
             continue;
         }
 
+        libk::cpu::prefetch_read(&next->tf);
+        libk::cpu::prefetch_read(&next->fpsimd);
         e.current = next;
         next->state = TS_RUNNING;
         __atomic_store_n(&next->execution_cpu, e.cpu_id, __ATOMIC_RELEASE);
@@ -775,7 +788,7 @@ void tick() {
     const u64 ran_in_slice = (cur->slice_start_ns && now >= cur->slice_start_ns)
         ? now - cur->slice_start_ns : 0;
     const bool handoff_expired = handoff_deadline_expired(cur, now);
-    account_current(e);
+    account_current_at(e, now);
 
     if (e.switch_pending) return;
     if ((cur->slice_ns > 0 && ran_in_slice >= cur->slice_ns) ||
@@ -827,8 +840,7 @@ void enqueue(Thread* t) {
     } else {
         t->state = TS_RUNNABLE_PENDING_REMOTE;
         t->cpu_id = tgt;
-        pending_push(eki_for_cpu(tgt), t);
-        smp::send_wake_ipi(tgt);
+        if (pending_push(eki_for_cpu(tgt), t)) smp::send_wake_ipi(tgt);
     }
 }
 
@@ -889,12 +901,12 @@ void mark_current_dead(bool whole_process) {
 // post_syscall — called on every syscall return.
 // Saves TrapFrame, performs context switch if needed.
 // ---------------------------------------------------------------------------
-extern "C" void post_syscall(void* frame_ptr) {
+extern "C" TrapFrame* post_syscall_frame(void* frame_ptr) {
     irq_disable();
     Eki& e = current_eki();
     drain_pending_wakes(e);
     Thread* cur = e.current;
-    if (!frame_ptr || !cur) return;
+    if (!frame_ptr || !cur) return static_cast<TrapFrame*>(frame_ptr);
     collect_terminations(e, cur);
     auto* frame = static_cast<TrapFrame*>(frame_ptr);
     if (e.switch_pending || cur->state != TS_RUNNING ||
@@ -903,12 +915,13 @@ extern "C" void post_syscall(void* frame_ptr) {
     if (__atomic_load_n(&cur->terminate_requested, __ATOMIC_ACQUIRE)) cur->state = TS_DEAD;
     if (!e.switch_pending && cur->state != TS_RUNNING)
         request_switch(false, cur->state == TS_DEAD ? SWITCH_EXIT : SWITCH_BLOCK);
-    if (!e.switch_pending) { activate_thread_space(cur); return; }
+    if (!e.switch_pending) { activate_thread_space(cur); return frame; }
     // A same-thread return uses the live exception frame directly. Copy all
     // registers only when dispatch may relinquish execution ownership; deferred
     // remote wakes still cannot observe the thread until this save completes.
     fpsimd::save(&cur->fpsimd);
-    cur->tf = *frame;
+    (void)libk::copy_exact(libk::as_bytes(&cur->tf, sizeof(cur->tf)),
+                           libk::as_bytes(frame, sizeof(*frame)));
     // Retain only on the switch path. After remote publication this CPU uses
     // the pointer only for identity comparison, unless it owns the retirement.
     // Running execution owns the thread's creator reference until finish_thread.
@@ -956,31 +969,36 @@ extern "C" void post_syscall(void* frame_ptr) {
             } else {
                 cur->state = TS_RUNNABLE_PENDING_REMOTE;
                 cur->cpu_id = wake_cpu;
-                pending_push(eki_for_cpu(wake_cpu), cur);
-                smp::send_wake_ipi(wake_cpu);
+                if (pending_push(eki_for_cpu(wake_cpu), cur)) smp::send_wake_ipi(wake_cpu);
             }
         }
     }
     if (!retiring_current) {
         // A sleeping thread can wake, migrate, and die while this CPU is idle.
-        // The saved frame is no longer ours; do not pin its process in WFE.
+        // The saved frame is no longer ours; do not pin its process in WFI.
         current_reference.reset();
         cur = nullptr;
     }
     // Direct handoff must obey the same eligibility and timing contracts as
     // queue dispatch. The receiver remains sleeping until this point.
     if (next) {
+        const bool competing = __atomic_load_n(&e.published_load, __ATOMIC_RELAXED) != 0;
         if (__atomic_load_n(&next->terminate_requested, __ATOMIC_ACQUIRE) ||
-            next->execution_cpu != kInvalidCpu || !thread_budget_available(next)) {
+            next->execution_cpu != kInvalidCpu || !thread_budget_available(next) ||
+            (competing && (e.rt.bitmap || e.handoff_streak >= 8))) {
             if (!next->terminate_requested) wake_local(next);
             next = nullptr;
         } else {
+            e.handoff_streak = competing ? e.handoff_streak + 1 : 0;
             next->state = TS_RUNNABLE_QUEUED;
             next->slice_ns = compute_slice_ns(next, 1);
             next->handoff_deadline_ns = sched_clock_ns() + kIpcDrainQuantumNs;
         }
     }
-    if (!next) next = pick_next(e);
+    if (!next) {
+        e.handoff_streak = 0;
+        next = pick_next(e);
+    }
     while (!next) {
         if (cur && retiring_current) {
             mm::vm_activate(0);
@@ -994,6 +1012,10 @@ extern "C" void post_syscall(void* frame_ptr) {
         collect_terminations(e, cur);
         next = pick_next(e);
     }
+    // Pull the selected context toward L1 while accounting/address-space work
+    // runs. Coherent cache hints do not modify the frame or relax publication.
+    libk::cpu::prefetch_read(&next->tf);
+    libk::cpu::prefetch_read(&next->fpsimd);
     if (reinterpret_cast<usize>(next) != previous_address) {
         metric_inc(e.context_switches);
         metric_inc(next->switches);
@@ -1021,7 +1043,6 @@ extern "C" void post_syscall(void* frame_ptr) {
         ipc_drain_quantum_begin(next, next->last_start_ns);
     }
     activate_thread_space(next);
-    *frame = next->tf;
     e.switch_pending = false;
     e.requeue_current = false;
     e.pending_reason = SWITCH_NONE;
@@ -1030,6 +1051,14 @@ extern "C" void post_syscall(void* frame_ptr) {
         current_reference.reset();
     }
     fpsimd::restore(&next->fpsimd);
+    return &next->tf;
+}
+
+// Compatibility boundary for host probes and architecture-independent callers.
+// The assembly path restores straight from the selected thread's owned frame.
+extern "C" void post_syscall(void* frame_ptr) {
+    auto* selected = post_syscall_frame(frame_ptr);
+    if (selected && selected != frame_ptr) *static_cast<TrapFrame*>(frame_ptr) = *selected;
 }
 
 // ---------------------------------------------------------------------------

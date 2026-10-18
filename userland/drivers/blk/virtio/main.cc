@@ -14,6 +14,9 @@
 #include "mochi/fs.h"
 #include "midix/abi/protocols/fs.h"
 #include "mochi/va_layout.h"
+#include "mochi/wait.h"
+#include "mochi/driver.h"
+#include "libk/cpu.h"
 
 using namespace mochi::va::blk;
 
@@ -126,7 +129,7 @@ static mx_u8_t* g_req_status = nullptr;
 static mx_u64_t g_io_data_offset = 0;
 
 static void barrier() {
-    asm volatile("dsb sy" ::: "memory");
+    libk::cpu::data_sync();
 }
 
 static mx_u64_t dma_phys(const void* ptr) {
@@ -472,12 +475,8 @@ extern "C" [[noreturn]] void _start() {
     if (device_present) {
         g_mmio = reinterpret_cast<volatile mx_u8_t*>(kVaVirtioMmio + g_virtio_slot_offset);
     }
-    const mx_handle_t dma_cap = mochi::boot::handle(boot, "virtio.blk.dma");
     MxCapInfo dma_info{};
-    const bool dma_ready =
-        dma_cap != MX_NULL_HANDLE &&
-        mx_cap_info(dma_cap, &dma_info) == MX_OK &&
-        mx_map_page(dma_cap, kVaVirtioDma, MX_RIGHT_READ | MX_RIGHT_WRITE) == MX_OK;
+    const bool dma_ready = mochi::driver::map_dma(boot, "virtio.blk.dma", kVaVirtioDma, &dma_info);
     if (dma_ready) {
         g_dma_base = reinterpret_cast<mx_u8_t*>(kVaVirtioDma);
         g_dma_phys = dma_info.base;
@@ -507,7 +506,7 @@ extern "C" [[noreturn]] void _start() {
 
     if (!blk.valid()) {
         mochi::log_raw_marker("drv.blk.virtio: no block endpoint\n");
-        while (true) mx_yield();
+        mochi::park();
     }
 
     mochi::log_raw_marker("drv.blk.virtio: ready\n");

@@ -1,0 +1,26 @@
+{
+  "success": true,
+  "cases": [
+    {
+      "cpus": 2,
+      "entry_el": 1,
+      "success": true
+    },
+    {
+      "cpus": 2,
+      "entry_el": 2,
+      "success": true
+    },
+    {
+      "cpus": 4,
+      "entry_el": 1,
+      "success": true
+    },
+    {
+      "cpus": 4,
+      "entry_el": 2,
+      "success": true
+    }
+  ],
+  "logs": "out/validation/simd-final"
+}

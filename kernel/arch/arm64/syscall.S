@@ -11,7 +11,7 @@
 
 .extern syscall_dispatch
 .extern syscall_fault
-.extern post_syscall
+.extern post_syscall_frame
 .extern irq_dispatch
 
 // Stack frame layout (288 bytes):
@@ -82,12 +82,13 @@ syscall_entry:
 2:
     // post_syscall(current_frame) -> next_frame
     mov     x0, sp
-    bl      post_syscall
+    bl      post_syscall_frame
 
-    // Write system regs first (x9/x10/x11 used as scratch, frame still valid).
-    ldr     x9,  [sp, #248]
-    ldr     x10, [sp, #256]
-    ldr     x11, [sp, #264]
+    // x0 selects the live stack frame or the next thread-owned frame.
+    mov     x30, x0
+    ldr     x9,  [x30, #248]
+    ldr     x10, [x30, #256]
+    ldr     x11, [x30, #264]
     msr     ELR_EL1,  x9
 #if ANKO_HOST_FIQ_MASK
     orr     x10, x10, #ANKO_HOST_FIQ_MASK
@@ -96,25 +97,25 @@ syscall_entry:
     msr     SP_EL0,   x11
 
 
-    // Restore ALL GP registers (including x9/x10/x11).
-    ldp     x0,  x1,  [sp, #0]
-    ldp     x2,  x3,  [sp, #16]
-    ldp     x4,  x5,  [sp, #32]
-    ldp     x6,  x7,  [sp, #48]
-    ldp     x8,  x9,  [sp, #64]
-    ldp     x10, x11, [sp, #80]
-    ldp     x12, x13, [sp, #96]
-    ldp     x14, x15, [sp, #112]
-    ldp     x16, x17, [sp, #128]
-    ldp     x18, x19, [sp, #144]
-    ldp     x20, x21, [sp, #160]
-    ldp     x22, x23, [sp, #176]
-    ldp     x24, x25, [sp, #192]
-    ldp     x26, x27, [sp, #208]
-    ldp     x28, x29, [sp, #224]
-    ldr     x30,      [sp, #240]
-
+    // Release this CPU exception stack; restore the selected register file.
     add     sp, sp, #288
+    ldp     x0,  x1,  [x30, #0]
+    ldp     x2,  x3,  [x30, #16]
+    ldp     x4,  x5,  [x30, #32]
+    ldp     x6,  x7,  [x30, #48]
+    ldp     x8,  x9,  [x30, #64]
+    ldp     x10, x11, [x30, #80]
+    ldp     x12, x13, [x30, #96]
+    ldp     x14, x15, [x30, #112]
+    ldp     x16, x17, [x30, #128]
+    ldp     x18, x19, [x30, #144]
+    ldp     x20, x21, [x30, #160]
+    ldp     x22, x23, [x30, #176]
+    ldp     x24, x25, [x30, #192]
+    ldp     x26, x27, [x30, #208]
+    ldp     x28, x29, [x30, #224]
+    ldr     x30,      [x30, #240]
+
     eret
 
 irq_entry:
@@ -147,12 +148,13 @@ irq_entry:
     bl      irq_dispatch
 
     mov     x0, sp
-    bl      post_syscall
+    bl      post_syscall_frame
 
-    // Write system regs first (x9/x10/x11 used as scratch, frame still valid).
-    ldr     x9,  [sp, #248]
-    ldr     x10, [sp, #256]
-    ldr     x11, [sp, #264]
+    // x0 selects the live stack frame or the next thread-owned frame.
+    mov     x30, x0
+    ldr     x9,  [x30, #248]
+    ldr     x10, [x30, #256]
+    ldr     x11, [x30, #264]
     msr     ELR_EL1,  x9
 #if ANKO_HOST_FIQ_MASK
     orr     x10, x10, #ANKO_HOST_FIQ_MASK
@@ -161,25 +163,25 @@ irq_entry:
     msr     SP_EL0,   x11
 
 
-    // Restore ALL GP registers (including x9/x10/x11).
-    ldp     x0,  x1,  [sp, #0]
-    ldp     x2,  x3,  [sp, #16]
-    ldp     x4,  x5,  [sp, #32]
-    ldp     x6,  x7,  [sp, #48]
-    ldp     x8,  x9,  [sp, #64]
-    ldp     x10, x11, [sp, #80]
-    ldp     x12, x13, [sp, #96]
-    ldp     x14, x15, [sp, #112]
-    ldp     x16, x17, [sp, #128]
-    ldp     x18, x19, [sp, #144]
-    ldp     x20, x21, [sp, #160]
-    ldp     x22, x23, [sp, #176]
-    ldp     x24, x25, [sp, #192]
-    ldp     x26, x27, [sp, #208]
-    ldp     x28, x29, [sp, #224]
-    ldr     x30,      [sp, #240]
-
+    // Release this CPU exception stack; restore the selected register file.
     add     sp, sp, #288
+    ldp     x0,  x1,  [x30, #0]
+    ldp     x2,  x3,  [x30, #16]
+    ldp     x4,  x5,  [x30, #32]
+    ldp     x6,  x7,  [x30, #48]
+    ldp     x8,  x9,  [x30, #64]
+    ldp     x10, x11, [x30, #80]
+    ldp     x12, x13, [x30, #96]
+    ldp     x14, x15, [x30, #112]
+    ldp     x16, x17, [x30, #128]
+    ldp     x18, x19, [x30, #144]
+    ldp     x20, x21, [x30, #160]
+    ldp     x22, x23, [x30, #176]
+    ldp     x24, x25, [x30, #192]
+    ldp     x26, x27, [x30, #208]
+    ldp     x28, x29, [x30, #224]
+    ldr     x30,      [x30, #240]
+
     eret
 
 irq_entry_kernel:

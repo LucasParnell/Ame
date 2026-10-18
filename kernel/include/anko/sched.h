@@ -157,12 +157,12 @@ enum LatencyHint : u8 {
 // ---------------------------------------------------------------------------
 enum IpcSchedHint : u32 {
     IPC_HINT_NONE        = 0,
-    IPC_HINT_LATENCY     = 1u << 0, // wake receiver with credit
-    IPC_HINT_THROUGHPUT  = 1u << 1, // prefer separate CPUs
-    IPC_HINT_WAKE_AFFINE = 1u << 2, // colocate receiver with waker
-    IPC_HINT_HANDOFF_OK  = 1u << 3, // allow synchronous handoff
-    IPC_HINT_SERVER      = 1u << 4, // receiver is a server loop
-    IPC_HINT_NO_STEAL    = 1u << 5, // don't migrate this receiver
+    IPC_HINT_LATENCY     = MX_IPC_HINT_LATENCY,
+    IPC_HINT_THROUGHPUT  = MX_IPC_HINT_THROUGHPUT,
+    IPC_HINT_WAKE_AFFINE = MX_IPC_HINT_WAKE_AFFINE,
+    IPC_HINT_HANDOFF_OK  = MX_IPC_HINT_HANDOFF_OK,
+    IPC_HINT_SERVER      = MX_IPC_HINT_SERVER,
+    IPC_HINT_NO_STEAL    = MX_IPC_HINT_NO_STEAL,
 };
 
 // ---------------------------------------------------------------------------
@@ -340,123 +340,92 @@ enum SwitchReason : u8 {
 // Thread — one schedulable execution context.
 //
 // ABI note: CpuContext ctx MUST be first (offset 0); assembly references it.
-// All new V2 fields are added after the established layout block.
+// Kernel-private metadata follows in cache-line working sets. The context at
+// offset zero and the separately passed TrapFrame/FPSIMD layouts are stable.
 // ---------------------------------------------------------------------------
-struct Thread {
-    // --- Offset 0: assembly-referenced context block ---
-    CpuContext  ctx;              // offset 0, size 104
+struct alignas(64) Thread {
+    CpuContext ctx; // assembly-referenced context, offset zero
+    // Fill the context's alignment gap with latency-sensitive links. Handoff
+    // and RT dispatch no longer fetch a line beyond the cold SIMD register file.
+    Thread* reply_target;
+    Thread* next;
+    Thread* process_next;
+
+    // Exactly one coherence line for cross-CPU wake/dispatch ownership. No
+    // unrelated thread can share this line through the slab allocator.
+    alignas(64) u32 lifecycle_lock;
+    u32 terminate_requested;
+    u32 execution_cpu; // release only after the outgoing exception frame is saved
+    u32 deferred_wake_cpu;
+    u32 tid, pid, cpu_id, principal_id, principal_generation, home_cpu, last_cpu;
+    PublishedThreadState state;
+    WakeReason last_wake_reason;
+    LatencyHint latency_hint;
+    u8 _pad0;
+    u32 heap_idx;
+    bool in_drain_quantum, has_donation, on_runqueue, migration_rebase;
+    u64 affinity_mask;
+
+    // Retained identity and wait publication form a second coherent line.
     object::Record* lifetime;
     object::Record* owner_lifetime;
     object::Record* waiting_lifetime;
-    u64 wait_sequence; // protected by the waited doorbell; prevents stale timer wakes
     object::Record* sched_context_lifetime;
     struct Process* owner;
-    u32 terminate_requested;
-    u32 lifecycle_lock;
-    // The exception-return frame must be saved before another CPU can enqueue
-    // this thread. Wakeups during that interval are published by post_syscall.
-    u32 execution_cpu;
-    u32 deferred_wake_cpu;
-    u32 principal_generation;
+    u64 wait_sequence;
+    Doorbell* waiting_doorbell;
+    Thread* remote_next;
 
-    // --- Identity ---
-    u32         tid;
-    u32         pid;
-    u32         cpu_id;
-    u32         principal_id;    // index into g_principal_sched / Eki::principal_entities
-    u32         home_cpu;        // preferred CPU (kInvalidCpu = none)
-    u32         last_cpu;        // CPU last ran on
+    // CPU-owned scheduling arithmetic; keep it separate from the register file.
+    SchedAttrs sched;
+    u64 vruntime_ns;
+    i64 wake_credit_ns;
+    u64 last_start_ns, slice_start_ns, last_wake_ns, slice_ns;
 
-    // --- State flags (byte-packed) ---
-    PublishedThreadState state;
-    WakeReason  last_wake_reason;
-    LatencyHint latency_hint;
-    u8          _pad0;
-
-    // --- Position within the principal's thread heap for this band ---
-    u32         heap_idx;
-
-    // --- Affinity ---
-    u64         affinity_mask;   // 0 = any CPU; bit i = CPU i allowed
-
-    // --- Trap frame (user register state) ---
-    TrapFrame   tf;
-
-    // --- Intrusive list pointers ---
-    Thread*     next;            // link in RT RunQueue
-    Thread*     process_next;    // link in Process::threads
-    Thread*     remote_next;     // link in PendingWakeQueue stack
-    Doorbell*   waiting_doorbell;
-    Thread*     reply_target;    // handoff: sender blocked for this receiver's reply
-
-    // --- Runtime accounting ---
-    u64         switches;
-    u64         runtime_ns;
-    u64         vruntime_ns;
-    i64         wake_credit_ns;  // bounded IPC dispatch advantage (ns)
-
-    // --- Slice and timing ---
-    u64         slice_ns;
-    u64         last_start_ns;   // sched_clock_ns() when last switched in
-    u64         last_wake_ns;    // sched_clock_ns() when last woken
-    u64         slice_start_ns;  // start of current scheduling slice
-
-    // --- IPC state ---
-    u64         ipc_hot_until_ns;      // sticky window: don't steal until this time
-    u64         drain_quantum_start_ns;
-    u64         handoff_deadline_ns;   // when handoff quantum expires
-    u64         donated_key;           // non-transitive effective_key donation from sender
-
-    // --- Boolean flags ---
-    bool        in_drain_quantum;
-    bool        has_donation;
-    bool        on_runqueue;      // physically present in an Eki fair/RT queue
-    bool        migration_rebase;
-    u8          _pad1[4];
-
-    // --- Scheduling context binding ---
-    u32          sched_context_id;
-    u32          _pad2;
+    u64 switches, runtime_ns;
+    u64 ipc_hot_until_ns, drain_quantum_start_ns, handoff_deadline_ns, donated_key;
+    u32 sched_context_id, _pad2;
     SchedContext* sched_context;
 
-    // --- Scheduling class and weight ---
-    SchedAttrs  sched;
-
-    // Saved before releasing execution ownership; restored on the dispatch CPU.
-    // Keep the vector register file out of the scheduler's hot metadata.
-    fpsimd::State fpsimd;
+    alignas(64) TrapFrame tf;
+    alignas(64) fpsimd::State fpsimd;
 };
 static_assert(__is_trivially_constructible(Thread));
 static_assert(__builtin_offsetof(Thread, ctx) == 0);
+static_assert(alignof(Thread) == 64 && sizeof(Thread) % 64 == 0);
+static_assert(__builtin_offsetof(Thread, affinity_mask) + sizeof(u64) -
+              __builtin_offsetof(Thread, lifecycle_lock) == 64);
+static_assert(__builtin_offsetof(Thread, lifetime) % 64 == 0);
+static_assert(__builtin_offsetof(Thread, sched) % 64 == 0);
+static_assert(__builtin_offsetof(Thread, tf) % 64 == 0);
+static_assert(__builtin_offsetof(Thread, fpsimd) % 64 == 0);
 
 // ---------------------------------------------------------------------------
-// Process — one isolated address space + cap table.
+// Process — isolate dispatch identity, shared accounting, and cold supervision.
 // ---------------------------------------------------------------------------
-struct Process {
-    u32         pid;
-    u32         generation;
+struct alignas(64) Process {
+    u32 pid, generation;
     object::Record* lifetime;
-    PrincipalClass principal_class;
-    u8          _pad[3];
-    char        name[32];      // human-readable identity (e.g. "init", "io.console")
-    u32         supervisor_pid;
-    u64         supervisor_identity;
-    u64         ttbr0;
-    CapTable*   cap_table;
+    u64 ttbr0;
+    CapTable* cap_table;
     ArenaTable* arena_table;
-    Thread*     threads;
-    u32         next_stack_slot;
-    u32         principal_id;
-    u64         runtime_ns;
-    u32         page_count;
-    u32         page_quota;
-    u32         runnable_threads;
-    u32         lock;
-    u32         dying;
-    bool        kill_with_supervisor;
+    Thread* threads;
+    u32 principal_id, next_stack_slot;
+    PrincipalClass principal_class;
+    u8 _pad[3];
+    u32 dying;
 
+    alignas(64) u64 runtime_ns;
+    u32 runnable_threads, page_count, page_quota, lock;
 
+    alignas(64) u64 supervisor_identity;
+    u32 supervisor_pid;
+    char name[32];
+    bool kill_with_supervisor;
 };
+static_assert(alignof(Process) == 64 && sizeof(Process) == 192);
+static_assert(__builtin_offsetof(Process, runtime_ns) == 64);
+static_assert(__builtin_offsetof(Process, supervisor_identity) == 128);
 
 // ---------------------------------------------------------------------------
 // Per-CPU scheduler station (Eki).
@@ -466,6 +435,7 @@ struct alignas(64) Eki {
     Thread* current;
     Thread* idle;
     Thread* handoff_next;        // non-null: post_syscall uses this instead of pick
+    u32 handoff_streak;          // bounded bypass while other runnable work exists
 
     // --- Queues ---
     RtQueue              rt;
@@ -479,7 +449,7 @@ struct alignas(64) Eki {
     // --- Cross-CPU coordination ---
     alignas(64) PendingWakeQueue  pending_wakes;
     alignas(64) PendingStealQueue pending_steal_requests;
-    StealRequest      steal_req_buf;       // single pre-allocated steal request
+    alignas(64) StealRequest steal_req_buf;       // single pre-allocated steal request
     bool              steal_req_in_flight;
 
     // Only this CPU changes queue counts. Peers read the published summaries,
@@ -487,7 +457,8 @@ struct alignas(64) Eki {
     alignas(64) u32 queued_threads[NUM_BANDS];
     alignas(64) u32 published_load;
     u32 published_steal_load;
-    u64 min_service_vruntime_ns;
+    // Peer load readers must not share a line with local dispatch writes.
+    alignas(64) u64 min_service_vruntime_ns;
 
     // --- Context switch state ---
     bool         switch_pending;
@@ -524,6 +495,8 @@ struct alignas(64) Eki {
     BandQueue thread_heaps[kMaxPrincipals][NUM_BANDS - 1];
 };
 static_assert(__is_trivially_constructible(Eki));
+static_assert(__builtin_offsetof(Eki, min_service_vruntime_ns) -
+              __builtin_offsetof(Eki, published_load) >= 64);
 
 constexpr u32 SPAWN_SUSPENDED  = 1u << 0;
 constexpr u32 THREAD_SUSPENDED = 1u << 0;
@@ -617,6 +590,7 @@ void drain_pending_wakes();
 
 void request_switch(bool requeue_current, SwitchReason reason);
 extern "C" void post_syscall(void* frame_ptr);
+extern "C" TrapFrame* post_syscall_frame(void* frame_ptr);
 void mark_current_dead(bool whole_process = false);
 
 // ---------------------------------------------------------------------------

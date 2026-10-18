@@ -47,7 +47,8 @@ Eki& eki_for_cpu(u32 cpu_id);
 Eki& current_eki();
 u64 online_mask();
 u32 first_allowed_cpu(u64 allowed);
-void pending_push(Eki& target, Thread* t);
+// Returns true only for an empty-to-nonempty publication needing an IPI.
+bool pending_push(Eki& target, Thread* t);
 void publish_queue_load(Eki& e);
 bool dequeue_from_principal(Eki& e, Thread* t);
 
@@ -68,6 +69,7 @@ bool retain_principal(u32 pid);
 void principal_init_bootstrap();
 void principal_mirror_weights(u32 cpu_id);
 void account_current(Eki& e);
+void account_current_at(Eki& e, u64 now);
 void refill_principal_budgets();
 u64  fairness_max_lag();
 u64  principal_runtime(u32 pid);

@@ -5,7 +5,7 @@
 //
 // Startup order follows spec §5.1 and §8 V0 Boot Flow:
 //
-//   phase 0  early UART, libk putchar, "anko\n"   ← THIS COMMIT
+//   phase 0  early UART, exception vectors, libk output and boot log
 //   phase 1  DTB parse, page tables + MMU, vectors, phys allocator, GIC, timer
 //   phase 2  cap table, IPC, scheduler, init process, enter EL0
 

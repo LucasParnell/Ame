@@ -342,25 +342,46 @@ void boot_log_panic(const char* message) {
     anne_diag_reset();
 }
 void boot_timer_tick() {
+    const u32 bit = 1u << cpu_id();
+#if ANKO_ANNE_DIAG_CAPTURE_SECONDS == 0
+    // IRQ entry already excludes local interrupts. Completed one-time records
+    // need no global diagnostic lock; watchdog ownership remains on CPU zero.
+    if (__atomic_load_n(&state.tick_seen, __ATOMIC_ACQUIRE) & bit) {
+#ifdef ANKO_ANNE_WATCHDOG
+        watchdog::poll();
+#endif
+        return;
+    }
+#endif
     IrqGuard guard;
 #ifdef ANKO_ANNE_WATCHDOG
     watchdog::poll();
 #endif
     capture_poll();
-    const u32 bit = 1u << cpu_id();
     if (state.tick_seen & bit) return;
-    state.tick_seen |= bit;
+    __atomic_store_n(&state.tick_seen, state.tick_seen | bit, __ATOMIC_RELEASE);
     boot_checkpoint(BootStage::FirstTimerTick);
 }
 void boot_syscall(u64 nr) {
+#if ANKO_ANNE_DIAG_CAPTURE_SECONDS == 0
+    // Native steady-state IPC must not serialize all eight A53 cores through
+    // the boot logger. SVC entry masks IRQs, so CPU-zero watchdog polling can
+    // continue without the logger's cross-CPU lock.
+    if (__atomic_load_n(&state.syscall_seen, __ATOMIC_ACQUIRE)) {
+#ifdef ANKO_ANNE_WATCHDOG
+        watchdog::poll();
+#endif
+        return;
+    }
+#endif
     IrqGuard guard;
 #ifdef ANKO_ANNE_WATCHDOG
     watchdog::poll();
 #endif
     if (!state.syscall_seen) {
-        state.syscall_seen = 1;
         u64 saved_pstate; asm volatile("mrs %0, spsr_el1" : "=r"(saved_pstate));
         text("\nEL0 first_svc="); number(nr); text(" saved_pstate="); hex(saved_pstate); text("\n"); boot_log_flush();
+        __atomic_store_n(&state.syscall_seen, 1u, __ATOMIC_RELEASE);
     }
     capture_poll();
 }

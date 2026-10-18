@@ -12,6 +12,7 @@
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
+#include "mochi/wait.h"
 #include "mochi/boot_log.h"
 #include "mochi/handle.h"
 #include "midix/abi/protocols/demo.h"
@@ -55,7 +56,7 @@ static void resolve_pong(RingPage* request_ring, RingPage* reply_ring,
         }
         if (slot.type == MSG_NS_ERROR) {
             try_console_log("nameservice: resolve failed\n");
-            while (true) sys_yield();
+            mochi::park();
         }
         if (slot.type != MSG_NS_RESOLVE_REPLY) continue;
 
@@ -163,7 +164,7 @@ extern "C" [[noreturn]] void _start() {
 
     if (sent != recv) {
         try_console_log("ipc: hot ring failed\n");
-        while (true) sys_yield();
+        mochi::park();
     }
     try_console_log("ipc: hot ring ready\n");
     try_console_log("ipc: cross-core hot ring ready\n");
@@ -199,7 +200,7 @@ extern "C" [[noreturn]] void _start() {
     }
     if (!sleeping) {
         try_console_log("ipc: doorbell sleep failed\n");
-        while (true) sys_yield();
+        mochi::park();
     }
 
     uint32_t sleep_seq = 0xCAFEBABE;
@@ -244,5 +245,5 @@ extern "C" [[noreturn]] void _start() {
         sys_notify(done_doorbell);
     }
 
-    while (true) sys_yield();
+    mochi::park();
 }

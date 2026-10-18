@@ -31,6 +31,8 @@ static_assert(demo_pong::kVaSendRing + ring_span <= demo_pong::kVaLogRing);
 #include "mochi/framebuffer.h"
 #include "mochi/driver.h"
 #include "mochi/inbox.h"
+#include "mochi/wait.h"
+#include "mochi/sessions.h"
 
 namespace {
 constexpr uint32_t kOrder = 2;
@@ -49,6 +51,64 @@ void reset() {
     host_now = 0;
     host_on_yield = host_on_read = nullptr;
     host_on_wait = nullptr;
+    host_on_doorbell_create = nullptr;
+}
+
+void parked_service() {
+    reset();
+    struct Blocked {};
+    host_on_doorbell_create = [](mx_handle_t* out) -> mx_status_t { *out = 17; return MX_OK; };
+    host_notifies = 9;
+    host_on_wait = []() -> mx_i64_t {
+        assert(host_wait_expected == 9 && host_yields == 0);
+        throw Blocked{}; // the real syscall would leave this thread blocked
+    };
+    bool blocked = false;
+    try { mochi::park(); } catch (Blocked) { blocked = true; }
+    assert(blocked && host_yields == 0);
+    reset();
+}
+
+void session_waits() {
+    reset();
+    struct SessionStorage {
+        RingPage page{};
+        RingSlot slots[1u << MX_DEFAULT_RING_ORDER]{};
+    };
+    static SessionStorage active{}, stale{};
+    active = {}; stale = {};
+    MxSessionDirectory directory{};
+    directory.count = 2;
+    mochi::ServerSessions sessions{};
+    sessions.directory = &directory;
+    sessions.live[0] = true;
+    sessions.endpoints[0].rx_ring = &active.page;
+    sessions.endpoints[1].rx_ring = &stale.page;
+    const mochi::Ring input{&active.page, MX_DEFAULT_RING_ORDER, 1};
+    stale.page.head.v = 1;
+    stale.page.flags.receiver_about_to_sleep = 9;
+    // An inactive mapping must neither keep us runnable nor get armed.
+    host_on_wait = []() -> mx_i64_t {
+        assert(active.page.flags.receiver_about_to_sleep == 1);
+        assert(stale.page.flags.receiver_about_to_sleep == 9);
+        assert(host_wait_expected == 0 && host_wait_deadline == 1000);
+        return MX_OK;
+    };
+    assert(sessions.wait(1, 0, 1000) == MX_OK);
+    assert(!active.page.flags.receiver_about_to_sleep);
+    // A generation notification racing the refresh/drain scan survives sleep.
+    host_notifies = 7;
+    host_on_wait = []() -> mx_i64_t {
+        assert(host_wait_expected == 6 && host_notifies == 7);
+        return MX_OK;
+    };
+    assert(sessions.wait(1, 6) == MX_OK);
+    assert(input.try_push_msg(kType, 23u));
+    host_on_wait = []() -> mx_i64_t { assert(false); return MX_ERR_DEAD; };
+    assert(sessions.wait(1, 7) == MX_OK);
+    directory.count = MX_MAX_SESSIONS + 1;
+    assert(sessions.wait(1, 7) == MX_ERR_BAD_PROTOCOL);
+    reset();
 }
 
 Storage inbox_storage[8];
@@ -297,6 +357,30 @@ void cold_driver_bindings() {
     assert(mochi::driver::registers(&boot, "i2c.mmio", 0x1b200000).size == 4096);
     host_on_map_mmio = nullptr;
     assert(!mochi::driver::registers(&boot, "i2c.mmio", 0x1b200000).base);
+
+    // DMA metadata is checked before mapping; cached memory requires a cache
+    // maintenance contract these drivers do not implement.
+    static MxCapInfo dma{};
+    static unsigned maps;
+    dma = {}; dma.type = MX_CAP_ARENA; dma.attr = MX_ARENA_MEMORY_NONCACHEABLE;
+    dma.size = 4096; dma.base = 0x40000000;
+    maps = 0;
+    host_on_cap_info = [](CapHandle, MxCapInfo* out) -> mx_status_t { *out = dma; return MX_OK; };
+    host_on_map_page = [](CapHandle, mx_vaddr_t, mx_rights_t) -> mx_status_t { ++maps; return MX_OK; };
+    MxCapInfo output{};
+    assert(mochi::driver::map_dma(&boot, "i2c.mmio", 0x20000000, &output) && maps == 1);
+    assert(output.base == dma.base && output.size == 4096);
+    output.size = 73;
+    dma.attr = 0;
+    assert(!mochi::driver::map_dma(&boot, "i2c.mmio", 0x20000000, &output));
+    dma.attr = MX_ARENA_MEMORY_NONCACHEABLE; dma.type = MX_CAP_MMIO;
+    assert(!mochi::driver::map_dma(&boot, "i2c.mmio", 0x20000000, &output));
+    dma.type = MX_CAP_ARENA; dma.size = 0;
+    assert(!mochi::driver::map_dma(&boot, "i2c.mmio", 0x20000000, &output));
+    dma.size = 4096;
+    host_on_map_page = [](CapHandle, mx_vaddr_t, mx_rights_t) -> mx_status_t { return MX_ERR_NOMEM; };
+    assert(!mochi::driver::map_dma(&boot, "i2c.mmio", 0x20000000, &output));
+    assert(maps == 1 && output.size == 73);
     host_on_map_page = nullptr; host_on_cap_info = nullptr;
 }
 } // namespace
@@ -323,9 +407,20 @@ static void batches() {
     assert(ring.try_pop_batch(out,6)==2 && out[0].seq==703 && out[1].seq==700);
     assert(!ring.try_pop_batch(out,0) && !ring.try_push_frames(nullptr,1));
     assert(!ring.try_pop_batch(nullptr,1));
+
+    // A peer cannot publish more than capacity, including across cursor wrap.
+    reset();
+    storage.page.tail.v = ~uint64_t{0} - 1;
+    storage.page.head.v = storage.page.tail.v + (1u << kOrder) + 1;
+    const auto tail = storage.page.tail.v;
+    out[0].seq = 991;
+    assert(!ring.try_pop(&out[0]) && !ring.try_pop_batch(out, 1));
+    assert(storage.page.tail.v == tail && out[0].seq == 991);
 }
 
 int main() {
+    parked_service();
+    session_waits();
     reset();
     RingSlot frame{}, received{};
     mochi::message_put(&frame, kType, 42u);

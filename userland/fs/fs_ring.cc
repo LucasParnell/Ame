@@ -84,6 +84,7 @@ extern "C" [[noreturn]] void _start() {
     if (!g_sessions.map(boot)) {
         mochi::boot::invalid_boot();
     }
+    const auto wake = mochi::boot::require_handle(boot, "sessions.doorbell");
     fs_disk_init(boot);
 
     // Replay the durable /data region, if the mount exposed a safe one.
@@ -106,6 +107,7 @@ extern "C" [[noreturn]] void _start() {
     }
     mochi::boot::ready(boot);
     while (true) {
+        const auto expected = sys_doorbell_read(wake);
         bool progress = false;
         for (mx_u32_t i = 0; i < g_sessions.directory->count; ++i) {
             if (!g_sessions.refresh(i, close_session)) {
@@ -140,7 +142,11 @@ extern "C" [[noreturn]] void _start() {
             }
         }
         if (!progress) {
-            mx_yield();
+            // Lifecycle publications and requests wake immediately. Reap dead
+            // peers at most 100 ms later even if init does not restart them;
+            // process-cap revocation itself does not notify a server doorbell.
+            if (g_sessions.wait(wake, expected, mx_clock_ns() + 100000000ull) < 0)
+                mochi::boot::invalid_boot();
         }
     }
 }

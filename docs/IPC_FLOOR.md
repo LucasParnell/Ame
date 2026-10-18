@@ -1,0 +1,153 @@
+# IPC execution paths for Cortex-A53
+
+The primary device is the Huawei P20 Lite (Kirin 659, Cortex-A53). These changes
+use ARMv8.0 instructions and the mandatory eight-bit ASID facility. They do not
+require LSE, newer wait instructions, speculative SIMD ownership, or a DMA
+engine. QEMU Cortex-A53 validates execution and ordering protocols; TCG timings
+do not establish physical-device latency or the architectural floor.
+
+## Address spaces
+
+The 64 reserved live process IDs are also ASIDs 1–64. ASID zero belongs to the
+kernel root. Process IDs remain reserved until the old process's execution and
+lifetime references retire. Creating a new incarnation completes `ASIDE1IS`
+before publishing it. A tagged context is `vm_context(root, pid)`; physical
+page-table walkers continue to receive the untagged root.
+
+Normal switches write TTBR0 and execute ISB without invalidating translations.
+Mapping changes invalidate only the affected ASID. Root teardown detaches each
+subtree and completes its shootdown before reclaiming its pages. Changes that
+affect all kernel roots retain their global shootdowns. Kernel identity leaves
+are non-global too: late MMIO mappings can differ between roots while TTBR1
+separation remains unimplemented. Temporary VM kernel-root scopes restore the
+caller's tagged context.
+
+`test_asid.py` executes production activation/shootdown/setup code at EL1 and
+EL2 on Cortex-A53, alternating different backing pages at the same VA and then
+reusing all 64 ASIDs. It also checks that activation contains no TLBI.
+
+## Copied records and credits
+
+`MX_RING_PACKED_FRAMES` opts a ring into packed framing. The formerly reserved
+header line carries the feature and a separate producer sleep request. Existing
+head/tail/receiver-flag offsets and the 256-byte header size are unchanged.
+Feature-zero rings retain the original interoperable FIRST/LAST slot protocol.
+
+Packed logical messages above 48 bytes have one 16-byte header and contiguous
+payload, with at most two copies at ring wrap. Their occupancy is
+`ceil((16 + payload_size) / 64)` cursor units. A 4096-byte message uses 65 units,
+one publication and one release instead of 86 individually framed slots.
+Publication requires room for the whole record. Larger-than-capacity records
+fall back to bounded legacy fragmentation. Readers validate bounds, feature,
+flags and available occupancy before copying or advancing ownership. Invalid
+framing poisons the reader.
+
+The default framed geometry is order 7: an 8 KiB data area per direction. This
+fits a full 4 KiB record while limiting the A53 cache footprint. Existing inline
+service rings retain order 6. Bulk services can explicitly choose a larger
+supported order; allocation and mapping remain outside the exchange path.
+
+Optional space doorbells let a producer arm, compare the tail, and block for
+the actual required room. Readers publish tail progress before claiming the
+producer's one-shot wake request. A separate line prevents contention with the
+receiver's data wake request. Both directions preserve the acquire/release RMW
+handshake; a speculative zero-flag load is not a substitute. No per-message
+cache clean/invalidate is used for coherent normal CPU memory.
+
+## Kernel entries and synchronous RPC
+
+`WAIT_RING(ring, doorbell, cursor, direction)` compares a retained kernel-backed
+ring cursor while registering its doorbell waiter. It needs no preceding
+counter-read syscall and never dereferences an arbitrary userspace pointer.
+Readable waits compare head; credit waits compare tail. Callers arm their
+shared wake request first. Publication preceding registration makes the syscall
+return immediately; publication after registration produces a notification.
+
+`NOTIFY_WAIT(notify, ring, wait, cursor, flags)` validates all three capabilities
+before any notification side effect. It combines notification with conditional
+waiting. `REPLY_WAIT` selects reply mode. The production `Channel::call` uses
+ordinary combined notification/waiting when endpoint handles are available;
+legacy/deadline endpoints keep their existing behavior.
+
+Trusted creators may configure scheduling hints in `sys_doorbell_create(hints)`.
+Handoff is an explicit server protocol: the receiver must use `reply_handoff`
+or reply-and-wait. It cannot be enabled transparently for an arbitrary server.
+Requests use same-core handoff only when affinity, ownership, principal and
+context budgets permit it. Already-readable replies skip request handoff.
+Reply-and-wait rearms the server before directly returning to its caller.
+Cross-core and ineligible exchanges retain the normal wake/dispatch path.
+
+An exclusive sender may defer a wake claimed by `FrameWriter` or `Ring::try_push`
+and carry it into its next receive syscall. It must flush before waiting for
+space, switching to polling, terminating, or abandoning the operation. The
+benchmark adapter follows these rules, including its final `Closed` response.
+It defers only same-core wakes. Cross-core publication wakes the receiver
+immediately so production and consumption overlap. When both peers explicitly
+negotiate polling, readers omit credit notifications because producers never
+park for space in that policy.
+Blocking cross-core waits may poll for at most 64 cursor checks before parking;
+same-core waits poll zero times. This avoids waking a core for data arriving
+just after its empty check. The budget is recorded in benchmark metadata, and
+does not turn blocking waits into unlimited spin waits. Energy is not measured.
+The closing server also completes any synchronous reply token before exiting;
+otherwise teardown correctly aborts that token even if response bytes exist.
+An end-to-end A53 integrity test covers this shutdown handshake, partial stream
+windows, both placements and polling as well as blocking data/credit waits.
+
+## Scheduler, assembly and working sets
+
+The scheduler saves the outgoing full GPR and SIMD state before relinquishing
+execution ownership, as before. ARM return assembly restores straight from the
+selected thread's saved frame, eliminating the copy back to the CPU exception
+stack. Host probes retain a compatibility wrapper that materializes that copy.
+Huawei's FIQ return mask remains in the assembly path.
+
+Reply and RT queue links fill the 24-byte alignment gap following `CpuContext`,
+avoiding accesses beyond the cold SIMD file. Direct handoff bypass is limited to
+eight consecutive transfers when other runnable work exists. Queued real-time
+work always forces normal selection. Budgets, donation deadlines, termination
+and deferred remote-wake ownership checks remain active.
+
+Steady-state IPC, clock and yield dispatch avoid the large cold VM/control
+dispatcher. Syscall statistics use separate cache lines per CPU and atomic
+load/store updates under exception-entry IRQ exclusion. General IPC counters
+retain their atomic updates where kernel notifications can be reentrant.
+
+Aligned byte copies use scalar AArch64 LDP/STP pairs without overreading,
+touching FP/SIMD state, or depending on unaligned kernel accesses. Unaligned and
+short copies retain bounded byte handling. The Huawei build also schedules C++
+instructions for Cortex-A53 without enabling a newer ISA.
+Inline frames have separate inlined readers/writers; packed copying and partial
+fragment handling stay in non-inlined helpers. Empty/small messages therefore
+avoid the bulk handlers' register spills and instruction footprint.
+
+With capture disabled, Huawei syscall/timer hooks return after their one-time
+records instead of acquiring the boot logger's global lock on every entry.
+CPU-zero watchdog polling continues under exception-entry IRQ exclusion.
+Capture mode retains its original serialized observation/reset path.
+
+## Verification and measurements
+
+Run correctness first:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3 scripts/test/simd.py --build out/architectural --cpus 2 4 --entry-el 1 2
+```
+
+New coverage includes packed and fragmented concurrency, cursor wrap, buffer
+guards, malformed records, real blocking data/credit races, combined syscall
+authority failures, handoff/reply ownership, fair competitors and RT precedence.
+The normal lifecycle bundle additionally exercises 100 process restart cycles.
+
+Performance collection follows implementation and correctness validation:
+
+```sh
+python3 scripts/test/ipc-bench.py ame --cpu cortex-a53 --build-type Release \
+  --output out/ipc-results/final
+```
+
+Use a freshly built original snapshot with the same compiler, QEMU, CPU model,
+workload, parameters and build type for the before/after comparison. Retain raw
+samples, independent runs, binaries and logs. The supplied older A57/TCG
+collection is historical context and is not a matched A53 baseline.

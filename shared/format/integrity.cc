@@ -1,4 +1,5 @@
 #include "midix/format/integrity.h"
+#include "libk/hash.h"
 
 namespace integrity {
 
@@ -82,36 +83,28 @@ void compress(u32 h[8], const u8 block[64]) {
 
 } // namespace
 
+// Progress is boot/watchdog policy, kept outside libk's pure checksum engine.
+// Process at most 4 KiB between callbacks, with no callback test per byte.
 u32 crc32c(const u8* data, usize size, Progress progress) {
-    static constexpr u32 table[16] = {
-        0x00000000u, 0x105ec76fu, 0x20bd8edeu, 0x30e349b1u, 0x417b1dbcu, 0x5125dad3u,
-        0x61c69362u, 0x7198540du, 0x82f63b78u, 0x92a8fc17u, 0xa24bb5a6u, 0xb21572c9u,
-        0xc38d26c4u, 0xd3d3e1abu, 0xe330a81au, 0xf36e6f75u,
-    };
     u32 crc = 0xffffffffu;
-    for (usize i = 0; i < size; ++i) {
-        if (!(i & 4095)) progress.poll();
-        crc ^= data[i];
-        crc = (crc >> 4) ^ table[crc & 0xfu];
-        crc = (crc >> 4) ^ table[crc & 0xfu];
+    for (usize offset = 0; offset < size;) {
+        progress.poll();
+        const usize count = size - offset < 4096 ? size - offset : 4096;
+        crc = libk::crc32c_update(crc, libk::as_bytes(data + offset, count));
+        offset += count;
     }
     return ~crc;
 }
 
 u32 crc32c_zero_field(const u8* data, usize size, usize zero_offset, usize zero_size,
                      Progress progress) {
-    static constexpr u32 table[16] = {
-        0x00000000u, 0x105ec76fu, 0x20bd8edeu, 0x30e349b1u, 0x417b1dbcu, 0x5125dad3u,
-        0x61c69362u, 0x7198540du, 0x82f63b78u, 0x92a8fc17u, 0xa24bb5a6u, 0xb21572c9u,
-        0xc38d26c4u, 0xd3d3e1abu, 0xe330a81au, 0xf36e6f75u,
-    };
     u32 crc = 0xffffffffu;
     for (usize i = 0; i < size; ++i) {
         if (!(i & 4095)) progress.poll();
-        const bool zero = i >= zero_offset && i < zero_offset + zero_size;
-        crc ^= zero ? 0 : data[i];
-        crc = (crc >> 4) ^ table[crc & 0xfu];
-        crc = (crc >> 4) ^ table[crc & 0xfu];
+        // Subtract after the lower-bound check: offset + size can wrap for
+        // caller-supplied ranges. Bytes outside the buffer are never read.
+        const bool zero = i >= zero_offset && i - zero_offset < zero_size;
+        crc = libk::crc32c_byte(crc, zero ? 0 : data[i]);
     }
     return ~crc;
 }

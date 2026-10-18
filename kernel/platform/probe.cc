@@ -419,6 +419,7 @@ static void probe_prop(void* v, fdt::Property id, const char* name, const u8* da
 // Read the active window while the MMU is off. Invalid or unsupported scanout
 // stays unavailable; guessing an address here can overwrite unrelated memory.
 static void probe_t210_dc(HwInfo& hw) {
+#if defined(__aarch64__)
     if (!hw.has_t210_dc) {
         const auto fb = midix::tegra_dc::read_active(hw.ram_base, hw.ram_size);
         hw.has_t210_dc = fb.address != 0;
@@ -431,6 +432,10 @@ static void probe_t210_dc(HwInfo& hw) {
                                0xff00ff00u);
         asm volatile("dsb sy" ::: "memory");
     }
+#else
+    // The pure DT transform is host-testable; physical DC0 access is not.
+    (void)hw;
+#endif
 }
 
 // Only the rare aliases-table overflow uses a preliminary selection walk.

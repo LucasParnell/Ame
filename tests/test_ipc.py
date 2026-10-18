@@ -9,6 +9,10 @@ from test_scheduler import build_probe, root
 def build_ipc(work, *, snapshot=None, benchmark=False, sanitizer='address,undefined', run=True):
     kernel = (snapshot or root) / 'kernel'
     source = (kernel/'ipc/doorbell.cc').read_text()
+    # Architecture hint only, including older comparison snapshots. IRQ, lock
+    # and publication algorithms below remain the production implementations.
+    source = '#include "libk/spin.h"\n' + source.replace(
+        'asm volatile("yield" ::: "memory");', 'libk::spin_pause();')
     for pattern, replacement in [
         (r'static inline u64 local_irq_save_disable\(\) \{.*?\n\}',
          'static inline u64 local_irq_save_disable() { return 0; }'),

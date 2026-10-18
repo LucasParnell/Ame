@@ -1,3 +1,4 @@
+#include "libk/dma.h"
 // Native eMMC block service. The process owns the controller; io.fs receives
 // only a bounded partition view and a shared transfer arena.
 #include "midix/drivers/emmc.h"
@@ -31,20 +32,20 @@ u32 read_reg(void* context, u32 offset, unsigned width) {
     // barriers; avoid two expensive DMBs for each of its 128 words. PIO uses
     // coherent CPU mappings and needs no non-coherent DMA cache maintenance.
     if (offset == 0x20 && width == 4) return *reinterpret_cast<const volatile u32*>(p);
-    asm volatile("dmb osh" ::: "memory");
+    libk::dma::order_mmio();
     u32 value = width == 1 ? *p : width == 2 ? *reinterpret_cast<const volatile u16*>(p)
                                            : *reinterpret_cast<const volatile u32*>(p);
-    asm volatile("dmb osh" ::: "memory");
+    libk::dma::order_mmio();
     return value;
 }
 void write_reg(void* context, u32 offset, unsigned width, u32 value) {
     auto* p = static_cast<Runtime*>(context)->mmio + offset;
     if (offset == 0x20 && width == 4) { *reinterpret_cast<volatile u32*>(p) = value; return; }
-    asm volatile("dmb osh" ::: "memory");
+    libk::dma::order_mmio();
     if (width == 1) *p = u8(value);
     else if (width == 2) *reinterpret_cast<volatile u16*>(p) = u16(value);
     else *reinterpret_cast<volatile u32*>(p) = value;
-    asm volatile("dmb osh" ::: "memory");
+    libk::dma::order_mmio();
 }
 u64 now_us(void*) { return mx_clock_ns() / 1000; }
 void note(const char* name, u64 first, u64 sectors) {

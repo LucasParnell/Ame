@@ -205,11 +205,90 @@ void return_frame_checks() {
     std::puts("cached lifetime identity retains the object through creator release");
 }
 
+void remote_batch_checks() {
+    reset();
+    sched::set_online_cpu_count(4);
+    const auto pid = sched::allocate_principal(PRINCIPAL_NATIVE_SANDBOXED, NICE_0_WEIGHT, 0, 0);
+    constexpr unsigned producers = 3, per_producer = 8, count = producers * per_producer;
+    Thread threads[count]{};
+    for (auto& t : threads) {
+        t = make_thread(pid, SCHED_BAND_FAIR);
+        t.affinity_mask = 2;
+        t.cpu_id = t.home_cpu = 1;
+    }
+    std::atomic<bool> go{false};
+    std::thread writers[producers];
+    for (unsigned source = 0; source < producers; ++source) {
+        writers[source] = std::thread([&, source] {
+            audit_cpu = source == 0 ? 0 : source + 1;
+            while (!go.load(std::memory_order_acquire)) {}
+            for (unsigned i = 0; i < per_producer; ++i)
+                sched::wake_remote(&threads[source * per_producer + i], 1);
+        });
+    }
+    go.store(true, std::memory_order_release);
+    for (auto& writer : writers) writer.join();
+    assert(ipis == 1); // one empty transition, not one SGI per thread
+    audit_cpu = 1;
+    sched::drain_pending_wakes();
+    assert(sched::current_eki().published_load == count);
+    for (auto& t : threads) {
+        assert(t.on_runqueue && t.state == TS_RUNNABLE_QUEUED && t.cpu_id == 1);
+        sched::dequeue_thread(&t);
+    }
+    assert(!sched::current_eki().pending_wakes.head);
+    sched::drain_pending_wakes(); // empty fast path must not change membership
+    audit_cpu = 0;
+    threads[0].state = TS_SLEEPING;
+    sched::wake_remote(&threads[0], 1);
+    assert(ipis == 2); // draining reopened the signal transition
+    audit_cpu = 1;
+    sched::drain_pending_wakes();
+    assert(threads[0].on_runqueue && sched::current_eki().published_load == 1);
+    sched::dequeue_thread(&threads[0]);
+    sched::release_principal(pid);
+    std::puts("concurrent remote wake batches retain every thread and coalesce IPIs until drain");
+}
+
+static void handoff_fairness_checks() {
+    for (bool realtime : {false, true}) {
+        reset();
+        const auto pid = sched::allocate_principal(PRINCIPAL_NATIVE_TRUSTED, 1024, 0, 0);
+        auto first = make_thread(pid, SCHED_BAND_FAIR);
+        auto second = make_thread(pid, SCHED_BAND_FAIR);
+        auto competitor = make_thread(pid, realtime ? SCHED_BAND_RT_NATIVE : SCHED_BAND_FAIR);
+        dispatch(first);
+        sched::enqueue(&competitor);
+        bool ran = false;
+        for (unsigned i = 0; i < 9; ++i) {
+            auto* current = sched::current();
+            auto* next = current == &first ? &second : &first;
+            current->state = TS_BLOCKED;
+            next->state = TS_SLEEPING;
+            sched::set_handoff_next(next);
+            sched::request_switch(false, SWITCH_HANDOFF);
+            ++audit_now;
+            TrapFrame frame{};
+            sched::post_syscall(&frame);
+            if (sched::current() == &competitor) { ran = true; break; }
+            assert(!realtime && "handoff bypassed queued realtime work");
+            assert(sched::current() == next);
+        }
+        assert(ran && "unbounded handoff chain starved queued work");
+        sched::current_eki().current = nullptr;
+        sched::dequeue_thread(&first); sched::dequeue_thread(&second); sched::dequeue_thread(&competitor);
+        sched::release_principal(pid);
+    }
+    std::puts("handoff bursts yield to fair competitors and never bypass queued realtime work");
+}
+
 int main() {
+    handoff_fairness_checks();
     heap_checks();
     compact_dispatch_checks();
     queue_capacity_checks();
     return_frame_checks();
+    remote_batch_checks();
     static_assert(alignof(Eki) >= 64);
     static_assert(__builtin_offsetof(Eki, pending_wakes) % 64 == 0);
     std::printf("layout: Thread=%zu PrincipalEntity=%zu Eki=%zu align=%zu pending=%zu\n",

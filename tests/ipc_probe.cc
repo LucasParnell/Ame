@@ -173,6 +173,23 @@ static void allocation_failures() {
     std::puts("IPC object/record/capacity failures reclaim every root and page");
 }
 
+static void counter_wrap() {
+    Fixture f;
+    auto& waiter = f.thread();
+    dispatch(waiter);
+    const auto handle = ipc::doorbell_create(1);
+    assert(handle);
+    auto entry = cap::lookup(f.tables[0], handle, CAP_DOORBELL);
+    auto* db = static_cast<Doorbell*>(entry->target);
+    __atomic_store_n(&db->counter, ~u64{0}, __ATOMIC_RELEASE);
+    assert(ipc::wait_doorbell(handle, ~u64{0}, 1) == E_OK);
+    f.park(waiter);
+    assert(ipc::notify_object(db) == E_OK);
+    assert(ipc::doorbell_counter(handle, 1) == 0);
+    assert(waiter.on_runqueue && !waiter.waiting_doorbell);
+    std::puts("locked counter publication preserves wraparound and waiter wakeup");
+}
+
 static void frame_and_timeout() {
     Fixture f; auto& waiter=f.thread(); auto& fallback=f.thread();
     const auto handle=ipc::doorbell_create(1);
@@ -239,6 +256,55 @@ static void handoff_and_reply() {
     std::puts("same-CPU request/reply handoff preserves payload, return value, and ownership");
 }
 
+#ifndef AME_IPC_LEGACY_BENCH_FIXTURE
+static void ring_waits_and_exchange() {
+    Fixture f;
+    auto& receiver = f.thread(); auto& sender = f.thread();
+    dispatch(receiver);
+    const auto request = ipc::ring_create(1, 7, MX_RING_PACKED_FRAMES);
+    const auto reply = ipc::ring_create(1, 7, MX_RING_PACKED_FRAMES);
+    const auto request_db = ipc::doorbell_create(1, IPC_HINT_HANDOFF_OK | IPC_HINT_SERVER);
+    const auto reply_db = ipc::doorbell_create(1);
+    const auto space_db = ipc::doorbell_create(1);
+    auto req = ipc::ring_from_cap(1, request), rep = ipc::ring_from_cap(1, reply);
+    auto* request_page = reinterpret_cast<RingHeader*>(req->phys_base);
+    auto* reply_page = reinterpret_cast<RingHeader*>(rep->phys_base);
+    assert(request_page->space.features == MX_RING_PACKED_FRAMES);
+    assert(ipc::wait_ring(request, request_db, 0, 2, 1) == E_INVALID);
+    // Publication that wins before waiter registration needs no notification.
+    request_page->head.head = 1;
+    assert(ipc::wait_ring(request, request_db, 0, MX_RING_WAIT_READABLE, 1) == E_OK);
+    assert(receiver.state == TS_RUNNING);
+    request_page->tail.tail = 1;
+    sched::enqueue(&sender);
+    assert(ipc::wait_ring(request, request_db, 1, MX_RING_WAIT_READABLE, 1) == E_OK);
+    TrapFrame frame{};
+    sched::post_syscall(&frame);
+    assert(sched::current() == &sender);
+    request_page->head.head = 2;
+    // Invalid authority must leave the real notify counter and waiter untouched.
+    assert(ipc::exchange_ring(request_db, reply, kNullCap, 0, 0, 1) == E_NOTFOUND);
+    assert(ipc::doorbell_counter(request_db, 1) == 0);
+    assert(ipc::exchange_ring(request_db, reply, reply_db, 0, MX_IPC_EXCHANGE_HANDOFF, 1) == E_OK);
+    assert(sender.state == TS_BLOCKED && sender.reply_target == &receiver);
+    sched::post_syscall(&frame);
+    assert(sched::current() == &receiver);
+    request_page->tail.tail = 2;
+    reply_page->head.head = 1;
+    assert(ipc::exchange_ring(reply_db, request, request_db, 2, MX_IPC_EXCHANGE_REPLY, 1) == E_OK);
+    assert(receiver.state == TS_SLEEPING && !receiver.on_runqueue);
+    sched::post_syscall(&frame);
+    assert(sched::current() == &sender && !sender.reply_target && !receiver.reply_target);
+    // Producer credit waits compare the tail, not head or a doorbell snapshot.
+    reply_page->head.head = 128;
+    assert(ipc::wait_ring(reply, space_db, 0, MX_RING_WAIT_WRITABLE, 1) == E_OK);
+    f.park(sender);
+    reply_page->tail.tail = 1;
+    assert(ipc::notify(space_db, 1) == E_OK && sender.on_runqueue);
+    std::puts("ring cursor waits, producer credits, atomic exchange/reply, and authority failures pass");
+}
+#endif
+
 static void concurrent_notifications() {
     Fixture f; auto& runner=f.thread(); dispatch(runner);
     Doorbell* independent[kMaxCpus]{};
@@ -295,6 +361,11 @@ static void registration_race() {
 int main() {
     static_assert(sizeof(Doorbell)==64);
     rights_and_allocation(); allocation_failures(); frame_and_timeout();
-    deadline_capacity(); handoff_and_reply(); concurrent_notifications(); registration_race();
+    counter_wrap();
+    deadline_capacity(); handoff_and_reply();
+#ifndef AME_IPC_LEGACY_BENCH_FIXTURE
+    ring_waits_and_exchange();
+#endif
+    concurrent_notifications(); registration_race();
     return 0;
 }

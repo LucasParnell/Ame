@@ -9,6 +9,7 @@
 #include "mochi/ring.h"
 #include "mochi/log.h"
 #include "mochi/boot.h"
+#include "mochi/wait.h"
 #include "dango/vm.h"
 #include "dango/channel.h"
 #include "dango/layout.h"
@@ -1275,7 +1276,5 @@ extern "C" [[noreturn]] void _start() {
     // A latency-band monitor that repeatedly yields remains runnable and can
     // starve the budgeted VM runner. The runner reports its own transitions;
     // the manager sleeps until a future control-plane request is implemented.
-    const CapHandle idle = as_cap(sys_doorbell_create());
-    if (!idle) fail("manager idle doorbell failed\n");
-    for (;;) (void)sys_wait_doorbell(idle, sys_doorbell_read(idle));
+    mochi::park();
 }

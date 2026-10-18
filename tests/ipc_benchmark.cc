@@ -1,6 +1,8 @@
 // Same real IPC/scheduler fixture as regression tests, optimized host timings.
 #define main ipc_regression_main
+#define AME_IPC_LEGACY_BENCH_FIXTURE 1
 #include "ipc_probe.cc"
+#undef AME_IPC_LEGACY_BENCH_FIXTURE
 #undef main
 #include <chrono>
 

@@ -47,7 +47,11 @@ void worker(uint64_t id) {
         // No syscalls inside this loop: IRQ preemption must preserve the live
         // vector state too, even in the middle of a long EL0 computation.
         uint64_t sum = witness[id] + id + 1;
-        for (uint32_t i = 0; i < 100000; ++i) sum = sum * 6364136223846793005ull + i;
+        // Short rounds can all yield before a 10 ms timer tick on a fast host,
+        // leaving the final preemption assertion dependent on IRQ phase. Give
+        // every worker one sustained computation before the shorter rounds.
+        const uint32_t iterations = round == 0 ? 10000000 : 100000;
+        for (uint32_t i = 0; i < iterations; ++i) sum = sum * 6364136223846793005ull + i;
         witness[id] = sum;
         verify(seed, fpcr, fpsr);
         if (!(round % 8)) {

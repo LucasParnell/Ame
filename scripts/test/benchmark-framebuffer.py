@@ -34,7 +34,7 @@ def main():
     old = subprocess.check_output([
         'git', 'show', f'{args.baseline_ref}:userland/drivers/framebuffer/main.cc'],
         cwd=ROOT, text=True)
-    source = '#include "' + str(ROOT / 'userland/drivers/framebuffer/raster.h') + '"\n'
+    source = '#include "' + str(ROOT / 'userland/lib/include/mochi/framebuffer_raster.h') + '"\n'
     source += 'constexpr uint32_t kFbWidth = 1080, kFbHeight = 2280;\n'
     source += '\n'.join(function(old, name) for name in
                         ('fb_clear', 'min_u32', 'fb_draw_glyph', 'fb_draw_text'))

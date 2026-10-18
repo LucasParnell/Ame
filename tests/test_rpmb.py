@@ -28,6 +28,7 @@ class Rpmb(unittest.TestCase):
                 '-DANKO_HOST_TEST=1', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'shared/include'),
                 '-I' + str(ROOT / 'boards/huawei-anne'),
+                '-idirafter', str(ROOT / 'lib/include'),
                 str(ROOT / 'tests/rpmb_provision_probe.cc'),
                 str(ROOT / 'boards/huawei-anne/rpmb_diagnostics.cc'),
                 str(ROOT / 'boards/huawei-anne/rpmb_provisioning.cc'), '-o', str(probe)],
@@ -48,6 +49,7 @@ class Rpmb(unittest.TestCase):
                 '-DANKO_HOST_TEST=1', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'shared/include'),
                 '-I' + str(ROOT / 'boards/huawei-anne'),
+                '-idirafter', str(ROOT / 'lib/include'),
                 str(ROOT / 'tests/rpmb_storage_probe.cc'),
                 str(ROOT / 'boards/huawei-anne/rpmb_diagnostics.cc'),
                 str(ROOT / 'boards/huawei-anne/rpmb_provisioning.cc'), '-o', str(probe)],
@@ -74,6 +76,7 @@ class Rpmb(unittest.TestCase):
                         *defines, '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                         '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'shared/include'),
                         '-I' + str(ROOT / 'boards/huawei-anne'),
+                        '-idirafter', str(ROOT / 'lib/include'),
                         str(ROOT / 'tests/rpmb_gic_probe.cc'),
                         str(ROOT / 'boards/huawei-anne/rpmb_diagnostics.cc'),
                 str(ROOT / 'boards/huawei-anne/rpmb_provisioning.cc'), '-o', str(probe)],
@@ -91,6 +94,7 @@ class Rpmb(unittest.TestCase):
                 '-fno-omit-frame-pointer',
                 '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'shared/include'),
                 '-I' + str(ROOT / 'boards/huawei-anne'),
+                '-idirafter', str(ROOT / 'lib/include'),
                 str(ROOT / 'tests/rpmb_lifecycle_probe.cc'),
                 str(ROOT / 'boards/huawei-anne/rpmb_diagnostics.cc'),
                 str(ROOT / 'boards/huawei-anne/rpmb_provisioning.cc'), '-o', str(probe)],
@@ -111,6 +115,7 @@ class Rpmb(unittest.TestCase):
                 '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I' + str(ROOT / 'kernel/include'),
                 '-I' + str(ROOT / 'boards/huawei-anne'),
+                '-idirafter', str(ROOT / 'lib/include'),
                 str(ROOT / 'tests/rpmb_probe.cc'), '-o', str(probe)],
                 capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -187,6 +192,7 @@ int main() {
                 '-Wno-missing-field-initializers',
                 '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'boards/huawei-anne'),
+                '-idirafter', str(ROOT / 'lib/include'),
                 str(cpp), '-o', str(probe)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(probe)], capture_output=True, text=True, timeout=10)
@@ -265,6 +271,7 @@ int main() {{ (void)rpmb_err_msg; }}
             result = subprocess.run([
                 'clang++', '-std=c++23', '-Wall', '-Wextra', '-Werror',
                 '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'boards/huawei-anne'),
+                '-idirafter', str(ROOT / 'lib/include'),
                 str(cpp), '-o', str(probe)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
 

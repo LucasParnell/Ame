@@ -1,0 +1,27 @@
+{
+  "full_suite": {
+    "tests": 279,
+    "expected_skips": 39,
+    "initial_errors": 1,
+    "cause": "ZIP shell execute permissions",
+    "affected_group_retest": {
+      "tests": 25,
+      "passed": true
+    }
+  },
+  "final_transport_group": {
+    "tests": 6,
+    "passed": true
+  },
+  "a53_asid_el1_el2": true,
+  "a53_eight_cpu_boot": true,
+  "simd_el1_el2_two_four_cpus": true,
+  "huawei_release_build": true,
+  "measured_kernel_lifecycle_simd": true,
+  "kernel_sha256": "6e7aaa2f9f318aa36952543571cd8fe0df3be791df128d831c5d07496ad191e0",
+  "residual_cases": [
+    "stream/different_cpu/blocking/256",
+    "stream/different_cpu/spin/0",
+    "stream/different_cpu/spin/8"
+  ]
+}

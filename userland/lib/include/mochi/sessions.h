@@ -2,6 +2,7 @@
 #include "midix/abi/session.h"
 #include "mochi/boot.h"
 #include "mochi/endpoint.h"
+#include "mochi/inbox.h"
 
 namespace mochi {
 
@@ -21,9 +22,20 @@ struct ServerSessions {
     bool mapped[MX_MAX_SESSIONS]{};
     bool write_mapped[MX_MAX_SESSIONS]{};
 
+    // Sample expected before refresh/drain. Init notifies the common doorbell
+    // when publishing a generation, even if there is no request in any ring.
+    // Only a compact column of live inputs participates in the sleep handshake.
+    mx_status_t wait(CapHandle wake, uint64_t expected, uint64_t deadline = 0) const {
+        if (!directory || directory->count > MX_MAX_SESSIONS) return MX_ERR_BAD_PROTOCOL;
+        alignas(64) RingPage* incoming[MX_MAX_SESSIONS]{};
+        for (uint32_t i = 0; i < directory->count; ++i)
+            incoming[i] = live[i] ? endpoints[i].rx_ring : nullptr;
+        return InboxWait{incoming, directory->count, MX_DEFAULT_RING_ORDER, wake}.wait(expected, deadline);
+    }
+
     bool map(const MxBootInfo* boot, uint64_t directory_va = va::sessions::kDirectory) {
         auto cap = boot::handle(boot, "sessions");
-        if (!cap || sys_map_page(cap, directory_va, RIGHT_READ | RIGHT_WRITE)) return false;
+        if (!cap || mx_map_page(cap, directory_va, RIGHT_READ | RIGHT_WRITE)) return false;
         auto* candidate = reinterpret_cast<MxSessionDirectory*>(directory_va);
         if (candidate->magic != MX_SESSION_MAGIC || candidate->count > MX_MAX_SESSIONS) {
             (void)sys_unmap_page(directory_va);
@@ -68,8 +80,8 @@ struct ServerSessions {
             live[i] = false;
             if (!generation || slot.order != MX_DEFAULT_RING_ORDER || !slot.client ||
                 !slot.request_doorbell || !slot.reply_doorbell) return false;
-            if (sys_map_page(slot.request_ring, request_va, RIGHT_READ | RIGHT_WRITE)) return false;
-            if (sys_map_page(slot.reply_ring, reply_va, RIGHT_READ | RIGHT_WRITE)) {
+            if (mx_map_page(slot.request_ring, request_va, RIGHT_READ | RIGHT_WRITE)) return false;
+            if (mx_map_page(slot.reply_ring, reply_va, RIGHT_READ | RIGHT_WRITE)) {
                 (void)sys_unmap_page(request_va);
                 return false;
             }
@@ -77,7 +89,7 @@ struct ServerSessions {
             if (slot.write_arena) {
                 MxCapInfo info{};
                 if (mx_cap_info(slot.write_arena, &info) != MX_OK || info.type != MX_CAP_ARENA ||
-                    info.size != 65536 || sys_map_page(slot.write_arena, va::sessions::write_arena(i),
+                    info.size != 65536 || mx_map_page(slot.write_arena, va::sessions::write_arena(i),
                                                      RIGHT_READ | RIGHT_WRITE)) return false;
                 write_mapped[i] = true;
                 libk::zero(reinterpret_cast<void*>(va::sessions::write_arena(i)), 65536);

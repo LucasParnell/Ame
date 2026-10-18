@@ -14,14 +14,16 @@ struct SpscEndpoint {
     uint32_t order = 0;
     CapHandle tx_doorbell = kNullCap;
     CapHandle rx_doorbell = kNullCap;
+    CapHandle tx_handle = kNullCap, rx_handle = kNullCap;
+    CapHandle tx_space_doorbell = kNullCap, rx_space_doorbell = kNullCap;
 
     // The two halves as Rings. Ring carries the whole operation set (try /
     // spinning / deadline publish, try / blocking / deadline consume, byte runs,
     // typed messages, depth, sleep flag), so every endpoint operation below is a
     // thin delegation and nothing is lost by using the endpoint instead of the
     // raw ring helpers.
-    Ring tx() const { return Ring{tx_ring, order, tx_doorbell}; }
-    Ring rx() const { return Ring{rx_ring, order, rx_doorbell}; }
+    Ring tx() const { return Ring{tx_ring, order, tx_doorbell, tx_handle, tx_space_doorbell}; }
+    Ring rx() const { return Ring{rx_ring, order, rx_doorbell, rx_handle, rx_space_doorbell}; }
 
     bool valid() const {
         return tx().valid() && rx().valid() && tx_doorbell != kNullCap && rx_doorbell != kNullCap;

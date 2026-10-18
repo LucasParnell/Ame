@@ -38,10 +38,22 @@ extern "C" u64 g_cpu_mpidrs[MX_HOST_MAX_CPUS];
 
 namespace {
 
-u64 g_syscall_count = 0;
-u64 g_ipc_syscall_count = 0;
-u64 g_debug_puts_count = 0;
-u64 g_el0_fault_count = 0;
+// Single-CPU writers avoid a shared counter line on every cross-core IPC.
+struct alignas(64) SyscallMetrics {
+    u64 calls, ipc, debug_puts, faults;
+};
+static SyscallMetrics syscall_metrics[MX_HOST_MAX_CPUS]{};
+static SyscallMetrics& local_syscall_metrics() { return syscall_metrics[sched::current_cpu_id()]; }
+static void syscall_metric_inc(u64& counter) {
+    // SVC/synchronous-fault entry masks IRQs. This CPU is the sole writer;
+    // diagnostic readers still use atomic loads, without an A53 LL/SC loop.
+    __atomic_store_n(&counter, __atomic_load_n(&counter, __ATOMIC_RELAXED) + 1, __ATOMIC_RELAXED);
+}
+static u64 syscall_metric_total(u64 SyscallMetrics::* member) {
+    u64 value = 0;
+    for (auto& cpu : syscall_metrics) value += libk::metric_load(cpu.*member);
+    return value;
+}
 constexpr u64 kUserCopyMin = 0x1000'0000ull;
 constexpr u64 kUserCopyMax = 0x4000'0000ull;
 constexpr u64 kMaxUserElfSize = 16ull * 1024ull * 1024ull;
@@ -286,10 +298,73 @@ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
                         static_cast<unsigned long long>(tf ? tf->x[22] : 0));
     }
 
-    metric_inc(g_el0_fault_count);
+    syscall_metric_inc(local_syscall_metrics().faults);
     sched::record_exit(p, static_cast<long>(esr));
     sched::mark_current_dead(true);
 }
+
+// Keep steady-state IPC outside the large cold control/VM dispatch body.
+// The caller has already validated process/execution ownership.
+static SysResult ipc_dispatch_hot(Process* p, u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4) {
+    syscall_metric_inc(local_syscall_metrics().ipc);
+    switch (static_cast<Syscall>(nr)) {
+    case SYS_NOTIFY: {
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
+        const SysError rc = ipc::notify_object(static_cast<Doorbell*>(e->target));
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
+    }
+
+    case SYS_WAIT_DOORBELL: {
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
+        const SysError rc = ipc::wait_doorbell_object(e, a1, 0);
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
+    }
+
+    case SYS_DOORBELL_READ: {
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
+        return ok(static_cast<long>(__atomic_load_n(&static_cast<Doorbell*>(e->target)->counter, __ATOMIC_ACQUIRE)));
+    }
+
+    case SYS_NOTIFY_HANDOFF: {
+        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
+        if (!e) return err(E_NOTFOUND);
+        if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
+        const SysError rc = ipc::notify_handoff_object(static_cast<Doorbell*>(e->target), a1);
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
+    }
+
+    case SYS_REPLY_HANDOFF: {
+        const SysError rc = ipc::reply_handoff(a0, p->pid);
+        if (rc != E_OK) return err(rc);
+        return ok(E_OK);
+    }
+
+    case SYS_WAIT_RING:
+        return ok(ipc::wait_ring(a0, a1, a2, a3, p->pid));
+
+    case SYS_NOTIFY_WAIT:
+        return ok(ipc::exchange_ring(a0, a1, a2, a3, a4, p->pid));
+
+    case SYS_REPLY_WAIT:
+        return ok(ipc::exchange_ring(a0, a1, a2, a3, MX_IPC_EXCHANGE_REPLY, p->pid));
+
+
+
+    default: return err(E_INVALID);
+    }
+}
+
+[[gnu::noinline]] static SysResult syscall_dispatch_cold(Process* p, u64 nr, u64 a0, u64 a1,
+                                                         u64 a2, u64 a3, u64 a4, u64 a5);
 
 extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
                                       u64 a3, u64 a4, u64 a5) {
@@ -297,7 +372,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     anne::boot_syscall(nr);
 #endif
     (void)a5;
-    metric_inc(g_syscall_count);
+    syscall_metric_inc(local_syscall_metrics().calls);
 
     Process* p = cur_proc();
     if (!p && nr != SYS_DEBUG_PUTS && nr != SYS_DEBUG_COUNTERS) {
@@ -313,6 +388,17 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         ANKO_ASSERT(t && t->state == TS_RUNNING);
     }
     if (p && __atomic_load_n(&p->dying, __ATOMIC_ACQUIRE)) return err(E_DEAD);
+    if (nr == SYS_CLOCK_NS) return ok(static_cast<long>(sched::sched_clock_ns()));
+    if (nr == SYS_YIELD) { sched::yield(); return ok(E_OK); }
+    if ((nr >= SYS_NOTIFY && nr <= SYS_WAIT_DOORBELL) || nr == SYS_DOORBELL_READ ||
+        nr == SYS_NOTIFY_HANDOFF || nr == SYS_REPLY_HANDOFF ||
+        (nr >= SYS_WAIT_RING && nr <= SYS_REPLY_WAIT))
+        return ipc_dispatch_hot(p, nr, a0, a1, a2, a3, a4);
+    return syscall_dispatch_cold(p, nr, a0, a1, a2, a3, a4, a5);
+}
+
+[[gnu::noinline]] static SysResult syscall_dispatch_cold(Process* p, u64 nr, u64 a0, u64 a1,
+                                                         u64 a2, u64 a3, u64 a4, u64 a5) {
     const UserAccess ua = user_access_for(p);
 
     vm::CallGuard vm_call((nr >= SYS_VM_CREATE && nr <= SYS_VM_MEMORY_WRITE) ||
@@ -591,14 +677,14 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     }
 
     case SYS_RING_CREATE: {
-        metric_inc(g_ipc_syscall_count);
+        syscall_metric_inc(local_syscall_metrics().ipc);
         CapHandle h = ipc::ring_create(p->pid, static_cast<u32>(a0), static_cast<u32>(a1));
         if (h == kNullCap) return err(E_NOMEM);
         return ok(static_cast<long>(h));
     }
 
     case SYS_RING_SHARE: {
-        metric_inc(g_ipc_syscall_count);
+        syscall_metric_inc(local_syscall_metrics().ipc);
         cap::Ref target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
         if (!target_e) return err(E_BADTYPE);
         if (!has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
@@ -611,14 +697,16 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     }
 
     case SYS_DOORBELL_CREATE: {
-        metric_inc(g_ipc_syscall_count);
-        CapHandle h = ipc::doorbell_create(p->pid);
+        syscall_metric_inc(local_syscall_metrics().ipc);
+        if (a0 && p->principal_class != PRINCIPAL_NATIVE_TRUSTED && p->principal_class != PRINCIPAL_KERNEL)
+            return err(E_PERM);
+        CapHandle h = ipc::doorbell_create(p->pid, static_cast<u32>(a0));
         if (h == kNullCap) return err(E_NOMEM);
         return ok(static_cast<long>(h));
     }
 
     case SYS_DOORBELL_SHARE: {
-        metric_inc(g_ipc_syscall_count);
+        syscall_metric_inc(local_syscall_metrics().ipc);
         cap::Ref target_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
         if (!target_e) return err(E_BADTYPE);
         if (!has_rights(target_e, RIGHT_SPAWN)) return err(E_PERM);
@@ -630,15 +718,6 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         return ok(static_cast<long>(h));
     }
 
-    case SYS_NOTIFY: {
-        metric_inc(g_ipc_syscall_count);
-        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
-        if (!e) return err(E_NOTFOUND);
-        if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
-        const SysError rc = ipc::notify(static_cast<CapHandle>(a0), p->pid);
-        if (rc != E_OK) return err(rc);
-        return ok(E_OK);
-    }
 
     case SYS_PLATFORM_CONTROL: {
         auto entry = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_PLATFORM);
@@ -652,23 +731,8 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         return ok(ipc::wait_doorbell_until(static_cast<CapHandle>(a0), a1, a2, p->pid));
     }
 
-    case SYS_WAIT_DOORBELL: {
-        metric_inc(g_ipc_syscall_count);
-        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
-        if (!e) return err(E_NOTFOUND);
-        if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
-        const SysError rc = ipc::wait_doorbell(static_cast<CapHandle>(a0), a1, p->pid);
-        if (rc != E_OK) return err(rc);
-        return ok(E_OK);
-    }
 
-    case SYS_DOORBELL_READ: {
-        metric_inc(g_ipc_syscall_count);
-        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
-        if (!e) return err(E_NOTFOUND);
-        if (!has_rights(e, RIGHT_WAIT)) return err(E_PERM);
-        return ok(static_cast<long>(ipc::doorbell_counter(static_cast<CapHandle>(a0), p->pid)));
-    }
+
 
     case SYS_SUPERVISOR_BIND_DOORBELL: {
         auto authority = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_SUPERVISOR);
@@ -1011,7 +1075,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         if (!a0 || len > 4096) return err(E_INVALID);
         if (!user_range_ok(ua, a0, len)) return err(E_FAULT);
         const char* s = reinterpret_cast<const char*>(a0);
-        metric_inc(g_debug_puts_count);
+        syscall_metric_inc(local_syscall_metrics().debug_puts);
 #ifdef ANKO_BOARD_HUAWEI_ANNE
         anne::boot_log_write(s, len);
 #else
@@ -2233,11 +2297,11 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         // Phase L shared-arena counters (attached / number registered SharedGpu).
         case 202: return ok(static_cast<long>(vm::shared_arena_stats().attached));
         case 203: return ok(static_cast<long>(vm::shared_arena_stats().dma_registered));
-        case DBG_SYSCALL_COUNT:         return ok(static_cast<long>(metric_load(g_syscall_count)));
-        case DBG_IPC_SYSCALL_COUNT:     return ok(static_cast<long>(metric_load(g_ipc_syscall_count)));
+        case DBG_SYSCALL_COUNT:         return ok(static_cast<long>(syscall_metric_total(&SyscallMetrics::calls)));
+        case DBG_IPC_SYSCALL_COUNT:     return ok(static_cast<long>(syscall_metric_total(&SyscallMetrics::ipc)));
         case DBG_CONTEXT_SWITCHES:      return ok(static_cast<long>(sched::context_switch_count()));
-        case DBG_DEBUG_PUTS:            return ok(static_cast<long>(metric_load(g_debug_puts_count)));
-        case DBG_EL0_FAULTS:            return ok(static_cast<long>(metric_load(g_el0_fault_count)));
+        case DBG_DEBUG_PUTS:            return ok(static_cast<long>(syscall_metric_total(&SyscallMetrics::debug_puts)));
+        case DBG_EL0_FAULTS:            return ok(static_cast<long>(syscall_metric_total(&SyscallMetrics::faults)));
         case DBG_DOORBELL_SLEEPS:       return ok(static_cast<long>(ipc::doorbell_sleep_count()));
         case DBG_DOORBELL_WAKES:        return ok(static_cast<long>(ipc::doorbell_wake_count()));
         case DBG_TIMER_TICKS:           return ok(static_cast<long>(drivers::timer::tick_count()));
@@ -2284,22 +2348,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         default: return err(E_INVALID);
         }
 
-    case SYS_NOTIFY_HANDOFF: {
-        metric_inc(g_ipc_syscall_count);
-        cap::Ref e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_DOORBELL);
-        if (!e) return err(E_NOTFOUND);
-        if (!has_rights(e, RIGHT_NOTIFY)) return err(E_PERM);
-        const SysError rc = ipc::notify_handoff(static_cast<CapHandle>(a0), a1, p->pid);
-        if (rc != E_OK) return err(rc);
-        return ok(E_OK);
-    }
 
-    case SYS_REPLY_HANDOFF: {
-        metric_inc(g_ipc_syscall_count);
-        const SysError rc = ipc::reply_handoff(a0, p->pid);
-        if (rc != E_OK) return err(rc);
-        return ok(E_OK);
-    }
 
     case SYS_MAP_MMIO: {
         // a0 = mmio_cap, a1 = va, a2 = rights

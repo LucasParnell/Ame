@@ -44,10 +44,6 @@ extern "C" [[noreturn]] void _start() {
     static mochi::ServerSessions sessions;
     if (!sessions.map(boot)) mochi::boot::invalid_boot();
     const auto wake = mochi::boot::require_handle(boot, "sessions.doorbell");
-    // Eight incoming addresses fit one cache line. Build this view only after
-    // refreshing generations; the larger endpoint/session records stay cold
-    // while deciding whether to sleep.
-    alignas(64) static RingPage* incoming[MX_MAX_SESSIONS];
     for (uint32_t i = 0; i < sessions.directory->count; ++i) sessions.refresh(i, no_close);
     mochi::boot::ready(boot);
     for (;;) {
@@ -55,7 +51,6 @@ extern "C" [[noreturn]] void _start() {
         bool progress = false;
         for (uint32_t i = 0; i < sessions.directory->count; ++i) {
             const bool live = sessions.refresh(i, no_close);
-            incoming[i] = live ? sessions.endpoints[i].rx_ring : nullptr;
             if (!live) continue;
             const auto& endpoint = sessions.endpoints[i];
             RingSlot slot{};
@@ -73,8 +68,7 @@ extern "C" [[noreturn]] void _start() {
                 sessions.drop(i, no_close);
             }
         }
-        if (!progress && mochi::InboxWait{incoming, sessions.directory->count,
-                MX_DEFAULT_RING_ORDER, wake}.wait(expected) < 0)
+        if (!progress && sessions.wait(wake, expected) < 0)
             mochi::boot::invalid_boot();
     }
 }

@@ -2,6 +2,8 @@
 
 #include "anko/types.h"
 #include "anko/interrupt_mask.h"
+#include "libk/spin.h"
+#include "libk/cpu.h"
 
 namespace kernel {
 
@@ -14,12 +16,12 @@ class InterruptGuard {
 public:
     InterruptGuard() {
 #if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
-        asm volatile("mrs %0, DAIF; msr DAIFSet, #2" : "=r"(irq_) :: "memory");
+        irq_ = libk::cpu::interrupt_save_disable();
 #endif
     }
     ~InterruptGuard() {
 #if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
-        asm volatile("msr DAIF, %0" :: "r"(host_interrupt_state(irq_)) : "memory");
+        libk::cpu::interrupt_restore(host_interrupt_state(irq_));
 #endif
     }
     InterruptGuard(const InterruptGuard&) = delete;
@@ -34,21 +36,15 @@ class LockGuard {
 public:
     explicit LockGuard(SpinLock& lock) : lock_(lock) {
 #if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
-        asm volatile("mrs %0, DAIF; msr DAIFSet, #2" : "=r"(irq_) :: "memory");
+        irq_ = libk::cpu::interrupt_save_disable();
 #endif
-        while (__atomic_exchange_n(&lock_.value, 1u, __ATOMIC_ACQUIRE) != 0) {
-#if defined(__aarch64__)
-            asm volatile("yield" ::: "memory");
-#else
-            __builtin_ia32_pause();
-#endif
-        }
+        libk::spin_lock(lock_.value);
     }
 
     ~LockGuard() {
-        __atomic_store_n(&lock_.value, 0u, __ATOMIC_RELEASE);
+        libk::spin_unlock(lock_.value);
 #if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
-        asm volatile("msr DAIF, %0" :: "r"(host_interrupt_state(irq_)) : "memory");
+        libk::cpu::interrupt_restore(host_interrupt_state(irq_));
 #endif
     }
 

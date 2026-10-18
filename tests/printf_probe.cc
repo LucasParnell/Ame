@@ -30,7 +30,7 @@ int main() {
     check(libk::snprintf(b, sizeof(b), "%zu", static_cast<std::size_t>(7)) == 1 && libk::str::equal(b, "7"));
 
     // Overflow-checked arithmetic.
-    unsigned long long v = 123;
+    std::uint64_t v = 123;
     check(libk::checked_add(1, 2, &v) && v == 3);
     check(!libk::checked_add(~0ull, 1ull, &v) && v == 3);   // untouched on failure
     check(libk::checked_sub(5, 2, &v) && v == 3);

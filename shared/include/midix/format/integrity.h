@@ -18,6 +18,8 @@ struct Progress {
     void poll() const { if (step) step(context); }
 };
 u32 crc32c(const u8* data, usize size, Progress progress = {});
+// Treat the mathematical zero range as clipped to the input, including when
+// zero_offset + zero_size would overflow usize. Input storage is never modified.
 u32 crc32c_zero_field(const u8* data, usize size, usize zero_offset, usize zero_size,
                      Progress progress = {});
 void sha256(const u8* data, usize size, u8 out[kSha256Size], Progress progress = {});

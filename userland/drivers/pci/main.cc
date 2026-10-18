@@ -15,6 +15,7 @@
 #include "mochi/boot.h"
 #include "mochi/boot_log.h"
 #include "mochi/va_layout.h"
+#include "mochi/wait.h"
 
 using namespace mochi::va::pci;
 
@@ -24,5 +25,5 @@ extern "C" [[noreturn]] void _start() {
 
     mochi::log_raw_marker("drv.pci: placeholder — M10 not yet implemented\n");
     mochi::boot::ready(boot);
-    while (true) { mx_yield(); }
+    mochi::park();
 }

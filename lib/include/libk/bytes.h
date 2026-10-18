@@ -68,7 +68,30 @@ inline bytes slice(bytes b, std::size_t offset, std::size_t length) {
 // at least `n` bytes.
 inline bool copy_n(bytes dst, const_bytes src, std::size_t n) {
     if (n > dst.size || n > src.size || (n != 0 && (!dst.data || !src.data))) return false;
-    for (std::size_t i = 0; i < n; ++i) dst.data[i] = src.data[i];
+    std::size_t i = 0;
+#if defined(__aarch64__)
+    // A53-friendly scalar pairs. Both endpoints must be naturally aligned:
+    // this also works with the kernel's strict-alignment/SIMD-free contract.
+    // No overread, destination padding access, or FP register ownership change.
+    if (((reinterpret_cast<std::uintptr_t>(dst.data) |
+          reinterpret_cast<std::uintptr_t>(src.data)) & 7) == 0) {
+        auto* d = dst.data;
+        const auto* s = src.data;
+        for (; n - i >= 32; i += 32) {
+            std::uint64_t a, b, c, e;
+            asm volatile("ldp %0, %1, [%4]\n"
+                         "ldp %2, %3, [%4, #16]\n"
+                         "stp %0, %1, [%5]\n"
+                         "stp %2, %3, [%5, #16]"
+                         : "=&r"(a), "=&r"(b), "=&r"(c), "=&r"(e)
+                         : "r"(s + i), "r"(d + i) : "memory");
+        }
+        using Word = std::uint64_t __attribute__((__may_alias__));
+        for (; n - i >= 8; i += 8)
+            *reinterpret_cast<Word*>(d + i) = *reinterpret_cast<const Word*>(s + i);
+    }
+#endif
+    for (; i < n; ++i) dst.data[i] = src.data[i];
     return true;
 }
 

@@ -12,6 +12,7 @@
 
 #include "mochi/arena.h"
 #include "mochi/boot.h"
+#include "mochi/wait.h"
 #include "mochi/boot_log.h"
 #include "mochi/endpoint.h"
 #include "mochi/log.h"
@@ -113,5 +114,5 @@ extern "C" [[noreturn]] void _start() {
     }
 
     mochi::log_raw_marker("done\n");
-    while (true) sys_yield();
+    mochi::park();
 }

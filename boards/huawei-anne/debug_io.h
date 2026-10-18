@@ -41,7 +41,7 @@ inline void debug_led(char stage) {
     // inherited from the loader or an earlier diagnostic image.
     debug_pmic_write(0x14e, debug_pmic_read(0x14e) & ~0x3fu);
     asm volatile("dsb sy" ::: "memory");
-#if !defined(ANKO_ANNE_DIAG_TEST) && !defined(ANNE_MINIMAL_TEST)
+#if defined(__aarch64__) && !defined(ANKO_ANNE_DIAG_TEST) && !defined(ANNE_MINIMAL_TEST)
     minimal::wait_ticks(minimal::kCounterHz / 1000);
 #endif
     const u32 selected = stage == 'w' ? 7u : 1u << (stage == 'r' ? 0 : stage == 'g' ? 1 : 2);

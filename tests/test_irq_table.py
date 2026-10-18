@@ -13,6 +13,7 @@ class IrqTable(unittest.TestCase):
             subprocess.run(['clang++', '-std=c++23', '-DANKO_HOST_TEST', '-O1', '-g', '-pthread',
                 '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I'+str(ROOT/'kernel/include'), '-I'+str(ROOT/'shared/include'),
+                '-idirafter', str(ROOT/'lib/include'),
                 str(ROOT/'tests/irq_probe.cc'),
                 str(ROOT/'kernel/drivers/gic/irq_table.cc'),
                 str(ROOT/'kernel/cap/object.cc'),

@@ -21,13 +21,7 @@ struct InboxWait {
         if (!doorbell) return MX_ERR_INVALID;
         for (uint32_t i = 0; i < count; ++i) {
             if (!rings[i]) continue;
-            auto& flags = rings[i]->flags;
-            flags.doorbell_counter_snapshot = expected;
-            // Pair RMWs with ring_publish(), rather than relying on a flag
-            // store followed by an unrelated head load. If the producer's
-            // exchange wins first, this acquire observes its publication; if
-            // ours wins first, the producer sees 1 and notifies the doorbell.
-            (void)__atomic_exchange_n(&flags.receiver_about_to_sleep, 1u, __ATOMIC_ACQ_REL);
+            ring_publish_sleep(rings[i], expected);
         }
         bool pending = false;
         for (uint32_t i = 0; i < count; ++i)

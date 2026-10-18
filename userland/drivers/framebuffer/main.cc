@@ -24,7 +24,9 @@
 #include "dango/layout.h"
 #include "gpu_linux.h"
 #include "mochi/va_layout.h"
-#include "raster.h"
+#include "mochi/framebuffer_raster.h"
+#include "mochi/wait.h"
+#include "libk/cpu.h"
 
 // Virtual address layout for io.framebuffer.
 using namespace mochi::va::framebuffer;
@@ -124,7 +126,7 @@ static void present_frame(ServerState& state) {
     if (!state.gpu_force_full && state.damage.empty()) return;
     // This path also runs after draining a batch without FB_PRESENT. Publish
     // Normal NC pixel stores before sending the appliance a present request.
-    asm volatile("dsb sy" ::: "memory");
+    libk::cpu::data_sync();
     if (state.gpu_force_full) {
         // The first present after the handshake is always a whole frame, so a
         // stale appliance scanout (the bootstrap placeholder) cannot survive.
@@ -196,7 +198,7 @@ static bool handle_fb_command(ServerState& state, const RingSlot& slot) {
     case FB_PRESENT:
         // The ramfb store is normal RAM; the barrier orders the pixels before
         // the appliance (and the display) reads them.
-        asm volatile("dsb sy" ::: "memory");
+        libk::cpu::data_sync();
         present_frame(state);
         return true;
     default:
@@ -213,7 +215,7 @@ extern "C" [[noreturn]] void _start() {
     mx_handle_t fb_arena = mochi::boot::handle(boot, "fb.memory");
     if (fb_arena == MX_NULL_HANDLE) {
         mochi::log_raw_marker("io.framebuffer: no fb.memory in BootInfo\n");
-        while (true) { mx_yield(); }
+        mochi::park();
     }
 
     // Map the framebuffer pixel arena (CAP_MMIO, NORMAL_NC).
@@ -221,7 +223,7 @@ extern "C" [[noreturn]] void _start() {
                                            MX_RIGHT_READ | MX_RIGHT_WRITE);
     if (map_rc != MX_OK) {
         mochi::log_raw_marker("io.framebuffer: fb.memory map failed\n");
-        while (true) { mx_yield(); }
+        mochi::park();
     }
 
     MxCapInfo extent{};
@@ -234,7 +236,7 @@ extern "C" [[noreturn]] void _start() {
     const mochi::framebuffer::Raster raster{reinterpret_cast<uint32_t*>(kVaFbPixels),
                                            kFbWidth, kFbHeight};
     raster.clear(kClearColor);
-    asm volatile("dsb sy" ::: "memory");
+    libk::cpu::data_sync();
 
     mochi::log_raw_marker("io.framebuffer: ready\n");
 

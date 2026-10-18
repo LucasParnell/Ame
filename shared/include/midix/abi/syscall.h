@@ -96,11 +96,28 @@ enum MxSyscall : mx_u64_t {
     // (own supervisor, notify doorbell or 0): signal after child teardown has
     // published a pollable exit. Binding retains the doorbell until unbound.
     MX_NR_SUPERVISOR_BIND_DOORBELL = 71,
+    // Compare a retained shared-ring cursor under the doorbell registration
+    // lock. Eliminates a preceding counter-read syscall. direction: 0=head,
+    // 1=tail. The caller publishes its sleep request before entering.
+    MX_NR_WAIT_RING = 72,
+    // Validate both capabilities before notifying; then conditionally wait.
+    MX_NR_NOTIFY_WAIT = 73,
+    MX_NR_REPLY_WAIT = 74,
 };
 
 constexpr mx_u32_t MX_SPAWN_SUSPENDED = 1u << 0;
 constexpr mx_u32_t MX_SPAWN_KILL_WITH_SUPERVISOR = 1u << 1;
 constexpr mx_u32_t MX_THREAD_SUSPENDED = 1u << 0;
+constexpr mx_u32_t MX_IPC_EXCHANGE_HANDOFF = 1u << 0;
+constexpr mx_u32_t MX_IPC_EXCHANGE_REPLY = 1u << 1;
+// Optional trusted-creator scheduling policy. A handoff server must complete
+// synchronous requests with reply_handoff or a reply-and-wait exchange.
+constexpr mx_u32_t MX_IPC_HINT_LATENCY = 1u << 0;
+constexpr mx_u32_t MX_IPC_HINT_THROUGHPUT = 1u << 1;
+constexpr mx_u32_t MX_IPC_HINT_WAKE_AFFINE = 1u << 2;
+constexpr mx_u32_t MX_IPC_HINT_HANDOFF_OK = 1u << 3;
+constexpr mx_u32_t MX_IPC_HINT_SERVER = 1u << 4;
+constexpr mx_u32_t MX_IPC_HINT_NO_STEAL = 1u << 5;
 
 // SYS_VM_MEMORY_CREATE flags (a2). MX_VM_MEMORY_FLAG_SHARED_STAGING marks the
 // object as the VM's shared staging window: its pages stay out of every DMA

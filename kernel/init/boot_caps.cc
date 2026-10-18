@@ -467,6 +467,11 @@ void issue_boot_caps(Process& init_proc,
         Arena* blk_dma = static_cast<Arena*>(
             mm::heap_alloc(sizeof(Arena), alignof(Arena)));
         if (blk_mmio && blk_dma_phys && blk_dma) {
+            // Virtio and io.fs share this physical arena with the device.
+            // Register before the first write so kernel and EL0 aliases agree;
+            // ordering barriers cannot repair cached/noncached aliasing.
+            if (!mm::register_noncached_range(blk_dma_phys, kBlkDmaPages * PAGE_SIZE))
+                panic("virtio-blk DMA noncached registration failed");
             blk_mmio->phys_base    = g_hw.virtio_base;
             blk_mmio->size         = platform::kVirtioMmioSize;
             blk_mmio->attr         = MX_MMIO_DEVICE_nGnRnE;

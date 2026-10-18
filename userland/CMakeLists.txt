@@ -418,6 +418,48 @@ add_custom_target(mochi_system ALL
 
 # Regression processes are built explicitly and never included in system.mxb.
 if(ANKO_BUILD_DEV)
+    # Isolated IPC workload, built on demand. Kernel optimization is controlled
+    # by the chosen build tree; the benchmark loop uses the same -O2 as Linux.
+    foreach(pair ITERATIONS WARMUP SAMPLES ROUNDS WINDOW PAYLOAD_MASK SPIN SERVER_CPU REFERENCE_FRAMING)
+        if(NOT DEFINED AME_IPC_BENCH_${pair})
+            if(pair STREQUAL "ITERATIONS")
+                set(AME_IPC_BENCH_${pair} 1024 CACHE STRING "IPC benchmark parameter")
+            elseif(pair STREQUAL "WARMUP")
+                set(AME_IPC_BENCH_${pair} 256 CACHE STRING "IPC benchmark parameter")
+            elseif(pair STREQUAL "SAMPLES")
+                set(AME_IPC_BENCH_${pair} 4096 CACHE STRING "IPC benchmark parameter")
+            elseif(pair STREQUAL "ROUNDS")
+                set(AME_IPC_BENCH_${pair} 5 CACHE STRING "IPC benchmark parameter")
+            elseif(pair STREQUAL "WINDOW")
+                set(AME_IPC_BENCH_${pair} 32 CACHE STRING "IPC benchmark parameter")
+            elseif(pair STREQUAL "PAYLOAD_MASK")
+                set(AME_IPC_BENCH_${pair} 31 CACHE STRING "IPC benchmark parameter")
+            else()
+                set(AME_IPC_BENCH_${pair} 0 CACHE STRING "IPC benchmark parameter")
+            endif()
+        endif()
+        if(NOT AME_IPC_BENCH_${pair} MATCHES "^[0-9]+$")
+            message(FATAL_ERROR "AME_IPC_BENCH_${pair} must be an unsigned integer")
+        endif()
+    endforeach()
+    mochi_service(bench.ipc ${CMAKE_SOURCE_DIR}/benchmarks/ipc/ame.cc 0x13200000)
+    set_target_properties(bench.ipc PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    file(SHA256 ${CMAKE_SOURCE_DIR}/benchmarks/ipc/workload.h AME_IPC_CONTRACT_HASH)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        ${CMAKE_SOURCE_DIR}/benchmarks/ipc/workload.h)
+    target_compile_definitions(bench.ipc PRIVATE IPC_BENCH_CONTRACT_SHA256="${AME_IPC_CONTRACT_HASH}")
+    target_compile_options(bench.ipc PRIVATE -O2)
+    foreach(pair ITERATIONS WARMUP SAMPLES ROUNDS WINDOW PAYLOAD_MASK SPIN SERVER_CPU REFERENCE_FRAMING)
+        target_compile_definitions(bench.ipc PRIVATE AME_IPC_BENCH_${pair}=${AME_IPC_BENCH_${pair}})
+    endforeach()
+    add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/ipc-bench.mxb
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test/package-ipc-bench.py ${CMAKE_BINARY_DIR}
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/bench.ipc.mxi
+                ${CMAKE_SOURCE_DIR}/scripts/test/package-ipc-bench.py
+                ${CMAKE_SOURCE_DIR}/scripts/mx/mxpack.py
+                ${CMAKE_SOURCE_DIR}/scripts/mx/signing.py
+        VERBATIM)
+    add_custom_target(ipc_bench DEPENDS ${CMAKE_BINARY_DIR}/ipc-bench.mxb)
     mochi_service(test.simd ${CMAKE_SOURCE_DIR}/tests/kernel/simd.cc 0x13100000
                   ${CMAKE_SOURCE_DIR}/tests/kernel/simd_regs.S)
     # Keep arbitrary register patterns live across C++ calls in this harness.

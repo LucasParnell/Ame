@@ -29,7 +29,7 @@ static cap::Ref resolve_ring_entry(u32 pid, CapHandle ring_cap, u32 need_rights)
 }
 
 Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
-    (void)flags;
+    if (flags & ~MX_RING_PACKED_FRAMES) return nullptr;
     if (order < MX_RING_ORDER_MIN || order > MX_RING_ORDER_MAX) return nullptr;
 
     auto owner = process_reference(pid);
@@ -42,6 +42,7 @@ Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
     const PhysAddr base = mm::alloc_pages_contiguous_for(pid, pages);
     if (!base) return nullptr;
     libk::memset(reinterpret_cast<void*>(base), 0, pages * PAGE_SIZE);
+    reinterpret_cast<RingHeader*>(base)->space.features = flags;
 
     Ring* ring = static_cast<Ring*>(mm::slab_alloc(sizeof(Ring), alignof(Ring)));
     if (!ring) {

@@ -36,6 +36,10 @@ capacity recovery. Empty polling returns before touching DAIF or the clock.
 
 ## Notification and waiting
 
+The current [IPC and scheduler refactor](IPC_REFACTOR.md) adds paired atomic
+sleep arming, copied-message batching, coalesced remote wake IPIs, exact clock
+scaling, and cache-line separation of scheduler working sets.
+
 For a syscall from the current process, execution already retains its owner.
 IPC validates the handle directly in that process's capability table; it adds
 only the capability borrow's reference. Calls targeting another process retain

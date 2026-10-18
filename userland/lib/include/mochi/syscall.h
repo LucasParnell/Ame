@@ -154,11 +154,18 @@ static inline int64_t sys_cap_identify(CapHandle cap) { return _svc1(NR_CAP_IDEN
 static inline int64_t sys_cap_grant(CapHandle proc, CapHandle src, uint32_t rights) { return _svc3(NR_CAP_GRANT, proc, src, rights); }
 static inline int64_t sys_ring_create(uint32_t order, uint32_t flags) { return _svc2(NR_RING_CREATE, order, flags); }
 static inline int64_t sys_ring_share(CapHandle ring, CapHandle proc, uint32_t rights) { return _svc3(NR_RING_SHARE, ring, proc, rights); }
-static inline int64_t sys_doorbell_create() { return _svc1(NR_DOORBELL_CREATE, 0); }
+static inline int64_t sys_doorbell_create(uint32_t hints = 0) { return _svc1(NR_DOORBELL_CREATE, hints); }
 static inline int64_t sys_doorbell_share(CapHandle db, CapHandle proc, uint32_t rights) { return _svc3(NR_DOORBELL_SHARE, db, proc, rights); }
 static inline int64_t sys_notify(CapHandle db) { return _svc1(NR_NOTIFY, db); }
 static inline int64_t sys_wait_doorbell(CapHandle db, uint64_t expected) { return _svc2(NR_WAIT_DOORBELL, db, expected); }
 static inline uint64_t sys_doorbell_read(CapHandle db) { return static_cast<uint64_t>(_svc1(NR_DOORBELL_READ, db)); }
+static inline int64_t sys_wait_ring(CapHandle ring, CapHandle db, uint64_t cursor, uint32_t direction) {
+    return _svc4(MX_NR_WAIT_RING, ring, db, cursor, direction);
+}
+static inline int64_t sys_notify_wait(CapHandle notify, CapHandle ring, CapHandle wait,
+                                     uint64_t cursor, uint32_t flags = 0) {
+    return _svc5(MX_NR_NOTIFY_WAIT, notify, ring, wait, cursor, flags);
+}
 static inline SysPair sys_supervisor_poll(CapHandle supervisor) { return _svc1_pair(NR_SUPERVISOR_POLL, supervisor); }
 static inline mx_status_t sys_supervisor_bind_doorbell(CapHandle supervisor, CapHandle doorbell) {
     return _svc2(MX_NR_SUPERVISOR_BIND_DOORBELL, supervisor, doorbell);

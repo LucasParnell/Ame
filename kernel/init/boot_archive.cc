@@ -1,6 +1,7 @@
 // External signed MXB bundles are the sole boot archive format.
 #include "anko/init.h"
 #include "anko/log.h"
+#include "anko/sched.h"
 #include "anko/fdt.h"
 #include "midix/format/bundle.h"
 #include "manifest_trust.h"
@@ -83,6 +84,7 @@ bool discover_initrd(PhysAddr dtb_phys, PhysAddr* out_base, usize* out_size) {
 }
 
 bool init_archive(PhysAddr base, usize size) {
+    const u64 started = sched::sched_clock_ns();
     integrity::Progress progress{};
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && defined(ANKO_ANNE_WATCHDOG)
     // Bundle validation runs before CPU0 enters the scheduler with IRQs enabled.
@@ -97,8 +99,10 @@ bool init_archive(PhysAddr base, usize size) {
         ANKO_LOGF_ERROR("kernel/init", "bundle rejected: %s", error);
         return false;
     }
-    ANKO_LOGF_INFO("kernel/init", "authenticated MXB bundle objects=%u",
-                   g_archive.header.object_count);
+    ANKO_LOGF_INFO("kernel/init", "authenticated MXB bundle objects=%u verify_ns=%llu bytes=%llu",
+                   g_archive.header.object_count,
+                   static_cast<unsigned long long>(sched::sched_clock_ns() - started),
+                   static_cast<unsigned long long>(size));
     return true;
 }
 bool archive_get(const char* wanted, const void** data, usize* size) {

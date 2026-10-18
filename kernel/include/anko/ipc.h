@@ -17,6 +17,7 @@
 #include "anko/types.h"
 #include "anko/cap.h"
 #include "anko/syscall.h"
+#include "midix/abi/ring.h"
 
 struct Thread;
 
@@ -74,7 +75,7 @@ struct RingHeader {
     RingHeadLine  head;      // offset 0x000
     RingTailLine  tail;      // offset 0x040
     RingFlagsLine flags;     // offset 0x080
-    u8            _reserved[64]; // offset 0x0C0
+    MxRingSpaceLine space;       // offset 0x0C0
 };                           // total 0x100
 static_assert(sizeof(RingHeader) == 0x100);
 static_assert(__builtin_offsetof(RingHeader, head)  == 0x000);
@@ -135,15 +136,21 @@ cap::Borrow<Ring> ring_from_cap(u32 pid, CapHandle cap);
 Ring* ring_create_object(u32 pid, u32 order, u32 flags);
 CapHandle ring_cap_alloc(u32 target_pid, Ring* ring, u32 rights);
 
-CapHandle doorbell_create(u32 pid);
+CapHandle doorbell_create(u32 pid, u32 hints = 0);
 CapHandle doorbell_share(u32 owner_pid, CapHandle db_cap, u32 target_pid, u32 rights);
 Doorbell* doorbell_create_object(u32 pid);
 CapHandle doorbell_cap_alloc(u32 target_pid, Doorbell* db, u32 rights);
 SysError notify(CapHandle cap, u32 caller_pid);
 SysError notify_object(Doorbell* db);
 SysError notify_handoff(CapHandle cap, u64 payload_word, u32 caller_pid);
+SysError notify_handoff_object(Doorbell* db, u64 payload_word);
 SysError reply_handoff(u64 reply_val, u32 caller_pid);
 SysError wait_doorbell_until(CapHandle handle, u64 expected, u64 deadline, u32 caller_pid);
+SysError wait_doorbell_object(const cap::Ref& authority, u64 expected, u64 deadline,
+                             const Ring* ring = nullptr, u64 cursor = 0, bool writable = false);
+SysError wait_ring(CapHandle ring, CapHandle doorbell, u64 cursor, u32 direction, u32 caller_pid);
+SysError exchange_ring(CapHandle notify, CapHandle ring, CapHandle wait, u64 cursor,
+                       u32 flags, u32 caller_pid);
 void poll_deadline_waiters();
 SysError wait_doorbell(CapHandle cap, u64 expected, u32 caller_pid);
 u64 doorbell_counter(CapHandle cap, u32 caller_pid);

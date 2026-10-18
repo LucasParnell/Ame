@@ -56,6 +56,7 @@ static Thread* select_stealable(Eki& victim, u32 thief_cpu) {
 }
 
 void handle_pending_steal_requests(Eki& victim) {
+    if (!__atomic_load_n(&victim.pending_steal_requests.head, __ATOMIC_ACQUIRE)) return;
     StealRequest* list = __atomic_exchange_n(
         &victim.pending_steal_requests.head, nullptr, __ATOMIC_ACQ_REL);
     while (list) {
@@ -82,8 +83,7 @@ void handle_pending_steal_requests(Eki& victim) {
             t->migration_rebase = true;
             t->state = TS_RUNNABLE_PENDING_REMOTE;
             t->cpu_id = thief_cpu;
-            pending_push(eki_for_cpu(thief_cpu), t);
-            smp::send_wake_ipi(thief_cpu);
+            if (pending_push(eki_for_cpu(thief_cpu), t)) smp::send_wake_ipi(thief_cpu);
             metric_inc(victim.steals_granted);
 
             // Free request back to thief's eki
@@ -126,15 +126,14 @@ void maybe_send_steal_request(Eki& thief) {
     thief.steal_req_buf.next      = nullptr;
 
     Eki& victim = eki_for_cpu(victim_cpu);
-    StealRequest* old;
+    StealRequest* old = __atomic_load_n(&victim.pending_steal_requests.head, __ATOMIC_RELAXED);
     do {
-        old = __atomic_load_n(&victim.pending_steal_requests.head, __ATOMIC_ACQUIRE);
         thief.steal_req_buf.next = old;
     } while (!__atomic_compare_exchange_n(&victim.pending_steal_requests.head,
                                           &old, &thief.steal_req_buf,
-                                          false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+                                          true, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
     metric_inc(thief.steal_requests_sent);
-    smp::send_wake_ipi(victim_cpu);
+    if (!old) smp::send_wake_ipi(victim_cpu);
 }
 
 } // namespace sched

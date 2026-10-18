@@ -107,6 +107,9 @@ endif()
 # ---------------------------------------------------------------------------
 # Global flags — freestanding, no exceptions/RTTI
 # ---------------------------------------------------------------------------
+if(AME_CPU_TUNE)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-mtune=${AME_CPU_TUNE}>)
+endif()
 add_compile_options(
     -ffreestanding
     $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>

@@ -7,6 +7,14 @@ and `mx` names remain in the source and ABI.
 See [feature status](docs/FEATURE_STATUS.md) for implementation coverage and
 [the architecture specification](docs/architecture.md) for the design. Architecture
 and older protocol documents include targets that are not yet implemented.
+See [the performance refactor notes](docs/PERFORMANCE_REFACTOR.md) for boot
+measurements, library boundaries, idle behavior and validation limits.
+See [the IPC benchmark guide](docs/IPC_BENCHMARK.md) and [initial raw baselines](docs/IPC_BASELINE.md)
+for two-process latency/throughput measurements and reproducible comparisons.
+The [IPC and scheduler refactor](docs/IPC_REFACTOR.md) describes the current
+fast paths, wakeup ordering and validation.
+See [Cortex-A53 IPC execution paths](docs/IPC_FLOOR.md) for the P20 Lite-oriented
+ASID, framing, combined IPC and scheduler changes.
 
 ## Build
 
@@ -39,6 +47,7 @@ targets below are the ones worth knowing by name.
 |--------------------|----------|
 | `anko`             | The microkernel ELF and `anko.bin` raw image |
 | `mochi_system`     | The Mochi services plus the signed `system.mxb` bundle and `manifest.json` |
+| `ipc_bench`        | Isolated signed two-process IPC benchmark bundle (dev builds, explicit target) |
 | `kernel_regressions` | `lifecycle.mxb` (dev builds only), the kernel lifecycle fixture |
 | `ame_vfs`          | A QEMU virtual-filesystem image (`fs.img`) with the built Ame tree under `/ame` |
 | `ame_disk`         | A U-Boot/QEMU raw-boot + AmeFS disk image for the disk boot path |

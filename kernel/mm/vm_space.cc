@@ -136,6 +136,7 @@ bool is_table_desc(u64 desc) {
 }
 
 void tlbi_all();
+void tlbi_space(u32 pid);
 
 u64 user_page_attrs(u32 rights, PhysAddr pa) {
     const bool writable = (rights & RIGHT_WRITE) != 0;
@@ -162,7 +163,9 @@ u64 kernel_page_attrs(bool device, PhysAddr pa) {
         (pa >= anne::native_display::kCrgBase && pa - anne::native_display::kCrgBase < PAGE_SIZE)) device = true;
 #endif
 #endif
-    u64 attrs = (device ? ATTR_DEVICE : normal_attrs(pa)) | PTE_AF | PTE_UXN;
+    // Kernel roots can acquire different late MMIO mappings. Keep even these
+    // identity translations ASID-tagged until a shared TTBR1 is installed.
+    u64 attrs = (device ? ATTR_DEVICE : normal_attrs(pa)) | PTE_AF | PTE_UXN | PTE_NG;
     if (!device) attrs |= PTE_SH_INNER;
     if (device) attrs |= PTE_PXN;
     return attrs;
@@ -184,7 +187,7 @@ bool map_page_raw(VmSpace& space, VirtAddr va, PhysAddr pa, u64 attrs) {
     auto rollback = [&]() {
         // Remove only tables created by this walk. Existing mappings are intact.
         for (u32 i = 0; i < created_count; ++i) *created_links[i] = 0;
-        if (created_count) tlbi_all();
+        if (created_count) tlbi_space(space.pid);
         for (u32 i = 0; i < created_count; ++i) free_page(created_pages[i]);
         return false;
     };
@@ -291,7 +294,7 @@ bool emit_identity_batch(VmSpace& space, PhysAddr begin, PhysAddr end, u64 attri
     u32 created_count = 0;
     auto rollback = [&]() {
         for (u32 i = 0; i < created_count; ++i) *created_links[i] = 0;
-        if (created_count) tlbi_all();
+        if (created_count) tlbi_space(space.pid);
         for (u32 i = 0; i < created_count; ++i) free_page(created_pages[i]);
         return false;
     };
@@ -517,6 +520,19 @@ void tlbi_all() {
 #endif
 }
 
+void tlbi_space(u32 pid) {
+#ifdef ANKO_HOST_TEST
+    (void)pid;
+    anko_vm_test_tlbi();
+#else
+    const u64 operand = static_cast<u64>(pid) << 48;
+    asm volatile("dsb ishst\n"
+                 "tlbi aside1is, %0\n"
+                 "dsb ish\n"
+                 "isb\n" :: "r"(operand) : "memory");
+#endif
+}
+
 } // namespace
 
 void sync_icache_range(PhysAddr pa, usize len) {
@@ -616,7 +632,7 @@ bool unmap_page_raw(VmSpace& space, VirtAddr va, bool free_owned) {
     }
     // Remote CPUs must discard cached translations before any backing or page
     // table can be returned to the allocator and used for a different object.
-    tlbi_all();
+    tlbi_space(space.pid);
     for (u32 i = 0; i < count; ++i) free_page(retired[i]);
     if (free_owned && (pte & PTE_SW_OWNED)) free_page_for(space.pid, pte & PTE_ADDR_MASK);
     return true;
@@ -628,12 +644,15 @@ void destroy_table(VmSpace& space, PhysAddr table_pa, u32 level) {
     for (u32 i = 0; i < 512; ++i) {
         const u64 desc = table[i];
         if ((desc & PTE_VALID) == 0) continue;
+        // Detach each populated root subtree and complete its shootdown before
+        // freeing anything beneath it. No cached walk may reach recycled tables.
+        table[i] = 0;
+        if (level == 0) tlbi_space(space.pid);
         if (level < 3 && is_table_desc(desc)) {
             destroy_table(space, desc & PTE_ADDR_MASK, level + 1);
         } else if (level == 3 && (desc & PTE_SW_OWNED)) {
             free_page_for(space.pid, desc & PTE_ADDR_MASK);
         }
-        table[i] = 0;
     }
     free_page(table_pa);
 }
@@ -720,7 +739,11 @@ VmSpace vm_space_create(u32 pid) {
     // Serialize lazy plan rebuilding with NC registration and other creators.
     kernel::LockGuard guard(g_vm_lock);
     VmSpace s{};
+    if (!pid || pid > 64) return s;
     s.pid = pid;
+    // IDs are reserved until the old process and all its execution references
+    // have retired. Flush the previous incarnation on every CPU before reuse.
+    tlbi_space(pid);
     s.pgd_phys = alloc_page();
     if (s.pgd_phys) {
         clear_table(s.pgd_phys);
@@ -733,7 +756,7 @@ bool vm_map(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights) {
     if (!valid_user_rights(rights, false)) return false;
     kernel::LockGuard guard(g_vm_lock);
     const bool ok = map_page_raw(space, va, pa, user_page_attrs(rights, pa));
-    if (ok) tlbi_all();
+    if (ok) tlbi_space(space.pid);
     return ok;
 }
 
@@ -741,7 +764,7 @@ bool vm_map_owned(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights) {
     if (!valid_user_rights(rights, false)) return false;
     kernel::LockGuard guard(g_vm_lock);
     const bool ok = map_page_raw(space, va, pa, user_page_attrs(rights, pa) | PTE_SW_OWNED);
-    if (ok) tlbi_all();
+    if (ok) tlbi_space(space.pid);
     return ok;
 }
 
@@ -761,12 +784,12 @@ bool vm_map_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32 rights
             for (u64 undo = 0; undo < mapped; undo += PAGE_SIZE) {
                 (void)unmap_page_raw(space, va + undo, false);
             }
-            if (mapped) tlbi_all();
+            if (mapped) tlbi_space(space.pid);
             return false;
         }
         mapped += PAGE_SIZE;
     }
-    tlbi_all();
+    tlbi_space(space.pid);
     return true;
 }
 
@@ -787,18 +810,18 @@ bool vm_map_device_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32
             for (u64 undo = 0; undo < mapped; undo += PAGE_SIZE) {
                 (void)unmap_page_raw(space, va + undo, false);
             }
-            if (mapped) tlbi_all();
+            if (mapped) tlbi_space(space.pid);
             return false;
         }
         mapped += PAGE_SIZE;
     }
-    tlbi_all();
+    tlbi_space(space.pid);
     return true;
 }
 
 void vm_unmap(VmSpace& space, VirtAddr va) {
     kernel::LockGuard guard(g_vm_lock);
-    if (unmap_page_raw(space, va, true)) tlbi_all();
+    (void)unmap_page_raw(space, va, true);
 }
 
 void vm_unmap_owned_range(VmSpace& space, VirtAddr va, u64 size) {
@@ -811,7 +834,7 @@ void vm_unmap_owned_range(VmSpace& space, VirtAddr va, u64 size) {
     for (u64 off = 0; off < rounded; off += PAGE_SIZE) {
         changed = unmap_page_raw(space, va + off, true) || changed;
     }
-    if (changed) tlbi_all();
+    if (changed) tlbi_space(space.pid);
 }
 
 void vm_space_destroy(VmSpace& space) {
@@ -819,18 +842,14 @@ void vm_space_destroy(VmSpace& space) {
     if (!space.pgd_phys) return;
     destroy_table(space, space.pgd_phys, 0);
     space.pgd_phys = 0;
-    tlbi_all();
+    tlbi_space(space.pid);
 }
 
 void vm_activate(PhysAddr pgd_phys) {
     if (!pgd_phys) pgd_phys = g_kernel_root;
 #ifndef ANKO_HOST_TEST
     asm volatile(
-        "dsb ishst\n"
         "msr ttbr0_el1, %0\n"
-        "isb\n"
-        "tlbi vmalle1is\n"
-        "dsb ish\n"
         "isb\n"
         :
         : "r"(pgd_phys)

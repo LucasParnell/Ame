@@ -13,6 +13,8 @@
 #include "midix/usb/xhci_events.h"
 #include "libk/mmio.h"
 #include "libk/dma.h"
+#include "libk/cpu.h"
+#include "mochi/driver.h"
 #include "libk/endian.h"
 #include "libk/slot_pool.h"
 #include "mochi/va_layout.h"
@@ -363,7 +365,7 @@ static bool xhci_reset() {
         op_write(kXhciUsbCmd, op_read(kXhciUsbCmd) & ~kCmdRun);
         uint32_t attempts = 100000;
         while (!(op_read(kXhciUsbSts) & kStsHcHalted) && --attempts) {
-            asm volatile("yield" ::: "memory");
+            libk::cpu::relax();
         }
         if (!attempts) return false;
     }
@@ -373,13 +375,13 @@ static bool xhci_reset() {
     // T210 keeps Hekate's FALCON firmware; other controllers reset normally.
     op_write(kXhciUsbCmd, op_read(kXhciUsbCmd) | kCmdHcReset);
     while ((op_read(kXhciUsbCmd) & kCmdHcReset) && --attempts) {
-        asm volatile("yield" ::: "memory");
+        libk::cpu::relax();
     }
     if (!attempts) return false;
     attempts = 100000;
 #endif
     while ((op_read(kXhciUsbSts) & kStsNotReady) && --attempts) {
-        asm volatile("yield" ::: "memory");
+        libk::cpu::relax();
     }
     return attempts > 0;
 }
@@ -448,7 +450,7 @@ static bool xhci_program_and_start() {
 
     uint32_t attempts = 100000;
     while ((op_read(kXhciUsbSts) & kStsHcHalted) && --attempts) {
-        asm volatile("yield" ::: "memory");
+        libk::cpu::relax();
     }
     return attempts > 0;
 }
@@ -459,7 +461,7 @@ static bool reset_port(uint8_t port, uint8_t* out_speed) {
 
     if ((s & kPortPp) == 0) {
         port_write(port, s | kPortPp);
-        for (uint32_t i = 0; i < 10000; ++i) asm volatile("yield" ::: "memory");
+        for (uint32_t i = 0; i < 10000; ++i) libk::cpu::relax();
         s = port_read(port);
     }
 
@@ -469,13 +471,13 @@ static bool reset_port(uint8_t port, uint8_t* out_speed) {
 
     uint32_t attempts = 250000;
     while ((port_read(port) & kPortPr) && --attempts) {
-        asm volatile("yield" ::: "memory");
+        libk::cpu::relax();
     }
     if (!attempts) return false;
 
     attempts = 250000;
     while (((s = port_read(port)) & kPortPed) == 0 && --attempts) {
-        asm volatile("yield" ::: "memory");
+        libk::cpu::relax();
     }
     if (!attempts) return false;
 
@@ -894,10 +896,10 @@ extern "C" [[noreturn]] void _start() {
         !g_engine.init(g_state_arena, {kEndpoints, kTransfers, kTransfers, kControlBufferBytes,
             (1u << 0) | (1u << 2) | (1u << 3)})) mochi::boot::invalid_boot();
     MxCapInfo mmio{}, dma{};
-    const auto mmio_cap = mochi::boot::handle(boot, "xhci.mmio"), dma_cap = mochi::boot::handle(boot, "xhci.dma");
-    if (!mmio_cap || !dma_cap || mx_cap_info(mmio_cap, &mmio) != MX_OK || mx_cap_info(dma_cap, &dma) != MX_OK ||
-        dma.attr != MX_ARENA_MEMORY_NONCACHEABLE || mx_map_mmio(mmio_cap, kVaXhciMmio, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK ||
-        mx_map_page(dma_cap, kVaXhciDma, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) mochi::boot::invalid_boot();
+    const auto mmio_cap = mochi::boot::handle(boot, "xhci.mmio");
+    if (!mmio_cap || mx_cap_info(mmio_cap, &mmio) != MX_OK ||
+        mx_map_mmio(mmio_cap, kVaXhciMmio, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK ||
+        !mochi::driver::map_dma(boot, "xhci.dma", kVaXhciDma, &dma)) mochi::boot::invalid_boot();
     g_mmio = {reinterpret_cast<volatile uint8_t*>(kVaXhciMmio), mmio.size};
     g_dma_base = reinterpret_cast<uint8_t*>(kVaXhciDma); g_dma_phys = dma.base; g_dma_size = dma.size;
     g_dma_arena = mochi::Arena(g_dma_base, g_dma_size);
@@ -920,5 +922,18 @@ extern "C" [[noreturn]] void _start() {
     if (!xhci_program_and_start()) mochi::boot::invalid_boot();
     mochi::log_raw_marker("drv.usb.xhci: controller ready\n");
     mochi::boot::ready(boot);
-    while (true) if (!service()) mx_yield();
+    for (;;) {
+        if (mochi::driver::run_batch(service)) {
+            mx_yield();
+            continue;
+        }
+        // The current PCI path has no usable interrupt binding. Request rings
+        // wake immediately; poll hardware and retained TX work on a timer rather
+        // than keeping a runnable thread on every CPU idle pass. Actual timeout
+        // resolution is the kernel timer tick (currently 10 ms).
+        const auto deadline = libk::earlier_deadline(g->next_deadline,
+            mx_clock_ns() + mochi::driver::kBackpressureRetryNs);
+        mochi::driver::idle(&g->link, 1, g->link.rx_doorbell, deadline,
+                            g->reply_pending ? 0u : 1u);
+    }
 }

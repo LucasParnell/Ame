@@ -126,6 +126,14 @@ static inline SysPair _svc5_pair(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t
     return {static_cast<int64_t>(x0), static_cast<int64_t>(x1)};
 }
 
+static inline SysPair _svc2_pair(uint64_t nr, uint64_t a0, uint64_t a1) {
+    register uint64_t x0 asm("x0") = a0;
+    register uint64_t x1 asm("x1") = a1;
+    register uint64_t x8 asm("x8") = nr;
+    asm volatile("svc #0" : "+r"(x0), "+r"(x1), "+r"(x8) : : MOCHI_SVC_CLOBBERS_1);
+    return {static_cast<int64_t>(x0), static_cast<int64_t>(x1)};
+}
+
 static inline SysPair _svc1_pair(uint64_t nr, uint64_t a0) {
     register uint64_t x0 asm("x0") = a0;
     register uint64_t x1 asm("x1") = 0;
@@ -263,6 +271,11 @@ static inline uint32_t mx_ipc_policy_set_budget(uint32_t budget) {
 }
 // x0 = parks, x1 = wakes.
 static inline SysPair mx_ipc_policy_counts() { return _svc1_pair(MX_NR_IPC_POLICY, 2); }
+// Same counters for a direct child; the kernel rejects anything else. Negative
+// value means denied (MX_ERR_PERM) or unknown (MX_ERR_NOTFOUND).
+static inline SysPair mx_ipc_policy_counts_for(uint32_t pid) {
+    return _svc2_pair(MX_NR_IPC_POLICY, 3, pid);
+}
 
 static inline void mx_yield() { sys_yield(); }
 static inline void mx_exit(int32_t code) { sys_exit(code); }

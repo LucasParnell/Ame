@@ -252,3 +252,19 @@ interleaved boots each, different-CPU, medians:
 
 The controller lands within a few percent of the best fixed value on the RPC
 cases and beats it on stream/256, while giving budget back when nothing parks.
+
+### Supervisor reads (why write-back is not wired yet)
+
+`SYS_IPC_POLICY` op 3 returns the park/wake counts of a direct child
+(`supervisor_pid` must match the caller). It is read-only, needs no capability
+and exposes nothing the supervisor does not already own by lifetime. That is the
+aggregation primitive a profiler would use.
+
+The write-back loop itself is not wired, because the two halves do not meet:
+`init` is the only process that supervises every service, but it holds no io.fs
+session — it only routes client endpoints — so it cannot read or write the
+profile file at boot. Adding that session means teaching `init` to be a client of
+a service it is still launching, which risks a boot-order deadlock; a service
+that does have fs access (msh) is not the supervisor of anything else. Until one
+of those is solved deliberately, the profile stays image-provisioned and the
+controller adapts within each boot.

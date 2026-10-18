@@ -96,7 +96,9 @@ struct Ring {
     u32      producer_pid;
     u32      consumer_pid;
     u32      owner_generation;
+    object::Record* lifetime; // creator/bound endpoint identity; never searched on share
 };
+static_assert(sizeof(Ring) == 32);
 
 // ---------------------------------------------------------------------------
 // Doorbell kernel object (spec §5.9)
@@ -111,15 +113,15 @@ struct Ring {
 struct alignas(64) Doorbell {
     u64     counter;          // incremented by notify; compared by wait
     Thread* waiter;           // sleeping thread, or null
-    u32     owner_pid;
-    u32     rights;
+    object::Record* lifetime; // immutable cached identity
     u32     lock;
     u32     sched_hints;      // IpcSchedHint flags; set by privileged cap holders
-    u32     bound_server_tid; // preferred server thread tid (0 = unbound)
     u32     home_cpu;         // preferred CPU for wake-affine (kInvalidCpu = none)
+    u32     owner_pid;
+    u32     rights;
+    u32     bound_server_tid; // preferred server thread tid (0 = unbound)
     u64     wake_count;       // total notify-woke-thread events
     u64     handoff_count;    // total successful handoffs
-    u8      pad[8];
 };
 static_assert(sizeof(Doorbell) == 64);
 

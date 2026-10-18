@@ -187,6 +187,9 @@ void capture_poll() {
 
 extern "C" {
 __attribute__((section(".data.anne_diag"))) volatile u32 anne_diag_fault_active[MX_HOST_MAX_CPUS]{};
+// Hand-shake state for the fault-tolerant probe hook in boot_diagnostics.S.
+// [0]=armed [1]=faults [2]=esr [3]=elr [4]=far [5]=owning cpu.
+__attribute__((section(".data.anne_diag"))) volatile u64 anne_diag_probe_state[6]{};
 }
 
 namespace anne {
@@ -361,6 +364,42 @@ void boot_syscall(u64 nr) {
     }
     capture_poll();
 }
+// Fault-tolerant single-u64 read. Arms the board fault hook for exactly one
+// load; when the address is denied the abort is captured, the instruction is
+// skipped in the handler, and the failure is reported here instead of
+// resetting the kernel. Returns true when the value was read.
+bool probe_read(u64 addr, u64* out_value, u64* out_esr, u64* out_far, u64* out_elr,
+                u64* out_faults) {
+    if (out_value) *out_value = 0;
+    if (out_esr) *out_esr = 0;
+    if (out_far) *out_far = 0;
+    if (out_elr) *out_elr = 0;
+    if (out_faults) *out_faults = 0;
+    u64 cpu = 0;
+    asm volatile("mrs %0, tpidr_el1" : "=r"(cpu));
+    if (cpu >= MX_HOST_MAX_CPUS) cpu = 0;
+    IrqGuard guard;
+    anne_diag_probe_state[1] = 0;
+    anne_diag_probe_state[5] = cpu;
+    asm volatile("dmb sy" ::: "memory");
+    anne_diag_probe_state[0] = 1;
+    asm volatile("dmb sy" ::: "memory");
+    u64 value = 0;
+    asm volatile("ldr %0, [%1]" : "=r"(value) : "r"(addr) : "memory");
+    asm volatile("dmb sy" ::: "memory");
+    anne_diag_probe_state[0] = 0;
+    const u64 faults = anne_diag_probe_state[1];
+    if (out_faults) *out_faults = faults;
+    if (faults != 0) {
+        if (out_esr) *out_esr = anne_diag_probe_state[2];
+        if (out_elr) *out_elr = anne_diag_probe_state[3];
+        if (out_far) *out_far = anne_diag_probe_state[4];
+        return false;
+    }
+    if (out_value) *out_value = value;
+    return true;
+}
+
 void boot_user_fault(u64 esr, u64 pc, u64 far, u64 sp, u32 pid, u32 tid) {
     IrqGuard guard;
     text("\n!USERFAULT pid="); number(pid); text(" tid="); number(tid);

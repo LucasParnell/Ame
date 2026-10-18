@@ -32,6 +32,7 @@ using supervision::restart_decision;
 constexpr uint32_t kMaxServices = 4;
 
 static CapHandle supervisor;
+static CapHandle exit_doorbell;
 static uint32_t cpu_count;
 static midix::format::Bundle bundle;
 
@@ -97,15 +98,78 @@ static bool poll_exit(uint64_t* identity, long* status) {
 static void await_exit(uint64_t identity, long expected, const char* message) {
     const uint64_t deadline = mx_clock_ns() + 3000000000ull;
     while (mx_clock_ns() < deadline) {
+        const auto counter = exit_doorbell ? sys_doorbell_read(exit_doorbell) : 0;
         uint64_t got = 0;
         long status = 0;
         if (poll_exit(&got, &status)) {
             check(got == identity && status == expected, message);
             return;
         }
-        sys_yield();
+        if (exit_doorbell) {
+            check(!mx_doorbell_wait_until(exit_doorbell, counter, deadline), "exit notification wait");
+        } else {
+            sys_yield();
+        }
     }
     fail(message);
+}
+
+// Bind real child completion to the same counter-based wait used by init.
+// Keep a wait-only handle after revoking the original: the binding must own its
+// reference, and a supervisor without notify authority cannot create one.
+static void test_exit_notification_binding() {
+    const auto original = static_cast<CapHandle>(sys_doorbell_create());
+    check(original != kNullCap, "exit doorbell create");
+    exit_doorbell = static_cast<CapHandle>(sys_cap_dup(original, RIGHT_WAIT));
+    check(exit_doorbell != kNullCap, "exit wait handle");
+    check(sys_supervisor_bind_doorbell(supervisor, exit_doorbell) == MX_ERR_PERM,
+          "notify authority required");
+    const auto read_only = static_cast<CapHandle>(sys_cap_dup(supervisor, RIGHT_READ));
+    check(read_only != kNullCap, "read-only supervisor");
+    check(sys_supervisor_bind_doorbell(read_only, original) == MX_ERR_PERM,
+          "supervisor mutation authority required");
+    check(!sys_cap_revoke(read_only), "read-only supervisor revoke");
+    check(!sys_supervisor_bind_doorbell(supervisor, original), "exit doorbell bind");
+    check(!sys_cap_revoke(original), "original exit handle revoke");
+
+    CapHandle process = kNullCap, thread = kNullCap;
+    uint64_t identity = 0;
+    spawn_child(&process, &thread, &identity, "test.busy");
+    const auto delegated = static_cast<CapHandle>(sys_supervisor_delegate(supervisor, process));
+    check(delegated != kNullCap, "child supervisor delegation");
+    check(sys_supervisor_bind_doorbell(delegated, exit_doorbell) == MX_ERR_PERM,
+          "foreign supervisor binding rejected");
+    check(!sys_cap_revoke(delegated), "delegated supervisor revoke");
+    const auto expected = sys_doorbell_read(exit_doorbell);
+    check(!sys_kill(process), "notified child kill");
+    await_exit(identity, -1, "notified exit record");
+    const auto notify_deadline = mx_clock_ns() + 3000000000ull;
+    while (sys_doorbell_read(exit_doorbell) == expected && mx_clock_ns() < notify_deadline)
+        check(!mx_doorbell_wait_until(exit_doorbell, expected, notify_deadline), "retained notification");
+    check(sys_doorbell_read(exit_doorbell) != expected, "exit increments retained doorbell");
+
+    // Rebinding an already published exit must signal the new destination.
+    spawn_child(&process, &thread, &identity, "test.busy");
+    const auto before = sys_doorbell_read(exit_doorbell);
+    check(!sys_kill(process), "rebind child kill");
+    const auto deadline = mx_clock_ns() + 3000000000ull;
+    // A counter change from either this completion or the previous one is not
+    // enough: wait for the current process's teardown to revoke its handles.
+    while (sys_cap_identify(process) >= 0 && mx_clock_ns() < deadline) sys_yield();
+    // Completion publishes after revocation; wait for its notification as well.
+    while (sys_doorbell_read(exit_doorbell) == before && mx_clock_ns() < deadline)
+        check(!mx_doorbell_wait_until(exit_doorbell, before, deadline), "completion before rebind");
+    check(sys_doorbell_read(exit_doorbell) != before, "completion published before rebind");
+    const auto replacement = static_cast<CapHandle>(sys_doorbell_create());
+    check(replacement != kNullCap, "replacement exit doorbell");
+    check(!sys_supervisor_bind_doorbell(supervisor, replacement), "pending exit rebind");
+    check(sys_doorbell_read(replacement) != 0, "pending exit signals new binding");
+    check(!sys_cap_revoke(exit_doorbell), "old exit waiter revoke");
+    exit_doorbell = replacement;
+    await_exit(identity, -1, "rebound exit record");
+    check(!sys_supervisor_bind_doorbell(supervisor, 0), "exit doorbell unbind");
+    check(!sys_supervisor_bind_doorbell(supervisor, replacement), "exit doorbell rebind");
+    print("exit notifications: retained, rights checked, rebound, and race-safe\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +435,7 @@ extern "C" [[noreturn]] void _start() {
     (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)), libk::as_bytes(bundle.data, sizeof(bundle.header)), sizeof(bundle.header));
     print("supervision regression started\n");
 
+    test_exit_notification_binding();
     test_generation_matching();
     test_generation_reuse();
     test_simultaneous_exits();

@@ -161,9 +161,16 @@ extern "C" [[noreturn]] void _start() {
         MxRingSlot slot{};
         MxBoardRequest request{};
         if (!r->busy && !r->pending && r->links[1].try_recv(&slot) &&
-            mochi::message_get(slot, &request, MX_ROLE_SET)) {
+            (mochi::message_get(slot, &request, MX_ROLE_SET) ||
+             mochi::message_get(slot, &request, MX_ROLE_QUERY))) {
             r->reply = {request.id, MX_OK, 0, 0, 0};
-            if (request.reserved || request.value > 2 ||
+            if (slot.type == MX_ROLE_QUERY) {
+                if (request.reserved || request.value) r->reply.status = MX_ERR_INVALID;
+                r->reply.value = static_cast<mx_u32_t>(r->host.sequence);
+                r->reply.flags = (r->host.active ? MX_ROLE_HOST_ACTIVE : 0u) |
+                                  (r->host.connected ? MX_ROLE_DATA_CONNECTED : 0u);
+                r->pending = true;
+            } else if (request.reserved || request.value > 2 ||
                 (r->role != MxUsbRole::Detached && request.value)) {
                 r->reply.status = MX_ERR_BUSY;
                 r->pending = true;

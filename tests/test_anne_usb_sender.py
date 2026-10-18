@@ -5,6 +5,7 @@ import sys
 from unittest import mock
 import unittest
 import zlib
+import errno
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts/anne'))
@@ -37,6 +38,47 @@ class Transport:
 
 
 class AnneUsbSender(unittest.TestCase):
+    def test_interactive_console_reopens_without_replaying_pending_input(self):
+        first, second = mock.Mock(fd=17), mock.Mock(fd=23)
+        stdin = mock.Mock()
+        stdin.isatty.return_value = True
+        stdin.fileno.return_value = 19
+        stdout = mock.Mock()
+        with mock.patch.object(serial_console, 'Serial', side_effect=[first, second]) as opened, \
+             mock.patch.object(serial_console.sys, 'stdin', stdin), \
+             mock.patch.object(serial_console.sys, 'stdout', stdout), \
+             mock.patch.object(serial_console.termios, 'tcgetattr'), \
+             mock.patch.object(serial_console.termios, 'tcsetattr'), \
+             mock.patch.object(serial_console.tty, 'setraw'), \
+             mock.patch.object(serial_console.select, 'select', side_effect=[
+                 ([19], [], []), ([], [17], []), ([], [], []), ([19], [], [])]), \
+             mock.patch.object(serial_console.os, 'read', side_effect=[b'partial-command', b'\x1d']), \
+             mock.patch.object(serial_console.os, 'write', side_effect=OSError(errno.ENXIO, 'lost')) as write:
+            # Use the real relay, including a partially queued command when
+            # the first fd vanishes. The reconnect must start with no bytes.
+            self.assertEqual(serial_console.console_mode('same-phone', None, False, 3), 0)
+            self.assertEqual(opened.call_count, 2)
+            self.assertEqual(write.call_count, 1)
+            first.close.assert_called_once()
+            second.close.assert_called_once()
+
+    def test_disconnect_cleanup_is_idempotent_and_does_not_mask_error(self):
+        link = serial_console.Serial.__new__(serial_console.Serial)
+        link.fd, link.previous = 17, [0] * 7
+        with mock.patch.object(serial_console.termios, 'tcsetattr',
+                               side_effect=serial_console.termios.error(errno.ENXIO, 'disconnected')), \
+             mock.patch.object(serial_console.os, 'close') as close:
+            link.close()
+            link.close()
+            close.assert_called_once_with(17)
+
+    def test_relay_signals_disconnect_for_reconnection(self):
+        with mock.patch.object(serial_console.select, 'select', return_value=([17], [], [])), \
+             mock.patch.object(serial_console.os, 'read', return_value=b''):
+            with self.assertRaises(OSError) as error:
+                serial_console.relay(17, 19, lambda _: None)
+            self.assertEqual(error.exception.errno, errno.ENODEV)
+
     def test_raw_console_relay_reads_integer_fds_and_drains_before_exit(self):
         emitted = []
         with mock.patch.object(serial_console.select, 'select', side_effect=[

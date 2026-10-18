@@ -95,21 +95,7 @@ constexpr uint32_t SCHED_CTX_NO_STEAL = 1u << 0;
 constexpr uint32_t SCHED_CTX_VM_RUNNER = 1u << 1;
 constexpr uint32_t SCHED_CTX_STEALABLE = 1u << 2;
 
-struct SchedContext {
-    uint32_t principal_id;
-    uint32_t owner_thread_or_vcpu;
-    uint32_t band;
-    uint32_t weight;
-    uint64_t budget_ns;
-    uint64_t period_ns;
-    uint64_t deadline_ns;
-    uint64_t used_ns;
-    uint64_t period_start_ns;
-    uint64_t core_mask;
-    uint32_t home_cpu;
-    uint32_t flags;
-    uint32_t id;
-};
+using SchedContext = MxSchedContext;
 
 enum VcpuExitReason : uint32_t {
     VCPU_EXIT_QUANTUM_EXPIRED = 0,

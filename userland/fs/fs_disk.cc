@@ -1,9 +1,9 @@
-// userland/fs/fs_disk.cc — read-only midix-fs-v1 disk backend.
+// userland/fs/fs_disk.cc — midix-fs-v1 block transport and mount.
 //
 // On top of the block driver this provides a GPT scan for the AMEROOT
 // partition, a small LRU block cache, and the B+tree lookups used by inode,
-// extent, and directory reads. The backend is read-only: it never writes the
-// image, so the mounted root cannot be mutated.
+// extent, and directory reads. store.cc journals mutable /data metadata and
+// allocates across the volume; handles keep the packaged root read-only.
 
 #include "fs_internal.h"
 #include "libk/endian.h"
@@ -41,13 +41,6 @@ constexpr char kAmerootPartitionName[] = "AMEROOT";
 // the caller degrades to the memory backend / an error reply.
 constexpr mx_u64_t kBlkReplyTimeoutNs = 1'000'000'000ull;
 
-struct DiskBlockCacheEntry {
-    bool valid;
-    mx_u64_t block;
-    mx_u64_t age;
-    alignas(4096) mx_u8_t data[kBlockSize];
-};
-
 static mochi::fs::BlkClient g_blk_client{};
 static bool g_blk_available = false;
 static mx_u8_t* g_blk_dma = nullptr;
@@ -60,7 +53,11 @@ static mx_u64_t g_disk_inode_root = 0;
 static mx_u64_t g_disk_journal_start = 0;
 static mx_u64_t g_disk_journal_blocks = 0;
 static mx_u64_t g_disk_first_data = 0;
-static DiskBlockCacheEntry g_disk_cache[kDiskBlockCacheEntries];
+// Probe identities without dragging 4 KiB payloads through the CPU cache.
+static mx_u64_t g_cache_blocks[kDiskBlockCacheEntries];
+static mx_u64_t g_cache_ages[kDiskBlockCacheEntries];
+static mx_u32_t g_cache_valid;
+alignas(4096) static mx_u8_t g_cache_data[kDiskBlockCacheEntries][kBlockSize];
 static mx_u64_t g_disk_cache_clock = 1;
 alignas(4096) static mx_u8_t g_gpt_entries[64 * 1024];
 alignas(4096) static mx_u8_t g_disk_block[kBlockSize];
@@ -76,55 +73,47 @@ bool disk_mounted() {
 // ---------------------------------------------------------------------------
 static bool disk_cache_lookup(mx_u64_t block, mx_u8_t* out) {
     for (mx_u32_t i = 0; i < kDiskBlockCacheEntries; ++i) {
-        DiskBlockCacheEntry& entry = g_disk_cache[i];
-        if (!entry.valid || entry.block != block) {
-            continue;
+        if ((g_cache_valid & (1u << i)) && g_cache_blocks[i] == block) {
+            g_cache_ages[i] = ++g_disk_cache_clock;
+            libk::copy_exact(libk::as_bytes(out, kBlockSize), libk::as_bytes(g_cache_data[i]));
+            return true;
         }
-        entry.age = ++g_disk_cache_clock;
-        libk::copy_exact(libk::as_bytes(out, kBlockSize), libk::as_bytes(entry.data));
-        return true;
     }
     return false;
 }
-
-static DiskBlockCacheEntry& disk_cache_victim() {
-    mx_u32_t victim = 0;
-    mx_u64_t oldest = ~0ull;
-    for (mx_u32_t i = 0; i < kDiskBlockCacheEntries; ++i) {
-        if (!g_disk_cache[i].valid) {
-            return g_disk_cache[i];
-        }
-        if (g_disk_cache[i].age < oldest) {
-            oldest = g_disk_cache[i].age;
-            victim = i;
-        }
-    }
-    return g_disk_cache[victim];
-}
-
 static void disk_cache_store(mx_u64_t block, const mx_u8_t* data) {
-    DiskBlockCacheEntry& entry = disk_cache_victim();
-    entry.valid = true;
-    entry.block = block;
-    entry.age = ++g_disk_cache_clock;
-    libk::copy_exact(libk::as_bytes(entry.data), libk::as_bytes(data, kBlockSize));
+    mx_u32_t victim = 0;
+    bool empty = false;
+    for (mx_u32_t i = 0; i < kDiskBlockCacheEntries; ++i) {
+        if ((g_cache_valid & (1u << i)) && g_cache_blocks[i] == block) { victim = i; break; }
+        if (!(g_cache_valid & (1u << i))) { if (!empty) victim = i; empty = true; }
+        else if (!empty && g_cache_ages[i] < g_cache_ages[victim]) victim = i;
+    }
+    g_cache_blocks[victim] = block;
+    g_cache_ages[victim] = ++g_disk_cache_clock;
+    libk::copy_exact(libk::as_bytes(g_cache_data[victim]), libk::as_bytes(data, kBlockSize));
+    g_cache_valid |= 1u << victim;
 }
-
 static void disk_cache_invalidate(mx_u64_t block) {
-    for (mx_u32_t i = 0; i < kDiskBlockCacheEntries; ++i) {
-        if (g_disk_cache[i].valid && g_disk_cache[i].block == block) {
-            g_disk_cache[i].valid = false;
-        }
-    }
+    for (mx_u32_t i = 0; i < kDiskBlockCacheEntries; ++i)
+        if ((g_cache_valid & (1u << i)) && g_cache_blocks[i] == block) g_cache_valid &= ~(1u << i);
 }
-
 static void disk_cache_reset() {
-    for (mx_u32_t i = 0; i < kDiskBlockCacheEntries; ++i) {
-        g_disk_cache[i].valid = false;
-        g_disk_cache[i].block = 0;
-        g_disk_cache[i].age = 0;
-    }
+    g_cache_valid = 0;
     g_disk_cache_clock = 1;
+}
+// An unanswered command may still own the shared transfer arena. Never reuse
+// it or accept an uncorrelated late reply after the bounded wait expires.
+static bool block_request(mx_u32_t type, mx_u64_t sector, mx_u32_t count, BlkReply* reply) {
+    if (!g_blk_available) return false;
+    if (!g_blk_client.request(type, sector, count, MX_NULL_HANDLE,
+                             type == BLK_FLUSH ? 0 : BLK_DMA_CLIENT_OFFSET,
+                             reply, mx_clock_ns() + kBlkReplyTimeoutNs)) {
+        g_blk_available = false;
+        disk_cache_reset();
+        return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -140,8 +129,7 @@ static bool disk_read_sectors(mx_u64_t sector, mx_u32_t sector_count, mx_u8_t* o
         return false;
     }
     BlkReply reply{};
-    if (!g_blk_client.request(BLK_READ, sector, sector_count, MX_NULL_HANDLE, BLK_DMA_CLIENT_OFFSET,
-                              &reply, mx_clock_ns() + kBlkReplyTimeoutNs)) {
+    if (!block_request(BLK_READ, sector, sector_count, &reply)) {
         return false;
     }
     if (reply.status != MX_OK || reply.sectors_transferred != sector_count) {
@@ -168,25 +156,37 @@ static bool disk_sector_for_block(mx_u64_t block, mx_u64_t* sector) {
 // Write one fs block through the block service. Mirrors disk_read_block's
 // bounds checks so a durable write can never leave the mounted partition, and
 // keeps the read cache coherent with the new contents.
-bool disk_write_block(mx_u64_t block, const mx_u8_t* data) {
-    if (!g_blk_available || !g_blk_dma || !data) {
-        return false;
-    }
-    mx_u64_t sector = 0;
-    if (!disk_sector_for_block(block, &sector)) return false;
+bool disk_write_blocks(mx_u64_t block, mx_u32_t count, const void* input) {
+    if (!g_blk_available || !g_blk_dma || !input || !count || count > 16 ||
+        block > ~mx_u64_t{0} - (count - 1)) return false;
+    mx_u64_t sector = 0, last = 0;
+    if (!disk_sector_for_block(block, &sector) ||
+        !disk_sector_for_block(block + count - 1, &last)) return false;
+    const auto bytes = static_cast<mx_u64_t>(count) * kBlockSize;
     if (!libk::copy_exact(libk::slice(libk::as_bytes(g_blk_dma, g_blk_dma_size),
-                                     BLK_DMA_CLIENT_OFFSET, kBlockSize),
-                           libk::as_bytes(data, kBlockSize))) return false;
+                                     BLK_DMA_CLIENT_OFFSET, bytes), libk::as_bytes(input, bytes))) return false;
+    // Invalidate before submission, including every block in a partial or
+    // ambiguous write. Old cached bytes can never conceal a failed transfer.
+    for (mx_u32_t i = 0; i < count; ++i) disk_cache_invalidate(block + i);
     BlkReply reply{};
-    if (!g_blk_client.request(BLK_WRITE, sector, kSectorsPerFsBlock, MX_NULL_HANDLE,
-                              BLK_DMA_CLIENT_OFFSET, &reply, mx_clock_ns() + kBlkReplyTimeoutNs)) {
-        return false;
-    }
-    if (reply.status != MX_OK || reply.sectors_transferred != kSectorsPerFsBlock) {
-        return false;
-    }
-    disk_cache_invalidate(block);
-    disk_cache_store(block, data);
+    if (!block_request(BLK_WRITE, sector, count * kSectorsPerFsBlock, &reply) ||
+        reply.status != MX_OK || reply.sectors_transferred != count * kSectorsPerFsBlock) return false;
+    const auto* data = static_cast<const mx_u8_t*>(input);
+    for (mx_u32_t i = 0; i < count; ++i) disk_cache_store(block + i, data + i * kBlockSize);
+    return true;
+}
+bool disk_write_block(mx_u64_t block, const mx_u8_t* data) {
+    return disk_write_blocks(block, 1, data);
+}
+bool disk_read_blocks(mx_u64_t block, mx_u32_t count, void* out) {
+    if (!out || !count || count > 16 || block > ~mx_u64_t{0} - (count - 1)) return false;
+    auto* data = static_cast<mx_u8_t*>(out);
+    if (count == 1) return disk_read_block(block, data);
+    mx_u64_t sector = 0, last = 0;
+    if (!disk_sector_for_block(block, &sector) ||
+        !disk_sector_for_block(block + count - 1, &last) ||
+        !disk_read_sectors(sector, count * kSectorsPerFsBlock, data)) return false;
+    for (mx_u32_t i = 0; i < count; ++i) disk_cache_store(block + i, data + i * kBlockSize);
     return true;
 }
 
@@ -281,11 +281,12 @@ static DiskLookup disk_btree_find(mx_u64_t root, mx_u64_t key, DiskTree tree,
 }
 
 bool disk_inode(mx_u32_t inode_number, InodeLeafEntry* out) {
-    if (!g_disk_mounted || !out) {
+    if (!g_disk_mounted || g_volume.poisoned || !out) {
         return false;
     }
     alignas(8) mx_u8_t entry[kBTreeEntrySize];
-    if (disk_btree_find(g_disk_inode_root, inode_number, DiskTree::Inode, entry) != DiskLookup::Found) {
+    const auto root = g_volume.mounted ? g_volume.checkpoint.inode_table_root : g_disk_inode_root;
+    if (disk_btree_find(root, inode_number, DiskTree::Inode, entry) != DiskLookup::Found) {
         return false;
     }
     libk::copy_exact(libk::as_bytes(out, sizeof(*out)), libk::as_bytes(entry));
@@ -297,6 +298,7 @@ bool disk_dir_lookup(const InodeLeafEntry& dir, mx_u32_t parent_inode, const cha
     if (dir.type != FS_INODE_DIR || name_len == 0 || name_len > kMaxName || !name || !out_inode) {
         return false;
     }
+    if (g_volume.mounted) return mochi::store::lookup(g_volume, parent_inode, name, name_len, *out_inode) == MX_OK;
     alignas(8) mx_u8_t entry[kBTreeEntrySize];
     const mx_u64_t key = (static_cast<mx_u64_t>(parent_inode) << 32) | name_hash32(name, name_len);
     if (disk_btree_find(dir.extent_tree_root, key, DiskTree::Directory, entry) != DiskLookup::Found) {
@@ -371,6 +373,8 @@ mx_i32_t disk_read_file(const OpenHandle& handle, mx_u64_t offset, mx_u32_t leng
     if (length > FS_INLINE_READ_MAX) {
         return static_cast<mx_i32_t>(MX_ERR_NOT_IMPLEMENTED);
     }
+    if (g_volume.mounted) return mochi::store::read(g_volume, handle.inode_number, offset,
+                                                    reply->inline_data, length, reply->length_read);
     if (offset >= handle.size) {
         reply->length_read = 0;
         return MX_OK;
@@ -586,11 +590,26 @@ static bool mount_disk_fs() {
     g_disk_journal_start = sb->journal_start_block;
     g_disk_journal_blocks = sb->journal_block_count;
     g_disk_first_data = sb->first_data_block;
+    const mochi::store::Io io{
+        nullptr,
+        [](void*, mx_u64_t first, mx_u32_t count, void* out) { return disk_read_blocks(first, count, out); },
+        [](void*, mx_u64_t first, mx_u32_t count, const void* data) { return disk_write_blocks(first, count, data); },
+        [](void*) { return disk_flush() == MX_OK; }};
+    if (!mochi::store::mount(g_volume, io) && g_volume.error != MX_ERR_NOT_IMPLEMENTED) {
+        mochi::log_raw_marker("io.fs: disk recovery failed; volume not writable\n");
+        g_volume.mounted = false;
+        return false;
+    }
+    if (g_volume.mounted) {
+        g_disk_inode_root = g_volume.checkpoint.inode_table_root;
+        mochi::log_raw_marker("io.fs: full-volume /data allocator and journal ready\n");
+    }
     g_disk_mounted = true;
     InodeLeafEntry root;
     libk::zero(root);
     if (!disk_inode(kRootInode, &root) || root.type != FS_INODE_DIR) {
         g_disk_mounted = false;
+        g_volume.mounted = false;
         return false;
     }
     mochi::log_raw_marker("io.fs: mounted midix-fs-v1 disk\n");
@@ -605,8 +624,7 @@ mx_i32_t disk_flush() {
         return static_cast<mx_i32_t>(MX_ERR_SERVICE_UNAVAILABLE);
     }
     BlkReply reply{};
-    if (!g_blk_client.request(BLK_FLUSH, 0, 0, MX_NULL_HANDLE, 0, &reply,
-                              mx_clock_ns() + kBlkReplyTimeoutNs)) {
+    if (!block_request(BLK_FLUSH, 0, 0, &reply)) {
         return static_cast<mx_i32_t>(MX_ERR_BUSY);
     }
     return reply.status;
@@ -658,7 +676,8 @@ void fs_disk_init(const MxBootInfo* boot) {
     mochi::log_raw_marker(g_blk_available ? "io.fs: block endpoint ready\n"
         : "io.fs: no block endpoint; running memory backend\n");
 
-    const mx_handle_t blk_dma = mochi::boot::handle(boot, "virtio.blk.dma");
+    mx_handle_t blk_dma = mochi::boot::handle(boot, "blk.buffer");
+    if (blk_dma == MX_NULL_HANDLE) blk_dma = mochi::boot::handle(boot, "virtio.blk.dma");
     MxCapInfo dma_info{};
     if (blk_dma != MX_NULL_HANDLE && mx_cap_info(blk_dma, &dma_info) == MX_OK &&
         dma_info.size >= BLK_DMA_CLIENT_OFFSET + kBlockSize &&

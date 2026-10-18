@@ -25,25 +25,23 @@ void FramebufferConsole::glyph(u32 x, u32 y, u32 scale, char c, u32 foreground) 
     if (!active() || !scale || scale > 4 || x > fb_.width || y > fb_.height ||
         8 * scale > fb_.width - x || 16 * scale > fb_.height - y) return;
     const auto* bits = midix::font::vga8x16_glyph(static_cast<u8>(c));
-    auto* pixels = reinterpret_cast<volatile u32*>(fb_.address);
+    auto* pixels = reinterpret_cast<u32*>(fb_.address);
     for (u32 gy = 0; gy < 16; ++gy) {
         for (u32 sy = 0; sy < scale; ++sy) {
             const u64 row = u64{y + gy * scale + sy} * fb_.width;
-            for (u32 gx = 0; gx < 8; ++gx) {
-                const u32 color = bits[gy] & (0x80u >> gx) ? foreground : kBackground;
-                for (u32 sx = 0; sx < scale; ++sx) pixels[row + x + gx * scale + sx] = color;
-            }
+            libk::framebuffer_mono_span(pixels + row + x, bits[gy], 8 * scale, scale,
+                                        foreground, kBackground);
         }
     }
     dirty(y, 16 * scale);
 }
 void FramebufferConsole::clear_row(u32 row) {
     for (u32 col = 0; col < columns_; ++col) cells_[row][col] = ' ';
-    auto* pixels = reinterpret_cast<volatile u32*>(fb_.address);
+    auto* pixels = reinterpret_cast<u32*>(fb_.address);
     const u32 start_y = view_.y + row * 16 * view_.scale;
     for (u32 py = start_y; py < start_y + 16 * view_.scale; ++py)
-        for (u32 px = view_.x; px < view_.x + columns_ * 8 * view_.scale; ++px)
-            pixels[u64{py} * fb_.width + px] = kBackground;
+        libk::framebuffer_fill_span(pixels + u64{py} * fb_.width + view_.x,
+                                    columns_ * 8 * view_.scale, kBackground);
     dirty(start_y, 16 * view_.scale);
 }
 void FramebufferConsole::newline() {

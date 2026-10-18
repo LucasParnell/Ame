@@ -1,0 +1,3 @@
+# Optional host-only firmware analysis dependencies, separate from build signing.
+unicorn==2.1.4
+capstone==5.0.6

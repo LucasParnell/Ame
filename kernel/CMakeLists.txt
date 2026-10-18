@@ -1,5 +1,22 @@
 # anko microkernel — sources are added phase-by-phase as V0 progresses.
-# Spec ref: docs/v0-phases.md.
+# Spec ref: docs/architecture.md.
+
+# Keep per-device entropy out of the distributable userland system bundle.
+set(AME_FIDO2_SEED_FILE "" CACHE FILEPATH "Private 32-byte per-device FIDO2 seed (empty disables credential operations)")
+set(_fido_seed_args)
+set(_fido_seed_deps)
+if(AME_FIDO2_SEED_FILE)
+    list(APPEND _fido_seed_args --seed "${AME_FIDO2_SEED_FILE}")
+    list(APPEND _fido_seed_deps "${AME_FIDO2_SEED_FILE}")
+endif()
+set(_fido_seed_header "${CMAKE_CURRENT_BINARY_DIR}/generated/fido2_seed.h")
+add_custom_command(OUTPUT "${_fido_seed_header}"
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/fido2/seed.py
+            --header "${_fido_seed_header}" ${_fido_seed_args}
+    DEPENDS ${CMAKE_SOURCE_DIR}/scripts/fido2/seed.py ${_fido_seed_deps}
+    VERBATIM)
+set_source_files_properties(init/boot_caps.cc PROPERTIES OBJECT_DEPENDS "${_fido_seed_header}")
+include_directories("${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 set(ANKO_SOURCES
     # ---- Phase 0: build and run --------------------------------------------
@@ -42,6 +59,7 @@ set(ANKO_SOURCES
 
     # ---- Phase 3/4: scheduler + capabilities -------------------------------
     arch/arm64/context.S
+    arch/arm64/fpsimd.S
     arch/arm64/psci.S
     sched/thread.cc
     sched/sched_class.cc
@@ -99,6 +117,7 @@ set(ANKO_SOURCES
 
 add_executable(anko ${ANKO_SOURCES})
 if(ANKO_BOARD STREQUAL "huawei-anne" OR ANKO_ANNE_DIAG_QEMU)
+    target_sources(anko PRIVATE mm/boot_cache.cc arch/arm64/boot_cache.S)
     set(ANNE_MINIMAL_DIR ${CMAKE_SOURCE_DIR}/boards/huawei-anne/minimal)
     add_executable(anko-minimal EXCLUDE_FROM_ALL
         ${ANNE_MINIMAL_DIR}/entry.S ${ANNE_MINIMAL_DIR}/main.cc
@@ -129,6 +148,10 @@ if(ANKO_BOARD STREQUAL "huawei-anne" OR ANKO_ANNE_DIAG_QEMU)
     target_sources(anko PRIVATE ${CMAKE_BINARY_DIR}/generated/anne_bundle.S
         ${CMAKE_SOURCE_DIR}/boards/huawei-anne/native_log.cc
         ${CMAKE_SOURCE_DIR}/boards/huawei-anne/boot_diagnostics.cc
+        ${CMAKE_SOURCE_DIR}/boards/huawei-anne/rpmb_diagnostics.cc
+        ${CMAKE_SOURCE_DIR}/boards/huawei-anne/rpmb_provisioning.cc
+        ${CMAKE_SOURCE_DIR}/boards/huawei-anne/emmc.cc
+        ${CMAKE_SOURCE_DIR}/shared/drivers/emmc/sdhci.cc
         ${CMAKE_SOURCE_DIR}/boards/huawei-anne/boot_diagnostics.S)
     target_include_directories(anko PRIVATE ${CMAKE_SOURCE_DIR}/boards/huawei-anne)
     if(ANKO_ANNE_WATCHDOG)

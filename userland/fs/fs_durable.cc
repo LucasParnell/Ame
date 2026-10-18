@@ -458,6 +458,6 @@ bool durable_load() {
 }
 
 void handle_sync(const mochi::fs::Server& fs, const RingSlot& slot) {
-    const mx_i32_t status = durable_sync();
+    const mx_i32_t status = g_volume.mounted ? mochi::store::sync(g_volume) : durable_sync();
     send_status_only(fs, slot, FS_SYNC_REPLY, status);
 }

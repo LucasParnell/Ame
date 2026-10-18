@@ -30,6 +30,7 @@ static_assert(demo_pong::kVaSendRing + ring_span <= demo_pong::kVaLogRing);
 #include "mochi/usb.h"
 #include "mochi/framebuffer.h"
 #include "mochi/driver.h"
+#include "mochi/inbox.h"
 
 namespace {
 constexpr uint32_t kOrder = 2;
@@ -48,6 +49,63 @@ void reset() {
     host_now = 0;
     host_on_yield = host_on_read = nullptr;
     host_on_wait = nullptr;
+}
+
+Storage inbox_storage[8];
+RingPage* inbox_rings[8];
+
+void inbox_wait_races() {
+    reset();
+    for (uint32_t i = 0; i < 8; ++i) {
+        inbox_storage[i] = {};
+        inbox_rings[i] = &inbox_storage[i].page;
+    }
+    const mochi::InboxWait inbox{inbox_rings, 8, kOrder, 1};
+    const mochi::Ring last{inbox_rings[7], kOrder, 1};
+
+    // A queued request skips the syscall; waiting must not consume its payload.
+    assert(last.try_push_msg(kType, 73u));
+    host_on_wait = []() -> mx_i64_t { assert(false); return MX_ERR_DEAD; };
+    assert(inbox.wait(0) == MX_OK && last.depth() == 1);
+    RingSlot slot{};
+    assert(last.try_pop(&slot));
+
+    // A publication after the final head check claims a sleep flag and changes
+    // the expected counter. Every ring, including the last one, must be armed.
+    host_on_wait = []() -> mx_i64_t {
+        for (const auto* page : inbox_rings) assert(page->flags.receiver_about_to_sleep == 1);
+        assert((mochi::Ring{inbox_rings[7], kOrder, 1}.try_push_msg(kType, 91u)));
+        assert(host_notifies != host_wait_expected);
+        return MX_OK;
+    };
+    assert(inbox.wait(0) == MX_OK && last.depth() == 1);
+    for (const auto* page : inbox_rings) assert(!page->flags.receiver_about_to_sleep);
+    assert(last.try_pop(&slot));
+
+    // Exit/session publication is independent of ring flags. Its notification
+    // between the caller's event scan and sleep must satisfy the old counter.
+    const auto expected = sys_doorbell_read(1);
+    mx_doorbell_notify(1);
+    host_on_wait = []() -> mx_i64_t {
+        assert(host_notifies != host_wait_expected);
+        assert(host_wait_deadline == 1234);
+        return MX_OK;
+    };
+    assert(inbox.wait(expected, 1234) == MX_OK);
+
+    // A failed wait disarms every producer too; a replacement generation may
+    // remap these addresses immediately after the caller regains control.
+    host_on_wait = []() -> mx_i64_t { return MX_ERR_DEAD; };
+    assert(inbox.wait(host_notifies) == MX_ERR_DEAD);
+    for (const auto* page : inbox_rings) assert(!page->flags.receiver_about_to_sleep);
+
+    // Inactive sessions and zero-client servers still wait for lifecycle events.
+    inbox_rings[3] = nullptr;
+    host_on_wait = nullptr;
+    assert(inbox.wait(host_notifies, 5678) == MX_OK && host_now == 5678);
+    assert((mochi::InboxWait{nullptr, 0, kOrder, 1}.wait(host_notifies, 6789)) == MX_OK);
+    assert(host_now == 6789 && host_yields == 0);
+    reset();
 }
 void enqueue() {
     const uint32_t value = 42;
@@ -243,6 +301,30 @@ void cold_driver_bindings() {
 }
 } // namespace
 
+static void batches() {
+    reset();
+    RingSlot frames[6]{}, out[6]{};
+    for (uint32_t i=0;i<6;++i) {
+        assert(mochi::message_put(&frames[i],kType,i));
+        frames[i].seq=700+i;
+        for (uint32_t j=4;j<MX_RING_INLINE_PAYLOAD;++j) frames[i].payload[j]=0xaa;
+    }
+    storage.page.head.v=storage.page.tail.v=~uint64_t{0}-1;
+    ring.publish_sleep(0);
+    assert(ring.try_push_frames(frames,6)==4 && host_notifies==1);
+    assert(ring.try_pop_batch(out,3)==3);
+    for (uint32_t i=0;i<3;++i) {
+        uint32_t value=99;
+        assert(mochi::message_get(out[i],&value,kType) && value==i && out[i].seq==700+i);
+        for (uint32_t j=4;j<MX_RING_INLINE_PAYLOAD;++j) assert(out[i].payload[j]==0);
+    }
+    frames[1].length=49;
+    assert(ring.try_push_frames(frames,3)==1);
+    assert(ring.try_pop_batch(out,6)==2 && out[0].seq==703 && out[1].seq==700);
+    assert(!ring.try_pop_batch(out,0) && !ring.try_push_frames(nullptr,1));
+    assert(!ring.try_pop_batch(nullptr,1));
+}
+
 int main() {
     reset();
     RingSlot frame{}, received{};
@@ -252,6 +334,8 @@ int main() {
     assert(ring.try_pop(&received) && received.seq == frame.seq);
     invalid_and_full();
     byte_runs_and_wrap();
+    batches();
+    inbox_wait_races();
     sleep_and_typed_reads();
     protocol_replies();
     usb_transfer_hot_path();

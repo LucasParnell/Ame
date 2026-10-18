@@ -10,6 +10,7 @@
 #include "mochi/boot_log.h"
 #include "midix/abi/protocols/usb_function.h"
 #include "midix/debug/usb_input.h"
+#include "midix/abi/protocols/app_stream.h"
 namespace {
 struct Source {
     midix::debug::Parser parser;
@@ -19,22 +20,35 @@ struct Source {
     InputEvent events[3];
     mx_u32_t count, next;
     bool attached, held, reply_pending;
+    mx_u32_t app_offset;
+    bool app_pending, app_reset;
+    mx_u64_t usb_generation;
+    bool configured;
 };
 struct Runtime {
     mochi::SpscEndpoint link;
     mochi::input::EventSink input;
     Source source;
+    mochi::SpscEndpoint apps;
+    MxRingSlot app_reply;
+    bool app_reply_pending;
 };
 void event(Source& s, mx_u32_t type, mx_u32_t key = 0, mx_u32_t modifiers = 0) {
     s.events[s.count++] = {type,         key,          modifiers, 0, 0xf000000000000001ull,
                            s.generation, ++s.sequence, 7,         0};
 }
-void frame(Source& s) {
+void frame(Runtime& r) {
+    auto& s = r.source;
     using namespace midix::debug;
     const auto* bytes = s.parser.bytes;
     const auto sequence = libk::load_le<mx_u32_t>(bytes + 4);
     const auto length = libk::load_le<mx_u16_t>(bytes + 10);
     const auto type = libk::load_le<mx_u16_t>(bytes + 8);
+    if (midix::apps::wire_type(type) && r.apps.valid()) {
+        s.app_pending = true;
+        s.app_offset = 0;
+        return;
+    }
     mx_status_t status = MX_OK;
     if (!sequence || (type != kHello && sequence <= s.wire_sequence)) {
         status = MX_ERR_INVALID;
@@ -83,6 +97,37 @@ void frame(Source& s) {
 bool service(Runtime& r) {
     auto& s = r.source;
     bool progress = false;
+    if (r.apps.valid()) {
+        if (!r.app_reply_pending && r.apps.try_recv(&r.app_reply)) {
+            MxFunctionChunk reply{};
+            r.app_reply_pending = mochi::message_get(r.app_reply, &reply, MX_FUNCTION_TX) &&
+                                  s.configured && reply.generation == s.usb_generation;
+            progress = true;
+        }
+        if (r.app_reply_pending && r.link.tx().try_push_frame(r.app_reply)) {
+            r.app_reply_pending = false; libk::zero(r.app_reply); progress = true;
+        }
+        if (s.app_reset) {
+            MxFunctionChunk reset{s.usb_generation, 0, 0, 0,
+                static_cast<mx_u8_t>(s.configured ? MX_FUNCTION_CONFIGURED : 0), {}};
+            if (!r.apps.tx().try_push_msg(MX_FUNCTION_RESET, reset)) return progress;
+            s.app_reset = false; progress = true;
+        }
+        if (s.app_pending) {
+            const auto size = midix::debug::kHeader + libk::load_le<mx_u16_t>(s.parser.bytes + 10);
+            const auto count = (size - s.app_offset < 32 ? size - s.app_offset : 32);
+            MxFunctionChunk chunk{s.usb_generation, 0, static_cast<mx_u16_t>(count), 0, 0, {}};
+            libk::copy_n(libk::as_bytes(chunk.data),
+                libk::as_bytes(s.parser.bytes + s.app_offset, count), count);
+            if (!r.apps.tx().try_push_msg(MX_FUNCTION_RX, chunk)) return progress;
+            s.app_offset += count;
+            if (s.app_offset == size) {
+                s.app_pending = false;
+                libk::zero(s.parser.bytes); s.parser.reset();
+            }
+            return true;
+        }
+    }
     while (s.next < s.count) {
         if (!r.input.try_send(s.events[s.next])) {
             return progress;
@@ -105,15 +150,24 @@ bool service(Runtime& r) {
         }
         progress = true;
         if (slot.type == MX_FUNCTION_RESET) {
+            MxFunctionChunk reset{};
+            if (!mochi::message_get(slot, &reset, MX_FUNCTION_RESET) || !reset.generation ||
+                reset.length || (reset.flags & ~MX_FUNCTION_CONFIGURED)) return progress;
+            s.usb_generation = reset.generation;
+            s.configured = (reset.flags & MX_FUNCTION_CONFIGURED) != 0;
+            s.app_reset = r.apps.valid();
+            r.app_reply_pending = false; libk::zero(r.app_reply);
             if (s.attached) {
                 event(s, INPUT_SOURCE_RESET);
             }
             s.attached = false;
             s.wire_sequence = 0;
             s.parser.reset();
+            libk::zero(s.parser.bytes);
             return progress;
         }
-        if (!mochi::message_get(slot, &s.chunk, MX_FUNCTION_RX) || s.chunk.length > 32) {
+        if (!mochi::message_get(slot, &s.chunk, MX_FUNCTION_RX) || s.chunk.length > 32 ||
+            !s.configured || s.chunk.generation != s.usb_generation || s.chunk.flags) {
             return progress;
         }
         s.position = 0;
@@ -121,8 +175,9 @@ bool service(Runtime& r) {
     }
     while (s.position < s.chunk.length) {
         progress = true;
-        if (s.parser.push(s.chunk.data[s.position++])) {
-            frame(s);
+        const auto byte = s.chunk.data[s.position]; s.chunk.data[s.position++] = 0;
+        if (s.parser.push(byte)) {
+            frame(r);
             return progress;
         }
     }
@@ -147,6 +202,10 @@ extern "C" [[noreturn]] void _start() {
         mochi::boot::invalid_boot();
     }
     r->source.generation = mx_clock_ns();
+    if (mochi::boot::handle(boot, "apps.tx")) {
+        r->apps = mochi::driver::link(boot, "apps", mochi::va::native_driver::kLinks + 0x40000);
+        if (!r->apps.valid()) mochi::boot::invalid_boot();
+    }
     mochi::boot::ready(boot);
     for (;;) {
         if (mochi::driver::run_batch([&] { return service(*r); })) {
@@ -154,9 +213,13 @@ extern "C" [[noreturn]] void _start() {
             continue;
         }
         const auto& source = r->source;
-        const bool retained = source.held || source.reply_pending || source.next < source.count;
-        mochi::driver::idle(&r->link, 1, r->link.rx_doorbell,
+        const bool retained = source.held || source.reply_pending || source.next < source.count ||
+                              source.app_pending || source.app_reset || r->app_reply_pending;
+        // Both producers use the bulk receiver's doorbell. Arm the app reply
+        // ring too: the host waits for its ACK without sending another packet.
+        const mochi::SpscEndpoint links[] = {r->link, r->apps};
+        mochi::driver::idle(links, r->apps.valid() ? 2 : 1, r->link.rx_doorbell,
                             retained ? mx_clock_ns() + mochi::driver::kBackpressureRetryNs : 0,
-                            retained ? 0u : 1u);
+                            (retained ? 0u : 1u) | (!r->app_reply_pending ? 2u : 0u));
     }
 }

@@ -15,10 +15,18 @@
 #include "anko/vm.h"
 #include "anko/el2_boot.h"
 #include "midix/abi/diagnostics.h"
+#include "midix/abi/vm.h"
 #include "anko/log.h"
 #include "anko/panic.h"
+#include "anko/spinlock.h"
+#include "anko/smp.h"
 #ifdef ANKO_BOARD_HUAWEI_ANNE
 #include "boot_diagnostics.h"
+#include "battery.h"
+#include "debug_io.h"
+#include "rpmb.h"
+#include "rpmb_diagnostics.h"
+#include "emmc.h"
 #endif
 #include "libk/metric.h"
 #include "libk/printf.h"
@@ -45,6 +53,57 @@ constexpr VirtAddr kStackFrameAlign = 16; // AArch64 ABI: SP must be 16-byte ali
 using libk::metric_inc;
 using libk::metric_load;
 
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+// These RPMB service metadata IDs are defined by the matching Hi6250 kernel;
+// its driver does not call them during initialization. Keep them separate from
+// the request-address and request-done calls: those calls consume a shared
+// buffer and are not safe compatibility tests.
+constexpr u64 kRpmbCallCount = anne::rpmb::kCallCountSmc;
+constexpr u64 kRpmbUid = anne::rpmb::kUidSmc;
+constexpr u64 kRpmbVersion = anne::rpmb::kVersionSmc;
+constexpr u64 kRpmbRequestAddressSmc = anne::rpmb::kRequestAddressSmc;
+constexpr u64 kRpmbRequestDoneSmc = anne::rpmb::kRequestDoneSmc;
+
+constexpr auto kAnneRpmbConfig = anne::rpmb::kAnneConfig;
+static kernel::SpinLock g_el3_lock{};
+
+struct SmcWords {
+    u64 x0;
+    u64 x1;
+    u64 x2;
+    u64 x3;
+};
+
+SmcWords rpmb_call(u64 function_id, u64 arg0 = 0, u64 arg1 = 0, u64 arg2 = 0,
+                   u64 arg3 = 0, u64 arg4 = 0, u64 arg5 = 0, u64 arg6 = 0) {
+#if defined(__aarch64__)
+    // Fixed register variables are intentional: the SMCCC convention assigns
+    // the four result words to x0..x3, while ordinary C++ operands may be
+    // allocated to any general-purpose register. x4..x7 are pinned so secure
+    // handlers that inspect extended registers (e.g. the RPMB caller-trusted
+    // bit checked in w7) see deterministic values.
+    register u64 x0 asm("x0") = function_id;
+    register u64 x1 asm("x1") = arg0;
+    register u64 x2 asm("x2") = arg1;
+    register u64 x3 asm("x3") = arg2;
+    register u64 x4 asm("x4") = arg3;
+    register u64 x5 asm("x5") = arg4;
+    register u64 x6 asm("x6") = arg5;
+    register u64 x7 asm("x7") = arg6;
+    asm volatile("smc #0"
+                 : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
+                   "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7)
+                 :
+                 : "memory", "cc");
+    return {x0, x1, x2, x3};
+#else
+    (void)function_id; (void)arg0; (void)arg1; (void)arg2;
+    (void)arg3; (void)arg4; (void)arg5; (void)arg6;
+    return {~0ull, 0, 0, 0};
+#endif
+}
+
+#endif
 extern "C" char __text_start[];
 extern "C" char __kernel_end[];
 
@@ -60,7 +119,7 @@ inline Process* cur_proc() {
     return sched::current_process();
 }
 
-inline bool has_rights(const CapEntry* e, u32 rights) {
+inline bool has_rights(const cap::Snapshot* e, u32 rights) {
     return e && ((e->rights_mask & rights) == rights);
 }
 
@@ -272,6 +331,7 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     }
 
     case SYS_SPAWN: {
+        if (a4 & ~(MX_SPAWN_SUSPENDED | MX_SPAWN_KILL_WITH_SUPERVISOR)) return err(E_INVALID);
         if (!a0 || a1 == 0 || a1 > kMaxUserElfSize) return err(E_INVALID);
         if (!user_range_ok(ua, a0, a1)) return err(E_FAULT);
         char kname[32]{};
@@ -319,6 +379,20 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
             }
         }
         return ok(static_cast<long>(h), static_cast<long>(th));
+    }
+
+    case SYS_SUPERVISOR_DELEGATE: {
+        auto authority = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_SUPERVISOR);
+        auto target = cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_PROCESS);
+        if (!authority || !target || !has_rights(authority, RIGHT_SPAWN) ||
+            !has_rights(target, RIGHT_SPAWN)) return err(E_PERM);
+        auto* parent = static_cast<Process*>(authority->target);
+        auto* child = static_cast<Process*>(target->target);
+        if (!parent || !child || parent->dying || child->dying) return err(E_DEAD);
+        if (child->supervisor_identity != sched::process_identity(*parent)) return err(E_PERM);
+        const auto h = cap::alloc(*p->cap_table, CAP_SUPERVISOR, child,
+                                  RIGHT_READ | RIGHT_SPAWN | RIGHT_DUP);
+        return h ? ok(static_cast<long>(h)) : err(E_OVERFLOW);
     }
 
     case SYS_KILL: {
@@ -596,6 +670,19 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         return ok(static_cast<long>(ipc::doorbell_counter(static_cast<CapHandle>(a0), p->pid)));
     }
 
+    case SYS_SUPERVISOR_BIND_DOORBELL: {
+        auto authority = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_SUPERVISOR);
+        if (!authority || !has_rights(authority, RIGHT_READ | RIGHT_SPAWN)) return err(E_PERM);
+        // A delegated supervisor may bind its own exit stream, never replace
+        // another process's wake destination through a borrowed capability.
+        if (authority->target != p) return err(E_PERM);
+        auto doorbell = a1 ? cap::lookup(*p->cap_table, static_cast<CapHandle>(a1), CAP_DOORBELL)
+                           : cap::Ref{};
+        if (a1 && (!doorbell || !has_rights(doorbell, RIGHT_NOTIFY))) return err(E_PERM);
+        return ok(sched::bind_exit_doorbell(*p,
+            doorbell ? static_cast<Doorbell*>(doorbell->target) : nullptr));
+    }
+
     case SYS_SUPERVISOR_POLL: {
         cap::Ref supervisor_e = cap::lookup(*p->cap_table, static_cast<CapHandle>(a0), CAP_SUPERVISOR);
         if (!supervisor_e) return err(E_NOTFOUND);
@@ -791,9 +878,23 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
     }
 
     case SYS_SCHED_CONTEXT_CREATE: {
-        if (!a0 || a1 < sizeof(SchedContext)) return err(E_INVALID);
+        if (!a0 || a1 < sizeof(MxSchedContext)) return err(E_INVALID);
+        MxSchedContext request{};
+        if (!copy_from_user(ua, &request, a0, sizeof(request))) return err(E_FAULT);
+        if (request.band >= NUM_BANDS) return err(E_INVALID);
+        // Translate policy explicitly: the kernel's aligned atomic budget
+        // window has a different layout from the stable userspace request.
         SchedContext ctx{};
-        if (!copy_from_user(ua, &ctx, a0, sizeof(ctx))) return err(E_FAULT);
+        ctx.principal_id = request.principal_id;
+        ctx.owner_thread_or_vcpu = request.owner_thread_or_vcpu;
+        ctx.band = static_cast<SchedBand>(request.band);
+        ctx.weight = request.weight;
+        ctx.budget_ns = request.budget_ns;
+        ctx.period_ns = request.period_ns;
+        ctx.deadline_ns = request.deadline_ns;
+        ctx.core_mask = request.core_mask;
+        ctx.home_cpu = request.home_cpu;
+        ctx.flags = request.flags;
         SysError rc = E_OK;
         CapHandle h = sched::sched_context_create(*p, ctx, &rc);
         if (h == kNullCap) return err(rc);
@@ -972,6 +1073,29 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
         // holding the retained-log lock.
         if (!a2 || !a3 || a3 > MX_DIAG_READ_MAX) return err(E_INVALID);
         switch (a0) {
+        case MX_DIAG_HEALTH: {
+            if (a1 || a3 < sizeof(MxDiagHealth)) return err(E_INVALID);
+            MxDiagHealth info{};
+            info.version = MX_DIAG_VERSION;
+            info.sampled_ns = sched::sched_clock_ns();
+            info.online_mask = sched::online_cpu_mask();
+            info.busy_ns = sched::busy_runtime_ns();
+            info.total_bytes = mm::total_page_count() * PAGE_SIZE;
+            info.used_bytes = mm::allocated_page_count() * PAGE_SIZE;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+            const libk::Mmio pmic{reinterpret_cast<volatile u8*>(anne::kDebugPmicBase), PAGE_SIZE};
+            if (anne::battery::voltage_mv(pmic, info.battery_mv))
+                info.flags |= MX_HEALTH_BATTERY_VOLTAGE;
+#endif
+            return copy_to_user(ua, a2, &info, sizeof(info)) ? ok(sizeof(info)) : err(E_FAULT);
+        }
+        case MX_DIAG_RUNTIME: {
+            if (!a1 || a1 > MX_DIAG_PROCESS_LIMIT || a3 < sizeof(MxDiagRuntimeBatch))
+                return err(E_INVALID);
+            MxDiagRuntimeBatch info{};
+            if (!sched::process_runtime_snapshot(static_cast<u32>(a1), &info)) return err(E_INVALID);
+            return copy_to_user(ua, a2, &info, sizeof(info)) ? ok(sizeof(info)) : err(E_FAULT);
+        }
         case MX_DIAG_SYSTEM: {
             if (a1 || a3 < sizeof(MxDiagSystem)) return err(E_INVALID);
             MxDiagSystem info{};
@@ -999,6 +1123,1072 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
             asm volatile("mrs %0, CTR_EL0" : "=r"(info.ctr));
             asm volatile("mrs %0, CNTFRQ_EL0" : "=r"(info.counter_reported_hz));
             info.counter_effective_hz = platform::counter_frequency(info.counter_reported_hz);
+            return copy_to_user(ua, a2, &info, sizeof(info)) ? ok(sizeof(info)) : err(E_FAULT);
+        }
+        case MX_DIAG_EL3: {
+            if (a1 > MX_DIAG_EL3_MAX_INDEX) return err(E_INVALID);
+            // Apply board availability to every operation, including the raw
+            // operations below. Compiled-out native bodies must not return a
+            // successful record containing caller-supplied result fields.
+#if !defined(ANKO_BOARD_HUAWEI_ANNE) || defined(ANKO_ANNE_DIAG_TEST)
+            if (a1 != 0) return err(E_NOTIMPL);
+#endif
+            if (a1 == 29 || a1 == 30) {
+                if (a3 < sizeof(MxDiagEl3Rpmb)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE)) return err(E_FAULT);
+                MxDiagEl3Rpmb info{};
+                if (!copy_from_user(ua, &info, a2, sizeof(info))) return err(E_FAULT);
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                const u32 action = info.action;
+                info = {};
+                const anne::rpmb_diag::Storage storage{anne::emmc::prepare,
+                    anne::emmc::service, anne::emmc::provision_key,
+                    anne::emmc::write_pending, anne::emmc::key_info, anne::emmc::delay_ms};
+                anne::rpmb_diag::execute(action, info,
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress),
+                    [](u64 fid, u64 x1, u64 x2, u64 x3) { return rpmb_call(fid, x1, x2, x3).x0; }, &storage);
+#endif
+                return copy_to_user(ua, a2, &info, sizeof(info)) ? ok(sizeof(info)) : err(E_FAULT);
+            }
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+            bool allow_rpmb_producer = false;
+            if (a1 == 25) {
+                if (a3 < sizeof(MxDiagEl3Svc) ||
+                    !user_range_ok(ua, a2, sizeof(MxDiagEl3Svc), RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Svc requested{};
+                if (!copy_from_user(ua, &requested, a2, sizeof(requested))) return err(E_FAULT);
+                // Keep arbitrary EL3 research calls blocked while the RPMB
+                // window is owned. The known HISEE producer is the exception:
+                // it must run concurrently so its SGI 5 reaches the service.
+                allow_rpmb_producer = anne::rpmb_diag::producer_allowed(requested.fid) &&
+                                       requested.x1 == 0x13;
+            }
+            anne::rpmb_diag::ResearchAccess research;
+            if (!allow_rpmb_producer && !research) return err(E_BUSY);
+#endif
+            // Raw ops 25..28 deliberately skip the cross-CPU transaction lock: they
+            // exist so a window or secure call stuck on another CPU can still be
+            // observed (26) and driven (27/28) from the rest of the system, and so the
+            // sacrificial caller (25) never leaves other CPUs blocked on the lock.
+            if (a1 == 25) {
+                if (a3 < sizeof(MxDiagEl3Svc)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Svc sv{};
+                if (!copy_from_user(ua, &sv, a2, sizeof(sv))) return err(E_FAULT);
+                sv.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                store64(0x6900, 0x454C335000000000ull | 0xD1ull);
+                store64(0x6908, sv.fid);
+                store64(0x6910, sv.x1);
+                store64(0x6918, sv.x2);
+                asm volatile("dsb sy" ::: "memory");
+                const SmcWords r =
+                    rpmb_call(sv.fid, sv.x1, sv.x2, sv.x3, sv.x4, sv.x5, sv.x6, sv.x7);
+                sv.r0 = r.x0;
+                sv.r1 = r.x1;
+                sv.r2 = r.x2;
+                sv.r3 = r.x3;
+                store64(0x6900, 0x454C335000000000ull | 0xD2ull);
+                store64(0x6908, sv.r0);
+                store64(0x6910, sv.r1);
+                store64(0x6918, sv.r2);
+                asm volatile("dsb sy" ::: "memory");
+                sv.crumb_stage = 0xD0ull;
+#endif
+                return copy_to_user(ua, a2, &sv, sizeof(sv)) ? ok(sizeof(sv)) : err(E_FAULT);
+            }
+            if (a1 == 26) {
+                if (a3 < sizeof(MxDiagEl3Win)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Win wn{};
+                if (!copy_from_user(ua, &wn, a2, sizeof(wn))) return err(E_FAULT);
+                wn.version = MX_DIAG_VERSION;
+                libk::memset(wn.words, 0, sizeof(wn.words));
+                wn.aborted = 0;
+                wn.crumb_stage = 0;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                wn.crumb_stage = 0xD3ull;
+                if (wn.off > anne::kRpmbRequestSize - sizeof(wn.words)) {
+                    wn.aborted = 1;
+                } else {
+                    const volatile u8* const base =
+                        reinterpret_cast<const volatile u8*>(anne::kRpmbRequestAddress);
+                    for (unsigned w = 0; w < 8; ++w) {
+                        u64 value = 0;
+                        for (unsigned i = 0; i < 8; ++i)
+                            value |= static_cast<u64>(base[wn.off + w * 8 + i]) << (8 * i);
+                        wn.words[w] = value;
+                    }
+                }
+#endif
+                return copy_to_user(ua, a2, &wn, sizeof(wn)) ? ok(sizeof(wn)) : err(E_FAULT);
+            }
+            if (a1 == 27) {
+                if (a3 < sizeof(MxDiagEl3Wput)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Wput wp{};
+                if (!copy_from_user(ua, &wp, a2, sizeof(wp))) return err(E_FAULT);
+                wp.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                wp.aborted = 0;
+                wp.readback = 0;
+                wp.crumb_stage = 0xD4ull;
+                if (wp.off > anne::kRpmbRequestSize - sizeof(wp.val)) {
+                    wp.aborted = 1;
+                } else {
+                    volatile u8* const tgt =
+                        reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress + wp.off);
+                    for (unsigned i = 0; i < 8; ++i)
+                        tgt[i] = static_cast<u8>(wp.val >> (8 * i));
+                    asm volatile("dsb sy" ::: "memory");
+                    u64 rb = 0;
+                    for (unsigned i = 0; i < 8; ++i)
+                        rb |= static_cast<u64>(tgt[i]) << (8 * i);
+                    wp.readback = rb;
+                }
+#endif
+                return copy_to_user(ua, a2, &wp, sizeof(wp)) ? ok(sizeof(wp)) : err(E_FAULT);
+            }
+            if (a1 == 28) {
+                if (a3 < sizeof(MxDiagEl3Wmemset)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Wmemset wm{};
+                if (!copy_from_user(ua, &wm, a2, sizeof(wm))) return err(E_FAULT);
+                wm.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                wm.aborted = 0;
+                wm.crumb_stage = 0xD5ull;
+                if (!anne::rpmb::contains(0, anne::kRpmbRequestSize, wm.off, wm.len)) {
+                    wm.aborted = 1;
+                } else {
+                    volatile u8* const base =
+                        reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress + wm.off);
+                    const u64 val = wm.val;
+                    u64 i = 0;
+                    for (; i + 8 <= wm.len; i += 8) {
+                        for (unsigned b = 0; b < 8; ++b)
+                            base[i + b] = static_cast<u8>(val >> (8 * b));
+                    }
+                    for (; i < wm.len; ++i)
+                        base[i] = static_cast<u8>(val);
+                    asm volatile("dsb sy" ::: "memory");
+                }
+#endif
+                return copy_to_user(ua, a2, &wm, sizeof(wm)) ? ok(sizeof(wm)) : err(E_FAULT);
+            }
+            if (a1 == 29) {
+                // Send a wake SGI to a CPU. Used to test whether a core held
+                // in EL3 is sitting in an interrupt-enabled wait.
+                if (a3 < sizeof(u64)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, sizeof(u64), RIGHT_READ))
+                    return err(E_FAULT);
+                u64 cpu = 0;
+                if (!copy_from_user(ua, &cpu, a2, sizeof(cpu))) return err(E_FAULT);
+                if (cpu >= MX_HOST_MAX_CPUS) return err(E_INVALID);
+                smp::send_wake_ipi(static_cast<u32>(cpu));
+                return ok(0);
+            }
+            if (a1 > 24) return err(E_INVALID);
+            // Validate the destination before touching shared memory or firmware.
+            if (!user_range_ok(ua, a2, a3, RIGHT_WRITE)) return err(E_FAULT);
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+            // Registration and window access form one transaction across CPUs.
+            kernel::LockGuard el3_guard(g_el3_lock);
+#endif
+            if (a1 == 2) {
+                if (a3 < sizeof(MxDiagEl3Recon)) return err(E_INVALID);
+                MxDiagEl3Recon recon{};
+                recon.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                // Raw window snapshots retained for research compatibility.
+                // Linux does not establish callback/status semantics for these
+                // offsets. Nothing is written and no SMC is issued here.
+                recon.window_base = 0x34a29000ull;
+                recon.window_size = 0x8000ull;
+                const volatile u8* const win =
+                    reinterpret_cast<const volatile u8*>(anne::kRpmbRequestAddress);
+                auto load64 = [&](u64 off) -> u64 {
+                    u64 value = 0;
+                    const volatile u8* p = win + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        value |= static_cast<u64>(p[i]) << (8 * i);
+                    return value;
+                };
+                recon.base_6000 = load64(0x6000);
+                recon.slot_6c30 = load64(0x6C30);
+                recon.slot_6c38 = load64(0x6C38);
+                recon.slot_6c40 = load64(0x6C40);
+                recon.slot_6c48 = load64(0x6C48);
+                recon.status_6c42 = load64(0x6C42) & 0xFFFFull;
+                recon.bl31_lo = 0x35e00000ull;
+                recon.bl31_hi = 0x35ec0000ull;
+                recon.crumb[0] = load64(0x6900);
+                recon.crumb[1] = load64(0x6908);
+                recon.crumb[2] = load64(0x6910);
+                recon.crumb[3] = load64(0x6918);
+                {
+                    u64 v = 0;
+                    asm volatile("mrs %0, ID_AA64ISAR0_EL1" : "=r"(v));
+                    recon.isar0 = v;
+                }
+                for (u64 off = 0; off + 8 <= recon.window_size; off += 8) {
+                    const u64 value = load64(off);
+                    if (value >= recon.bl31_lo && value < recon.bl31_hi) {
+                        if (recon.ptr_count < 8) {
+                            recon.ptr_slots[recon.ptr_count][0] = off;
+                            recon.ptr_slots[recon.ptr_count][1] = value;
+                        }
+                        ++recon.ptr_count;
+                    }
+                }
+#endif
+                return copy_to_user(ua, a2, &recon, sizeof(recon)) ? ok(sizeof(recon))
+                                                                    : err(E_FAULT);
+            }
+            if (a1 == 3) {
+                // Linux's rpmb_work_routine completes an actual MMC/UFS request
+                // and passes its result in x1. There is no Linux callback field
+                // at +0x6c38, so clearing it cannot guard a standalone DONE call.
+                // No storage backend/pending-request lifecycle exists here yet.
+                return err(E_NOTIMPL);
+            }
+            if (a1 == 4) {
+                if (a3 < sizeof(MxDiagEl3Bl31)) return err(E_INVALID);
+                MxDiagEl3Bl31 probe{};
+                probe.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                // Breadcrumbs first: if any secure read faults, the watchdog
+                // resets and these words survive in the request window for
+                // post-recovery inspection via el3-recon.
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                auto crumb = [&](u64 stage, u64 v0, u64 v1, u64 v2) {
+                    store64(0x6900, 0x454C335000000000ull | stage);
+                    store64(0x6908, v0);
+                    store64(0x6910, v1);
+                    store64(0x6918, v2);
+                    asm volatile("dsb sy" ::: "memory");
+                };
+                crumb(1, 0, 0, 0);
+                probe.tick_before = drivers::timer::tick_count();
+                probe.control_addr = 0x34a29000ull;
+                probe.control_value =
+                    *reinterpret_cast<const volatile u32*>(0x34a29000ull);
+                crumb(2, probe.control_value, 0, 0);
+                probe.bl31_addr = 0x35e00000ull;
+                crumb(3, 0x35e00000ull, 0, 0);
+                probe.bl31_words[0] =
+                    *reinterpret_cast<const volatile u32*>(0x35e00000ull);
+                probe.bl31_words[1] =
+                    *reinterpret_cast<const volatile u32*>(0x35e00004ull);
+                probe.bl31_words[2] =
+                    *reinterpret_cast<const volatile u32*>(0x35e00008ull);
+                probe.bl31_words[3] =
+                    *reinterpret_cast<const volatile u32*>(0x35e0000cull);
+                probe.bl31_read_ok = 1;
+                crumb(4, probe.bl31_words[0], probe.bl31_words[1], probe.bl31_words[2]);
+                probe.teeos_addr = 0x36208000ull;
+                crumb(5, 0x36208000ull, 0, 0);
+                probe.teeos_words[0] =
+                    *reinterpret_cast<const volatile u32*>(0x36208000ull);
+                probe.teeos_words[1] =
+                    *reinterpret_cast<const volatile u32*>(0x36208004ull);
+                probe.teeos_read_ok = 1;
+                crumb(6, probe.teeos_words[0], probe.teeos_words[1], 0);
+                probe.tick_after = drivers::timer::tick_count();
+                probe.crumb_stage = 6;
+#endif
+                return copy_to_user(ua, a2, &probe, sizeof(probe)) ? ok(sizeof(probe))
+                                                                   : err(E_FAULT);
+            }
+            if (a1 == 5) {
+                if (a3 < sizeof(MxDiagEl3Gv)) return err(E_INVALID);
+                MxDiagEl3Gv gv{};
+                gv.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                auto crumb = [&](u64 stage, u64 v0) {
+                    store64(0x6900, 0x454C335000000000ull | stage);
+                    store64(0x6908, v0);
+                    asm volatile("dsb sy" ::: "memory");
+                };
+                gv.tick_before = drivers::timer::tick_count();
+                crumb(1, 0);
+                gv.replay_x1 = 0xFFFC6100ull;
+                gv.replay_ret = rpmb_call(0xc500aa01ull, 0xFFFC6100ull, 4, 0x55bbcce0ull).x0;
+                crumb(2, gv.replay_ret);
+                gv.oracle_expected = 0x5A420000ull;
+                gv.oracle_ret = rpmb_call(0xc500aa01ull, 0x34a2fc40ull, 4, 0x55bbcce0ull).x0;
+                gv.oracle_match =
+                    ((gv.oracle_ret & 0xFFFFFFFFull) == gv.oracle_expected) ? 1ull : 0ull;
+                crumb(3, gv.oracle_ret);
+                if (gv.oracle_match) {
+                    // The prize: first word of the running BL31, read at EL3.
+                    gv.bl31_ret = rpmb_call(0xc500aa01ull, 0x35e00000ull, 4, 0x55bbcce0ull).x0;
+                    crumb(4, gv.bl31_ret);
+                    gv.crumb_stage = 4;
+                } else {
+                    gv.aborted = 1;
+                    gv.crumb_stage = 9;
+                }
+                gv.tick_after = drivers::timer::tick_count();
+#endif
+                return copy_to_user(ua, a2, &gv, sizeof(gv)) ? ok(sizeof(gv)) : err(E_FAULT);
+            }
+            if (a1 == 6) {
+                if (a3 < sizeof(MxDiagEl3Aa)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Aa aa{};
+                if (!copy_from_user(ua, &aa, a2, sizeof(aa))) return err(E_FAULT);
+                aa.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                if (aa.idx > 31) {
+                    aa.aborted = 1;
+                } else {
+                    volatile u8* const request =
+                        reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                    auto store64 = [&](u64 off, u64 value) {
+                        volatile u8* p = request + off;
+                        for (unsigned i = 0; i < 8; ++i)
+                            p[i] = static_cast<u8>(value >> (8 * i));
+                    };
+                    store64(0x6900, 0x454C335000000000ull | (0xA0ull + aa.idx));
+                    store64(0x6910, aa.x1);
+                    store64(0x6918, aa.x2);
+                    asm volatile("dsb sy" ::: "memory");
+                    aa.cookie = 0x55bbcce0ull | (aa.idx & 0x1Full);
+                    const SmcWords r =
+                        rpmb_call(0xc500aa01ull, aa.x1, aa.x2, aa.cookie);
+                    aa.r0 = r.x0;
+                    aa.r1 = r.x1;
+                    aa.r2 = r.x2;
+                    aa.r3 = r.x3;
+                    store64(0x6908, aa.r0);
+                    store64(0x6900, 0x454C335000000000ull | (0xB0ull + aa.idx));
+                    asm volatile("dsb sy" ::: "memory");
+                    aa.crumb_stage = 0xC0ull + aa.idx;
+                }
+#endif
+                return copy_to_user(ua, a2, &aa, sizeof(aa)) ? ok(sizeof(aa))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 7) {
+                if (a3 < sizeof(MxDiagEl3Share)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Share sh{};
+                if (!copy_from_user(ua, &sh, a2, sizeof(sh))) return err(E_FAULT);
+                sh.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                if (sh.offset >= 0x8000ull || sh.len == 0 || sh.len > 64) {
+                    sh.aborted = 1;
+                } else {
+                    const volatile u8* base =
+                        reinterpret_cast<const volatile u8*>(0x34a21000ull);
+                    if (sh.offset + sh.len > 0x8000ull) sh.len = 0x8000ull - sh.offset;
+                    for (u64 i = 0; i < sh.len; ++i)
+                        sh.data[i] = base[sh.offset + i];
+                }
+#endif
+                return copy_to_user(ua, a2, &sh, sizeof(sh)) ? ok(sizeof(sh))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 8) {
+                if (a3 < sizeof(MxDiagEl3Ra)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Ra ra{};
+                if (!copy_from_user(ua, &ra, a2, sizeof(ra))) return err(E_FAULT);
+                ra.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                if (ra.target < 0x34a21000ull || ra.target > 0x34a31000ull - 64ull) {
+                    ra.aborted = 1;
+                } else {
+                    volatile u8* const request =
+                        reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                    const volatile u8* src =
+                        reinterpret_cast<const volatile u8*>(&kAnneRpmbConfig);
+                    volatile u8* tgt = reinterpret_cast<volatile u8*>(ra.target);
+                    for (u64 i = 0; i < sizeof(kAnneRpmbConfig); ++i) tgt[i] = src[i];
+                    asm volatile("dsb sy" ::: "memory");
+                    const SmcWords r1 =
+                        rpmb_call(kRpmbRequestAddressSmc, ra.target, 0, 0);
+                    ra.attempt_r0 = r1.x0;
+                    ra.attempt_r1 = r1.x1;
+                    ra.attempt_r2 = r1.x2;
+                    ra.attempt_r3 = r1.x3;
+                    for (u64 i = 0; i < sizeof(kAnneRpmbConfig); ++i) request[i] = src[i];
+                    asm volatile("dsb sy" ::: "memory");
+                    const SmcWords r2 = rpmb_call(kRpmbRequestAddressSmc, 0x34a29000ull, 0, 0);
+                    ra.restore_r0 = r2.x0;
+                    ra.restore_r1 = r2.x1;
+                    ra.restore_r2 = r2.x2;
+                    ra.restore_r3 = r2.x3;
+                }
+#endif
+                return copy_to_user(ua, a2, &ra, sizeof(ra)) ? ok(sizeof(ra))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 9) {
+                if (a3 < sizeof(MxDiagEl3Nn)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Nn nn{};
+                if (!copy_from_user(ua, &nn, a2, sizeof(nn))) return err(E_FAULT);
+                nn.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                {
+                    const SmcWords r = rpmb_call(0xc5009900ull, nn.x1, nn.x2, nn.x3);
+                    nn.r0 = r.x0;
+                    nn.r1 = r.x1;
+                    nn.r2 = r.x2;
+                    nn.r3 = r.x3;
+                }
+#endif
+                return copy_to_user(ua, a2, &nn, sizeof(nn)) ? ok(sizeof(nn))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 10) {
+                if (a3 < sizeof(MxDiagEl3Teeos)) return err(E_INVALID);
+                MxDiagEl3Teeos tt{};
+                tt.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                store64(0x6900, 0x454C335000000000ull | 0xD1ull);
+                asm volatile("dsb sy" ::: "memory");
+                tt.addr = 0x36208000ull;
+                tt.words[0] = *reinterpret_cast<const volatile u32*>(0x36208000ull);
+                tt.words[1] = *reinterpret_cast<const volatile u32*>(0x36208004ull);
+                tt.ok = 1;
+                store64(0x6900, 0x454C335000000000ull | 0xD2ull);
+                store64(0x6908, tt.words[0]);
+                asm volatile("dsb sy" ::: "memory");
+                tt.crumb_stage = 0xD2;
+#endif
+                return copy_to_user(ua, a2, &tt, sizeof(tt)) ? ok(sizeof(tt))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 11) {
+                if (a3 < sizeof(MxDiagEl3Cc)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Cc cc{};
+                if (!copy_from_user(ua, &cc, a2, sizeof(cc))) return err(E_FAULT);
+                cc.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                store64(0x6900, 0x454C335000000000ull | 0xC1ull);
+                store64(0x6908, cc.x1);
+                asm volatile("dsb sy" ::: "memory");
+                const SmcWords r = rpmb_call(0xc500cc00ull, cc.x1, 0, 0);
+                cc.r0 = r.x0; cc.r1 = r.x1; cc.r2 = r.x2; cc.r3 = r.x3;
+                store64(0x6900, 0x454C335000000000ull | 0xC2ull);
+                store64(0x6908, cc.r0);
+                asm volatile("dsb sy" ::: "memory");
+                cc.crumb_stage = 0xC2;
+#endif
+                return copy_to_user(ua, a2, &cc, sizeof(cc)) ? ok(sizeof(cc))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 12) {
+                if (a3 < sizeof(MxDiagEl3Cc2)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Cc2 cc{};
+                if (!copy_from_user(ua, &cc, a2, sizeof(cc))) return err(E_FAULT);
+                cc.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                store64(0x6900, 0x454C335000000000ull | 0xC1ull);
+                store64(0x6908, cc.a);
+                asm volatile("dsb sy" ::: "memory");
+                const SmcWords ra = rpmb_call(0xc500cc00ull, cc.a, 0, 0);
+                cc.ra0 = ra.x0; cc.ra1 = ra.x1; cc.ra2 = ra.x2; cc.ra3 = ra.x3;
+                store64(0x6900, 0x454C335000000000ull | 0xC2ull);
+                store64(0x6908, cc.ra0);
+                asm volatile("dsb sy" ::: "memory");
+                store64(0x6900, 0x454C335000000000ull | 0xC3ull);
+                store64(0x6908, cc.b);
+                asm volatile("dsb sy" ::: "memory");
+                const SmcWords rb = rpmb_call(0xc500cc00ull, cc.b, 0, 0);
+                cc.rb0 = rb.x0; cc.rb1 = rb.x1; cc.rb2 = rb.x2; cc.rb3 = rb.x3;
+                store64(0x6900, 0x454C335000000000ull | 0xC4ull);
+                store64(0x6908, cc.rb0);
+                asm volatile("dsb sy" ::: "memory");
+                cc.crumb_stage = 0xC4;
+#endif
+                return copy_to_user(ua, a2, &cc, sizeof(cc)) ? ok(sizeof(cc))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 13) {
+                if (a3 < sizeof(MxDiagEl3AaSweep)) return err(E_INVALID);
+                MxDiagEl3AaSweep sw{};
+                sw.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                for (u64 i = 0; i < 32; ++i) {
+                    store64(0x6900, 0x454C335000000000ull | 0xE0ull);
+                    store64(0x6908, i);
+                    asm volatile("dsb sy" ::: "memory");
+                    sw.rows[i] = rpmb_call(0xc500aa01ull, 0, 0, 0x55bbcce0ull | i).x0;
+                }
+                store64(0x6900, 0x454C335000000000ull | 0xE1ull);
+                asm volatile("dsb sy" ::: "memory");
+                sw.rows[32] = rpmb_call(0xc500aa01ull, 0xabcde0ull, 2, 0x55bbcce7ull).x0;
+                sw.rows[33] = rpmb_call(0xc500aa01ull, 0x34a21100ull, 0, 0x55bbcceAull).x0;
+                sw.rows[34] = rpmb_call(0xc500aa01ull, 0x34a21100ull, 0x1000, 0x55bbcceEull).x0;
+                sw.rows[35] = rpmb_call(0xc500aa01ull, 0x34a21100ull, 0x1000, 0x55bbcceFull).x0;
+                store64(0x6900, 0x454C335000000000ull | 0xE2ull);
+                store64(0x6908, 36);
+                asm volatile("dsb sy" ::: "memory");
+                sw.crumb_stage = 0xE2;
+#endif
+                return copy_to_user(ua, a2, &sw, sizeof(sw)) ? ok(sizeof(sw))
+                                                              : err(E_FAULT);
+            }
+            if (a1 == 14) {
+                if (a3 < sizeof(MxDiagEl3Socp)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Socp sc{};
+                if (!copy_from_user(ua, &sc, a2, sizeof(sc))) return err(E_FAULT);
+                sc.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                volatile u8* const dmss =
+                    reinterpret_cast<volatile u8*>(0x34a21100ull);
+                for (u64 i = 0; i < 4; ++i) {
+                    const volatile u8* src =
+                        reinterpret_cast<const volatile u8*>(&sc.d[i]);
+                    for (unsigned j = 0; j < 8; ++j)
+                        dmss[i * 8 + j] = src[j];
+                }
+                asm volatile("dsb sy" ::: "memory");
+                store64(0x6900, 0x454C335000000000ull | 0xF1ull);
+                asm volatile("dsb sy" ::: "memory");
+                if (sc.mode == 2 || sc.mode == 3) {
+                    const SmcWords r8r = rpmb_call(0xc500aa01ull, 0x34a21100ull, sc.p1, 0x55bbcce8ull);
+                    sc.r8[0] = r8r.x0; sc.r8[1] = r8r.x1; sc.r8[2] = r8r.x2; sc.r8[3] = r8r.x3;
+                    store64(0x6900, 0x454C335000000000ull | 0xF2ull);
+                    store64(0x6908, sc.r8[0]);
+                    asm volatile("dsb sy" ::: "memory");
+                    store64(0x6900, 0x454C335000000000ull | 0xF5ull);
+                    asm volatile("dsb sy" ::: "memory");
+                }
+                if (sc.mode == 3 || sc.mode == 4) {
+                    const SmcWords rAr = rpmb_call(0xc500aa01ull, 0x34a21100ull, sc.p2, 0x55bbcceAull);
+                    sc.rA[0] = rAr.x0; sc.rA[1] = rAr.x1; sc.rA[2] = rAr.x2; sc.rA[3] = rAr.x3;
+                    store64(0x6900, 0x454C335000000000ull | 0xF3ull);
+                    store64(0x6908, sc.rA[0]);
+                    asm volatile("dsb sy" ::: "memory");
+                }
+                for (u64 i = 0; i < 16; ++i) {
+                    u64 v = 0;
+                    for (unsigned j = 0; j < 8; ++j)
+                        v |= static_cast<u64>(dmss[i * 8 + j]) << (8 * j);
+                    sc.readback[i] = v;
+                }
+                store64(0x6900, 0x454C335000000000ull | 0xF4ull);
+                asm volatile("dsb sy" ::: "memory");
+                sc.crumb_stage = 0xF4;
+#endif
+                return copy_to_user(ua, a2, &sc, sizeof(sc)) ? ok(sizeof(sc))
+                                                              : err(E_FAULT);
+            }
+            if (a1 == 15) {
+                if (a3 < sizeof(MxDiagEl3Put)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Put pt{};
+                if (!copy_from_user(ua, &pt, a2, sizeof(pt))) return err(E_FAULT);
+                pt.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                pt.aborted = 0;
+                pt.readback = 0;
+                pt.crumb_stage = 0;
+                if (!anne::rpmb::contains(0, anne::kRpmbSharedSize, pt.off, sizeof(pt.val))) {
+                    pt.aborted = 1;
+                } else {
+                    volatile u8* const request =
+                        reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                    auto store64 = [&](u64 off, u64 value) {
+                        volatile u8* p = request + off;
+                        for (unsigned i = 0; i < 8; ++i)
+                            p[i] = static_cast<u8>(value >> (8 * i));
+                    };
+                    store64(0x6900, 0x454C335000000000ull | 0x1F1ull);
+                    asm volatile("dsb sy" ::: "memory");
+                    volatile u8* const tgt =
+                        reinterpret_cast<volatile u8*>(0x34a21000ull + pt.off);
+                    for (unsigned i = 0; i < 8; ++i)
+                        tgt[i] = static_cast<u8>(pt.val >> (8 * i));
+                    asm volatile("dsb sy" ::: "memory");
+                    store64(0x6900, 0x454C335000000000ull | 0x1F2ull);
+                    asm volatile("dsb sy" ::: "memory");
+                    u64 rb = 0;
+                    for (unsigned i = 0; i < 8; ++i)
+                        rb |= static_cast<u64>(tgt[i]) << (8 * i);
+                    pt.readback = rb;
+                    pt.crumb_stage = 0x1F2;
+                }
+#endif
+                return copy_to_user(ua, a2, &pt, sizeof(pt)) ? ok(sizeof(pt))
+                                                              : err(E_FAULT);
+            }
+            if (a1 == 16) {
+                if (a3 < sizeof(MxDiagEl3Poke)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Poke pk{};
+                if (!copy_from_user(ua, &pk, a2, sizeof(pk))) return err(E_FAULT);
+                pk.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                auto store16 = [&](u64 off, u16 value) {
+                    volatile u8* p = request + off;
+                    p[0] = static_cast<u8>(value);
+                    p[1] = static_cast<u8>(value >> 8);
+                };
+                auto load64 = [&](u64 off) -> u64 {
+                    u64 value = 0;
+                    const volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        value |= static_cast<u64>(p[i]) << (8 * i);
+                    return value;
+                };
+                const volatile u8* src =
+                    reinterpret_cast<const volatile u8*>(&kAnneRpmbConfig);
+                for (u64 i = 0; i < sizeof(kAnneRpmbConfig); ++i) request[i] = src[i];
+                asm volatile("dsb sy" ::: "memory");
+                pk.registered =
+                    rpmb_call(kRpmbRequestAddressSmc, 0x34a29000ull, 0, 0).x0;
+                if (pk.registered == 0) {
+                    pk.slot_pre = load64(0x6C38);
+                    store64(0x6C38, pk.cb);
+                    store16(0x6C42, 0x5A42);
+                    asm volatile("dsb sy" ::: "memory");
+                    pk.slot_written = load64(0x6C38);
+                    pk.status_set = load64(0x6C42) & 0xFFFFull;
+                    if (pk.slot_written == pk.cb && pk.status_set == 0x5A42ull) {
+                        store64(0x6900, 0x454C335000000000ull | 0xD1ull);
+                        store64(0x6908, pk.cb);
+                        store64(0x6910, pk.slot_written);
+                        store64(0x6918, pk.status_set);
+                        asm volatile("dsb sy" ::: "memory");
+                        pk.tick_before = drivers::timer::tick_count();
+                        const SmcWords r = rpmb_call(kRpmbRequestDoneSmc, 0, 0, 0);
+                        pk.tick_after = drivers::timer::tick_count();
+                        pk.call_x0 = r.x0;
+                        pk.call_x1 = r.x1;
+                        pk.call_x2 = r.x2;
+                        pk.call_x3 = r.x3;
+                        store64(0x6900, 0x454C335000000000ull | 0xD2ull);
+                        store64(0x6908, pk.call_x0);
+                        store64(0x6910, pk.call_x1);
+                        store64(0x6918, pk.call_x2);
+                    } else {
+                        pk.aborted = 2;
+                    }
+                    asm volatile("dsb sy" ::: "memory");
+                    pk.slot_post = load64(0x6C38);
+                    pk.status_post = load64(0x6C42) & 0xFFFFull;
+                    pk.crumb_stage = 0xD0ull;
+                } else {
+                    pk.aborted = 1;
+                }
+#endif
+                return copy_to_user(ua, a2, &pk, sizeof(pk)) ? ok(sizeof(pk))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 17) {
+                if (a3 < sizeof(MxDiagEl3Svc)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Svc sv{};
+                if (!copy_from_user(ua, &sv, a2, sizeof(sv))) return err(E_FAULT);
+                sv.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                store64(0x6900, 0x454C335000000000ull | 0xE1ull);
+                store64(0x6908, sv.fid);
+                store64(0x6910, sv.x1);
+                store64(0x6918, sv.x2);
+                asm volatile("dsb sy" ::: "memory");
+                const SmcWords r =
+                    rpmb_call(sv.fid, sv.x1, sv.x2, sv.x3, sv.x4, sv.x5, sv.x6, sv.x7);
+                sv.r0 = r.x0;
+                sv.r1 = r.x1;
+                sv.r2 = r.x2;
+                sv.r3 = r.x3;
+                store64(0x6900, 0x454C335000000000ull | 0xE2ull);
+                store64(0x6908, sv.r0);
+                store64(0x6910, sv.r1);
+                store64(0x6918, sv.r2);
+                asm volatile("dsb sy" ::: "memory");
+                sv.crumb_stage = 0xE0ull;
+#endif
+                return copy_to_user(ua, a2, &sv, sizeof(sv)) ? ok(sizeof(sv))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 18) {
+                if (a3 < sizeof(MxDiagEl3Win)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Win wn{};
+                if (!copy_from_user(ua, &wn, a2, sizeof(wn))) return err(E_FAULT);
+                wn.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                wn.aborted = 0;
+                libk::memset(wn.words, 0, sizeof(wn.words));
+                wn.crumb_stage = 0;
+                if (wn.off > anne::kRpmbRequestSize - sizeof(wn.words)) {
+                    wn.aborted = 1;
+                } else {
+                    const volatile u8* base =
+                        reinterpret_cast<const volatile u8*>(0x34a29000ull);
+                    for (u64 i = 0; i < 64; ++i)
+                        wn.words[i / 8] |= static_cast<u64>(base[wn.off + i]) << (8 * (i % 8));
+                }
+#endif
+                return copy_to_user(ua, a2, &wn, sizeof(wn)) ? ok(sizeof(wn))
+                                                              : err(E_FAULT);
+            }
+            if (a1 == 19) {
+                if (a3 < sizeof(MxDiagEl3Wput)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Wput wp{};
+                if (!copy_from_user(ua, &wp, a2, sizeof(wp))) return err(E_FAULT);
+                wp.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                wp.aborted = 0;
+                wp.readback = 0;
+                wp.crumb_stage = 0;
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                auto store64 = [&](u64 off, u64 value) {
+                    volatile u8* p = request + off;
+                    for (unsigned i = 0; i < 8; ++i)
+                        p[i] = static_cast<u8>(value >> (8 * i));
+                };
+                if (wp.off > 0x8000ull - 8ull) {
+                    wp.aborted = 1;
+                } else {
+                    store64(0x6900, 0x454C335000000000ull | 0x1F7ull);
+                    asm volatile("dsb sy" ::: "memory");
+                    volatile u8* const tgt =
+                        reinterpret_cast<volatile u8*>(0x34a29000ull + wp.off);
+                    for (unsigned i = 0; i < 8; ++i)
+                        tgt[i] = static_cast<u8>(wp.val >> (8 * i));
+                    asm volatile("dsb sy" ::: "memory");
+                    u64 rb = 0;
+                    for (unsigned i = 0; i < 8; ++i)
+                        rb |= static_cast<u64>(tgt[i]) << (8 * i);
+                    wp.readback = rb;
+                    store64(0x6900, 0x454C335000000000ull | 0x1F8ull);
+                    wp.crumb_stage = 0x1F8;
+                }
+                asm volatile("dsb sy" ::: "memory");
+#endif
+                return copy_to_user(ua, a2, &wp, sizeof(wp)) ? ok(sizeof(wp))
+                                                              : err(E_FAULT);
+            }
+            if (a1 == 20) {
+                if (a3 < sizeof(MxDiagEl3Scan)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Scan sc{};
+                if (!copy_from_user(ua, &sc, a2, sizeof(sc))) return err(E_FAULT);
+                sc.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                sc.aborted = 0;
+                sc.count = 0;
+                libk::memset(sc.hits, 0, sizeof(sc.hits));
+                sc.crumb_stage = 0;
+                if ((sc.base & 7ull) != 0 || sc.len == 0 || sc.len > anne::kRpmbRequestSize ||
+                    !anne::rpmb::contains(anne::kRpmbSharedBase, anne::kRpmbSharedSize,
+                                          sc.base, sc.len)) {
+                    sc.aborted = 1;
+                } else {
+                    const volatile u8* p0 =
+                        reinterpret_cast<const volatile u8*>(sc.base);
+                    for (u64 i = 0; i + 8 <= sc.len && sc.count < 20ull; i += 8) {
+                        u64 v = 0;
+                        for (unsigned j = 0; j < 8; ++j)
+                            v |= static_cast<u64>(p0[i + j]) << (8 * j);
+                        if (v >= sc.lo && v <= sc.hi) {
+                            sc.hits[sc.count][0] = i;
+                            sc.hits[sc.count][1] = v;
+                            sc.count++;
+                        }
+                    }
+                    sc.crumb_stage = 0x2E0ull;
+                }
+#endif
+                return copy_to_user(ua, a2, &sc, sizeof(sc)) ? ok(sizeof(sc))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 21) {
+                if (a3 < sizeof(MxDiagEl3Scan2)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Scan2 sc{};
+                if (!copy_from_user(ua, &sc, a2, sizeof(sc))) return err(E_FAULT);
+                sc.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                sc.aborted = 0;
+                sc.count = 0;
+                libk::memset(sc.hits, 0, sizeof(sc.hits));
+                sc.crumb_stage = 0;
+                bool bad = (sc.nranges == 0 || sc.nranges > 8);
+                for (u64 r = 0; r < sc.nranges && !bad; ++r) {
+                    const u64 b = sc.ranges[r][0], l = sc.ranges[r][1];
+                    if ((b & 7ull) != 0 || l == 0 || l > 0x200000ull) { bad = true; break; }
+                    const bool ok = anne::rpmb::contains(0x400000ull, 0x2600000ull, b, l) ||
+                        anne::rpmb::contains(anne::kRpmbSharedBase, anne::kRpmbSharedSize, b, l);
+                    if (!ok) { bad = true; break; }
+                }
+                if (bad) {
+                    sc.aborted = 1;
+                } else {
+                    for (u64 r = 0; r < sc.nranges && sc.count < 32ull; ++r) {
+                        const u64 b = sc.ranges[r][0], l = sc.ranges[r][1];
+                        const volatile u8* p0 = reinterpret_cast<const volatile u8*>(b);
+                        for (u64 i = 0; i + 8 <= l && sc.count < 32ull; i += 8) {
+                            u64 v = 0;
+                            for (unsigned j = 0; j < 8; ++j)
+                                v |= static_cast<u64>(p0[i + j]) << (8 * j);
+                            if (v >= sc.lo && v <= sc.hi) {
+                                sc.hits[sc.count][0] = r;
+                                sc.hits[sc.count][1] = i;
+                                sc.hits[sc.count][2] = v;
+                                sc.count++;
+                            }
+                        }
+                    }
+                    sc.crumb_stage = 0x2F0ull;
+                }
+#endif
+                return copy_to_user(ua, a2, &sc, sizeof(sc)) ? ok(sizeof(sc))
+                                                             : err(E_FAULT);
+            }
+            if (a1 == 22) {
+                if (a3 < sizeof(MxDiagEl3Rprobe)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Rprobe rp{};
+                if (!copy_from_user(ua, &rp, a2, sizeof(rp))) return err(E_FAULT);
+                rp.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                u64 v = 0, esr = 0, far = 0, elr = 0, faults = 0;
+                rp.ok = anne::probe_read(rp.addr, &v, &esr, &far, &elr, &faults) ? 1u : 0u;
+                rp.value = v;
+                rp.esr = esr;
+                rp.far = far;
+                rp.elr = elr;
+                rp.faults = faults;
+#endif
+                return copy_to_user(ua, a2, &rp, sizeof(rp)) ? ok(sizeof(rp)) : err(E_FAULT);
+            }
+            if (a1 == 23) {
+                if (a3 < sizeof(MxDiagEl3Rscan)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Rscan rs{};
+                if (!copy_from_user(ua, &rs, a2, sizeof(rs))) return err(E_FAULT);
+                rs.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                rs.aborted = 0;
+                rs.readable = 0;
+                rs.faults = 0;
+                rs.seg_count = 0;
+                rs.first_count = 0;
+                rs.esr_last = 0;
+                if ((rs.base & 7ull) != 0 || rs.length == 0 ||
+                    (rs.length & 7ull) != 0 || rs.length > MX_DIAG_EL3_RSCAN_MAX) {
+                    rs.aborted = 1;
+                } else {
+                    for (u64 i = 0; i < rs.length; i += 8) {
+                        u64 v = 0, esr = 0, faults = 0;
+                        if (anne::probe_read(rs.base + i, &v, &esr, nullptr, nullptr, &faults)) {
+                            if (rs.seg_count != 0 &&
+                                rs.segments[rs.seg_count - 1][1] == rs.base + i) {
+                                rs.segments[rs.seg_count - 1][1] = rs.base + i + 8;
+                            } else if (rs.seg_count < 8) {
+                                rs.segments[rs.seg_count][0] = rs.base + i;
+                                rs.segments[rs.seg_count][1] = rs.base + i + 8;
+                                ++rs.seg_count;
+                            }
+                            if (rs.first_count < 8 && v != 0) {
+                                rs.first_values[rs.first_count][0] = rs.base + i;
+                                rs.first_values[rs.first_count][1] = v;
+                                ++rs.first_count;
+                            }
+                            ++rs.readable;
+                        } else {
+                            ++rs.faults;
+                            rs.esr_last = esr;
+                        }
+                    }
+                }
+#endif
+                return copy_to_user(ua, a2, &rs, sizeof(rs)) ? ok(sizeof(rs)) : err(E_FAULT);
+            }
+            if (a1 == 24) {
+                if (a3 < sizeof(MxDiagEl3Rmap)) return err(E_INVALID);
+                if (!user_range_ok(ua, a2, a3, RIGHT_READ | RIGHT_WRITE))
+                    return err(E_FAULT);
+                MxDiagEl3Rmap rm{};
+                if (!copy_from_user(ua, &rm, a2, sizeof(rm))) return err(E_FAULT);
+                rm.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+                rm.aborted = 0;
+                rm.mapped_global = 0;
+                rm.mapped_current = 0;
+                rm.ok = 0;
+                rm.value = 0;
+                rm.esr = 0;
+                rm.far = 0;
+                rm.faults = 0;
+                u64 size = rm.size ? rm.size : 0x1000ull;
+                if ((rm.addr & 0xfffull) != 0 || size > 0x20000ull ||
+                    (size & 0xfffull) != 0) {
+                    rm.aborted = 1;
+                } else {
+                    rm.size = size;
+                    if (mm::map_kernel_device_mmio(rm.addr, size)) rm.mapped_global = 1;
+                    Process* p = cur_proc();
+                    if (p && p->ttbr0) {
+                        VmSpace sp{};
+                        sp.pgd_phys = p->ttbr0;
+                        sp.pid = p->pid;
+                        if (mm::vm_map_device_range(sp, rm.addr, rm.addr, size, RIGHT_READ))
+                            rm.mapped_current = 1;
+                    }
+                    u64 v = 0, esr = 0, far = 0, faults = 0;
+                    rm.ok = anne::probe_read(rm.addr, &v, &esr, &far, nullptr, &faults) ? 1u : 0u;
+                    rm.value = v;
+                    rm.esr = esr;
+                    rm.far = far;
+                    rm.faults = faults;
+                }
+#endif
+                return copy_to_user(ua, a2, &rm, sizeof(rm)) ? ok(sizeof(rm)) : err(E_FAULT);
+            }
+            if (a3 < sizeof(MxDiagEl3)) return err(E_INVALID);
+            MxDiagEl3 info{};
+            info.version = MX_DIAG_VERSION;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+            info.available = 1;
+            // Hi6250 EMUI-8 global_ddr_map.h and the matching RPMB DT node:
+            // BL31 shared memory starts at 0x34a21000 and the RPMB request
+            // window is the 0x8000..0xffff subrange of that area.
+            info.shared_base = anne::kRpmbSharedBase;
+            info.request_address = anne::kRpmbRequestAddress;
+            info.request_size = anne::kRpmbRequestSize;
+            info.bl31_base = 0x35e00000ull;
+            info.bl31_size = 0xc0000ull;
+            // Linux's RPMB path has no callback address.  The exploit-slide
+            // offset is Kirin970-specific and is intentionally not reported
+            // as a Hi6250 property.
+            info.callback_offset_from_request = 0;
+            info.callback_address = 0;
+            const SmcWords call_count = rpmb_call(kRpmbCallCount);
+            const SmcWords uid = rpmb_call(kRpmbUid);
+            const SmcWords version = rpmb_call(kRpmbVersion);
+            info.call_count[0] = call_count.x0;
+            info.call_count[1] = call_count.x1;
+            info.call_count[2] = call_count.x2;
+            info.call_count[3] = call_count.x3;
+            info.uid[0] = uid.x0;
+            info.uid[1] = uid.x1;
+            info.uid[2] = uid.x2;
+            info.uid[3] = uid.x3;
+            info.service_version[0] = version.x0;
+            info.service_version[1] = version.x1;
+            info.service_version[2] = version.x2;
+            info.service_version[3] = version.x3;
+            if (a1 == 1) {
+                // Match hisi_rpmb_device_init(): Linux copies this config into
+                // the ioremap_wc() window before REQUEST_ADDR.  The entire
+                // window is an identity Normal-NC mapping in Ame, so a DSB is
+                // sufficient; no cached alias or explicit clean is allowed.
+                volatile u8* const request =
+                    reinterpret_cast<volatile u8*>(anne::kRpmbRequestAddress);
+                const volatile u8* src = reinterpret_cast<const volatile u8*>(&kAnneRpmbConfig);
+                for (u64 i = 0; i < sizeof(kAnneRpmbConfig); ++i) request[i] = src[i];
+                asm volatile("dsb sy" ::: "memory");
+                info.request_address_result =
+                    rpmb_call(kRpmbRequestAddressSmc, info.request_address,
+                              anne::rpmb::kBootDeviceEmmc, 0).x0;
+            }
+#endif
             return copy_to_user(ua, a2, &info, sizeof(info)) ? ok(sizeof(info)) : err(E_FAULT);
         }
         case MX_DIAG_CPU: {
@@ -1197,6 +2387,10 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
             info.attr = mm::range_is_noncached(arena->phys_base, arena->size)
                             ? MX_ARENA_MEMORY_NONCACHEABLE : MX_ARENA_MEMORY_WRITE_BACK;
             info.flags = arena->flags & ~(kArenaFlagExposePhys | kArenaFlagOwnsPages);
+            const u64 refs = object::reference_count(e->object);
+            const u64 retained = refs ? refs - 1 : 0;
+            info.flags = (info.flags & ~MX_ARENA_REFERENCE_MASK) |
+                static_cast<u32>((retained > 65535 ? 65535 : retained) << MX_ARENA_REFERENCE_SHIFT);
             info.aux0 = arena->owner_pid;
             break;
         }

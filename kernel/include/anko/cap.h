@@ -159,7 +159,7 @@ static_assert(static_cast<u32>(RIGHT_VM_CREATE) == static_cast<u32>(MX_RIGHT_VM_
 // CapEntry — one slot in the per-process capability table.
 // Exact layout from spec §5.5.  Must be exactly 64 bytes.
 // ---------------------------------------------------------------------------
-struct CapEntry {
+struct alignas(64) CapEntry {
     void* target; // pointer to the kernel object (Thread*, Ring*, …)
     object::Record* object;
     u32 rights_mask; // CapRights bitmask
@@ -177,24 +177,46 @@ static_assert(sizeof(CapEntry) == 64, "CapEntry must be 64 bytes (spec §5.5)");
 // ---------------------------------------------------------------------------
 constexpr u32 kCapTableSize = 1024; // spec §7: flat-table threshold; 64 KB per process
 
-struct CapTable {
-    CapEntry entries[kCapTableSize];
+constexpr u32 kCapBitmapWords = kCapTableSize / 64;
+static_assert(kCapTableSize % 64 == 0);
+
+struct alignas(64) CapTable {
+    // Allocation and teardown scan this compact index instead of touching every
+    // 64-byte entry. Zero initialization denotes an entirely free table.
     u32 next_free; // bump pointer into entries[]
     u32 lock;
+    u32 used_count;
+    u64 occupied[kCapBitmapWords];
+    CapEntry entries[kCapTableSize];
 };
+static_assert(__builtin_offsetof(CapTable, entries) % 64 == 0);
 
 namespace cap {
 
+// Borrowed authority needs the live prefix, not a copy of the slot's reserved
+// bytes. The table remains ABI-sized; retained snapshots occupy half a line.
+struct Snapshot {
+    void* target;
+    object::Record* object;
+    u32 rights_mask;
+    u32 generation;
+    u16 type_tag;
+    u16 flags;
+};
+static_assert(sizeof(Snapshot) == 32);
+
 class Ref {
-    CapEntry entry_{};
+    Snapshot entry_{};
 
   public:
     Ref() = default;
     Ref(decltype(nullptr)) {}
-    explicit Ref(const CapEntry& entry) : entry_(entry) {
+    explicit Ref(const CapEntry& entry)
+        : entry_{entry.target, entry.object, entry.rights_mask, entry.generation,
+                 entry.type_tag, entry.flags} {
         object::retain(entry_.object);
     }
-    Ref(const Ref& other) : Ref(other.entry_) {}
+    Ref(const Ref& other) : entry_(other.entry_) { object::retain(entry_.object); }
     Ref(Ref&& other) : entry_(other.entry_) {
         other.entry_ = {};
     }
@@ -202,10 +224,10 @@ class Ref {
         object::release(entry_.object);
     }
     Ref& operator=(const Ref&) = delete;
-    const CapEntry* operator->() const {
+    const Snapshot* operator->() const {
         return &entry_;
     }
-    operator const CapEntry*() const {
+    operator const Snapshot*() const {
         return entry_.target ? &entry_ : nullptr;
     }
 };
@@ -216,6 +238,7 @@ template <class T> class Borrow {
   public:
     Borrow(decltype(nullptr)) {}
     explicit Borrow(const Ref& ref) : reference_(ref) {}
+    explicit Borrow(Ref&& ref) : reference_(static_cast<Ref&&>(ref)) {}
     T* get() const {
         return reference_ ? static_cast<T*>(reference_->target) : nullptr;
     }
@@ -231,7 +254,11 @@ template <class T> class Borrow {
 };
 
 void init();
+// A cached record is optional; its caller must already own a reference to the
+// same target. Rights validation, slot ownership, and generations are identical.
 CapHandle alloc(CapTable& table, CapType type, void* target, u32 rights);
+CapHandle alloc(CapTable& table, CapType type, void* target, u32 rights,
+                object::Record* record);
 Ref lookup(CapTable& table, CapHandle handle, CapType expected_type);
 Ref lookup_any(CapTable& table, CapHandle handle);
 

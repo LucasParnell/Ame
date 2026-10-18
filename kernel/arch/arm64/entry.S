@@ -8,7 +8,7 @@
 // Phase 0 responsibilities (spec §12 Phase 0):
 //   1. Save DTB pointer (x0) into x19 across BSS clear.
 //   2. Drop from EL2 -> EL1h if needed.
-//   3. Disable MMU/caches (clean slate; should already be off at boot).
+//   3. Disable MMU/data cache; initialise the phone's early instruction cache.
 //   4. Set up early stack.
 //   5. Zero BSS.
 //   6. Store DTB pointer into g_dtb_phys.
@@ -140,6 +140,20 @@ _start:
     bic     x0, x0, #(1 << 12)          // I (instruction cache)
     msr     SCTLR_EL1, x0
     isb
+
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+    // Instruction caching works with translation disabled. Initialise it
+    // before the long DT walks/page-table build; data accesses remain uncached
+    // until vm_init installs the normal/device memory attributes. The firmware
+    // handoff checks above still require M=C=0. Discard any old firmware code
+    // before enabling fetches from the freshly loaded kernel image.
+    dsb     sy
+    ic      iallu
+    dsb     sy
+    orr     x0, x0, #(1 << 12)
+    msr     SCTLR_EL1, x0
+    isb
+#endif
 
     // Set up the boot stack.
     adrp    x0, __boot_stack_top

@@ -1,7 +1,8 @@
 // Discovery uses one SPSC session per client. Init owns the live export catalog.
 //
-// Each client slot has its own request/reply rings and doorbell pair; the
-// service keeps no global session state. Replies are bounded by
+// Each client has separate request/reply rings. Incoming requests and session
+// generation changes share one wake doorbell; reply wakes stay per client.
+// Replies are bounded by
 // mochi::kSessionReplyTimeoutNs: if a client has died or stopped draining its
 // reply ring, the send expires and the slot is dropped, so nameservice never
 // wedges on an unresponsive peer.
@@ -9,6 +10,7 @@
 #include "mochi/boot_log.h"
 #include "midix/abi/protocols/nameservice.h"
 #include "mochi/va_layout.h"
+#include "mochi/inbox.h"
 
 static void no_close(uint32_t) {}
 
@@ -41,12 +43,20 @@ extern "C" [[noreturn]] void _start() {
     (void)mochi::log_map_from_boot(boot, mochi::va::nameservice::kVaLogRing, "nameservice");
     static mochi::ServerSessions sessions;
     if (!sessions.map(boot)) mochi::boot::invalid_boot();
+    const auto wake = mochi::boot::require_handle(boot, "sessions.doorbell");
+    // Eight incoming addresses fit one cache line. Build this view only after
+    // refreshing generations; the larger endpoint/session records stay cold
+    // while deciding whether to sleep.
+    alignas(64) static RingPage* incoming[MX_MAX_SESSIONS];
     for (uint32_t i = 0; i < sessions.directory->count; ++i) sessions.refresh(i, no_close);
     mochi::boot::ready(boot);
     for (;;) {
+        const auto expected = sys_doorbell_read(wake);
         bool progress = false;
         for (uint32_t i = 0; i < sessions.directory->count; ++i) {
-            if (!sessions.refresh(i, no_close)) continue;
+            const bool live = sessions.refresh(i, no_close);
+            incoming[i] = live ? sessions.endpoints[i].rx_ring : nullptr;
+            if (!live) continue;
             const auto& endpoint = sessions.endpoints[i];
             RingSlot slot{};
             if (!endpoint.try_recv(&slot)) continue;
@@ -63,6 +73,8 @@ extern "C" [[noreturn]] void _start() {
                 sessions.drop(i, no_close);
             }
         }
-        if (!progress) sys_yield();
+        if (!progress && mochi::InboxWait{incoming, sessions.directory->count,
+                MX_DEFAULT_RING_ORDER, wake}.wait(expected) < 0)
+            mochi::boot::invalid_boot();
     }
 }

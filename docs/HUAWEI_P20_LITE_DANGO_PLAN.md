@@ -43,9 +43,9 @@ UART, timer and Dango channel; it does not need Huawei Linux drivers.
 | Timekeeping | Native counter rate is 1,920,000 Hz; inherited CNTFRQ reports 16,384 Hz. | Give Linux the measured rate and verify host/guest timer isolation and wall-clock behavior. |
 | Observability | [USB acceptance](ANNE_USB.md) records V18 Mac enumeration, CDC input ACKs and `help` output on the panel. Retained fault logs and watchdog keepalive also exist. | Extend this path with guest status and counters; retain bounded recovery captures for early failures. |
 
-The latest recorded device state in the [USB handoff](HANDOFF_2026-10-13-evening.md)
-is V18 installed, with stock not restored. Check the actual image and connection
-before a future hardware run; older framebuffer notes describe earlier states.
+Check the actual installed image and USB connection before a hardware run.
+The [native USB guide](ANNE_USB.md) describes the current service profile; older
+framebuffer captures describe earlier device states.
 The recovery observations above came from existing private captures, not a new
 device inspection. Keep their full logs and identifiers outside version control.
 

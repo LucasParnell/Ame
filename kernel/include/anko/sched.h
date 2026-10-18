@@ -10,7 +10,10 @@
 #include "anko/cap.h"
 #include "anko/mm.h"
 #include "anko/syscall.h"
+#include "anko/sched_budget.h"
+#include "anko/fpsimd.h"
 #include "midix/abi/cpu_limits.h"
+struct MxDiagRuntimeBatch;
 
 // ---------------------------------------------------------------------------
 // Legacy priority levels — kept for thread_create API compatibility.
@@ -39,8 +42,9 @@ enum ThreadState : u8 {
 };
 
 // State is observed by wakers and teardown on other CPUs. Queue and frame
-// ownership still require the lifecycle lock; publishing a byte alone is not
-// permission to dispatch a thread.
+// ownership belongs to the station while running/queued. Blocking transitions
+// and remote publication additionally use the lifecycle lock; publishing a byte
+// alone is not permission to dispatch a thread.
 struct PublishedThreadState {
     ThreadState value;
     operator ThreadState() const { return __atomic_load_n(&value, __ATOMIC_ACQUIRE); }
@@ -110,6 +114,8 @@ constexpr SchedBand SCHED_IDLE        = SCHED_BAND_IDLE;
 
 constexpr u32 NUM_BANDS = 7;
 
+// Kernel context. The syscall accepts the separate, stable MxSchedContext wire
+// record; aligning our budget window must never change that userspace layout.
 struct SchedContext {
     u32 principal_id;
     u32 owner_thread_or_vcpu;
@@ -120,8 +126,7 @@ struct SchedContext {
     u64 budget_ns;
     u64 period_ns;
     u64 deadline_ns;
-    u64 used_ns;
-    u64 period_start_ns;
+    sched::BudgetWindow budget_window;
 
     u64 core_mask;
     u32 home_cpu;
@@ -214,8 +219,10 @@ constexpr u32 kFairQueueCap = 64;
 struct Thread; // forward declaration for FairThreadQueue
 
 struct FairThreadQueue {
-    Thread* data[kFairQueueCap];
+    // Empty/root checks use neighboring bytes, rather than opposite ends of
+    // the fixed-capacity array. Remaining heap slots stay cold until needed.
     u32     size;
+    Thread* data[kFairQueueCap];
 };
 static_assert(__is_trivially_constructible(FairThreadQueue));
 
@@ -232,23 +239,16 @@ constexpr u32 NICE_0_WEIGHT  = 1024;
 // Per-principal scheduling state — global, one entry per principal_id.
 // ---------------------------------------------------------------------------
 struct alignas(64) PrincipalSchedState {
-    u32  principal_id;
+    // Release-published generation (high word) and weight (low word).
+    // Zero means unallocated. Policy is immutable while references exist.
+    u64 dispatch;
+    u64 budget_ns;
+    u64 period_ns;
     PrincipalClass class_;
-    u8   allocated;
-    u16  _pad0;
-    u32  weight;
-    u32  generation;
-    u64  runtime_ns;
-    u64  period_ns;
-    u64  budget_ns;
-    u64  used_in_period_ns;
-    u64  period_start_ns;
-    u64  vruntime_ns;
-    u32  runnable_threads;
-    bool throttled;
-    u8   _pad[3];
+    sched::BudgetWindow budget_window;
 };
 static_assert(__is_trivially_constructible(PrincipalSchedState));
+static_assert(sizeof(PrincipalSchedState) == 64);
 
 // ---------------------------------------------------------------------------
 // Per-CPU, per-principal scheduling node.
@@ -256,31 +256,36 @@ static_assert(__is_trivially_constructible(PrincipalSchedState));
 // ---------------------------------------------------------------------------
 using BandQueue = FairThreadQueue;
 
-struct PrincipalEntity {
+// Selection and local fairness accounting share one cache line per principal.
+// Fixed-capacity thread heaps live in a separate CPU-owned array. Keep only the
+// two clocks that determine scheduling; runtime totals have global/thread owners.
+struct alignas(64) PrincipalEntity {
     u32             principal_id;
     u32             weight;
     u32             generation;
     u64             service_vruntime_ns; // principal share across all non-RT bands
     u64             thread_min_vruntime_ns; // thread clock; never a principal clock
-    u64             vruntime[NUM_BANDS];
-    u64             runtime_ns;
-    u32             runnable[NUM_BANDS];
+    // A fair band holds at most kFairQueueCap threads; byte counts retain the
+    // full queue capacity while keeping selection metadata in this cache line.
+    u8              runnable[NUM_BANDS];
     bool            throttled;
     bool            in_queue[NUM_BANDS];
     u8              heap_idx[NUM_BANDS]; // position in each FairPrincipalQueue heap
-
-    BandQueue       bands[NUM_BANDS - 1]; // RT has only the station's FIFO queues
 };
 static_assert(__is_trivially_constructible(PrincipalEntity));
+static_assert(kFairQueueCap <= 255);
+static_assert(sizeof(PrincipalEntity) == 64);
+static_assert(alignof(PrincipalEntity) == 64);
+static_assert(__builtin_offsetof(PrincipalEntity, thread_min_vruntime_ns) < 64);
 
 // ---------------------------------------------------------------------------
 // Fair principal queue — min-heap keyed by the principal's service clock.
 // ---------------------------------------------------------------------------
 struct FairPrincipalQueue {
-    PrincipalEntity* data[kMaxPrincipals];
     u32              size;
     SchedBand        band;
     u8               _pad[3];
+    PrincipalEntity* data[kMaxPrincipals];
 };
 static_assert(__is_trivially_constructible(FairPrincipalQueue));
 
@@ -416,6 +421,10 @@ struct Thread {
 
     // --- Scheduling class and weight ---
     SchedAttrs  sched;
+
+    // Saved before releasing execution ownership; restored on the dispatch CPU.
+    // Keep the vector register file out of the scheduler's hot metadata.
+    fpsimd::State fpsimd;
 };
 static_assert(__is_trivially_constructible(Thread));
 static_assert(__builtin_offsetof(Thread, ctx) == 0);
@@ -444,6 +453,7 @@ struct Process {
     u32         runnable_threads;
     u32         lock;
     u32         dying;
+    bool        kill_with_supervisor;
 
 
 };
@@ -479,9 +489,6 @@ struct alignas(64) Eki {
     u32 published_steal_load;
     u64 min_service_vruntime_ns;
 
-    // --- Min-vruntime watermarks (lag detection and normalization) ---
-    u64 min_vruntime[NUM_BANDS];
-
     // --- Context switch state ---
     bool         switch_pending;
     bool         requeue_current;
@@ -511,8 +518,10 @@ struct alignas(64) Eki {
     u64 fair_queue_overflows;
     u64 handoff_success;
     u64 handoff_fallback;
-    // Fixed-capacity thread heaps are cold relative to dispatch state.
+    // Parallel CPU-owned arrays, indexed by principal ID. Selection and fairness
+    // accounting share one-line records; fixed-capacity heap storage is separate.
     PrincipalEntity principal_entities[kMaxPrincipals];
+    BandQueue thread_heaps[kMaxPrincipals][NUM_BANDS - 1];
 };
 static_assert(__is_trivially_constructible(Eki));
 
@@ -543,6 +552,9 @@ void wake_remote(Thread* t, u32 target_cpu);
 
 // V2: IPC metadata — apply wake credit and record reason before enqueue
 void apply_wake_metadata(Thread* t, WakeReason reason, u32 sched_hints);
+// Doorbell delivery applies credit, selects a CPU, and publishes the wake under
+// one lifecycle guard. Returns the selected CPU for the caller's metrics.
+u32 wake_ipc(Thread* t, Thread* waker, u32 sched_hints, u32 home_cpu);
 
 // V2: wake-affine CPU selection
 u32 target_cpu_for_wake(Thread* waiter, Thread* waker,
@@ -582,10 +594,12 @@ bool     set_affinity(Thread* t, u64 cpu_mask);
 SysError resume_thread(Thread* t);
 object::Ref<Thread> find_thread(u32 tid);
 object::Ref<Process> find_process(u32 pid);
+bool process_runtime_snapshot(u32 first_pid, MxDiagRuntimeBatch* out);
 bool termination_pending();
 u64 process_identity(const Process& process);
 void record_exit(Process* process, long status);
 bool poll_exit(Process& supervisor, u64* identity, long* status);
+SysError bind_exit_doorbell(Process& supervisor, Doorbell* doorbell);
 void finish_thread(Thread* thread); // called only after its CPU stops using it
 void collect_terminations(Eki& eki, Thread* protected_thread = nullptr);
 
@@ -621,6 +635,7 @@ u64 remote_wake_count();
 u64 ipi_sent_count();
 u64 ipi_handled_count();
 u64 pending_wake_drain_count();
+u64 busy_runtime_ns();
 u64 principal_runtime(u32 principal_id);
 u64 principal_class_runtime(PrincipalClass class_);
 u64 fairness_max_lag();

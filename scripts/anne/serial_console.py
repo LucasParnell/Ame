@@ -1,6 +1,7 @@
 """Raw CDC transport and terminal relay, independent of AMK1 key framing."""
 from __future__ import annotations
 
+import errno
 import math
 import os
 import select
@@ -21,7 +22,7 @@ def write_until(fd: int, data: bytes, deadline: float):
         except BlockingIOError:
             continue
         if not count:
-            raise OSError("USB serial disconnected")
+            raise OSError(errno.ENODEV, "USB serial disconnected")
         view = view[count:]
 
 
@@ -53,7 +54,7 @@ class Serial:
             except BlockingIOError:
                 continue
             if not data:
-                raise OSError("USB serial disconnected")
+                raise OSError(errno.ENODEV, "USB serial disconnected")
             return data
 
     def close(self):
@@ -62,7 +63,13 @@ class Serial:
         fd, self.fd = self.fd, -1
         try:
             if self.previous is not None:
-                termios.tcsetattr(fd, termios.TCSANOW, self.previous)
+                try:
+                    termios.tcsetattr(fd, termios.TCSANOW, self.previous)
+                except (OSError, termios.error) as exc:
+                    # macOS invalidates the old tty after reset/unplug. Cleanup
+                    # must still close it without masking the original failure.
+                    if not exc.args or exc.args[0] not in (errno.ENXIO, errno.ENODEV, errno.EIO, errno.EBADF):
+                        raise
         finally:
             os.close(fd)
 
@@ -84,7 +91,7 @@ def relay(fd: int, input_fd: int, emit) -> int:
             except BlockingIOError:
                 data = None
             if data == b"":
-                return 0
+                raise OSError(errno.ENODEV, "USB serial disconnected")
             if data:
                 emit(data)
         if input_fd in ready:
@@ -101,7 +108,7 @@ def relay(fd: int, input_fd: int, emit) -> int:
             except BlockingIOError:
                 continue
             if not count:
-                raise OSError("USB serial disconnected")
+                raise OSError(errno.ENODEV, "USB serial disconnected")
             pending = pending[count:]
     return 0
 
@@ -136,7 +143,28 @@ def console_mode(path: str, send: str | None, enter: bool, read_seconds: float) 
         input_fd = sys.stdin.fileno()
         previous_input = termios.tcgetattr(input_fd)
         tty.setraw(input_fd)
-        return relay(link.fd, input_fd, emit)
+        while True:
+            try:
+                return relay(link.fd, input_fd, emit)
+            except OSError as exc:
+                if exc.errno not in (errno.ENXIO, errno.ENODEV, errno.EIO, errno.EBADF):
+                    raise
+                link.close()
+                print("\r\nUSB serial disconnected; waiting for " + path + " (Ctrl-] exits).", file=sys.stderr)
+                while True:
+                    # Discard keystrokes from the disconnected session. Never
+                    # replay a command after an uncertain partial USB write.
+                    if select.select([input_fd], [], [], 0.2)[0]:
+                        data = os.read(input_fd, 4096)
+                        if not data or b"\x1d" in data:
+                            return 0
+                    try:
+                        link = Serial(path)
+                        break
+                    except (OSError, termios.error) as reconnect:
+                        if not reconnect.args or reconnect.args[0] not in (errno.ENOENT, errno.ENXIO, errno.ENODEV, errno.EIO, errno.EBUSY):
+                            raise
+                print("\r\nUSB serial reconnected.", file=sys.stderr)
     finally:
         try:
             if previous_input is not None:

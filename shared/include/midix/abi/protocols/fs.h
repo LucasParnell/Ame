@@ -21,6 +21,8 @@ using mx_cap_handle_t = mx_handle_t;
 constexpr mx_u32_t FS_BLOCK_SIZE = 4096;
 constexpr mx_u32_t FS_INLINE_READ_MAX = 32;
 constexpr mx_u32_t FS_INLINE_WRITE_MAX = 24;
+constexpr mx_u32_t FS_TRANSFER_MAX = 65536;
+constexpr mx_u32_t FS_READ_ARENA_MAX = 4096;
 
 constexpr mx_u32_t FS_MAGIC = 0xFEED'FACEu;
 constexpr mx_u32_t FS_SUPERBLOCK_VERSION = 1;
@@ -420,6 +422,7 @@ enum JournalRecordType : mx_u32_t {
     JRN_DIR_DELETE   = 5,
     JRN_PHYS_REF_INC = 6,
     JRN_PHYS_REF_DEC = 7,
+    JRN_METADATA_FRAGMENT = 8, // target/offset/length + metadata after-image (§7 FS_SPEC)
 };
 
 struct JournalRecord {

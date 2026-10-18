@@ -96,8 +96,8 @@ class MinimalEntry(unittest.TestCase):
                 expected = 0xff00ff00 if el == 1 else 0xffff00ff
                 sample = path / 'sample'
                 while time.monotonic() < deadline:
-                    # Snapshot the record so completion means all stage holds
-                    # (or the deliberately triggered fault hold) actually ran.
+                    # Wait for every LED transition (including the intentional
+                    # fault path) and reset request to finish.
                     self.assertEqual(qmp('human-monitor-command', {'command-line':
                         f'pmemsave 0x44060000 4096 "{sample}"'}), '')
                     record = sample.read_bytes()[12:].decode('ascii', errors='replace')
@@ -107,7 +107,10 @@ class MinimalEntry(unittest.TestCase):
                 self.assertIn('AMEFL6', record)
                 held = {stage: int(ticks) for stage, ticks in re.findall(r'hold=([rbgw]) end=0x[0-9a-f]+ ticks=([0-9]+)', record)}
                 for stage in ('r', 'b', 'w' if fault else 'g'):
-                    self.assertGreaterEqual(held.get(stage, 0), 5760000)
+                    self.assertIn(stage, held, f'missing LED transition {stage}')
+                    # Normal transitions take milliseconds; a one-second upper
+                    # bound allows emulator jitter but catches the old 3 s dwell.
+                    self.assertLess(held[stage], 1920000)
                 if fault: self.assertIn('!FAULT', record)
                 else: self.assertNotIn('!FAULT', record)
                 self.assertEqual(qmp('human-monitor-command', {'command-line':

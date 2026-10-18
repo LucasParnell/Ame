@@ -30,6 +30,8 @@
 using integrity::sha256;
 using integrity::bytes_equal;
 #include "mochi/ring.h"
+#include "mochi/inbox.h"
+#include "midix/abi/protocols/fido2.h"
 #include "mochi/log.h"
 #include "mochi/fs.h"
 #include "mochi/console_config.h"
@@ -106,6 +108,7 @@ struct ServiceSpec {
     bool ready;
     bool launching;
     bool desired;
+    bool usb_host_activation;
     bool restart_pending;
     bool stopping;
     CapHandle log_ring;
@@ -136,6 +139,8 @@ struct InitRuntime {
     CapHandle gpu_reply_db;
 
     mochi::svcctl::Server svcctl;
+    mochi::Ring fido2_demand;
+    uint64_t fido2_generation;
 };
 
 static InitRuntime g_rt{};
@@ -228,11 +233,15 @@ static uint32_t parse_manifest_json_services(const char* manifest, ServiceSpec* 
         auto obj = json::element(entries, count);
         if (!obj) return count;
         auto& svc = out[count];
-        svc.desired = true;
+        auto activation = json::member(obj, "activation");
+        if (activation && !json::equals(activation, "boot") && !json::equals(activation, "usb-host")) return 0;
+        svc.usb_host_activation = activation && json::equals(activation, "usb-host");
+        svc.desired = !svc.usb_host_activation;
         if (!json::string(json::member(obj, "name"), svc.name, sizeof(svc.name)) ||
             !json::string(json::member(obj, "object"), svc.image, sizeof(svc.image)) ||
             !json::string(json::member(obj, "principal"), svc.principal, sizeof(svc.principal)) ||
             !json::string(json::member(obj, "restart"), svc.restart, sizeof(svc.restart))) return 0;
+        if (svc.usb_host_activation && !streq(svc.name, "usb.fn.fido2")) return 0;
         if ((!streq(svc.principal, "native_trusted") && !streq(svc.principal, "native_sandboxed")) ||
             (!streq(svc.restart, "always") && !streq(svc.restart, "never"))) return 0;
         for (uint32_t i = 0; i < count; ++i) if (streq(out[i].name, svc.name)) return 0;
@@ -466,7 +475,7 @@ static CapHandle create_service_registry(ServiceSpec* services, uint32_t service
         libk::str::copy_into(e.restart, sizeof(e.restart), services[i].restart);
         e.process = services[i].proc;
         e.main_thread = services[i].main_thread;
-        e.state = mochi::svc::kStateSpawned;
+        e.state = services[i].proc ? mochi::svc::kStateSpawned : 0;
         if (services[i].boot_info && services[i].boot_info->magic == MX_BOOT_MAGIC) {
             e.state |= mochi::svc::kStateBootPublished;
         }
@@ -533,6 +542,7 @@ static void console_config_reset() {
 struct ClientSession {
     ServiceSpec* client;
     CapHandle request, reply, request_db, reply_db;
+    CapHandle write_arena;
     uint64_t identity;
 };
 struct SessionServer {
@@ -542,8 +552,10 @@ struct SessionServer {
     MxSessionDirectory* directory;
     ClientSession clients[MX_MAX_SESSIONS];
     uint64_t exports[MX_MAX_EXPORTS];
+    CapHandle wake;
 };
-static SessionServer g_servers[2]{{"io.fs", 1, 0, nullptr, {}, {}}, {"nameservice", 2, 0, nullptr, {}, {}}};
+static SessionServer g_servers[2]{{"io.fs", 1, 0, nullptr, {}, {}, 0},
+                                {"nameservice", 2, 0, nullptr, {}, {}, 0}};
 
 static void create_sessions() {
     for (uint32_t index = 0; index < 2; ++index) {
@@ -562,6 +574,10 @@ static void create_sessions() {
         server.directory = reinterpret_cast<MxSessionDirectory*>(va);
         *server.directory = {};
         server.directory->magic = MX_SESSION_MAGIC;
+        if (server.use == 2) {
+            server.wake = as_cap(sys_doorbell_create());
+            if (!server.wake) fail_halt("init: discovery wake create failed\n");
+        }
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
             auto& svc = g_rt.services[i];
             if (!(svc.uses & server.use)) continue;
@@ -570,8 +586,12 @@ static void create_sessions() {
             client.client = &svc;
             client.request = as_cap(sys_ring_create(kRingOrder, 0));
             client.reply = as_cap(sys_ring_create(kRingOrder, 0));
-            client.request_db = as_cap(sys_doorbell_create());
+            client.request_db = server.wake ? server.wake : as_cap(sys_doorbell_create());
             client.reply_db = as_cap(sys_doorbell_create());
+            if (server.use == 1) {
+                client.write_arena = as_cap(sys_arena_create(FS_TRANSFER_MAX, 0));
+                if (!client.write_arena) fail_halt("init: FS transfer arena create failed\n");
+            }
             if (!client.request || !client.reply || !client.request_db || !client.reply_db) fail_halt("init: session create failed\n");
         }
     }
@@ -611,9 +631,12 @@ static void refresh_exports() {
 
 static void wire_session_server(ServiceSpec& svc, SessionServer& server) {
     grant_to(svc, server.arena, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, MX_BOOT_ENTRY_ARENA, "sessions");
+    if (server.wake) share_doorbell_to(svc, server.wake, "sessions.doorbell", RIGHT_WAIT);
     for (uint32_t i = 0; i < server.directory->count; ++i) {
         auto& client = server.clients[i];
         auto& slot = server.directory->slots[i];
+        slot.reserved = server.use == 1 && streq(client.client->name, "usb.fn.fido2")
+                            ? MX_SESSION_FIDO2_PRIVATE : 0;
         slot.client = client.client->proc ? as_cap(sys_cap_grant(svc.proc, client.client->proc, RIGHT_READ | RIGHT_SPAWN)) : kNullCap;
         client.identity = client.client->identity;
         slot.request_ring = as_cap(sys_ring_share(client.request, svc.proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP));
@@ -621,6 +644,9 @@ static void wire_session_server(ServiceSpec& svc, SessionServer& server) {
         slot.request_doorbell = as_cap(sys_doorbell_share(client.request_db, svc.proc, RIGHT_WAIT));
         slot.reply_doorbell = as_cap(sys_doorbell_share(client.reply_db, svc.proc, RIGHT_NOTIFY));
         slot.order = kRingOrder;
+        slot.write_arena = client.write_arena ? as_cap(sys_cap_grant(svc.proc, client.write_arena,
+            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP)) : kNullCap;
+        slot.client_write_arena = kNullCap;
         slot.acknowledged = 0;
         __atomic_add_fetch(&slot.generation, 1ull, __ATOMIC_RELEASE);
     }
@@ -643,6 +669,9 @@ static bool wire_client_sessions(ServiceSpec& svc) {
                 slot.client = as_cap(sys_cap_grant(service->proc, svc.proc, RIGHT_READ | RIGHT_SPAWN));
                 client.identity = svc.identity;
                 __atomic_add_fetch(&slot.generation, 1ull, __ATOMIC_RELEASE);
+                // The server can be asleep with no queued request. Generation
+                // publication must wake it before we await acknowledgement.
+                if (server.wake) require_ok(sys_notify(server.wake), "init: session wake failed\n");
             }
             const auto generation = __atomic_load_n(&slot.generation, __ATOMIC_ACQUIRE);
             const auto deadline = mx_clock_ns() + 5000000000ull;
@@ -651,6 +680,11 @@ static bool wire_client_sessions(ServiceSpec& svc) {
                 sys_yield();
             }
             const bool fs = server.use == 1;
+            if (fs) {
+                const auto cap = grant_to(svc, client.write_arena, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP,
+                                           MX_BOOT_ENTRY_ARENA, "fs.write.arena");
+                __atomic_store_n(&slot.client_write_arena, cap, __ATOMIC_RELEASE);
+            }
             share_ring_to_with_rights(svc, client.request, fs ? "fs.cmd.ring" : "ns.tx", RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
             share_ring_to_with_rights(svc, client.reply, fs ? "fs.reply.ring" : "ns.rx", RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
             share_doorbell_to(svc, client.request_db, fs ? "fs.cmd.doorbell" : "ns.server.db", RIGHT_NOTIFY);
@@ -689,6 +723,13 @@ static void wire_service_channels(ServiceSpec& svc) {
 static bool wire_and_resume_service(ServiceSpec& svc) {
     if (!wire_client_sessions(svc)) return false;
     wire_service_channels(svc);
+    if (streq(svc.name, "dev.apps")) {
+        const auto delegated = as_cap(sys_supervisor_delegate(kCapSupervisor, svc.proc));
+        if (!delegated) fail_halt("init: app supervision delegation failed\n");
+        grant_to(svc, delegated, RIGHT_READ | RIGHT_SPAWN,
+                 MX_BOOT_ENTRY_HANDLE, "apps.supervisor");
+        sys_cap_revoke(delegated);
+    }
     if (streq(svc.name, "nameservice")) {
         wire_session_server(svc, g_servers[1]);
         share_service_log(svc, g_rt.console_db);
@@ -1092,13 +1133,14 @@ static bool restart_service_now(ServiceSpec& svc) {
 }
 
 static void launch_prepared_services() {
-    uint32_t remaining = g_rt.service_count;
+    uint32_t remaining = 0;
+    for (uint32_t i = 0; i < g_rt.service_count; ++i) remaining += g_rt.services[i].desired;
     for (uint32_t pass = 0; pass < g_rt.service_count; ++pass) {
         // Phase A: prepare and resume every service whose dependencies are
         // ready. Nothing waits here, so independent services boot in parallel.
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
             auto& svc = g_rt.services[i];
-            if (svc.ready || svc.launching || !dependencies_ready(svc)) continue;
+            if (!svc.desired || svc.ready || svc.launching || !dependencies_ready(svc)) continue;
             // Explicit activation is separate from log mirroring.
             if (!prepare_service_now(svc)) {
                 sys_debug_puts("init: failed service: ", 22);
@@ -1132,13 +1174,28 @@ static void launch_prepared_services() {
 
 static bool supervise_services() {
     bool progress = drain_exits();
+    for (uint32_t i = 0; i < g_rt.service_count; ++i) {
+        auto& svc = g_rt.services[i];
+        // A replacement gadget must observe its own host request. Do not carry
+        // a previous USB incarnation's demand through dependency recovery.
+        if (svc.usb_host_activation && svc.desired && !dependencies_ready(svc)) {
+            svc.desired = false;
+            svc.restart_pending = false;
+            (void)stop_mask(1u << i);
+            progress = true;
+        }
+    }
     uint32_t affected = 0;
+    bool prepared = false;
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
         auto& svc = g_rt.services[i];
         if (!svc.proc && svc.restart_pending) affected |= 1u << i;
+        prepared |= svc.proc && !svc.ready && svc.desired && svc.restart_pending;
     }
-    if (!affected) return progress;
-    const uint32_t dependents = dependent_mask(affected) & ~affected;
+    // A prepared child can precede its dependency in manifest order. Keep
+    // launching across progress passes even after every process is allocated.
+    if (!affected && !prepared) return progress;
+    const uint32_t dependents = affected ? dependent_mask(affected) & ~affected : 0;
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
         auto& svc = g_rt.services[i];
         if ((dependents & (1u << i)) && svc.proc) {
@@ -1213,7 +1270,9 @@ static bool handle_svc_control_requests() {
         mx_u32_t reply_state = 0;
         bool do_power = false;
         if (slot.type == mochi::svcctl::kRequestStart) {
-            if (svc->proc != kNullCap || svc->main_thread != kNullCap) {
+            if (svc->usb_host_activation) {
+                status = MX_ERR_POLICY;
+            } else if (svc->proc != kNullCap || svc->main_thread != kNullCap) {
                 status = MX_ERR_BUSY;
             } else {
                 status = start_service_now(*svc) ? MX_OK : MX_ERR_INVALID;
@@ -1221,7 +1280,8 @@ static bool handle_svc_control_requests() {
         } else if (slot.type == mochi::svcctl::kRequestStop) {
             status = stop_service_now(*svc) ? MX_OK : MX_ERR_DEAD;
         } else if (slot.type == mochi::svcctl::kRequestRestart) {
-            status = restart_service_now(*svc) ? MX_OK : MX_ERR_INVALID;
+            status = svc->usb_host_activation ? MX_ERR_POLICY :
+                     restart_service_now(*svc) ? MX_OK : MX_ERR_INVALID;
         } else if (power_op) {
             status = !streq(req.name, "system") ? MX_ERR_INVALID :
                      kCapSystemControl == kNullCap ? MX_ERR_NOT_IMPLEMENTED :
@@ -1234,6 +1294,45 @@ static bool handle_svc_control_requests() {
         if (g_rt.svcctl.send_reply(status, reply_state) && do_power) system_power_now(power_op);
     }
     return handled;
+}
+
+static bool handle_fido2_demand() {
+    auto* svc = find_service(g_rt.services, g_rt.service_count, "usb.fn.fido2");
+    if (!svc || !svc->usb_host_activation || !g_rt.fido2_demand.valid()) return false;
+    bool progress = false;
+    RingSlot slot{};
+    // Coalesce queued lifecycle edges before spawning: a host that disconnected
+    // while init was busy must not start a now-unrequested authenticator.
+    MxFido2Demand latest{};
+    while (g_rt.fido2_demand.try_pop(&slot)) {
+        progress = true;
+        MxFido2Demand demand{};
+        if (!mochi::message_get(slot, &demand, MX_FIDO2_DEMAND) || !demand.generation ||
+            demand.reserved || demand.active > 1 || demand.generation < g_rt.fido2_generation) continue;
+        latest = demand;
+        g_rt.fido2_generation = demand.generation;
+    }
+    if (!latest.generation) return progress;
+    uint64_t previous_generation = 0;
+    for (uint32_t i = 0; i < svc->binding_count; ++i) {
+        auto& binding = svc->bindings[i];
+        if (binding.is_value && streq(binding.name, "usb.generation")) {
+            previous_generation = binding.value;
+            binding.value = latest.generation;
+        }
+    }
+    if (svc->proc && (!latest.active || previous_generation != latest.generation)) {
+        svc->desired = false;
+        svc->restart_pending = false;
+        (void)stop_mask(1u << service_ordinal(svc));
+    }
+    svc->desired = latest.active;
+    if (svc->desired && !svc->proc) {
+        svc->restart_pending = true;
+        svc->retry_at = mx_clock_ns();
+    }
+    if (!svc->desired) svc->restart_pending = false;
+    return progress;
 }
 
 extern "C" [[noreturn]] void _start() {
@@ -1302,7 +1401,7 @@ extern "C" [[noreturn]] void _start() {
         if (!services[i].image_data || services[i].image_size == 0) {
             fail_halt("init: manifest failed\n");
         }
-        if (!spawn_service(services[i], MX_SPAWN_SUSPENDED)) fail_halt("init: spawn failed\n");
+        if (services[i].desired && !spawn_service(services[i], MX_SPAWN_SUSPENDED)) fail_halt("init: spawn failed\n");
     }
 
     const CapHandle registry = create_service_registry(services, service_count);
@@ -1326,11 +1425,38 @@ extern "C" [[noreturn]] void _start() {
     g_rt.svcctl.ep = {reinterpret_cast<RingPage*>(kVaSvcCtlReplyRing), reinterpret_cast<RingPage*>(kVaSvcCtlReqRing),
         g_rt.channels[static_cast<unsigned>(ChannelId::svc_ctl_req_ring)].order,
         channel(ChannelId::svc_ctl_reply_db), channel(ChannelId::svc_ctl_req_db)};
+    if (find_service(services, service_count, "usb.fn.fido2")) {
+        require_ok(sys_map_page(channel(ChannelId::usb_fido_demand), kVaFido2Demand,
+                               RIGHT_READ | RIGHT_WRITE), "init: FIDO2 demand map failed\n");
+        g_rt.fido2_demand = {reinterpret_cast<RingPage*>(kVaFido2Demand),
+                           g_rt.channels[static_cast<unsigned>(ChannelId::usb_fido_demand)].order,
+                           channel(ChannelId::svc_ctl_req_db)};
+    }
+    require_ok(sys_supervisor_bind_doorbell(kCapSupervisor, g_rt.svcctl.ep.rx_doorbell),
+               "init: exit wake bind failed\n");
     parse_dependencies();
     launch_prepared_services();
     while (true) {
+        // Exit notifications and control messages converge on one doorbell.
+        // Sample before draining either source to preserve a racing wake.
+        const auto expected = sys_doorbell_read(g_rt.svcctl.ep.rx_doorbell);
         bool progress = handle_svc_control_requests();
+        if (handle_fido2_demand()) progress = true;
         if (supervise_services()) progress = true;
-        if (!progress) sys_yield();
+        if (progress) continue;
+
+        // Only pending respawns need a timer. In the healthy steady state the
+        // wait is indefinite: there is no periodic scan of cold ServiceSpecs.
+        uint64_t deadline = 0;
+        for (uint32_t i = 0; i < g_rt.service_count; ++i) {
+            const auto& svc = g_rt.services[i];
+            if (svc.proc || !svc.desired || !svc.restart_pending) continue;
+            const auto retry = svc.retry_at ? svc.retry_at : mx_clock_ns();
+            if (!deadline || retry < deadline) deadline = retry;
+        }
+        RingPage* incoming[] = {g_rt.svcctl.ep.rx_ring, g_rt.fido2_demand.ring};
+        require_ok(mochi::InboxWait{incoming, g_rt.fido2_demand.valid() ? 2u : 1u, kRingOrder,
+                    g_rt.svcctl.ep.rx_doorbell}.wait(expected, deadline),
+                   "init: control wait failed\n");
     }
 }

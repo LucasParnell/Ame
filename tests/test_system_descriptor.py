@@ -40,13 +40,25 @@ class SystemDescriptor(unittest.TestCase):
         services={s['name']:s for s in anne['services']}
         self.assertNotIn('drv.usb.xhci',services)
         self.assertEqual(services['io.usb']['start_after'],['drv.usb.dwc2'])
-        self.assertEqual(services['msh']['uses'],[])
-        self.assertNotIn('io.fs',services)
+        self.assertEqual(services['msh']['uses'],['fs'])
+        self.assertIn('io.fs',services['msh']['start_after'])
+        self.assertEqual(services['io.fs']['start_after'],['drv.blk.emmc'])
+        self.assertEqual(services['io.fs']['caps'],['blk'])
+        fs_bindings={b['name']:b for b in services['io.fs']['bindings']}
+        emmc_bindings={b['name']:b for b in services['drv.blk.emmc']['bindings']}
+        self.assertEqual(emmc_bindings['emmc.partition']['value'],56)
+        self.assertEqual(fs_bindings['blk.req.doorbell']['rights'],['notify'])
+        self.assertEqual(fs_bindings['blk.reply.doorbell']['rights'],['wait'])
+        self.assertEqual(fs_bindings['blk.buffer']['channel'],emmc_bindings['blk.buffer']['channel'])
+        self.assertNotIn('drv.blk.virtio',services)
         hardware={name:{b['boot'] for b in svc['bindings'] if 'boot' in b} for name,svc in services.items()}
         self.assertEqual(hardware['drv.usb.dwc2'],{'dwc2.mmio','dwc2.irq','usb.fence'})
         self.assertEqual(hardware['drv.usb.anne-phy'],{'usb.phy.mmio','usb.phy.control'})
         self.assertFalse(hardware['drv.usb.hid'])
         self.assertFalse(hardware['dev.usb-input'])
+        for name in ('drv.typec.fusb301', 'io.usb.role'):
+            bindings = {b['name']: b for b in services[name]['bindings']}
+            self.assertEqual(bindings['usb.device_only']['value'], 0)
         sources=[b['channel'] for b in services['ui.input']['bindings'] if b['name'] in {'hid.input.ring','test.input.ring'}]
         self.assertEqual(len(set(sources)),2)
 

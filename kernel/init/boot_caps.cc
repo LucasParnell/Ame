@@ -26,6 +26,7 @@
 #include "libk/integer.h"
 #include "libk/printf.h"
 #include "libk/string.h"
+#include "fido2_seed.h"
 
 namespace drivers::fwcfg {
     bool write_ramfb(PhysAddr pixel_phys, u32 width, u32 height);
@@ -166,6 +167,9 @@ void issue_boot_caps(Process& init_proc,
         constexpr Resource resources[] = {
             {"dwc2.mmio",0xff100000,0x40000}, {"usb.phy.mmio",0xff200000,4096},
             {"i2c.mmio",0xfdf0d000,4096},
+            {"emmc.mmio",0xff390000,4096},
+            // Captured Anne DTB: gpio25, volume-up bit 1, active low.
+            {"fido2.presence.mmio",0xfff0e000,4096},
         };
         for (const auto& r : resources) {
             auto* range = static_cast<MmioRange*>(mm::slab_alloc(sizeof(MmioRange),alignof(MmioRange)));
@@ -173,6 +177,17 @@ void issue_boot_caps(Process& init_proc,
             *range = {r.base,r.bytes,MX_MMIO_DEVICE_nGnRnE,0,0,0};
             grant(r.name,CAP_MMIO,range,RIGHT_READ|RIGHT_WRITE|RIGHT_MAP|RIGHT_DUP);
         }
+        const auto seed_page = mm::alloc_page_for(init_proc.pid);
+        auto* seed_arena = static_cast<Arena*>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
+        if (!seed_page || !seed_arena) panic("FIDO2 seed allocation failed");
+        libk::memset(reinterpret_cast<void*>(seed_page), 0, PAGE_SIZE);
+        libk::memcpy(reinterpret_cast<void*>(seed_page), &kFido2Seed, sizeof(kFido2Seed));
+        *seed_arena = {};
+        seed_arena->phys_base = seed_page;
+        seed_arena->size = PAGE_SIZE;
+        seed_arena->owner_pid = init_proc.pid;
+        seed_arena->rights = RIGHT_READ;
+        grant("fido2.seed", CAP_ARENA, seed_arena, RIGHT_READ | RIGHT_MAP | RIGHT_DUP);
         auto* line = static_cast<IrqLine*>(mm::slab_alloc(sizeof(IrqLine),alignof(IrqLine)));
         if (!line) panic("Anne USB IRQ allocation failed");
         *line = {191,0,0,0,0};
@@ -180,6 +195,25 @@ void issue_boot_caps(Process& init_proc,
         grant("usb.phy.control",CAP_PLATFORM,platform::board_control(platform::Domain::UsbPhy),RIGHT_WRITE|RIGHT_DUP);
         grant("usb.fence",CAP_PLATFORM,platform::board_control(platform::Domain::UsbController),RIGHT_WRITE|RIGHT_DUP);
         grant("i2c.control",CAP_PLATFORM,platform::board_control(platform::Domain::I2c),RIGHT_WRITE|RIGHT_DUP);
+        grant("emmc.control",CAP_PLATFORM,platform::board_control(platform::Domain::Emmc),RIGHT_WRITE|RIGHT_DUP);
+        // Dedicated ADMA descriptor/data memory, pinned for the entire boot.
+        // Register before publishing so identity and user aliases share NC
+        // attributes. Ordinary filesystem/client arenas stay CPU-cacheable.
+        constexpr usize kEmmcDmaPages = 17;
+        const PhysAddr emmc_dma_phys = mm::alloc_pages_contiguous(kEmmcDmaPages);
+        auto* emmc_dma = static_cast<Arena*>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
+        if (!emmc_dma || !emmc_dma_phys || emmc_dma_phys + kEmmcDmaPages * PAGE_SIZE > (1ull << 32))
+            panic("eMMC DMA allocation failed");
+        if (!mm::register_noncached_range(emmc_dma_phys, kEmmcDmaPages * PAGE_SIZE))
+            panic("eMMC DMA memory attributes failed");
+        libk::memset(reinterpret_cast<void*>(emmc_dma_phys), 0, kEmmcDmaPages * PAGE_SIZE);
+        *emmc_dma = {};
+        emmc_dma->phys_base = emmc_dma_phys;
+        emmc_dma->size = kEmmcDmaPages * PAGE_SIZE;
+        emmc_dma->owner_pid = init_proc.pid;
+        emmc_dma->rights = RIGHT_READ | RIGHT_WRITE;
+        emmc_dma->flags = kArenaFlagExposePhys; // no OwnsPages: never recycled
+        grant("emmc.dma", CAP_ARENA, emmc_dma, RIGHT_READ|RIGHT_WRITE|RIGHT_MAP|RIGHT_DUP);
 #ifdef ANKO_ANNE_FRAMEBUFFER
         u64 address=0; u32 width=0,height=0;
         if (anne::native_display::framebuffer(address,width,height)) {
@@ -467,6 +501,7 @@ Process* spawn_image(const void* elf_data, usize elf_size, PrincipalClass princi
 
     Process* p = sched::process_create(principal, supervisor_pid);
     if (!p) { ANKO_LOG_ERROR("kernel/loader", "process allocation failed"); return nullptr; }
+    p->kill_with_supervisor = (flags & MX_SPAWN_KILL_WITH_SUPERVISOR) != 0;
 
     VmSpace space{};
     space.pgd_phys = p->ttbr0;

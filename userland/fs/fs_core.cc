@@ -22,6 +22,7 @@ mx_u32_t g_data_inode = 0;
 // Currently served client, published by the session loop in fs_ring.cc.
 mx_u32_t g_session = 0;
 mx_u64_t g_session_generation = 0;
+mochi::store::State g_volume{};
 
 // Small registered arenas. These exist so the kernel's accounting sees the
 // service's memory; the actual storage is the static tables above.
@@ -440,6 +441,7 @@ void format_memory_fs() {
 }
 
 void register_service_arenas() {
+    (void)sys_arena_register(reinterpret_cast<mx_vaddr_t>(&g_volume), sizeof(g_volume), 0);
     (void)sys_arena_register(reinterpret_cast<mx_vaddr_t>(g_metadata_arena),
                              sizeof(g_metadata_arena), 0);
     (void)sys_arena_register(reinterpret_cast<mx_vaddr_t>(g_inode_arena), sizeof(g_inode_arena), 0);

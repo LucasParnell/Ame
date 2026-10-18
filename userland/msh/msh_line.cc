@@ -10,6 +10,11 @@
 static char g_history[kHistoryMax][kLineMax];
 static uint32_t g_history_count = 0;
 static uint32_t g_history_head = 0;
+// A USB packet may contain several commands. Keep the unread suffix when a
+// newline returns from read_line, including CRLF split across ring slots.
+static RingSlot g_input_slot{};
+static uint32_t g_input_offset = 0;
+static bool g_input_cr = false;
 
 uint32_t build_prompt(char* out, uint32_t cap) {
     if (!out || cap == 0) return 0;
@@ -188,7 +193,8 @@ static bool try_complete_line(char* line, uint32_t cap, uint32_t* len_io, uint32
     } else if (kind == CompleteRebootTarget) {
         add_literal("fastboot"); add_literal("bootloader");
     } else if (kind == CompleteDiagSection) {
-        add_literal("all"); add_literal("el2"); add_literal("log");
+        add_literal("all"); add_literal("el2"); add_literal("el3");
+        add_literal("el3-canary"); add_literal("log");
     } else if (kind == CompleteSvcName && g.svc_registry) {
         mochi::svc::RegistryEntry e{};
         const uint16_t count = svc_registry_entry_count();
@@ -294,12 +300,35 @@ bool read_line(char* out, uint32_t cap) {
 
     for (;;) {
         if (!g.have_terminal || !g.term.valid()) return false;
-        RingSlot slot{};
-        if (!g.term.wait_read(&slot)) return false;
-        if (slot.type != MX_TERM_INPUT_BYTES) continue;
+        if (g_input_offset >= g_input_slot.length) {
+            g_input_offset = 0;
+            if (!g.term.wait_read(&g_input_slot)) return false;
+            if (g_input_slot.type == MX_TERM_CONTROL) {
+                MxTermControl control{};
+                if (mochi::message_get(g_input_slot, &control, MX_TERM_CONTROL) &&
+                    !control.reserved0 && (control.code == MX_TERM_CONTROL_FLOW_ON ||
+                                          control.code == MX_TERM_CONTROL_FLOW_OFF)) {
+                    len = cursor = 0;
+                    out[0] = live_line[0] = '\0';
+                    history_nav = -1;
+                    esc = EscNone;
+                    g_input_cr = false;
+                    if (control.code == MX_TERM_CONTROL_FLOW_ON) redraw();
+                }
+                g_input_slot.length = 0;
+                continue;
+            }
+            if (g_input_slot.type != MX_TERM_INPUT_BYTES) {
+                g_input_slot.length = 0;
+                continue;
+            }
+        }
 
-        for (uint32_t i = 0; i < slot.length; ++i) {
-            char c = static_cast<char>(slot.payload[i]);
+        while (g_input_offset < g_input_slot.length) {
+            char c = static_cast<char>(g_input_slot.payload[g_input_offset++]);
+            const bool previous_cr = g_input_cr;
+            g_input_cr = c == '\r';
+            if (previous_cr && c == '\n') continue;
 
             if (esc == EscSeen) {
                 if (c == '[') { esc = EscCsi; continue; }
@@ -364,13 +393,22 @@ bool read_line(char* out, uint32_t cap) {
             }
 
             if (is_printable(c) && len + 1 < cap) {
+                const bool append = cursor == len;
                 for (uint32_t j = len + 1; j > cursor; --j) out[j] = out[j - 1];
                 out[cursor] = c;
                 ++cursor;
                 ++len;
                 out[len] = '\0';
                 history_nav = -1;
-                redraw();
+                if (append) {
+                    // The caller has already printed the prompt. Ordinary
+                    // typing appends one byte instead of repainting the line
+                    // twice and resending its prompt on every keystroke.
+                    put_bytes(&c, 1);
+                    prev_render_len = len;
+                } else {
+                    redraw();
+                }
             }
         }
     }

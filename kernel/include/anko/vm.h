@@ -361,6 +361,8 @@ struct El2RunState {
     u64 guest_esr_el1;
     u64 guest_afsr0_el1;
     u64 guest_afsr1_el1;
+    fpsimd::State host_fpsimd;
+    fpsimd::State guest_fpsimd;
 };
 
 struct VgicState {
@@ -387,6 +389,8 @@ static_assert(__builtin_offsetof(El2RunState, guest_vpidr) == 512);
 static_assert(__builtin_offsetof(El2RunState, host_ttbr1) == 520);
 static_assert(__builtin_offsetof(El2RunState, guest_sp_el0) == 592);
 static_assert(__builtin_offsetof(El2RunState, guest_afsr1_el1) == 696);
+static_assert(__builtin_offsetof(El2RunState, host_fpsimd) == 704);
+static_assert(__builtin_offsetof(El2RunState, guest_fpsimd) == 1232);
 struct VcpuSched {
     object::Record* context_lifetime;
     u32 sched_context_id;

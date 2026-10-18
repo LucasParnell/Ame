@@ -3,8 +3,8 @@
 // Spec ref: §5.2 Memory Management, §5.3 Address Spaces
 //
 // AArch64 4KB page, 48-bit VA, 4-level walk (L0–L3).
-// TTBR0_EL1 → user space (lower half).
-// TTBR1_EL1 → kernel (upper half, set once in entry.S, never per-process).
+// TTBR0_EL1 currently holds both user mappings and privileged kernel identity
+// mappings. Each process owns its tables. TTBR1/high-half separation is pending.
 //
 // V0 operations needed:
 //   vm_space_create()           — allocate PGD, return VmSpace
@@ -31,12 +31,41 @@
 
 extern "C" char __text_start[];
 extern "C" char __kernel_end[];
+#ifdef ANKO_HOST_TEST
+extern "C" void anko_vm_test_tlbi();
+#endif
 
 namespace mm {
 
 namespace {
 
 constexpr u64 kBootstrapRamMapSize = 512ull * 1024ull * 1024ull;
+constexpr u64 kLeafCoverage = 2ull * 1024ull * 1024ull; // one contiguous L3 table
+
+// DOP: policy is resolved into small, contiguous runs before emitting PTEs.
+// The hot writer consumes only these three words, with no board queries,
+// device graph, allocation per page, or repeated upper-level table walks.
+struct IdentityRun { PhysAddr begin, end; u64 attributes; };
+static_assert(sizeof(IdentityRun) == 24);
+struct IdentityPlan {
+    static constexpr u32 kCapacity = 128;
+    IdentityRun runs[kCapacity];
+    u32 count = 0;
+
+    bool append(PhysAddr begin, PhysAddr end, u64 attributes) {
+        if (begin == end) return true;
+        if (count && runs[count - 1].end == begin &&
+            runs[count - 1].attributes == attributes) {
+            runs[count - 1].end = end;
+            return true;
+        }
+        if (count == kCapacity) return false;
+        runs[count++] = {begin, end, attributes};
+        return true;
+    }
+};
+static IdentityPlan g_identity_plan;
+static bool g_identity_plan_valid;
 constexpr u64 kDeviceMapSize = 0x20000;
 constexpr u64 kSmmuMapSize = 0x20000; // SMMUv3 register window (QEMU virt)
 constexpr PhysAddr kTegraDc0Base = 0x5420'0000ull;
@@ -71,6 +100,10 @@ static u64 normal_attrs(PhysAddr pa) {
 #ifdef ANKO_BOARD_HUAWEI_ANNE
     if (pa >= anne::kDebugRamBase && pa - anne::kDebugRamBase < anne::kDebugRamBytes) return ATTR_NORMAL_NC;
     if (pa >= anne::kFirmwareFiqSource && pa - anne::kFirmwareFiqSource < PAGE_SIZE) return ATTR_NORMAL_NC;
+#ifndef ANKO_ANNE_DIAG_TEST
+    if (pa >= anne::kRpmbSharedBase && pa - anne::kRpmbSharedBase < anne::kRpmbSharedSize)
+        return ATTR_NORMAL_NC;
+#endif
 #if defined(ANKO_ANNE_WATCHDOG) && defined(ANKO_ANNE_DIAG_TEST)
     if (pa >= anne::watchdog::kBase && pa - anne::watchdog::kBase < PAGE_SIZE) return ATTR_NORMAL_NC;
 #endif
@@ -84,6 +117,13 @@ static u64 normal_attrs(PhysAddr pa) {
 
 u64* table_ptr(PhysAddr pa) {
     return reinterpret_cast<u64*>(pa);
+}
+
+void clear_table(PhysAddr pa) {
+    // Page tables are aligned arrays of 64-bit descriptors. Before D-cache
+    // enable, byte-wise memset would issue eight times as many stores.
+    auto* entries = reinterpret_cast<volatile u64*>(pa);
+    for (u32 i = 0; i < 512; ++i) entries[i] = 0;
 }
 
 u32 level_index(VirtAddr va, u32 level) {
@@ -159,7 +199,7 @@ bool map_page_raw(VmSpace& space, VirtAddr va, PhysAddr pa, u64 attrs) {
         if (desc & PTE_VALID) return rollback();
         const PhysAddr child = alloc_page();
         if (!child) return rollback();
-        libk::memset(reinterpret_cast<void*>(child), 0, PAGE_SIZE);
+        clear_table(child);
         created_links[created_count] = &table[idx];
         created_pages[created_count++] = child;
         table[idx] = (child & PTE_ADDR_MASK) | DESC_TABLE;
@@ -173,14 +213,146 @@ bool map_page_raw(VmSpace& space, VirtAddr va, PhysAddr pa, u64 attrs) {
     return true;
 }
 
-bool map_identity_range(VmSpace& space, PhysAddr base, u64 size, bool device) {
-    const PhysAddr start = base & ~(static_cast<PhysAddr>(PAGE_SIZE - 1));
-    const PhysAddr end = (base + size + PAGE_SIZE - 1) & ~(static_cast<PhysAddr>(PAGE_SIZE - 1));
-    for (PhysAddr pa = start; pa < end; pa += PAGE_SIZE) {
-        const u64 attrs = kernel_page_attrs(device, pa);
-        if (!map_page_raw(space, static_cast<VirtAddr>(pa), pa, attrs)) return false;
+// Cold policy stage: gather page-aligned attribute boundaries into a tiny flat
+// array, sort it, and merge equal adjacent runs. Every page in an emitted run
+// has the attributes that kernel_page_attrs() would have selected individually.
+bool append_identity_range(IdentityPlan& plan, PhysAddr base, u64 size, bool device) {
+    if (!size) return true;
+    u64 end = 0;
+    if (__builtin_add_overflow(base, size, &end) ||
+        __builtin_add_overflow(end, u64{PAGE_SIZE - 1}, &end)) return false;
+    end &= ~(u64{PAGE_SIZE - 1});
+    const PhysAddr begin = base & ~(u64{PAGE_SIZE - 1});
+    if ((begin & ~PTE_ADDR_MASK) || ((end - PAGE_SIZE) & ~PTE_ADDR_MASK)) return false;
+    PhysAddr cuts[48]{begin, end};
+    u32 count = 2;
+    auto cut = [&](PhysAddr boundary) {
+        if (boundary <= begin || boundary >= end) return;
+        // Policy checks the starting PA of each page, including partial FB
+        // pages. Rounding up reproduces that behavior at either boundary.
+        boundary = (boundary + PAGE_SIZE - 1) & ~(u64{PAGE_SIZE - 1});
+        if (boundary < end) {
+            ANKO_ASSERT(count < sizeof(cuts) / sizeof(cuts[0]));
+            cuts[count++] = boundary;
+        }
+    };
+    auto range = [&](PhysAddr address, u64 bytes) {
+        if (!bytes) return;
+        cut(address);
+        cut(bytes > ~u64{0} - address ? ~u64{0} : address + bytes);
+    };
+    if (!device) {
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+        range(anne::kDebugRamBase, anne::kDebugRamBytes);
+        range(anne::kFirmwareFiqSource, PAGE_SIZE);
+#ifndef ANKO_ANNE_DIAG_TEST
+        range(anne::kRpmbSharedBase, anne::kRpmbSharedSize);
+#endif
+#if defined(ANKO_ANNE_WATCHDOG) && defined(ANKO_ANNE_DIAG_TEST)
+        range(anne::watchdog::kBase, PAGE_SIZE);
+#endif
+#ifdef ANKO_ANNE_DIAG_TEST
+        range(anne::kDebugPmicBase, PAGE_SIZE);
+        range(anne::kDebugSctrlBase, PAGE_SIZE);
+#if defined(ANKO_ANNE_DISPLAY_CAPTURE) || defined(ANKO_ANNE_FRAMEBUFFER)
+        range(anne::native_display::kDssBase, anne::native_display::kDssBytes);
+        range(anne::native_display::kCrgBase, PAGE_SIZE);
+#endif
+#endif
+#endif
+        if (g_hw.has_t210_dc) {
+            range(g_hw.t210_dc_fb_phys, u64(g_hw.t210_dc_fb_width) * g_hw.t210_dc_fb_height * 4);
+        }
+        for (u32 i = 0; i < g_noncached_count; ++i) {
+            range(g_noncached[i].base, g_noncached[i].size);
+        }
+    }
+    for (u32 i = 1; i < count; ++i) {
+        const PhysAddr value = cuts[i];
+        u32 j = i;
+        while (j && cuts[j - 1] > value) { cuts[j] = cuts[j - 1]; --j; }
+        cuts[j] = value;
+    }
+    for (u32 i = 1; i < count; ++i) {
+        if (cuts[i] != cuts[i - 1] &&
+            !plan.append(cuts[i - 1], cuts[i], kernel_page_attrs(device, cuts[i - 1]))) return false;
     }
     return true;
+}
+
+// Hot data stage: walk upper levels once per 2 MiB of VA, then stream writes
+// through one contiguous leaf slice. Keep 4 KiB leaves so later DMA/scanout NC
+// changes never need to break a block containing the page tables themselves.
+bool emit_identity_batch(VmSpace& space, PhysAddr begin, PhysAddr end, u64 attributes) {
+    PhysAddr table_pa = space.pgd_phys;
+    if (!table_pa) return false;
+    u64* created_links[2]{};
+    PhysAddr created_pages[2]{};
+    u32 created_count = 0;
+    auto rollback = [&]() {
+        for (u32 i = 0; i < created_count; ++i) *created_links[i] = 0;
+        if (created_count) tlbi_all();
+        for (u32 i = 0; i < created_count; ++i) free_page(created_pages[i]);
+        return false;
+    };
+    for (u32 level = 0; level < 2; ++level) {
+        auto& link = table_ptr(table_pa)[level_index(begin, level)];
+        if (is_table_desc(link)) {
+            table_pa = link & PTE_ADDR_MASK;
+            continue;
+        }
+        if (link & PTE_VALID) return rollback();
+        const PhysAddr child = alloc_page();
+        if (!child) return rollback();
+        clear_table(child);
+        created_links[created_count] = &link;
+        created_pages[created_count++] = child;
+        link = child | DESC_TABLE;
+        table_pa = child;
+    }
+    auto& link = table_ptr(table_pa)[level_index(begin, 2)];
+    const u32 first = level_index(begin, 3);
+    const u32 count = (end - begin) / PAGE_SIZE;
+    if (!(link & PTE_VALID)) {
+        const PhysAddr child = alloc_page();
+        if (!child) return rollback();
+        auto* leaf = reinterpret_cast<volatile u64*>(child);
+        // Initialize the new leaf in one pass. A full 512-page batch needs no
+        // preliminary clear; partial leaves clear only their unused edges.
+        for (u32 i = 0; i < first; ++i) leaf[i] = 0;
+        for (u32 i = 0; i < count; ++i) {
+            leaf[first + i] = (begin + u64(i) * PAGE_SIZE) | DESC_PAGE | attributes;
+        }
+        for (u32 i = first + count; i < 512; ++i) leaf[i] = 0;
+        link = child | DESC_TABLE;
+    } else {
+        if (!is_table_desc(link)) return rollback();
+        auto* leaf = table_ptr(link & PTE_ADDR_MASK) + first;
+        // Reject the whole batch before publishing any duplicate/partial PTEs.
+        for (u32 i = 0; i < count; ++i) if (leaf[i] & PTE_VALID) return rollback();
+        for (u32 i = 0; i < count; ++i) {
+            leaf[i] = (begin + u64(i) * PAGE_SIZE) | DESC_PAGE | attributes;
+        }
+    }
+    return true;
+}
+
+bool emit_identity_plan(VmSpace& space, const IdentityPlan& plan) {
+    for (u32 i = 0; i < plan.count; ++i) {
+        const auto& run = plan.runs[i];
+        for (PhysAddr begin = run.begin; begin < run.end;) {
+            const u64 bytes = kLeafCoverage - (begin & (kLeafCoverage - 1));
+            const PhysAddr end = run.end - begin < bytes ? run.end : begin + bytes;
+            if (!emit_identity_batch(space, begin, end, run.attributes)) return false;
+            begin = end;
+        }
+    }
+    return true;
+}
+
+bool map_identity_range(VmSpace& space, PhysAddr base, u64 size, bool device) {
+    IdentityPlan plan;
+    return append_identity_range(plan, base, size, device) && emit_identity_plan(space, plan);
 }
 
 bool contains_range(PhysAddr outer_base, u64 outer_size, PhysAddr inner_base, u64 inner_size) {
@@ -192,40 +364,41 @@ bool contains_range(PhysAddr outer_base, u64 outer_size, PhysAddr inner_base, u6
     return inner_base >= outer_base && inner_end <= outer_end && inner_end >= inner_base;
 }
 
-bool map_identity_if_present(VmSpace& space, PhysAddr base, u64 size, bool device) {
+bool append_identity_if_present(IdentityPlan& plan, PhysAddr base, u64 size, bool device) {
     if (base == 0 || size == 0) return true;
-    return map_identity_range(space, base, size, device);
+    return append_identity_range(plan, base, size, device);
 }
 
-bool map_bootstrap_identity(VmSpace& space) {
+bool build_bootstrap_identity(IdentityPlan& plan) {
     const u64 ram_map_size =
         g_hw.ram_size < kBootstrapRamMapSize ? g_hw.ram_size : kBootstrapRamMapSize;
-    if (!map_identity_if_present(space, g_hw.ram_base, ram_map_size, false)) return false;
+    if (!append_identity_if_present(plan, g_hw.ram_base, ram_map_size, false)) return false;
 
     const PhysAddr kernel_base = reinterpret_cast<PhysAddr>(&__text_start[0]);
     const PhysAddr kernel_end = reinterpret_cast<PhysAddr>(&__kernel_end[0]);
     if (kernel_end > kernel_base &&
         !contains_range(g_hw.ram_base, ram_map_size, kernel_base, kernel_end - kernel_base)) {
-        if (!map_identity_range(space, kernel_base, kernel_end - kernel_base, false)) return false;
+        if (!append_identity_range(plan, kernel_base, kernel_end - kernel_base, false)) return false;
     }
 
-    if (!map_identity_if_present(space, g_hw.gic_dist_base, kDeviceMapSize, true)) return false;
+    if (!append_identity_if_present(plan, g_hw.gic_dist_base, kDeviceMapSize, true)) return false;
     if (!contains_range(g_hw.gic_dist_base, kDeviceMapSize, g_hw.gic_cpu_base, PAGE_SIZE)) {
-        if (!map_identity_if_present(space, g_hw.gic_cpu_base, PAGE_SIZE, true)) return false;
+        if (!append_identity_if_present(plan, g_hw.gic_cpu_base, PAGE_SIZE, true)) return false;
     }
-    if (!map_identity_if_present(space, g_hw.console_base, PAGE_SIZE, true)) return false;
+    if (!append_identity_if_present(plan, g_hw.console_base, PAGE_SIZE, true)) return false;
 #ifdef ANKO_BOARD_HUAWEI_ANNE
     // Fixed device pages used by capability-scoped kernel board mechanisms.
 #ifndef ANKO_ANNE_DIAG_TEST
-    if (!map_identity_range(space, 0xfff35000, PAGE_SIZE, true) ||
-        !map_identity_range(space, 0xfff0e000, PAGE_SIZE, true) ||
-        !map_identity_range(space, 0xe8a09000, PAGE_SIZE, true) ||
-        !map_identity_range(space, 0xe896c000, PAGE_SIZE, true)) return false;
+    if (!append_identity_range(plan, 0xfff35000, PAGE_SIZE, true) ||
+        !append_identity_range(plan, 0xfff0e000, PAGE_SIZE, true) ||
+        !append_identity_range(plan, 0xe8a09000, PAGE_SIZE, true) ||
+        !append_identity_range(plan, 0xe896c000, PAGE_SIZE, true) ||
+        !append_identity_range(plan, 0xff390000, PAGE_SIZE, true)) return false;
 #endif
     // Persistent native console lies in reserved RAM outside the allocator bank.
 #ifdef ANKO_ANNE_WATCHDOG
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::watchdog::kBase, PAGE_SIZE) &&
-        !map_identity_range(space, anne::watchdog::kBase, PAGE_SIZE,
+        !append_identity_range(plan, anne::watchdog::kBase, PAGE_SIZE,
 #ifdef ANKO_ANNE_DIAG_TEST
                             false
 #else
@@ -234,59 +407,105 @@ bool map_bootstrap_identity(VmSpace& space) {
                             )) return false;
 #endif
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::kFirmwareFiqSource, PAGE_SIZE) &&
-        !map_identity_range(space, anne::kFirmwareFiqSource, PAGE_SIZE, false)) return false;
+        !append_identity_range(plan, anne::kFirmwareFiqSource, PAGE_SIZE, false)) return false;
+#ifndef ANKO_ANNE_DIAG_TEST
+    // The first page is already mapped for kFirmwareFiqSource above.  Avoid
+    // asking map_page_raw() to install the same PTE twice; map the remaining
+    // BL31 share pages as one Normal-NC identity range.
+    constexpr u64 kRpmbTailBase = anne::kRpmbSharedBase + PAGE_SIZE;
+    constexpr u64 kRpmbTailSize = anne::kRpmbSharedSize - PAGE_SIZE;
+    if (!contains_range(g_hw.ram_base, ram_map_size, kRpmbTailBase, kRpmbTailSize) &&
+        !append_identity_range(plan, kRpmbTailBase, kRpmbTailSize, false)) return false;
+#endif
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::kDebugRamBase, anne::kDebugRamBytes) &&
-        !map_identity_range(space, anne::kDebugRamBase, anne::kDebugRamBytes, false)) return false;
+        !append_identity_range(plan, anne::kDebugRamBase, anne::kDebugRamBytes, false)) return false;
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::kDebugPmicBase, PAGE_SIZE) &&
-        !map_identity_range(space, anne::kDebugPmicBase, PAGE_SIZE, true)) return false;
+        !append_identity_range(plan, anne::kDebugPmicBase, PAGE_SIZE, true)) return false;
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::kDebugSctrlBase, PAGE_SIZE) &&
-        !map_identity_range(space, anne::kDebugSctrlBase, PAGE_SIZE, true)) return false;
+        !append_identity_range(plan, anne::kDebugSctrlBase, PAGE_SIZE, true)) return false;
 #if defined(ANKO_ANNE_DISPLAY_CAPTURE) || defined(ANKO_ANNE_FRAMEBUFFER)
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::native_display::kDssBase, anne::native_display::kDssBytes) &&
-        !map_identity_range(space, anne::native_display::kDssBase, anne::native_display::kDssBytes, true)) return false;
+        !append_identity_range(plan, anne::native_display::kDssBase, anne::native_display::kDssBytes, true)) return false;
 #ifdef ANKO_ANNE_DIAG_TEST
     // The synthetic display fixture has its own CRG page. Native CRG is shared
     // by display and USB and was already mapped with the fixed board mechanisms
     // above; mapping it twice rejects the entire bootstrap address space.
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::native_display::kCrgBase, PAGE_SIZE) &&
-        !map_identity_range(space, anne::native_display::kCrgBase, PAGE_SIZE, true)) return false;
+        !append_identity_range(plan, anne::native_display::kCrgBase, PAGE_SIZE, true)) return false;
 #endif
     if (!contains_range(g_hw.ram_base, ram_map_size, anne::native_display::kLogoBase, anne::native_display::kLogoBytes) &&
-        !map_identity_range(space, anne::native_display::kLogoBase, anne::native_display::kLogoBytes, false)) return false;
+        !append_identity_range(plan, anne::native_display::kLogoBase, anne::native_display::kLogoBytes, false)) return false;
 #endif
 #endif
 
     if (g_hw.has_fwcfg &&
-        !map_identity_if_present(space, g_hw.fwcfg_base, PAGE_SIZE, true)) return false;
+        !append_identity_if_present(plan, g_hw.fwcfg_base, PAGE_SIZE, true)) return false;
     if (g_hw.has_virtio_blk &&
-        !map_identity_if_present(space, g_hw.virtio_base, platform::kVirtioMmioSize, true)) return false;
+        !append_identity_if_present(plan, g_hw.virtio_base, platform::kVirtioMmioSize, true)) return false;
     if (g_hw.has_pcie &&
-        !map_identity_if_present(space, g_hw.ecam_base, platform::kPciEcamProbeSize, true)) return false;
+        !append_identity_if_present(plan, g_hw.ecam_base, platform::kPciEcamProbeSize, true)) return false;
 
     if (g_hw.console_kind == ConsoleKind::Tegra16550) {
-        if (!map_identity_range(space, kTegraDc0Base, kTegraDc0MapSize, true)) return false;
-        if (!map_identity_range(space, kTegraXusbBase, kTegraXusbMapSize, true)) return false;
+        if (!append_identity_range(plan, kTegraDc0Base, kTegraDc0MapSize, true)) return false;
+        if (!append_identity_range(plan, kTegraXusbBase, kTegraXusbMapSize, true)) return false;
     }
 
     // SMMUv3 register window.  Phase C programs the SMMU from the kernel, so its
     // control/queue registers must be reachable before any assignable device
     // can bus-master.
     if (g_hw.has_smmu &&
-        !map_identity_if_present(space, g_hw.smmu_base, kSmmuMapSize, true)) return false;
+        !append_identity_if_present(plan, g_hw.smmu_base, kSmmuMapSize, true)) return false;
 
     if (g_hw.has_t210_dc) {
         const u64 fb_size = static_cast<u64>(g_hw.t210_dc_fb_width) *
                             static_cast<u64>(g_hw.t210_dc_fb_height) * 4ull;
         if (fb_size != 0 &&
             !contains_range(g_hw.ram_base, ram_map_size, g_hw.t210_dc_fb_phys, fb_size)) {
-            if (!map_identity_range(space, g_hw.t210_dc_fb_phys, fb_size, false)) return false;
+            if (!append_identity_range(plan, g_hw.t210_dc_fb_phys, fb_size, false)) return false;
         }
     }
 
     return true;
 }
 
+// Cache the compact policy result across process creation. A boot-only NC
+// registration invalidates this plan; existing spaces are updated separately.
+// Each process owns its actual page tables and still tears them down normally.
+bool map_bootstrap_identity(VmSpace& space) {
+    if (!g_identity_plan_valid) {
+        g_identity_plan.count = 0;
+        if (!build_bootstrap_identity(g_identity_plan)) return false;
+        auto& plan = g_identity_plan;
+        for (u32 i = 1; i < plan.count; ++i) {
+            const IdentityRun value = plan.runs[i];
+            u32 j = i;
+            while (j && plan.runs[j - 1].begin > value.begin) {
+                plan.runs[j] = plan.runs[j - 1];
+                --j;
+            }
+            plan.runs[j] = value;
+        }
+        u32 kept = 0;
+        for (u32 i = 0; i < plan.count; ++i) {
+            const IdentityRun value = plan.runs[i];
+            if (kept && plan.runs[kept - 1].end > value.begin) return false;
+            if (kept && plan.runs[kept - 1].end == value.begin &&
+                plan.runs[kept - 1].attributes == value.attributes) {
+                plan.runs[kept - 1].end = value.end;
+            } else {
+                plan.runs[kept++] = value;
+            }
+        }
+        plan.count = kept;
+        g_identity_plan_valid = true;
+    }
+    return emit_identity_plan(space, g_identity_plan);
+}
+
 void tlbi_all() {
+#ifdef ANKO_HOST_TEST
+    anko_vm_test_tlbi();
+#else
     asm volatile(
         "dsb ishst\n"
         "tlbi vmalle1is\n"
@@ -295,13 +514,14 @@ void tlbi_all() {
         :
         :
         : "memory");
+#endif
 }
 
 } // namespace
 
 void sync_icache_range(PhysAddr pa, usize len) {
     if (!pa || len == 0) return;
-
+#ifndef ANKO_HOST_TEST
     u64 ctr = 0;
     asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
 
@@ -325,11 +545,15 @@ void sync_icache_range(PhysAddr pa, usize len) {
         :
         :
         : "memory");
+#endif
 }
 
 namespace {
 
 void enable_mmu(PhysAddr root) {
+#ifdef ANKO_HOST_TEST
+    (void)root;
+#else
     constexpr u64 mair =
         (0xFFull << (platform::kMairNormal * 8)) |
         (0x00ull << (platform::kMairDevice * 8)) |
@@ -359,6 +583,7 @@ void enable_mmu(PhysAddr root) {
         :
         : "r"(mair), "r"(tcr), "r"(root)
         : "x9", "memory");
+#endif
 }
 
 bool valid_user_rights(u32 rights, bool device) {
@@ -439,11 +664,14 @@ bool register_noncached_range(PhysAddr base, u64 size) {
     if (g_noncached_count == 8) return false;
     // Called before userspace launch. Clean the identity mapping before changing
     // its cache attributes; every later alias consults this physical range map.
+#ifndef ANKO_HOST_TEST
     u64 ctr = 0; asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
     const u64 line = 4ull << ((ctr >> 16) & 15);
     for (PhysAddr p = base; p < base + size; p += line) asm volatile("dc civac, %0" :: "r"(p) : "memory");
     asm volatile("dsb sy" ::: "memory");
+#endif
     g_noncached[g_noncached_count++] = {base, size};
+    g_identity_plan_valid = false;
     auto update = [&](PhysAddr root) {
         if (!root) return;
         for (PhysAddr pa = base; pa < base + size; pa += PAGE_SIZE) {
@@ -472,7 +700,7 @@ void vm_init() {
     kernel.pid = 0;
     kernel.pgd_phys = alloc_page();
     if (!kernel.pgd_phys) panic("kernel page-table allocation failed");
-    libk::memset(reinterpret_cast<void*>(kernel.pgd_phys), 0, PAGE_SIZE);
+    clear_table(kernel.pgd_phys);
 
     if (!map_bootstrap_identity(kernel)) {
         destroy_table(kernel, kernel.pgd_phys, 0);
@@ -489,11 +717,13 @@ void vm_enable_kernel() {
 }
 
 VmSpace vm_space_create(u32 pid) {
+    // Serialize lazy plan rebuilding with NC registration and other creators.
+    kernel::LockGuard guard(g_vm_lock);
     VmSpace s{};
     s.pid = pid;
     s.pgd_phys = alloc_page();
     if (s.pgd_phys) {
-        libk::memset(reinterpret_cast<void*>(s.pgd_phys), 0, PAGE_SIZE);
+        clear_table(s.pgd_phys);
         if (!map_bootstrap_identity(s)) { destroy_table(s, s.pgd_phys, 0); s.pgd_phys = 0; }
     }
     return s;
@@ -594,6 +824,7 @@ void vm_space_destroy(VmSpace& space) {
 
 void vm_activate(PhysAddr pgd_phys) {
     if (!pgd_phys) pgd_phys = g_kernel_root;
+#ifndef ANKO_HOST_TEST
     asm volatile(
         "dsb ishst\n"
         "msr ttbr0_el1, %0\n"
@@ -604,6 +835,9 @@ void vm_activate(PhysAddr pgd_phys) {
         :
         : "r"(pgd_phys)
         : "memory");
+#else
+    (void)pgd_phys;
+#endif
 }
 
 bool user_range_mapped(const VmSpace& space, VirtAddr va, u64 size, u32 rights) {

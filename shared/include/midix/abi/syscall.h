@@ -90,9 +90,16 @@ enum MxSyscall : mx_u64_t {
     MX_NR_WAIT_DOORBELL_UNTIL = 67, // (doorbell, expected, absolute ns); expiry is a wake
     MX_NR_PLATFORM_CONTROL = 68, // (platform capability, operation, argument)
     MX_NR_DEBUG_READ = 69, // (MxDiagRequest, index/offset, out, size) -> byte count
+    // Delegate supervision to a direct child; requires an existing supervisor
+    // with SPAWN authority and a process capability with SPAWN authority.
+    MX_NR_SUPERVISOR_DELEGATE = 70,
+    // (own supervisor, notify doorbell or 0): signal after child teardown has
+    // published a pollable exit. Binding retains the doorbell until unbound.
+    MX_NR_SUPERVISOR_BIND_DOORBELL = 71,
 };
 
 constexpr mx_u32_t MX_SPAWN_SUSPENDED = 1u << 0;
+constexpr mx_u32_t MX_SPAWN_KILL_WITH_SUPERVISOR = 1u << 1;
 constexpr mx_u32_t MX_THREAD_SUSPENDED = 1u << 0;
 
 // SYS_VM_MEMORY_CREATE flags (a2). MX_VM_MEMORY_FLAG_SHARED_STAGING marks the

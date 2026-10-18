@@ -9,6 +9,27 @@ struct SpinLock {
     u32 value;
 };
 
+// CPU ownership needs local interrupt exclusion, not necessarily a shared lock.
+class InterruptGuard {
+public:
+    InterruptGuard() {
+#if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
+        asm volatile("mrs %0, DAIF; msr DAIFSet, #2" : "=r"(irq_) :: "memory");
+#endif
+    }
+    ~InterruptGuard() {
+#if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
+        asm volatile("msr DAIF, %0" :: "r"(host_interrupt_state(irq_)) : "memory");
+#endif
+    }
+    InterruptGuard(const InterruptGuard&) = delete;
+    InterruptGuard& operator=(const InterruptGuard&) = delete;
+private:
+#if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
+    u64 irq_;
+#endif
+};
+
 class LockGuard {
 public:
     explicit LockGuard(SpinLock& lock) : lock_(lock) {

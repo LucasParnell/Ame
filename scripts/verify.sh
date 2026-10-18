@@ -92,6 +92,10 @@ do_boot() {
     run_boot 'all services ready' 2
 }
 
+do_simd() {
+    python3 scripts/test/simd.py --build "$BUILD_DIR" --cpus $CPUS --timeout "$BOOT_TIMEOUT"
+}
+
 do_lifecycle() {
     cmake --build "$BUILD_DIR" --target kernel_regressions >/dev/null
     local c
@@ -248,6 +252,7 @@ CHECKS=(
     "provenance:do_provenance"
     "caps-manifest:do_caps"
     "boot-direct:do_boot"
+    "userland-simd:do_simd"
     "lifecycle-matrix:do_lifecycle"
     "supervision-restart:do_supervision"
     "durable-persistence:do_durable"

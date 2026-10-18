@@ -94,16 +94,16 @@ static bool enqueue_fair(Eki& e, Thread* t) {
     const u32 bi = band_index(sb);
     PrincipalEntity& pe      = e.principal_entities[pid];
     FairPrincipalQueue& band = band_for(e, sb);
-    BandQueue& threads       = band_threads(pe, sb);
-    u64& min_vr              = min_vruntime_for(e, sb);
+    BandQueue& threads       = band_threads(e, pe, sb);
 
     // Normalize: clamp back-pay from sleeping.
-    const u32 generation = principal_generation(pid);
+    const auto policy = principal_dispatch(pid);
+    const u32 generation = policy.generation;
     if (!generation || (t->principal_generation && t->principal_generation != generation)) return false;
     t->principal_generation = generation;
     if (pe.generation != generation) {
         for (u32 b = 1; b < NUM_BANDS; ++b) {
-            ANKO_ASSERT(band_threads(pe, static_cast<SchedBand>(b)).size == 0);
+            ANKO_ASSERT(band_threads(e, pe, static_cast<SchedBand>(b)).size == 0);
             if (pe.in_queue[b]) fpq_remove(band_for(e, static_cast<SchedBand>(b)), &pe);
         }
         pe = {};
@@ -120,10 +120,8 @@ static bool enqueue_fair(Eki& e, Thread* t) {
         t->vruntime_ns = pe.thread_min_vruntime_ns;
     if (pe.service_vruntime_ns < e.min_service_vruntime_ns)
         pe.service_vruntime_ns = e.min_service_vruntime_ns;
-    if (pe.vruntime[bi] < min_vr) pe.vruntime[bi] = min_vr;
 
-    const u32 global_weight = principal_weight(pid);
-    pe.weight = global_weight;
+    pe.weight = policy.weight;
     t->slice_ns = compute_slice_ns(t, pe.runnable[bi] + 1);
 
     if (!ftq_push(threads, t)) {
@@ -140,7 +138,7 @@ static bool enqueue_fair(Eki& e, Thread* t) {
     }
 
     t->on_runqueue = true;
-    t->cpu_id = e.cpu_id;
+    if (t->cpu_id != e.cpu_id) t->cpu_id = e.cpu_id;
     ++pe.runnable[bi];
     ++e.queued_threads[bi];
     publish_queue_load(e);
@@ -179,7 +177,7 @@ bool dequeue_from_principal(Eki& e, Thread* t) {
     const SchedBand sb = t->sched.sched_class;
     const u32 bi = band_index(sb);
     PrincipalEntity& pe = e.principal_entities[pid];
-    BandQueue& threads = band_threads(pe, sb);
+    BandQueue& threads = band_threads(e, pe, sb);
     if (!ftq_remove(threads, t)) return false;
     if (pe.runnable[bi] > 0) --pe.runnable[bi];
 
@@ -234,7 +232,7 @@ static void enqueue_rt(Eki& e, Thread* t) {
     publish_queue_load(e);
     e.rt.bitmap |= (1u << prio);
     t->on_runqueue = true;
-    t->cpu_id = e.cpu_id;
+    if (t->cpu_id != e.cpu_id) t->cpu_id = e.cpu_id;
 }
 
 void publish_queue_load(Eki& e) {
@@ -271,11 +269,12 @@ static Thread* pick_rt(Eki& e) {
 // membership survives an idle interval and period rollover needs no remote
 // heap writes or global scan to make them eligible again.
 static Thread* pick_fair(Eki& e, FairPrincipalQueue& band, bool take = true) {
+    if (!band.size) return nullptr;
     const SchedBand sb = band.band;
     const u32 bi = band_index(sb);
     if (!take) {
         auto* pe = fpq_peek_min(band);
-        auto* t = pe ? ftq_peek_min(band_threads(*pe, sb)) : nullptr;
+        auto* t = pe ? ftq_peek_min(band_threads(e, *pe, sb)) : nullptr;
         if (t && t->state == TS_RUNNABLE_QUEUED && t->cpu_id == e.cpu_id &&
             thread_budget_available(t)) return t;
     }
@@ -285,7 +284,7 @@ static Thread* pick_fair(Eki& e, FairPrincipalQueue& band, bool take = true) {
     while (band.size) {
         auto* pe = fpq_pop_min(band);
         if (!pe) break;
-        auto& threads = band_threads(*pe, sb);
+        auto& threads = band_threads(e, *pe, sb);
         if (!threads.size) { pe->in_queue[bi] = false; pe->runnable[bi] = 0; continue; }
         Thread* deferred[kFairQueueCap];
         u32 deferred_count = 0;
@@ -321,8 +320,6 @@ static Thread* pick_fair(Eki& e, FairPrincipalQueue& band, bool take = true) {
     publish_queue_load(e);
     if (selected && take) {
         const auto& pe = e.principal_entities[selected->principal_id];
-        u64& watermark = min_vruntime_for(e, sb);
-        if (pe.vruntime[bi] > watermark) watermark = pe.vruntime[bi];
         // The selected principal has the least eligible service clock. This
         // floor bounds sleeper credit without mixing thread and principal time.
         if (pe.service_vruntime_ns > e.min_service_vruntime_ns)
@@ -426,10 +423,15 @@ static u32 target_cpu_for(const Thread* t) {
     return first_allowed_cpu(allowed);
 }
 
-u32 target_cpu_for_wake(Thread* waiter, Thread* waker,
-                        u32 db_sched_hints, u32 db_home_cpu) {
+static u32 target_cpu_for_wake_locked(Thread* waiter, Thread* waker,
+                                      u32 db_sched_hints, u32 db_home_cpu) {
     if (!waiter) return current_cpu_id();
-    kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&waiter->lifecycle_lock));
+
+    // Active/queued work belongs to its station and cannot be woken or rebound.
+    // Do not inspect last_cpu while that owner advances dispatch metadata.
+    const ThreadState state = waiter->state;
+    if (state == TS_RUNNING || state == TS_RUNNABLE_QUEUED ||
+        state == TS_RUNNABLE_PENDING_REMOTE) return waiter->cpu_id;
 
     // Hard affinity: single allowed CPU
     const u64 allowed = waiter->affinity_mask
@@ -457,15 +459,21 @@ u32 target_cpu_for_wake(Thread* waiter, Thread* waker,
     return least_loaded_cpu_for(waiter);
 }
 
+u32 target_cpu_for_wake(Thread* waiter, Thread* waker, u32 hints, u32 home) {
+    if (!waiter) return current_cpu_id();
+    kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&waiter->lifecycle_lock));
+    return target_cpu_for_wake_locked(waiter, waker, hints, home);
+}
+
 // ---------------------------------------------------------------------------
 // Apply IPC wake metadata — must be called before wake_local/wake_remote
 // so that effective_key() in enqueue_fair reflects the credit.
 // ---------------------------------------------------------------------------
-void apply_wake_metadata(Thread* t, WakeReason reason, u32 sched_hints) {
+static void apply_wake_metadata_locked(Thread* t, WakeReason reason, u32 sched_hints) {
     if (!t) return;
-    kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
-    if (t->terminate_requested || t->state == TS_RUNNING || t->on_runqueue ||
-        t->state == TS_RUNNABLE_PENDING_REMOTE) return;
+    const ThreadState state = t->state;
+    if (t->terminate_requested || state == TS_RUNNING || state == TS_RUNNABLE_QUEUED ||
+        state == TS_RUNNABLE_PENDING_REMOTE || t->on_runqueue) return;
     t->last_wake_reason = reason;
     t->last_wake_ns     = sched_clock_ns();
 
@@ -483,6 +491,12 @@ void apply_wake_metadata(Thread* t, WakeReason reason, u32 sched_hints) {
 
     // Mark IPC hot window for stickiness (resist work stealing)
     t->ipc_hot_until_ns = sched_clock_ns() + 2000000ULL; // 2 ms
+}
+
+void apply_wake_metadata(Thread* t, WakeReason reason, u32 hints) {
+    if (!t) return;
+    kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
+    apply_wake_metadata_locked(t, reason, hints);
 }
 
 // ---------------------------------------------------------------------------
@@ -563,6 +577,15 @@ static void wake_locked(Thread* t, u32 target_cpu) {
     send_event();
 }
 
+u32 wake_ipc(Thread* t, Thread* waker, u32 hints, u32 home) {
+    if (!t) return current_cpu_id();
+    kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
+    apply_wake_metadata_locked(t, WAKE_DOORBELL, hints);
+    const u32 target = target_cpu_for_wake_locked(t, waker, hints, home);
+    wake_locked(t, target);
+    return target;
+}
+
 void wake_local(Thread* t) {
     if (!t) return;
     kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
@@ -627,6 +650,7 @@ static Thread* pick_next(Eki& e) {
     FairPrincipalQueue* chosen = nullptr;
     for (u32 b = 1; b < SCHED_BAND_IDLE; ++b) {
         auto& queue = band_for(e, static_cast<SchedBand>(b));
+        if (!queue.size) continue;
         auto* candidate = pick_fair(e, queue, false);
         if (!candidate) continue;
         bool better = !next;
@@ -705,6 +729,7 @@ void init() {
 // Scheduler main loops
 // ---------------------------------------------------------------------------
 [[noreturn]] static void enter_cpu_scheduler(u32 cpu_id) {
+    fpsimd::enable();
     Eki& e = eki_for_cpu(cpu_id);
     for (;;) {
         drain_pending_wakes(e);
@@ -729,6 +754,7 @@ void init() {
                        "dispatch tid=%u pid=%u elr=%llx",
                        next->tid, next->pid,
                        static_cast<unsigned long long>(next->tf.elr));
+        fpsimd::restore(&next->fpsimd);
         enter_user_frame(&next->tf);
     }
 }
@@ -871,7 +897,6 @@ extern "C" void post_syscall(void* frame_ptr) {
     if (!frame_ptr || !cur) return;
     collect_terminations(e, cur);
     auto* frame = static_cast<TrapFrame*>(frame_ptr);
-    cur->tf = *frame;
     if (e.switch_pending || cur->state != TS_RUNNING ||
         __atomic_load_n(&cur->terminate_requested, __ATOMIC_ACQUIRE))
         account_current(e);
@@ -879,9 +904,16 @@ extern "C" void post_syscall(void* frame_ptr) {
     if (!e.switch_pending && cur->state != TS_RUNNING)
         request_switch(false, cur->state == TS_DEAD ? SWITCH_EXIT : SWITCH_BLOCK);
     if (!e.switch_pending) { activate_thread_space(cur); return; }
+    // A same-thread return uses the live exception frame directly. Copy all
+    // registers only when dispatch may relinquish execution ownership; deferred
+    // remote wakes still cannot observe the thread until this save completes.
+    fpsimd::save(&cur->fpsimd);
+    cur->tf = *frame;
     // Retain only on the switch path. After remote publication this CPU uses
     // the pointer only for identity comparison, unless it owns the retirement.
-    object::Ref<Thread> current_reference(cur);
+    // Running execution owns the thread's creator reference until finish_thread.
+    // Its cached record avoids a global registry search on every switch.
+    object::Ref<Thread> current_reference(cur, cur->lifetime);
     const bool retiring_current = cur->state == TS_DEAD;
     const usize previous_address = reinterpret_cast<usize>(cur);
 
@@ -891,13 +923,26 @@ extern "C" void post_syscall(void* frame_ptr) {
     e.requeue_current = false;
     e.pending_reason = SWITCH_NONE;
     Thread* next = handoff_take_next(e);
-    {
+    bool queued_current = false;
+    if (requeue && cur->state == TS_RUNNING) {
+        // RUNNING -> QUEUED keeps this thread under the same station's ownership.
+        // Remote wake/bind paths reject both states; teardown only publishes a
+        // terminate request. No lifecycle lock or deferred-wake exchange is
+        // needed until a syscall actually exposes a sleeping/blocked state.
+        ANKO_ASSERT(cur->cpu_id == e.cpu_id);
+        cur->state = TS_RUNNABLE_QUEUED;
+        if (cur->sched.sched_class == SCHED_BAND_RT_NATIVE) {
+            enqueue_rt(e, cur);
+            queued_current = cur->on_runqueue;
+        } else queued_current = enqueue_fair(e, cur);
+    }
+    if (queued_current) {
+        e.current = nullptr;
+        __atomic_store_n(&cur->execution_cpu, kInvalidCpu, __ATOMIC_RELEASE);
+    } else {
+        // Queue overflow parks the thread, exposing the same deferred-wake
+        // window as blocking. Complete that transition under its guard too.
         kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&cur->lifecycle_lock));
-        if (requeue && cur->state == TS_RUNNING) {
-            cur->state = TS_RUNNABLE_QUEUED;
-            if (cur->sched.sched_class == SCHED_BAND_RT_NATIVE) enqueue_rt(e, cur);
-            else enqueue_fair(e, cur);
-        }
         e.current = nullptr;
         __atomic_store_n(&cur->execution_cpu, kInvalidCpu, __ATOMIC_RELEASE);
         const u32 wake_cpu = cur->deferred_wake_cpu;
@@ -962,15 +1007,17 @@ extern "C" void post_syscall(void* frame_ptr) {
         }
     }
     {
-        kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&next->lifecycle_lock));
+        // pick_next removed this node from our queue with IRQs masked. Its
+        // published QUEUED state continues to exclude remote wake and binding;
+        // publish RUNNING before changing the CPU-owned dispatch fields.
         ANKO_ASSERT(next->state == TS_RUNNABLE_QUEUED && !next->on_runqueue);
+        ANKO_ASSERT(next->cpu_id == e.cpu_id);
         e.current = next;
         next->state = TS_RUNNING;
         __atomic_store_n(&next->execution_cpu, e.cpu_id, __ATOMIC_RELEASE);
         next->last_start_ns = sched_clock_ns();
         next->slice_start_ns = next->last_start_ns;
         next->last_cpu = next->cpu_id;
-        next->cpu_id = e.cpu_id;
         ipc_drain_quantum_begin(next, next->last_start_ns);
     }
     activate_thread_space(next);
@@ -982,6 +1029,7 @@ extern "C" void post_syscall(void* frame_ptr) {
         finish_thread(cur);
         current_reference.reset();
     }
+    fpsimd::restore(&next->fpsimd);
 }
 
 // ---------------------------------------------------------------------------

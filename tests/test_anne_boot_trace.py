@@ -12,6 +12,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'out/anne-trace-qemu-dev'
+EL3_MAX_INDEX = int(re.search(
+    r'constexpr mx_u64_t MX_DIAG_EL3_MAX_INDEX = (\d+);',
+    (ROOT / 'shared/include/midix/abi/diagnostics.h').read_text()).group(1))
 
 
 @unittest.skipUnless(shutil.which('cmake') and shutil.which('qemu-system-aarch64'), 'requires CMake and QEMU')
@@ -119,6 +122,7 @@ class NativeBootTrace(unittest.TestCase):
                 self.assertIn('BOOT 3 bss.done', record)
                 if workload:
                     self.assertIn('DIAG_READ complete records=8 retained_repeatable=1 bounds_checked=1', record)
+                    self.assertIn(f'DIAG_READ synthetic_el3_unavailable=1 native_requests_blocked={EL3_MAX_INDEX}', record)
                 if display:
                     self.assertIn('DISPLAY begin phase=entry', record)
                     self.assertIn('DISPLAY begin phase=mmu.done', record)

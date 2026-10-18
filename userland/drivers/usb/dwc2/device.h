@@ -78,11 +78,11 @@ struct Device {
     bool activate(const Registers& regs, const Geometry& geometry) {
         registers = regs;
         if (!geometry.device || !geometry.dynamic_fifo || !geometry.dedicated_fifos ||
-            geometry.device_endpoints < 6 || geometry.in_endpoints < 3 ||
+            geometry.device_endpoints < 7 || geometry.in_endpoints < 4 ||
             geometry.fifo_words < 1024 || payload.size < 8192) {
             return false;
         }
-        const mx_u32_t rx = geometry.fifo_words / 2, tx = (geometry.fifo_words - rx) / 6;
+        const mx_u32_t rx = geometry.fifo_words / 2, tx = (geometry.fifo_words - rx) / 7;
         if (tx < 16) {
             return false;
         }
@@ -103,7 +103,7 @@ struct Device {
         write(kDeviceControl, read(kDeviceControl) | (1u << 1)); // disconnect during construction
         write(kRxFifoSize, rx);
         write(kNonperiodicTxSize, rx | (tx << 16));
-        for (mx_u32_t i = 1; i < 6; ++i) {
+        for (mx_u32_t i = 1; i < 7; ++i) {
             write(0x104 + (i - 1) * 4, (rx + tx * i) | (tx << 16));
         }
         write(kDeviceConfig, 0); // USB2 high-speed, address zero

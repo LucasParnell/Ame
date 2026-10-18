@@ -98,5 +98,5 @@ The exact package image SHA-256 is
 Decoded records are under
 `out/anne-device-private/smp-capture-v1-test/results/`. The physical LED sequence
 was red, purple, purple, reboot; the revised output-control sequence was built
-after this capture. See [framebuffer handoff](../../docs/HUAWEI_FRAMEBUFFER_HANDOFF.md)
+after this capture. See [framebuffer reference](FRAMEBUFFER.md)
 for the latest device state and follow-up artifacts.

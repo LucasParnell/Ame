@@ -1,4 +1,5 @@
 # build outputs
+/.archives/
 /build/
 /build-*/
 /out/
@@ -35,3 +36,8 @@ __pycache__/
 *.pyc
 .venv/
 .claude-token-pack-backup-*/
+*.bak
+*.orig
+
+# private FIDO2 provisioning material
+secrets/

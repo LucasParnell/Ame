@@ -2,6 +2,33 @@
 // Fixed-layout VM syscall records, shared by the kernel and native clients.
 #include "midix/abi/types.h"
 
+// Stable scheduling-context request. Kernel budget synchronization is private;
+// it must not change this existing 80-byte syscall record. The kernel supplies
+// used_ns, period_start_ns and id when it creates the actual context.
+typedef struct MxSchedContext {
+    mx_u32_t principal_id;
+    mx_u32_t owner_thread_or_vcpu;
+    mx_u32_t band;
+    mx_u32_t weight;
+    mx_u64_t budget_ns;
+    mx_u64_t period_ns;
+    mx_u64_t deadline_ns;
+    mx_u64_t used_ns;
+    mx_u64_t period_start_ns;
+    mx_u64_t core_mask;
+    mx_u32_t home_cpu;
+    mx_u32_t flags;
+    mx_u32_t id;
+} MxSchedContext;
+
+#ifdef __cplusplus
+static_assert(sizeof(MxSchedContext) == 80);
+static_assert(__builtin_offsetof(MxSchedContext, band) == 8);
+static_assert(__builtin_offsetof(MxSchedContext, used_ns) == 40);
+static_assert(__builtin_offsetof(MxSchedContext, core_mask) == 56);
+static_assert(__builtin_offsetof(MxSchedContext, id) == 72);
+#endif
+
 typedef struct MxVcpuRunBudget {
     mx_u64_t budget_ns;
     mx_u64_t deadline_ns;

@@ -13,6 +13,14 @@ constexpr u64 kFirmwareFiqSource = 0x47400000;
 // hisi_ddr_secprotect.c. Read only these eight bytes, not other shared buffers.
 constexpr u64 kFirmwareFiqSource = 0x34a21000;
 #endif
+#ifndef ANKO_ANNE_DIAG_TEST
+// Hi6250 global_ddr_map.h and share.dtsi. Linux maps this entire BL31 share
+// region with ioremap_wc(); the RPMB request window begins at +0x8000.
+constexpr u64 kRpmbSharedBase = 0x34a21000;
+constexpr u64 kRpmbSharedSize = 0x10000;
+constexpr u64 kRpmbRequestAddress = kRpmbSharedBase + 0x8000;
+constexpr u64 kRpmbRequestSize = 0x8000;
+#endif
 enum class BootStage : u32 {
     Entry = 1, BssBegin, BssDone, ConstructorsBegin, ConstructorsDone,
     KernelMain, ConsoleReady, ProbeBegin, ProbeDone, PhysicalBegin, PhysicalDone,
@@ -38,6 +46,9 @@ void boot_log_panic(const char* message);
 void boot_timer_tick();
 void boot_syscall(u64 nr);
 void boot_user_fault(u64 esr, u64 pc, u64 far, u64 sp, u32 pid, u32 tid);
+// Fault-tolerant read used by the el3-rprobe/el3-rscan diagnostics.
+bool probe_read(u64 addr, u64* out_value, u64* out_esr, u64* out_far, u64* out_elr,
+                u64* out_faults);
 }
 extern "C" {
 void anne_diag_init(u64 entry_el, u64 dtb, u64 sctlr);

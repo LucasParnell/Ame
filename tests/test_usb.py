@@ -8,7 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class UsbCore(unittest.TestCase):
     def test_dwc2_and_hid_report_state_machines(self):
-        for source, marker in [('usb_dwc2_probe.cc', 'dwc2 packet probe ok'),
+        for source, marker in [('usb_typec_probe.cc', 'usb typec switching probe ok'),
+                               ('hi6523_probe.cc', 'hi6523 source health probe ok'),
+                               ('usb_dwc2_probe.cc', 'dwc2 packet probe ok'),
                                ('usb_hid_report_probe.cc', 'hid report probe ok'),
                                ('usb_debug_probe.cc','usb debug probe ok'),
                                ('usb_device_probe.cc','usb device probe ok'),

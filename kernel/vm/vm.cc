@@ -77,7 +77,7 @@ inline u64 counter_load(const u64& counter) {
     return __atomic_load_n(&counter, __ATOMIC_RELAXED);
 }
 
-inline bool has_rights(const CapEntry* e, u32 rights) {
+inline bool has_rights(const cap::Snapshot* e, u32 rights) {
     return e && ((e->rights_mask & rights) == rights);
 }
 

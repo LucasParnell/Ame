@@ -21,6 +21,7 @@ extern "C" char __kernel_end[];
 namespace mm {
 
 static PhysAllocator g_phys{};
+static u64 g_used_pages;
 static kernel::SpinLock g_phys_lock{};
 static kernel::SpinLock g_heap_lock{};
 static kernel::SpinLock g_slab_lock{};
@@ -48,10 +49,12 @@ static inline bool bit_is_free(usize page_idx) {
 }
 
 static inline void bit_set_free(usize page_idx) {
+    --g_used_pages;
     g_phys.bitmap[page_idx / 8] |= static_cast<u8>(1u << (page_idx % 8));
 }
 
 static inline void bit_set_used(usize page_idx) {
+    if (bit_is_free(page_idx)) ++g_used_pages;
     g_phys.bitmap[page_idx / 8] &= static_cast<u8>(~(1u << (page_idx % 8)));
 }
 
@@ -79,6 +82,7 @@ void reserve_phys_range(PhysAddr base, u64 size) {
 
 void phys_init(PhysAddr ram_base, usize ram_size) {
     g_phys = {};
+    g_used_pages = 0;
     g_phys.ram_base = ram_base;
     g_phys.ram_size = ram_size;
     g_phys.page_count = ram_size / PAGE_SIZE;
@@ -142,12 +146,29 @@ PhysAddr alloc_pages_contiguous_for(u32 pid, usize count) {
 
 u64 allocated_page_count() {
     kernel::LockGuard guard(g_phys_lock);
-    u64 used = 0;
-    for (usize i = 0; i < g_phys.page_count; ++i) if (!bit_is_free(i)) ++used;
-    return used;
+    return g_used_pages;
+}
+
+u64 total_page_count() { return g_phys.page_count; }
+
+static void clear_owned_page(PhysAddr pa) {
+    // The owner retains exclusive access until free_page publishes the page.
+    // Validate under the allocator lock, then clear outside it: a long clear
+    // with IRQs masked would delay cross-core teardown and shootdown progress.
+    {
+        kernel::LockGuard guard(g_phys_lock);
+        ANKO_ASSERT((pa & (PAGE_SIZE - 1)) == 0);
+        ANKO_ASSERT(pa >= g_phys.ram_base);
+        const usize idx = static_cast<usize>((pa - g_phys.ram_base) / PAGE_SIZE);
+        ANKO_ASSERT(page_in_range(idx));
+        ANKO_ASSERT(!bit_is_free(idx));
+    }
+    auto* words = reinterpret_cast<volatile u64*>(pa);
+    for (usize i = 0; i < PAGE_SIZE / sizeof(u64); ++i) words[i] = 0;
 }
 
 void free_page_for_identity(u64 identity, PhysAddr pa) {
+    clear_owned_page(pa);
     free_page(pa);
     auto p = sched::find_process(static_cast<u32>(identity));
     if (p && sched::process_identity(*p) == identity) sched::process_uncharge_page(p->pid);
@@ -211,6 +232,7 @@ void free_page(PhysAddr pa) {
 }
 
 void free_page_for(u32 owner_pid, PhysAddr pa) {
+    if (owner_pid != 0) clear_owned_page(pa);
     free_page(pa);
     if (owner_pid != 0) sched::process_uncharge_page(owner_pid);
 }

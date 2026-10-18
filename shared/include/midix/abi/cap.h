@@ -55,6 +55,13 @@ enum MxArenaMemoryAttr : mx_u32_t {
     MX_ARENA_MEMORY_NONCACHEABLE = 1,
 };
 
+// CAP_INFO's arena flags retain their low 16 bits. The upper half reports the
+// saturated object reference count, excluding CAP_INFO's temporary lookup.
+// A cache owning one capability and one mapping may reuse a page only at 2;
+// client capabilities and mappings each keep it above that value.
+constexpr mx_u32_t MX_ARENA_REFERENCE_SHIFT = 16;
+constexpr mx_u32_t MX_ARENA_REFERENCE_MASK = 0xffff0000u;
+
 enum MxRights : mx_rights_t {
     MX_RIGHT_READ     = 1u << 0,
     MX_RIGHT_WRITE    = 1u << 1,

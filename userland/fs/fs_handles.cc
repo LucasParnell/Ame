@@ -32,6 +32,7 @@ fs_handle_t alloc_handle(mx_u32_t inode_number, mx_u64_t snapshot_id, bool read_
 }
 
 void close_session(mx_u32_t session) {
+    close_transfer_session(session);
     for (mx_u32_t i = kFirstClientHandle; i < kMaxHandles; ++i) {
         if (g_handles[i].used && g_handles[i].owner == session) {
             g_handles[i] = {};
@@ -51,6 +52,53 @@ static OpenHandle* handle_state(fs_handle_t handle) {
         return nullptr;
     }
     return &g_handles[index];
+}
+
+static fs_handle_t alloc_volume_handle(const InodeLeafEntry& inode, bool writable) {
+    for (mx_u32_t i = kFirstClientHandle; i < kMaxHandles; ++i) {
+        if (g_handles[i].used || g_handle_generations[i] == kMaxHandleGeneration) continue;
+        auto& h = g_handles[i];
+        h = {};
+        h.used = h.disk_backed = h.volume_backed = true;
+        h.inode_number = inode.inode_number;
+        h.type = inode.type;
+        h.inode_class = inode.inode_class;
+        h.access = fs_handle_access(inode.type, writable);
+        return handle_token(i);
+    }
+    return 0;
+}
+static void volume_open(const mochi::fs::Server& fs, const RingSlot& slot,
+                        const FsOpenRequest& req, const OpenHandle* parent, bool mount) {
+    FsOpenReply reply{};
+    reply.status = MX_ERR_INVALID;
+    constexpr auto known = FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREATE | FS_OPEN_TRUNC;
+    if (!(req.flags & ~known) && !req.pad[0] && !req.pad[1] && !req.pad[2]) {
+        InodeLeafEntry target{};
+        const bool authority = mount || (parent && (parent->access & FS_ACCESS_MODIFY));
+        if (mount) reply.status = mochi::store::inode(g_volume, mochi::store::kDataRoot, target) ? MX_OK : MX_ERR_FAULT;
+        else reply.status = mochi::store::lookup(g_volume, parent->inode_number, req.name, req.name_len, target);
+        if (reply.status == MX_ERR_NOT_FOUND && (req.flags & FS_OPEN_CREATE)) {
+            reply.status = authority ? mochi::store::create(g_volume, parent->inode_number,
+                req.name, req.name_len, FS_INODE_FILE, target) : MX_ERR_PERM;
+        }
+        if (reply.status == MX_OK && (req.flags & (FS_OPEN_WRITE | FS_OPEN_TRUNC)) && !authority) reply.status = MX_ERR_PERM;
+        if (reply.status == MX_OK && (req.flags & FS_OPEN_TRUNC)) {
+            reply.status = (req.flags & FS_OPEN_WRITE) ? mochi::store::truncate(g_volume, target.inode_number) : MX_ERR_PERM;
+            target.size = 0;
+        }
+        if (reply.status == MX_OK) {
+            const bool writable = authority && (target.type == FS_INODE_DIR || (req.flags & FS_OPEN_WRITE));
+            reply.handle = alloc_volume_handle(target, writable);
+            if (!reply.handle) reply.status = MX_ERR_NOMEM;
+            reply.inode_number = target.inode_number;
+            reply.size = target.size;
+            reply.type = target.type;
+            reply.inode_class = target.inode_class;
+            reply.access = fs_handle_access(target.type, writable);
+        }
+    }
+    (void)fs.send_reply(slot, FS_OPEN_REPLY, reply);
 }
 
 static mx_i32_t parent_from_token(mx_u32_t token, mx_u32_t* out_inode, mx_u64_t* out_snapshot,
@@ -121,13 +169,16 @@ void handle_open(const mochi::fs::Server& fs, const RingSlot& slot) {
                                  parent_handle->inode_number == kRootInode;
         const bool tmp_mount = root_parent && req.name_len == kTmpMountNameLen &&
                                name_eq(kTmpMountName, req.name, kTmpMountNameLen);
-        // /data is the durable user volume; like /tmp it is served from the
-        // in-memory table (the read-only root is never mutated) and its
-        // persistence is handled by fs_durable on sync.
+        // /data redirects to the mutable disk subtree when mounted. The
+        // memory/legacy fallback below retains its earlier mount policy.
         const bool data_mount = root_parent && req.name_len == kDataMountNameLen &&
                                 name_eq(kDataMountName, req.name, kDataMountNameLen);
-        // Disk-backed parents are read-only. /tmp and /data are redirected away
-        // from the disk and served from the in-memory table.
+        if (g_volume.mounted && (data_mount || (parent_handle && parent_handle->volume_backed))) {
+            volume_open(fs, slot, req, parent_handle, data_mount);
+            return;
+        }
+        // Packaged disk parents are read-only; /tmp and /data mount redirects
+        // take precedence over this lookup.
         if (disk_mounted() && !tmp_mount && !data_mount && parent_handle &&
             (root_parent || parent_handle->disk_backed)) {
             bool disk_parent = false;
@@ -265,6 +316,11 @@ void handle_read(const mochi::fs::Server& fs, const RingSlot& slot) {
     FsReadRequest req{};
     if (mochi::message_get(slot, &req)) {
         const OpenHandle* handle = handle_state(req.handle);
+        if (handle && (handle->volume_backed || (handle->disk_backed && g_volume.mounted))) {
+            reply.status = volume_read(*handle, req, reply);
+            (void)fs.send_reply(slot, FS_READ_REPLY, reply);
+            return;
+        }
         if (handle && handle->disk_backed) {
             reply.status = disk_read_file(*handle, req.offset, req.length, &reply);
             (void)fs.send_reply(slot, FS_READ_REPLY, reply);
@@ -325,6 +381,12 @@ void handle_write(const mochi::fs::Server& fs, const RingSlot& slot) {
     FsWriteRequest req{};
     if (mochi::message_get(slot, &req)) {
         OpenHandle* handle = handle_state(req.handle);
+        if (handle && handle->volume_backed) {
+            reply.status = volume_write(*handle, req);
+            if (reply.status == MX_OK) reply.bytes_written = req.length;
+            (void)fs.send_reply(slot, FS_WRITE_REPLY, reply);
+            return;
+        }
         InodeState* inode =
             (handle && !handle->disk_backed) ? live_inode(handle->inode_number) : nullptr;
         if (handle && handle->disk_backed) {
@@ -346,6 +408,50 @@ void handle_write(const mochi::fs::Server& fs, const RingSlot& slot) {
     (void)fs.send_reply(slot, FS_WRITE_REPLY, reply);
 }
 
+// The immutable disk namespace and the two mounted volumes share one root
+// enumeration. Cookies count visible rows, so /ame is discoverable alongside
+// /tmp and /data even when the image does not contain mount placeholders.
+static mx_i32_t root_readdir(const FsReaddirRequest& req, FsReaddirReply& out) {
+    InodeLeafEntry inode{};
+    if (!disk_inode(kRootInode, &inode)) return MX_ERR_FAULT;
+    OpenHandle root{};
+    root.type = FS_INODE_DIR;
+    root.inode_number = kRootInode;
+    root.tree_root = inode.extent_tree_root;
+    mx_u32_t visible = 0;
+    auto row = [&](const char* name, mx_u8_t length, mx_u32_t number, mx_u16_t type) {
+        if (visible == req.cookie) {
+            out.flags = FS_READDIR_HAS_ENTRY;
+            out.next_cookie = req.cookie + 1;
+            out.inode_number = number;
+            out.type = type;
+            out.name_len = length > sizeof(out.name) ? sizeof(out.name) : length;
+            if (length > sizeof(out.name)) out.flags |= FS_READDIR_TRUNCATED;
+            libk::copy_n(libk::as_bytes(out.name), libk::as_bytes(name, length), out.name_len);
+        }
+        ++visible;
+    };
+    for (mx_u32_t ordinal = 0;; ++ordinal) {
+        FsReaddirRequest query{};
+        query.cookie = ordinal;
+        FsReaddirReply reply{};
+        const auto status = disk_readdir(root, query, &reply);
+        if (status != MX_OK) return status;
+        if (reply.flags & FS_READDIR_HAS_ENTRY) {
+            const bool mount = name_eq(kTmpMountName, reply.name, reply.name_len) ||
+                               name_eq(kDataMountName, reply.name, reply.name_len);
+            if (!mount) row(reply.name, reply.name_len, reply.inode_number, reply.type);
+        }
+        if (reply.flags & FS_READDIR_EOF) break;
+        if (ordinal == ~mx_u32_t{0}) return MX_ERR_OVERFLOW;
+    }
+    row(kTmpMountName, kTmpMountNameLen, 2, FS_INODE_DIR);
+    row(kDataMountName, kDataMountNameLen, g_volume.mounted ? mochi::store::kDataRoot : g_data_inode, FS_INODE_DIR);
+    out.entry_count = visible;
+    if (!(out.flags & FS_READDIR_HAS_ENTRY) || out.next_cookie == visible) out.flags |= FS_READDIR_EOF;
+    return MX_OK;
+}
+
 void handle_readdir(const mochi::fs::Server& fs, const RingSlot& slot) {
     FsReaddirReply reply{};
     reply.status = MX_OK;
@@ -356,6 +462,28 @@ void handle_readdir(const mochi::fs::Server& fs, const RingSlot& slot) {
     FsReaddirRequest req{};
     if (mochi::message_get(slot, &req)) {
         const OpenHandle* handle = handle_state(req.handle);
+        if (handle && !handle->snapshot_id && handle->inode_number == kRootInode && disk_mounted()) {
+            reply.status = req.flags || req.reserved ? MX_ERR_INVALID : root_readdir(req, reply);
+            (void)fs.send_reply(slot, FS_READDIR_REPLY, reply);
+            return;
+        }
+        if (handle && handle->volume_backed) {
+            DirLeafEntry row{};
+            bool eof = false;
+            reply.status = req.flags || req.reserved ? MX_ERR_INVALID :
+                mochi::store::readdir(g_volume, handle->inode_number, req.cookie, row, eof);
+            if (reply.status == MX_OK && !eof) {
+                reply.flags = FS_READDIR_HAS_ENTRY;
+                reply.next_cookie = req.cookie + 1;
+                reply.inode_number = row.child_inode;
+                reply.type = row.file_type;
+                reply.name_len = row.name_len > sizeof(reply.name) ? sizeof(reply.name) : row.name_len;
+                if (row.name_len > sizeof(reply.name)) reply.flags |= FS_READDIR_TRUNCATED;
+                libk::copy_n(libk::as_bytes(reply.name), libk::as_bytes(row.name), reply.name_len);
+            }
+            (void)fs.send_reply(slot, FS_READDIR_REPLY, reply);
+            return;
+        }
         if (handle && handle->disk_backed) {
             reply.status = disk_readdir(*handle, req, &reply);
             (void)fs.send_reply(slot, FS_READDIR_REPLY, reply);
@@ -412,6 +540,13 @@ void handle_mkdir(const mochi::fs::Server& fs, const RingSlot& slot) {
             send_status_only(fs, slot, FS_MKDIR_REPLY, MX_ERR_INVALID);
             return;
         }
+        const auto* h = handle_state(req.parent_inode ? req.parent_inode : kRootHandle);
+        if (h && h->volume_backed) {
+            InodeLeafEntry created{};
+            const auto rc = !(h->access & FS_ACCESS_MODIFY) ? MX_ERR_PERM : mochi::store::create(g_volume, h->inode_number, req.name, req.name_len, FS_INODE_DIR, created);
+            send_status_only(fs, slot, FS_MKDIR_REPLY, rc);
+            return;
+        }
         mx_u32_t parent_inode = kRootInode;
         mx_u64_t snapshot_id = 0;
         bool read_only_parent = false;
@@ -436,6 +571,12 @@ void handle_unlink(const mochi::fs::Server& fs, const RingSlot& slot) {
     if (mochi::message_get(slot, &req)) {
         if (!req.name_len || req.name_len > sizeof(req.name)) {
             send_status_only(fs, slot, FS_UNLINK_REPLY, MX_ERR_INVALID);
+            return;
+        }
+        const auto* h = handle_state(req.parent_inode ? req.parent_inode : kRootHandle);
+        if (h && h->volume_backed) {
+            const auto rc = !(h->access & FS_ACCESS_MODIFY) ? MX_ERR_PERM : mochi::store::unlink(g_volume, h->inode_number, req.name, req.name_len);
+            send_status_only(fs, slot, FS_UNLINK_REPLY, rc);
             return;
         }
         mx_u32_t parent_inode = kRootInode;
@@ -472,6 +613,17 @@ void handle_rename(const mochi::fs::Server& fs, const RingSlot& slot) {
     mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_INVALID);
     FsRenameRequest req{};
     if (mochi::message_get(slot, &req)) {
+        const auto* old = handle_state(req.old_parent ? req.old_parent : kRootHandle);
+        const auto* next = handle_state(req.new_parent ? req.new_parent : kRootHandle);
+        if ((old && old->volume_backed) || (next && next->volume_backed)) {
+            const auto rc = !old || !next || !old->volume_backed || !next->volume_backed ||
+                !(old->access & FS_ACCESS_MODIFY) || !(next->access & FS_ACCESS_MODIFY) ? MX_ERR_PERM :
+                req.old_name_len > sizeof(req.old_name) || req.new_name_len > sizeof(req.new_name) ? MX_ERR_INVALID :
+                mochi::store::rename(g_volume, old->inode_number, req.old_name, req.old_name_len,
+                                      next->inode_number, req.new_name, req.new_name_len);
+            send_status_only(fs, slot, FS_RENAME_REPLY, rc);
+            return;
+        }
         mx_u32_t old_parent = 0, new_parent = 0;
         mx_u64_t old_snapshot = 0, new_snapshot = 0;
         bool old_read_only = false, new_read_only = false;
@@ -522,7 +674,12 @@ void handle_promote(const mochi::fs::Server& fs, const RingSlot& slot) {
     if (mochi::message_get(slot, &req)) {
         const OpenHandle* handle = handle_state(req.handle);
         if (handle && handle->disk_backed) {
-            reply.status = static_cast<mx_i32_t>(MX_ERR_PERM);
+            InodeLeafEntry promoted{};
+            reply.status = g_volume.mounted ? mochi::store::promote(g_volume, handle->inode_number, promoted) : MX_ERR_NOT_IMPLEMENTED;
+            if (reply.status == MX_OK) {
+                reply.new_handle = alloc_volume_handle(promoted, true);
+                if (!reply.new_handle) reply.status = MX_ERR_NOMEM;
+            }
             (void)fs.send_reply(slot, FS_PROMOTE_REPLY, reply);
             return;
         }

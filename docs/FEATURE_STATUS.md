@@ -26,20 +26,13 @@ code or a captured log it is marked **unverified**.
 | **Not implemented** | Stub or explicit `E_NOTIMPL`; no working path. |
 | **Unverified** | Code may exist but no captured evidence in this tree exercises it. |
 
-## Documentation drift warning
+## Documentation scope
 
-Some design documents predate the current code and describe the implementation as
-less complete than it is. Do **not** treat these as status:
-
-- `docs/scheduler.md` describes the Ressha/Eki scheduler, including fairness,
-  execution-frame ownership, budget refill, handoff timing, and work stealing.
-- `docs/architecture.md` and `docs/boot-sequence.md` describe a `boot/` shim
-  (`boot/entry/boot_main.cc`, `boot/dtb/fdt.cc`, `boot/mmu/*`) as the boot path.
-  That directory is **not built** (`add_subdirectory(boot)` is commented out in the
-  top-level `CMakeLists.txt`) and its sources are unimplemented placeholders. The
-  live boot path is `kernel/arch/arm64/entry.S` → `kernel_main()`.
-- `docs/v0-progress.md` acceptance markers (`hello world`, `IPC PING/PONG OK`) are
-  historical; the current default boot ends at `init: all services ready`.
+The [architecture specification](architecture.md) includes design targets beyond
+what is implemented. The live boot path is `kernel/arch/arm64/entry.S` →
+`kernel_main()`; the legacy `boot/` shim is unbuilt. The default boot ends at
+`init: all services ready`. Scheduler implementation details are in
+[scheduler.md](scheduler.md).
 
 ---
 
@@ -106,7 +99,7 @@ less complete than it is. Do **not** treat these as status:
 | Stage-2 address space (create / map / unmap / destroy / activate / lookup), table prune | Implemented | `kernel/vm/stage2.cc`: `stage2_create`, `stage2_map_page`, `stage2_unmap_page`, `stage2_destroy`, `stage2_activate`, `stage2_lookup_page`, `prune_tables` | Guest PA window `0x40000000–0x48000000` (`kGuestPhysMin/Max`) |
 | vCPU run loop with WFx / virtual-IRQ / MMIO-batch / unsupported-trap exits, software VGIC, EL2 monitor | Implemented | `kernel/vm/vcpu.cc` (`run_vcpu`, `log_unsupported_exit`, guest-console MMIO emulation); `kernel/arch/arm64/el2.S` (`el2_vectors`); `VcpuExitReason` in `kernel/include/anko/vm.h` | Runs non-VHE; EL1 state is saved/restored explicitly |
 | VM memory objects (backing pages, map/unmap, write) | Implemented | `kernel/vm/vm_memory.cc`: `create_memory`, `map_memory`, `unmap_memory`, `write_memory` | — |
-| Paravirt channels (host↔guest ring + doorbell endpoints) | Implemented | `kernel/vm/vm_channel*.cc`; built-in Linux `/dev/dango-channel0`, 512 ordered round trips via vIRQ/HVC (`AME_VERIFY_CHANNEL=1`). [Phase G delivery](../DELIVERY/gpu-appliance-phase-g.md) | Fixed boot-time channel; no dynamic arenas |
+| Paravirt channels (host↔guest ring + doorbell endpoints) | Implemented | `kernel/vm/vm_channel*.cc`; built-in Linux `/dev/dango-channel0`, 512 ordered round trips via vIRQ/HVC (`AME_VERIFY_CHANNEL=1`). Phase G delivery (archived delivery report) | Fixed boot-time channel; no dynamic arenas |
 | VM/EL2 bring-up at boot | Implemented | Default boot: `dango.manager: vm.current_el=1`, `dango.manager: vm.el2_available=1`, `dango.manager: vm created`, `dango.manager: vcpu.id=1`, `dango.manager: channel ready`, `dango.manager: layout ready` | — |
 | Guest Linux payload run | **Implemented (opt-in)** | Default build still logs `dango.manager: vcpu stub run skipped: no linux guest payload`; the GPU artifact set (`build/dango-linux-gpu`) is packaged when configured with `-DDANGO_LINUX_PROFILE=gpu -DDANGO_LINUX_ARTIFACT_DIR=…` and booted by the opt-in `gpu-appliance` / `kms-display` rows (Linux binds `virtio_gpu`) | Requires the guest artifacts built separately (Linux container on macOS: `scripts/linux/build-gpu-linux-docker.sh`); not part of the default gate |
 | VM negative-authority probe | Implemented | Default boot: `dango.auth_probe: authority check passed` | Runs as a native probe, not a guest |
@@ -120,16 +113,16 @@ less complete than it is. Do **not** treat these as status:
 | Config and mapping isolation | Implemented | ASan/UBSan ECAM + stage-2 probes; trapped ranges reject RAM/MMIO overlap; active-VM revoke removes Device leaves; BME requires an ACTIVE DMA domain. |
 | Dango GPU appliance construction (assignment, BAR allocation, ECAM, INTx) | Implemented | `userland/dango/manager/main.cc`, `kernel/init/boot_caps.cc` (`gpu.function`/`gpu.irq`); boot: `assign: ACTIVE device=1`, `assign: bar4 mapped ipa=0x50000000`. |
 | Linux `virtio_gpu` binds and creates a DRM device | Implemented | Opt-in `gpu-appliance` row: `dango: DRM card0 driver=virtio_gpu dumb_buffer=1`, `dango: Linux virtio ISR observed`; counters `faults=0 quarantines=0 smmu=1`. |
-| Standalone Linux KMS modeset asserted from the host | Implemented | Opt-in `kms-display` row: guest raw-ioctl KMS (`linux-artifacts/kms_test/`), host `screendump` at `1024x768` showing mid-row R/G/B/W. See [Phase F delivery](../DELIVERY/gpu-appliance-phase-f.md). |
+| Standalone Linux KMS modeset asserted from the host | Implemented | Opt-in `kms-display` row: guest raw-ioctl KMS (`linux-artifacts/kms_test/`), host `screendump` at `1024x768` showing mid-row R/G/B/W. See Phase F delivery (archived delivery report). |
 | Real lavapipe transfer executor | Partial | `linux-artifacts/vkd/`, `scripts/linux/build-vkd.sh`, opt-in `AME_VERIFY_VULKAN=1`: libc rootfs boots under Linux, real device/fill/copy/fence/readback and malformed-command regressions pass. Native session bridge, larger appliance memory layout and graphics/WSI are still open; see [remaining work](GPU_APPLIANCE_REMAINING.md). |
 
 | Native TTY on assigned GPU | Implemented | `AME_VERIFY_FB_TTY=1` requires completed native-frame presentation and decodes shell text from the assigned GPU console. `gpud` resumes after KMS/channel self-tests and flushes dumb-buffer updates through Linux DRM; a native framebuffer capture alone is insufficient. |
 | Stage-2 block capacity and teardown | Implemented | RAM and aligned MMIO use 2 MiB blocks. Host regressions map 512 MiB in 256 records and cover failed/exact-capacity splits, mixed-page/block teardown and active Device revocation with allocations disabled. The appliance layout itself remains 128 MiB. |
 
-See [Phase E delivery](../DELIVERY/gpu-appliance-phase-e.md),
-[Phase E.1 delivery](../DELIVERY/gpu-appliance-phase-e1.md),
-[Phase F delivery](../DELIVERY/gpu-appliance-phase-f.md) and
-[remaining phases](GPU_APPLIANCE_TODO.md).
+See Phase E delivery (archived delivery report),
+Phase E.1 delivery (archived delivery report),
+Phase F delivery (archived delivery report) and
+[remaining phases](GPU_APPLIANCE_REMAINING.md).
 
 ### 1.7 Kernel drivers (in-kernel minimal set)
 
@@ -142,6 +135,7 @@ See [Phase E delivery](../DELIVERY/gpu-appliance-phase-e.md),
 | fw_cfg (QEMU, ramfb) | Implemented | `kernel/drivers/fwcfg.cc`; boot: `fwcfg: ramfb 1024x768` | — |
 | Kernel-side PCI scan (temporary) | Partial | `kernel/drivers/pci_probe.cc`; boot: `pci_probe: xhci found bus=0 dev=2 bar0=0x10000000 … irq=0` | Documented temporary shortcut; replaced by `drv.pci` (not yet) |
 | SDMMC1 (Switch boot log) | Implemented (build only) | `kernel/drivers/sdmmc/sdmmc.cc`; `kernel/init/fat_log.cc` (PIO only) | Switch only; no physical-device run |
+| eMMC / RPMB (Anne) | Implemented (host-tested) | `kernel/drivers/emmc/sdhci.cc`; `boards/huawei-anne/emmc.cc`; [usage](../boards/huawei-anne/EMMC.md) | PIO, continuous RPMB service and FF05 provisioning; executable Huawei OSS oracles; inherited boot power/clocks; no handset verification |
 | Hardware IRQ bind/ack | Implemented mechanism | `SYS_IRQ_BIND_DOORBELL`, `SYS_IRQ_ACK`, `kernel/drivers/gic/irq_table.cc`; host binding/teardown probe | Native xHCI still polls; its PCI IRQ mapping is not wired end to end |
 
 ---
@@ -180,7 +174,7 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | Feature | Status | Evidence | Limitations |
 |---------|--------|----------|-------------|
 | Resolve request → capability grant, one SPSC session per client | Implemented | `userland/nameservice/main.cc` (`MSG_NS_RESOLVE` handling, `mx_cap_grant`); `mochi::ServerSessions` in `userland/lib/include/mochi/sessions.h` | Has no dedicated serial "ready" line; liveness is inferred from a successful resolve |
-| Resolve exercised end-to-end | Implemented | `userland/demo/ping/main.cc` `resolve_pong()` resolves `demo.pong`; boot reaches `demo.ping: ipc: hot ring ready` | `docs/v0-progress.md` still lists the fixed-table register/resolve flow as unchecked (stale) |
+| Resolve exercised end-to-end | Implemented | `userland/demo/ping/main.cc` `resolve_pong()` resolves `demo.pong`; boot reaches `demo.ping: ipc: hot ring ready` | Fixed-table register/resolve flow is exercised by the default boot |
 
 ### 2.3 io.console
 
@@ -236,7 +230,7 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 |---------|--------|----------|-------------|
 | AArch64 Image header + `_start`, EL2→EL1 drop, BSS clear, early stack | Implemented | `kernel/arch/arm64/entry.S`, `kernel/arch/arm64/el2.S` | — |
 | DTB save, probe, physical init, GIC/timer, caps, IPC, VM, sched, SMP, init spawn | Implemented | `kernel/kernel_main.cc`; boot: `kernel/boot: anko booting`, `kernel/probe: boot_el=2 ram=0x40000000+0x20000000 console=0x9000000 …`, `kernel/init: init queued`, `kernel/boot: scheduler ready` | — |
-| Legacy `boot/` shim | **Not implemented / unbuilt** | `CMakeLists.txt` (`add_subdirectory(boot)` commented); `boot/entry/boot_main.cc`, `boot/dtb/fdt.cc`, `boot/mmu/page_table.cc`, `boot/memory/phys_map.cc` are TODO placeholders | Not in the build graph; `docs/boot-sequence.md` describes it as if live |
+| Legacy `boot/` shim | **Not implemented / unbuilt** | `CMakeLists.txt` (`add_subdirectory(boot)` commented); `boot/entry/boot_main.cc`, `boot/dtb/fdt.cc`, `boot/mmu/page_table.cc`, `boot/memory/phys_map.cc` are TODO placeholders | Not in the build graph; the live boot enters through `kernel/arch/arm64/entry.S` |
 
 ### 3.2 qemu-virt
 
@@ -252,7 +246,7 @@ Sources under `userland/`; each service is a freestanding ELF packed into the si
 | Feature | Status | Evidence | Limitations |
 |---------|--------|----------|-------------|
 | Board constants, DTS, Tegra UART / TegraDC0 framebuffer / XUSB no-reset, SD log | Implemented (build) | `boards/switch-t210/*`; `ame-switch.dts`; `hekate_ipl.ini` | — |
-| Kernel + userland build + Hekate package staging | Implemented (staging) | `CMakePresets.json` preset `switch` (RelWithDebInfo); `scripts/build-hekate-package.sh`; CLEANUP_STATUS notes staging passes | **No physical-device testing**; package validation ≠ device acceptance |
+| Kernel + userland build + Hekate package staging | Implemented (staging) | `CMakePresets.json` preset `switch` (RelWithDebInfo); `scripts/build-hekate-package.sh` | **No physical-device testing**; package validation ≠ device acceptance |
 | On-device boot | **Unverified** | None | Requires hardware |
 
 ---

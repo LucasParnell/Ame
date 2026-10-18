@@ -24,6 +24,7 @@
 #include "dango/layout.h"
 #include "gpu_linux.h"
 #include "mochi/va_layout.h"
+#include "raster.h"
 
 // Virtual address layout for io.framebuffer.
 using namespace mochi::va::framebuffer;
@@ -46,13 +47,6 @@ constexpr uint32_t kGpuHandshakeBudget = 256;
 
 // Clear color on startup: dark blue.
 constexpr uint32_t kClearColor = 0x001F3F;
-
-static void fb_clear(volatile uint32_t* pixels, uint32_t color) {
-    const uint32_t total = kFbHeight * kFbWidth;
-    for (uint32_t i = 0; i < total; ++i) {
-        pixels[i] = color | 0xff000000u;
-    }
-}
 
 static uint32_t min_u32(uint32_t a, uint32_t b) {
     return a < b ? a : b;
@@ -98,106 +92,6 @@ static uint32_t glyph_span_height(const FbDrawGlyphCmd& cmd) {
     return min_u32(cmd.height, 16) * (cmd.scale_y ? min_u32(cmd.scale_y, 8) : 1);
 }
 
-static void fb_fill_rect(volatile uint32_t* pixels, uint32_t x, uint32_t y,
-                         uint32_t width, uint32_t height, uint32_t color) {
-    if (x >= kFbWidth || y >= kFbHeight || width == 0 || height == 0) return;
-    const uint32_t clipped_w = min_u32(width, kFbWidth - x);
-    const uint32_t clipped_h = min_u32(height, kFbHeight - y);
-    for (uint32_t row = 0; row < clipped_h; ++row) {
-        volatile uint32_t* dst = pixels + ((y + row) * kFbWidth) + x;
-        for (uint32_t col = 0; col < clipped_w; ++col) {
-            dst[col] = color | 0xff000000u;
-        }
-    }
-}
-
-static void fb_copy_rect(volatile uint32_t* pixels, const FbCopyRectCmd& cmd) {
-    if (cmd.src_x >= kFbWidth || cmd.dst_x >= kFbWidth ||
-        cmd.src_y >= kFbHeight || cmd.dst_y >= kFbHeight ||
-        cmd.width == 0 || cmd.height == 0) {
-        return;
-    }
-
-    const uint32_t clipped_w = min_u32(cmd.width,
-                                       min_u32(kFbWidth - cmd.src_x,
-                                               kFbWidth - cmd.dst_x));
-    const uint32_t clipped_h = min_u32(cmd.height,
-                                       min_u32(kFbHeight - cmd.src_y,
-                                               kFbHeight - cmd.dst_y));
-    if (clipped_w == 0 || clipped_h == 0) return;
-
-    const bool copy_top_down =
-        (cmd.dst_y < cmd.src_y) ||
-        (cmd.dst_y == cmd.src_y && cmd.dst_x <= cmd.src_x);
-
-    // The ramfb backing store is normal RAM. Cast away volatile for bulk copies
-    // so scrolling does not degrade into hundreds of thousands of strongly
-    // ordered 32-bit accesses under QEMU TCG. FB_PRESENT provides the barrier.
-    uint32_t* base = const_cast<uint32_t*>(pixels);
-
-    for (uint32_t row_i = 0; row_i < clipped_h; ++row_i) {
-        const uint32_t row = copy_top_down ? row_i : (clipped_h - 1u - row_i);
-        const uint32_t src_off = ((cmd.src_y + row) * kFbWidth) + cmd.src_x;
-        const uint32_t dst_off = ((cmd.dst_y + row) * kFbWidth) + cmd.dst_x;
-        const uint32_t* src = base + src_off;
-        uint32_t* dst = base + dst_off;
-
-        const auto bytes = static_cast<std::size_t>(clipped_w) * sizeof(*dst);
-        (void)libk::move_n(libk::as_bytes(dst, (kFbWidth - cmd.dst_x) * sizeof(*dst)),
-                           libk::as_bytes(src, (kFbWidth - cmd.src_x) * sizeof(*src)), bytes);
-    }
-}
-
-static void fb_draw_glyph(volatile uint32_t* pixels, const FbDrawGlyphCmd& cmd) {
-    if (cmd.x >= kFbWidth || cmd.y >= kFbHeight) return;
-    const uint32_t glyph_w = min_u32(cmd.width, 8);
-    const uint32_t glyph_h = min_u32(cmd.height, 16);
-    const uint32_t scale_x = cmd.scale_x ? min_u32(cmd.scale_x, 8) : 1;
-    const uint32_t scale_y = cmd.scale_y ? min_u32(cmd.scale_y, 8) : 1;
-    if (glyph_w == 0 || glyph_h == 0) return;
-
-    for (uint32_t gy = 0; gy < glyph_h; ++gy) {
-        const uint8_t bits = cmd.rows[gy];
-        for (uint32_t sy = 0; sy < scale_y; ++sy) {
-            const uint32_t py = cmd.y + gy * scale_y + sy;
-            if (py >= kFbHeight) continue;
-            for (uint32_t gx = 0; gx < glyph_w; ++gx) {
-                const bool on = (bits & (0x80u >> gx)) != 0;
-                const uint32_t color = on ? cmd.fg : cmd.bg;
-                for (uint32_t sx = 0; sx < scale_x; ++sx) {
-                    const uint32_t px = cmd.x + gx * scale_x + sx;
-                    if (px < kFbWidth) pixels[py * kFbWidth + px] = color | 0xff000000u;
-                }
-            }
-        }
-    }
-}
-
-static void fb_draw_text(volatile uint32_t* pixels, const FbDrawTextCmd& cmd) {
-    if (cmd.x >= kFbWidth || cmd.y >= kFbHeight) return;
-    const uint32_t count = min_u32(cmd.len, static_cast<uint32_t>(sizeof(cmd.text)));
-    const uint32_t scale_x = cmd.scale_x ? min_u32(cmd.scale_x, 8) : 1;
-    const uint32_t scale_y = cmd.scale_y ? min_u32(cmd.scale_y, 8) : 1;
-
-    for (uint32_t i = 0; i < count; ++i) {
-        const uint8_t code = static_cast<uint8_t>(cmd.text[i]);
-        const uint8_t* rows = midix::font::vga8x16_glyph(code);
-
-        FbDrawGlyphCmd glyph{};
-        glyph.x = cmd.x + (i * midix::font::kVga8x16Width * scale_x);
-        glyph.y = cmd.y;
-        glyph.fg = cmd.fg;
-        glyph.bg = cmd.bg;
-        glyph.width = static_cast<uint8_t>(midix::font::kVga8x16Width);
-        glyph.height = static_cast<uint8_t>(midix::font::kVga8x16Height);
-        glyph.scale_x = static_cast<uint8_t>(scale_x);
-        glyph.scale_y = static_cast<uint8_t>(scale_y);
-        (void)libk::copy_exact(libk::as_bytes(glyph.rows),
-                                libk::as_bytes(rows, midix::font::kVga8x16Height));
-        fb_draw_glyph(pixels, glyph);
-    }
-}
-
 static void send_info(const mochi::framebuffer::Server& endpoint) {
     const FbInfo info{
         kFbWidth,
@@ -214,7 +108,7 @@ static void send_info(const mochi::framebuffer::Server& endpoint) {
 // endpoint, the damage accumulator, and (when the appliance is present) the
 // armed GPU service client. `gpu` is null on the default (ramfb-only) path.
 struct ServerState {
-    volatile uint32_t* pixels;
+    mochi::framebuffer::Raster raster;
     const mochi::framebuffer::Server* endpoint;
     drv::gpu::linux::Client* gpu = nullptr;
     bool gpu_force_full = false;
@@ -227,6 +121,10 @@ static void present_frame(ServerState& state) {
     if (!state.gpu) return;
     state.gpu->poll();
     if (!state.gpu->live()) return;
+    if (!state.gpu_force_full && state.damage.empty()) return;
+    // This path also runs after draining a batch without FB_PRESENT. Publish
+    // Normal NC pixel stores before sending the appliance a present request.
+    asm volatile("dsb sy" ::: "memory");
     if (state.gpu_force_full) {
         // The first present after the handshake is always a whole frame, so a
         // stale appliance scanout (the bootstrap placeholder) cannot survive.
@@ -236,7 +134,6 @@ static void present_frame(ServerState& state) {
         }
         return;
     }
-    if (state.damage.empty()) return;
     const MxGpuDamageRect rect = state.damage.rect();
     if (state.gpu->submit_present(&rect, false)) {
         state.damage.reset();
@@ -244,7 +141,7 @@ static void present_frame(ServerState& state) {
 }
 
 static bool handle_fb_command(ServerState& state, const RingSlot& slot) {
-    volatile uint32_t* pixels = state.pixels;
+    const auto& raster = state.raster;
     const mochi::framebuffer::Server& endpoint = *state.endpoint;
     DamageRect* damage = state.gpu ? &state.damage : nullptr;
     if (!mochi::message_valid(slot)) return false;
@@ -255,28 +152,28 @@ static bool handle_fb_command(ServerState& state, const RingSlot& slot) {
     case FB_CLEAR:
         if (slot.length >= sizeof(uint32_t)) {
             const uint32_t color = *reinterpret_cast<const uint32_t*>(slot.payload);
-            fb_clear(pixels, color);
+            raster.clear(color);
             if (damage) damage->whole();
         }
         return true;
     case FB_FILL_RECT:
         if (slot.length >= sizeof(FbFillRectCmd)) {
             const auto& cmd = *reinterpret_cast<const FbFillRectCmd*>(slot.payload);
-            fb_fill_rect(pixels, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color);
+            raster.fill_rect(cmd.x, cmd.y, cmd.width, cmd.height, cmd.color);
             if (damage) damage->add(cmd.x, cmd.y, cmd.width, cmd.height);
         }
         return true;
     case FB_DRAW_GLYPH:
         if (slot.length >= sizeof(FbDrawGlyphCmd)) {
             const auto& cmd = *reinterpret_cast<const FbDrawGlyphCmd*>(slot.payload);
-            fb_draw_glyph(pixels, cmd);
+            raster.draw_glyph(cmd);
             if (damage) damage->add(cmd.x, cmd.y, glyph_span_width(cmd), glyph_span_height(cmd));
         }
         return true;
     case FB_DRAW_TEXT:
         if (slot.length >= sizeof(FbDrawTextCmd)) {
             const auto& cmd = *reinterpret_cast<const FbDrawTextCmd*>(slot.payload);
-            fb_draw_text(pixels, cmd);
+            raster.draw_text(cmd);
             if (damage) {
                 const uint32_t count = min_u32(cmd.len, static_cast<uint32_t>(sizeof(cmd.text)));
                 const uint32_t scale_x = cmd.scale_x ? min_u32(cmd.scale_x, 8) : 1;
@@ -290,12 +187,10 @@ static bool handle_fb_command(ServerState& state, const RingSlot& slot) {
     case FB_COPY_RECT:
         if (slot.length >= sizeof(FbCopyRectCmd)) {
             const auto& cmd = *reinterpret_cast<const FbCopyRectCmd*>(slot.payload);
-            fb_copy_rect(pixels, cmd);
-            // A copy dirties both rectangles; a scroll is exactly this case.
-            if (damage) {
-                damage->add(cmd.src_x, cmd.src_y, cmd.width, cmd.height);
-                damage->add(cmd.dst_x, cmd.dst_y, cmd.width, cmd.height);
-            }
+            raster.copy_rect(cmd);
+            if (damage) damage->add(cmd.dst_x, cmd.dst_y,
+                                    min_u32(cmd.width, cmd.src_x < kFbWidth ? kFbWidth - cmd.src_x : 0),
+                                    min_u32(cmd.height, cmd.src_y < kFbHeight ? kFbHeight - cmd.src_y : 0));
         }
         return true;
     case FB_PRESENT:
@@ -336,8 +231,10 @@ extern "C" [[noreturn]] void _start() {
         if(mx_platform_control(control,MX_PLATFORM_CLAIM)!=MX_OK||
            mx_platform_control(control,MX_PLATFORM_DISPLAY_HANDOFF)!=MX_OK) mochi::boot::invalid_boot();
     }
-    volatile uint32_t* pixels = reinterpret_cast<volatile uint32_t*>(kVaFbPixels);
-    fb_clear(pixels, kClearColor);
+    const mochi::framebuffer::Raster raster{reinterpret_cast<uint32_t*>(kVaFbPixels),
+                                           kFbWidth, kFbHeight};
+    raster.clear(kClearColor);
+    asm volatile("dsb sy" ::: "memory");
 
     mochi::log_raw_marker("io.framebuffer: ready\n");
 
@@ -400,7 +297,7 @@ extern "C" [[noreturn]] void _start() {
 
     // The first present after arming is always a whole frame, so nothing drawn
     // before the handshake completed can be lost on the appliance.
-    ServerState state{pixels, &endpoint, gpu_armed ? &gpu_client : nullptr, gpu_armed, {}};
+    ServerState state{raster, &endpoint, gpu_armed ? &gpu_client : nullptr, gpu_armed, {}};
 
     mochi::boot::ready(boot);
     while (true) {

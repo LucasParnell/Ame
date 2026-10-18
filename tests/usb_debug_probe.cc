@@ -44,9 +44,9 @@ int main() {
         const auto length = mochi::usb::gadget::configuration(libk::as_bytes(descriptors),
                                                               speed == MxUsbSpeed::High);
         midix::usb::Configuration config{interfaces, endpoints, 4, 8, 0, 0, 0, 0, 0, 0};
-        assert(length == 98 && midix::usb::parse_configuration(libk::as_bytes(descriptors, length),
+        assert(length == 130 && midix::usb::parse_configuration(libk::as_bytes(descriptors, length),
                                                                speed, &config));
-        assert(config.interface_count == 3 && config.endpoint_count == 5);
+        assert(config.interface_count == 4 && config.endpoint_count == 7);
         assert(endpoints[1].max_packet == (speed == MxUsbSpeed::High ? 512 : 64));
     }
     assert(mochi::usb::gadget::string_descriptor(libk::as_bytes(descriptors), 1) == 8);

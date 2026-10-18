@@ -5,6 +5,10 @@ Updated 14 October 2026. This work targets the unlocked ANE-LX1 running
 prints hello through the emulated UART. Native execution still needs a firmware
 handoff that gives Ame control of EL2.
 
+See the later [EL2 path audit](EL2_PATH_AUDIT.md) for alternate boot-chain
+routes and corrections to the RPMB canary evidence. Deployment paragraphs
+below are historical snapshots; they do not describe the latest flashed image.
+
 ## Recorded hardware evidence
 
 - The verified native captures enter Anko at **EL1**.
@@ -66,6 +70,45 @@ Next inspect matching, hash-pinned bootloader/secure-monitor startup artifacts
 to locate the transition into the kernel. Record the responsible component and
 an evidenced entry mechanism before constructing a phone EL2 handoff probe.
 No lower boot-stage modification is part of this implementation.
+
+## EL3 compatibility probe
+
+The INFILTRATE 2019 presentation describes a Kirin 970/P20-specific RPMB
+callback path. Its addresses cannot be copied to the ANE-LX1: the matching
+Hi6250 EMUI-8 kernel source places the BL31 shared area at `0x34a21000`, the
+RPMB request window at `0x34a29000` (size `0x8000`), and BL31 at `0x35e00000`.
+The presentation's Kirin 970 values (`0x209e1000` and the `0x1fe00000` BL31
+region) therefore do not describe this phone.
+
+The native shell now has `diag el3`. It issues only the standard RPMB service
+metadata calls (`CALL_COUNT`, `UID`, and `VERSION`) and prints their four return
+words, together with the Hi6250 layout. The legacy callback ABI fields are zero:
+Linux defines no callback in its RPMB request. It does not set the RPMB request
+pointer, touch the shared window, call the request-completion service, alter page permissions, or
+execute a payload. A successful metadata response establishes that the EL3
+service is reachable; it does not establish an EL2 handoff.
+
+The probe was physically run on the connected ANE-LX1 after the verified
+identity preflight. The serial report completed with `el3.rpmb_call_count.x0 =
+0xf` and service version words `0, 1, ...`, confirming the standard RPMB
+metadata service is reachable. The same run reports `hardware_field=2`, but all
+eight CPUs still enter Ame at EL1 with `monitor_ready=0`. Thus the metadata
+service is present, while this probe does not provide an EL2 handoff.
+
+The tested image is `out/anne-el3-probe-package-v1/ame-native-kernel.img`,
+SHA-256
+`3b2ec226ba9d71d5e8b9bb76143d75d4c1564052859862f0804586fa2f767102`.
+The phone is currently left running this image for follow-up work; the verified
+stock restore image remains in the same package.
+
+The explicit `diag el3-canary` run then issued only `RPMB_SVC_REQUEST_ADDR`
+with that validated request address. EL3 returned `0xff01`, which the matching
+Hi6250 header names `RPMB_EXCEED_PART`; the shell prompt remained responsive and
+the callback/completion SMC was never issued. This result is inconclusive: the
+stock Hi6250 driver populates a `rpmb_config_info` structure in the request
+window before registering the address, while this first canary intentionally
+left the window untouched. It must not be read as proof that the address is
+rejected until that precondition is reproduced with the correct cache policy.
 
 Separately, the native allocator remains capped at 128 MiB, which cannot back
 the current 128 MiB Linux guest alongside Ame. Expand the verified usable host

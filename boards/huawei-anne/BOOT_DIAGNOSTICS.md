@@ -18,18 +18,20 @@ IOMMU, interrupts, timer, capabilities, IPC, scheduler, authenticated bundle,
 init creation, scheduler entry, first timer IRQ and service readiness.
 
 `!FAULT` captures the last checkpoint, ESR, fault PC, FAR and original stack
-pointer on a private per-CPU fault stack. `!PANIC` records the panic reason. After a
-three-second fault LED hold, `RESET nmi=0x4` precedes the verified LPM3 NMI
+pointer on a private per-CPU fault stack. `!PANIC` records the panic reason.
+`RESET nmi=0x4` precedes the verified LPM3 NMI
 pulse. Nested faults bypass logging and attempt reset directly. A hardware hang
 that raises no exception still needs the physical fastboot button sequence.
 
 LED stage requests are red at entry, blue at `kernel_main`, green only at service
-readiness, and white on fault. Holds last three seconds using the measured
-1,920,000 Hz counter rate, also used by the native scheduler, timer and kernel
-timestamps. The v6 phone test showed red, purple, purple, then reset: physical
+readiness, and white on fault. These transitions have no blocking LED dwell;
+the former three-second pauses were removed from the boot and fault paths.
+The measured 1,920,000 Hz counter rate is used by the native scheduler, timer
+and kernel timestamps. The v6 phone test showed red, purple, purple, then reset: physical
 LED output worked but selected colours were mixed. The current native LED
 sequence fixes unselected output-control pairs, and the v3 eight-core capture
-physically showed red, blue, green, reboot. The archived v6 probe is unchanged.
+physically showed red, blue, green, reboot. Historical v6 captures used the
+three-second holds; the minimal probe now records transitions without waiting.
 
 Build and package:
 
@@ -89,6 +91,19 @@ boots through service readiness, faults before constructors and after MMU
 enable, and retention in all five copies across address-space switches. The
 synthetic build is a QEMU target and is rejected by the native package builder.
 
+The synthetic eight-core workload validates the EL3 diagnostic range through
+`MX_DIAG_EL3_MAX_INDEX`, shared with the syscall dispatcher. Metadata remains
+unavailable, every recognized native operation returns `NOT_IMPLEMENTED`, and
+the next index and `u64` maximum return `INVALID`. The workload then runs and
+checks one pinned worker per CPU. A stale boundary used to stop the validation
+service before its workers launched, causing readiness timeouts.
+
+Minimal-entry tests require every LED transition to be recorded in under one
+second, with no configured dwell, and still verify elapsed-time boundaries,
+counter wrap, framebuffer bounds, pixels and glyphs. The updated focused gate
+passes all 27 boot/display tests, including eight-core EL1/EL2 workloads, fault
+records and watchdog retention. Normal QEMU boot also reaches all-services-ready.
+
 This validation found a real native bundle mapping bug: `.balign 16` left the
 embedded MXB physical base unaligned for init's page mapping. The embedding
 now aligns and pads the bundle to 4 KiB without changing its signed contents.
@@ -117,5 +132,5 @@ trace after console ring attachment, so a stalled console service cannot hide
 the scheduler's dispatch or userspace fault messages.
 
 Eight-core native startup is now verified; see [SMP](SMP.md) and the
-[framebuffer handoff](../../docs/HUAWEI_FRAMEBUFFER_HANDOFF.md) for the latest
+[framebuffer reference](FRAMEBUFFER.md) for the latest
 LED correction, hardware evidence and recovery state.

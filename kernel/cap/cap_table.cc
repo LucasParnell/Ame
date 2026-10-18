@@ -50,7 +50,24 @@ static u32 nospec_index(u32 idx, u32 limit) {
     return idx & (0u - in_range);
 }
 
-static CapHandle alloc_locked(CapTable& table, CapType type, void* target, u32 rights) {
+// Preserve the rotating slot policy while examining at most 17 bitmap words,
+// rather than scanning up to 1024 separate capability cache lines.
+static u32 free_slot(const CapTable& table) {
+    if (table.used_count == kCapTableSize) return kCapTableSize;
+    const u32 start = table.next_free;
+    const u32 first = start / 64, bit = start % 64;
+    for (u32 step = 0; step <= kCapBitmapWords; ++step) {
+        const u32 word = (first + step) % kCapBitmapWords;
+        u64 free = ~table.occupied[word];
+        if (!step) free &= ~0ull << bit;
+        else if (step == kCapBitmapWords) free &= ~(~0ull << bit);
+        if (free) return word * 64 + __builtin_ctzll(free);
+    }
+    return kCapTableSize;
+}
+
+static CapHandle alloc_locked(CapTable& table, CapType type, void* target, u32 rights,
+                              object::Record* cached = nullptr) {
     if (!target || type == CAP_NULL) {
         return kNullCap;
     }
@@ -59,19 +76,20 @@ static CapHandle alloc_locked(CapTable& table, CapType type, void* target, u32 r
         return kNullCap;
     }
 
-    for (u32 i = 0; i < kCapTableSize; ++i) {
-        const u32 idx = (table.next_free + i) % kCapTableSize;
+    {
+        const u32 idx = free_slot(table);
+        if (idx == kCapTableSize) return kNullCap;
         CapEntry& e = table.entries[idx];
-        if (e.type_tag != CAP_NULL) {
-            continue;
-        }
+        ANKO_ASSERT(e.type_tag == CAP_NULL);
 
         u32 gen = e.generation;
         if (gen == 0) {
             gen = 1;
         }
 
-        object::Record* record = object::acquire(target);
+        object::Record* record = cached;
+        if (record) object::retain(record);
+        else record = object::acquire(target);
         if (!record) {
             return kNullCap;
         }
@@ -83,9 +101,10 @@ static CapHandle alloc_locked(CapTable& table, CapType type, void* target, u32 r
         e.flags = 0;
 
         table.next_free = (idx + 1) % kCapTableSize;
+        table.occupied[idx / 64] |= 1ull << (idx % 64);
+        ++table.used_count;
         return cap_make(idx, gen);
     }
-    return kNullCap;
 }
 
 void init() {
@@ -95,8 +114,12 @@ void init() {
 // Allocate a new slot in a process's cap table.
 // Returns the new handle, or kNullCap if the table is full.
 CapHandle alloc(CapTable& table, CapType type, void* target, u32 rights) {
+    return alloc(table, type, target, rights, nullptr);
+}
+
+CapHandle alloc(CapTable& table, CapType type, void* target, u32 rights, object::Record* record) {
     kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
-    return alloc_locked(table, type, target, rights);
+    return alloc_locked(table, type, target, rights, record);
 }
 
 // Validation and retention happen together under the table lock. No caller
@@ -158,39 +181,44 @@ void revoke(CapTable& table, CapHandle handle) {
         record = e.object;
         e.generation = next_generation(e.generation);
         clear_entry(e);
+        table.occupied[idx / 64] &= ~(1ull << (idx % 64));
+        --table.used_count;
     }
     object::release(record);
 }
 
-void revoke_target(CapTable& table, void* target) {
-    if (!target) {
-        return;
-    }
-    for (u32 i = 0; i < kCapTableSize; ++i) {
-        object::Record* record = nullptr;
+static void clear_matching(CapTable& table, void* target, bool all) {
+    // A bounded pointer batch keeps the kernel stack small. Detach one bitmap
+    // word under the lock, then run destructors outside it: callbacks may take
+    // other table locks or allocate capabilities themselves.
+    for (u32 word = 0; word < kCapBitmapWords; ++word) {
+        object::Record* records[64];
+        u32 count = 0;
         {
             kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
-            CapEntry& e = table.entries[i];
-            if (e.type_tag == CAP_NULL || e.target != target) {
-                continue;
+            u64 occupied = table.occupied[word];
+            while (occupied) {
+                const u32 bit = __builtin_ctzll(occupied);
+                occupied &= occupied - 1;
+                CapEntry& e = table.entries[word * 64 + bit];
+                if (!all && e.target != target) continue;
+                records[count++] = e.object;
+                e.generation = next_generation(e.generation);
+                clear_entry(e);
+                table.occupied[word] &= ~(1ull << bit);
+                --table.used_count;
             }
-            record = e.object;
-            e.generation = next_generation(e.generation);
-            clear_entry(e);
         }
-        object::release(record);
+        for (u32 i = 0; i < count; ++i) object::release(records[i]);
     }
 }
 
+void revoke_target(CapTable& table, void* target) {
+    if (target) clear_matching(table, target, false);
+}
+
 void clear(CapTable& table) {
-    for (u32 i = 0; i < kCapTableSize; ++i) {
-        CapHandle handle;
-        {
-            kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
-            handle = cap_make(i, table.entries[i].generation);
-        }
-        revoke(table, handle);
-    }
+    clear_matching(table, nullptr, true);
 }
 
 bool reserve_slots(CapTable& table, u32 count) {
@@ -198,13 +226,7 @@ bool reserve_slots(CapTable& table, u32 count) {
         return true;
     }
     kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
-    u32 free_count = 0;
-    for (u32 i = 0; i < kCapTableSize; ++i) {
-        if (table.entries[i].type_tag == CAP_NULL && ++free_count >= count) {
-            return true;
-        }
-    }
-    return false;
+    return count <= kCapTableSize - table.used_count;
 }
 
 // Duplicate a capability with a reduced rights mask (spec sys_cap_dup).
@@ -231,7 +253,8 @@ CapHandle dup(CapTable& table, CapHandle src, u32 rights_mask) {
     if (new_rights == 0) {
         return kNullCap;
     }
-    return alloc_locked(table, static_cast<CapType>(src_e->type_tag), src_e->target, new_rights);
+    return alloc_locked(table, static_cast<CapType>(src_e->type_tag), src_e->target,
+                         new_rights, src_e->object);
 }
 
 } // namespace cap

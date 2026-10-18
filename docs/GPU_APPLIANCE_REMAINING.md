@@ -22,7 +22,7 @@ Legend: **blocker** = needs something not in the tree yet · **hardening** = wor
 | 11 | Guest minimality | cross-cutting | **polish** | The guest is `defconfig`-derived (~6,250 steps, ~48 MB `Image`). Base on `allnoconfig` + an explicit enable set (PL011, GIC, timer, initramfs, PCI/virtio/DRM). |
 | 12 | Phase S — zero-copy Vulkan/compositor | S | **blocker** | Swapchain/compositor buffers crossing the boundary without CPU readback where safe, preserving ownership, fence transfer and IOMMU registration lifetimes. Depends on #1. |
 | 13 | CI / provenance / release | cross-cutting | **polish** | No CI; a provenance gate exists (`generated/provenance.json`). Release signing needs a key kept outside the repo (`scripts/make-release-key.sh`); the no-key release fails closed by design. |
-| 14 | Docs currency | cross-cutting | **polish** | `docs/FEATURE_STATUS.md` and `docs/CLEANUP_STATUS.md` should be refreshed per landed phase; `docs/GPU_APPLIANCE_TODO.md`'s status table is updated alongside this note. |
+| 14 | Docs currency | cross-cutting | **polish** | `docs/FEATURE_STATUS.md` and this remaining-work list should be refreshed per landed phase. |
 
 ## Suggested order
 

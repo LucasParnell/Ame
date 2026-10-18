@@ -8,6 +8,7 @@
 #include "anko/cap.h"
 #include "anko/sched.h"
 #include "libk/string.h"
+#include "ipc_internal.h"
 
 namespace ipc {
 
@@ -24,20 +25,14 @@ void init() {
 }
 
 static cap::Ref resolve_ring_entry(u32 pid, CapHandle ring_cap, u32 need_rights) {
-    auto p = sched::find_process(pid);
-    if (!p || !p->cap_table) return nullptr;
-
-    cap::Ref e = cap::lookup(*p->cap_table, ring_cap, CAP_SHARED_RING);
-    if (!e) return nullptr;
-    if ((e->rights_mask & need_rights) != need_rights) return nullptr;
-    return e;
+    return resolve_entry(pid, ring_cap, CAP_SHARED_RING, need_rights);
 }
 
 Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
     (void)flags;
     if (order < MX_RING_ORDER_MIN || order > MX_RING_ORDER_MAX) return nullptr;
 
-    auto owner = sched::find_process(pid);
+    auto owner = process_reference(pid);
     if (!owner || !owner->cap_table) return nullptr;
 
     const usize slots = (1u << order);
@@ -61,29 +56,27 @@ Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
     ring->consumer_pid = pid;
     ring->owner_generation = owner->generation;
 
-    if (!object::create(ring, destroy_ring)) { destroy_ring(ring); return nullptr; }
+    ring->lifetime = object::create(ring, destroy_ring);
+    if (!ring->lifetime) { destroy_ring(ring); return nullptr; }
     return ring;
 }
 
 CapHandle ring_cap_alloc(u32 target_pid, Ring* ring, u32 rights) {
     if (!ring) return kNullCap;
-    auto target = sched::find_process(target_pid);
+    auto target = process_reference(target_pid);
     if (!target || !target->cap_table) return kNullCap;
 
     const u32 allowed = RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP;
     const u32 requested = rights & allowed;
     if (requested == 0) return kNullCap;
-    return cap::alloc(*target->cap_table, CAP_SHARED_RING, ring, requested);
+    return cap::alloc(*target->cap_table, CAP_SHARED_RING, ring, requested, ring->lifetime);
 }
 
 CapHandle ring_create(u32 pid, u32 order, u32 flags) {
     Ring* ring = ring_create_object(pid, order, flags);
     if (!ring) return kNullCap;
-    // acquire balances itself; the second release transfers the creator root.
-    auto* root = object::acquire(ring);
     CapHandle handle = ring_cap_alloc(pid, ring, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
-    object::release(root);
-    object::release(root);
+    object::release(ring->lifetime); // transfer the creator root to the capability
     return handle;
 }
 
@@ -94,23 +87,23 @@ CapHandle ring_share(u32 owner_pid, CapHandle ring_cap,
     Ring* ring = static_cast<Ring*>(src->target);
     if (!ring) return kNullCap;
 
-    auto target = sched::find_process(target_pid);
+    auto target = process_reference(target_pid);
     if (!target || !target->cap_table) return kNullCap;
 
     const u32 allowed = RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP;
     const u32 requested = rights & allowed;
     if (requested == 0) return kNullCap;
     if ((requested & src->rights_mask) != requested) return kNullCap;
-    const u32 granted = requested;
-    const CapHandle h = ring_cap_alloc(target_pid, ring, granted);
+    const CapHandle h = cap::alloc(*target->cap_table, CAP_SHARED_RING, ring, requested, src->object);
     if (h == kNullCap) return kNullCap;
-    if (ring->consumer_pid == owner_pid) ring->consumer_pid = target_pid;
+    __atomic_compare_exchange_n(&ring->consumer_pid, &owner_pid, target_pid, false,
+                                 __ATOMIC_RELAXED, __ATOMIC_RELAXED);
     return h;
 }
 
 cap::Borrow<Ring> ring_from_cap(u32 pid, CapHandle cap) {
     cap::Ref e = resolve_ring_entry(pid, cap, RIGHT_READ);
-    return e ? cap::Borrow<Ring>(e) : cap::Borrow<Ring>(nullptr);
+    return e ? cap::Borrow<Ring>(static_cast<cap::Ref&&>(e)) : cap::Borrow<Ring>(nullptr);
 }
 
 } // namespace ipc

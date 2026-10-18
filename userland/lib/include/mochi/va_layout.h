@@ -86,6 +86,7 @@ constexpr uint64_t kSlotStride = 2 * kReplyOffset;
 static_assert(mx_ring_page_bytes(MX_DEFAULT_RING_ORDER) <= kReplyOffset);
 constexpr uint64_t request(uint32_t slot) { return kRingBase + slot * kSlotStride; }
 constexpr uint64_t reply(uint32_t slot) { return request(slot) + kReplyOffset; }
+constexpr uint64_t write_arena(uint32_t slot) { return 0x2e00'0000ull + slot * 0x10000ull; }
 }
 
 // --- nameservice -----------------------------------------------------------
@@ -98,6 +99,7 @@ constexpr uint64_t kVaLogRing = 0x2002'0000ull;
 // through the fixed mappings above it.
 namespace init {
 constexpr uint64_t kVaServiceState = 0x1b10'0000ull;
+constexpr uint64_t kVaFido2Demand = 0x1b20'0000ull;
 constexpr uint64_t kVaManifest       = 0x2000'0000ull;
 constexpr uint64_t kVaInitrd         = 0x2400'0000ull;
 constexpr uint64_t kVaInitLogRing    = kVaInitrd + DANGO_INITRD_VA_SPAN;
@@ -121,6 +123,7 @@ constexpr uint64_t kVaShellInputRing  = 0x1908'0000ull; // tty -> msh
 constexpr uint64_t kVaShellOutputRing = 0x190A'0000ull; // msh -> tty
 constexpr uint64_t kVaSerialInRing    = 0x190C'0000ull; // serial bridge -> tty (shell input)
 constexpr uint64_t kVaSerialOutRing   = 0x190E'0000ull; // tty -> serial bridge (shell output)
+constexpr uint64_t kVaFido2Prompt     = 0x1910'0000ull;
 }
 
 // --- msh -------------------------------------------------------------------

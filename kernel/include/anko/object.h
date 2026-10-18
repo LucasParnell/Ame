@@ -2,7 +2,9 @@
 #include "anko/types.h"
 
 // A reference protects the object, independently of the capability slot that
-// supplied it. Destructors run after the object registry lock is released.
+// supplied it. Retaining an owned record and dropping a nonfinal reference are
+// lock-free. Creation, target lookup, and final unlink use the registry lock;
+// destructors run after that lock is released.
 namespace object {
 struct Record;
 using Destructor = void (*)(void*);
@@ -11,6 +13,9 @@ Record* acquire(void* target);                    // static objects are allowed
 void retain(Record* record);
 void release(Record* record);
 u64 live_count();
+// Caller holds a reference. Includes capability and mapping pins, so an arena
+// cache can refuse reuse while read-only client views still exist.
+u64 reference_count(Record* record);
 
 template <class T> class Ref {
     T* target_ = nullptr;
@@ -23,6 +28,14 @@ template <class T> class Ref {
         if (!record_) {
             target_ = nullptr;
         }
+    }
+    // The caller already owns a live reference and has cached its record.
+    // Retain that identity directly instead of searching the object registry.
+    // A missing record preserves support for caller-owned/static probe objects.
+    Ref(T* target, Record* record) : target_(target), record_(record) {
+        if (record_) retain(record_);
+        else record_ = acquire(target);
+        if (!record_) target_ = nullptr;
     }
     Ref(const Ref& other) : target_(other.target_), record_(other.record_) {
         retain(record_);
@@ -40,6 +53,15 @@ template <class T> class Ref {
         auto* old = record_;
         record_ = fresh;
         target_ = fresh ? target : nullptr;
+        release(old);
+    }
+    void reset(T* target, Record* record) {
+        // Retain before dropping the old reference, including self-reset.
+        if (record) retain(record);
+        else record = acquire(target);
+        auto* old = record_;
+        record_ = record;
+        target_ = record ? target : nullptr;
         release(old);
     }
     T* get() const {

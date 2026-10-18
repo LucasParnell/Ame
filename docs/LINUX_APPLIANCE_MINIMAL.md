@@ -5,7 +5,7 @@ Applies to every Dango guest kernel (`linux-artifacts/config/*.fragment`).
 ## Principle
 
 The Linux guest exists **only** to run a hardware driver and a paravirtual channel back to Ame
-(`Architecture_3.md §16`, "Linux as Driver Appliance"). It is not a general-purpose system. Every
+(`docs/architecture.md §16`, "Linux as Driver Appliance"). It is not a general-purpose system. Every
 kernel feature that is not required by (a) boot on arm64/QEMU `virt`, (b) the assigned-device flows,
 or (c) the Dango channel is **off**. A fat guest is a bug: it enlarges the attack surface, slows
 boot, and hides accidental dependencies.

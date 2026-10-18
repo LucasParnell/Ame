@@ -16,6 +16,7 @@
 #include "anko/spinlock.h"
 #include "libk/string.h"
 #include "sched_internal.h"
+#include "anko/runtime_snapshot.h"
 
 namespace sched {
 
@@ -36,11 +37,35 @@ struct ExitRecord { u64 identity; u64 supervisor; long status; bool ready; };
 // A PID remains unavailable while its exit record is unacknowledged. Therefore
 // every possible child has a reserved slot and simultaneous deaths cannot drop.
 static ExitRecord g_exits[kMaxProcs + 1];
+// Cold lifecycle column, indexed by PID under g_lifecycle_lock. A binding owns
+// one reference to the doorbell. Keep it out of Process's scheduling/accounting
+// fields: dispatch and ticks do not need to fetch notification metadata.
+static Doorbell* g_exit_doorbells[kMaxProcs + 1];
 u64 process_identity(const Process& p) { return (static_cast<u64>(p.generation) << 32) | p.pid; }
+
+SysError bind_exit_doorbell(Process& supervisor, Doorbell* doorbell) {
+    Doorbell* previous;
+    bool pending = false;
+    {
+        kernel::LockGuard guard(g_lifecycle_lock);
+        if (supervisor.dying) return E_DEAD;
+        previous = g_exit_doorbells[supervisor.pid];
+        if (doorbell) object::retain(doorbell->lifetime);
+        g_exit_doorbells[supervisor.pid] = doorbell;
+        for (const auto& event : g_exits)
+            pending |= event.ready && event.supervisor == process_identity(supervisor);
+    }
+    // Final release and wake scheduling must run outside the lifecycle lock.
+    if (pending && doorbell) ipc::notify_object(doorbell);
+    if (previous) object::release(previous->lifetime);
+    return E_OK;
+}
 
 void record_exit(Process* p, long status) {
     if (!p || !p->supervisor_identity) return;
     kernel::LockGuard guard(g_lifecycle_lock);
+    auto* parent = p->supervisor_pid <= kMaxProcs ? g_processes[p->supervisor_pid] : nullptr;
+    if (!parent || parent->dying || process_identity(*parent) != p->supervisor_identity) return;
     auto& event = g_exits[p->pid];
     if (!event.identity) event = {process_identity(*p), p->supervisor_identity, status, false};
 }
@@ -349,13 +374,8 @@ Process* process_create(PrincipalClass principal, u32 supervisor_pid) {
         return nullptr;
     }
     libk::memset(p->cap_table, 0, sizeof(CapTable));
-    p->cap_table->next_free = 0;
-
-    // Initialize generations to non-zero so handle 0 is never treated as valid.
-    for (u32 i = 0; i < kCapTableSize; ++i) {
-        p->cap_table->entries[i].generation = 1;
-        p->cap_table->entries[i].type_tag = CAP_NULL;
-    }
+    // Empty slots are already zero. Allocation assigns generation 1 lazily;
+    // avoid a second strided write across every capability cache line here.
 
     p->arena_table = static_cast<ArenaTable*>(
         mm::slab_alloc(sizeof(ArenaTable), alignof(ArenaTable)));
@@ -385,6 +405,7 @@ Process* process_create(PrincipalClass principal, u32 supervisor_pid) {
 void process_destroy(Process* p) {
     if (!p) return;
     bool completed = false;
+    Doorbell* detached = nullptr;
     {
         kernel::LockGuard guard(g_lifecycle_lock);
         if (p->dying == 2) return;
@@ -393,25 +414,54 @@ void process_destroy(Process* p) {
         if (!p->threads) {
             __atomic_store_n(&p->dying, 2u, __ATOMIC_RELEASE);
             unregister_process(p);
+            detached = g_exit_doorbells[p->pid];
+            g_exit_doorbells[p->pid] = nullptr;
             // A dead supervisor cannot acknowledge children. Release their PID
             // reservations instead of stranding them indefinitely.
             for (auto& child : g_exits) if (child.supervisor == process_identity(*p)) child = {};
             completed = true;
         }
     }
+    if (detached) object::release(detached->lifetime);
     if (completed) {
+        // Ephemeral sessions cannot outlive the service that owns them.
+        // Snapshot one retained child at a time, outside the lifecycle lock.
+        for (u32 pid = 1; pid <= kMaxProcs; ++pid) {
+            auto child = find_process(pid);
+            if (child && child->kill_with_supervisor &&
+                child->supervisor_identity == process_identity(*p)) {
+                record_exit(child.get(), -1);
+                process_destroy(child.get());
+            }
+        }
         platform::fence_owner(process_identity(*p));
         sweep_process_caps(p);
         cap::clear(*p->cap_table);
         irq::unbind_owner(process_identity(*p));
+        object::Ref<Doorbell> exit_wake;
         {
             kernel::LockGuard guard(g_lifecycle_lock);
             auto& event = g_exits[p->pid];
-            if (event.identity) event.ready = true;
+            if (event.identity) {
+                event.ready = true;
+                auto* parent = g_processes[p->supervisor_pid];
+                if (parent && !parent->dying && process_identity(*parent) == p->supervisor_identity) {
+                    auto* db = g_exit_doorbells[parent->pid];
+                    if (db) exit_wake.reset(db, db->lifetime);
+                }
+            }
         }
-        for (u32 tid = 1; tid <= kMaxThreads; ++tid) {
-            auto waiter = find_thread(tid);
-            if (waiter && process_identity(*waiter->owner) == p->supervisor_identity) wake(waiter);
+        if (exit_wake) {
+            // Publish the exit before incrementing the counter. A supervisor
+            // samples that counter BEFORE polling and therefore cannot sleep
+            // past an exit arriving between its final poll and wait syscall.
+            ipc::notify_object(exit_wake.get());
+        } else {
+            // Existing supervisors without a binding retain their old wake.
+            for (u32 tid = 1; tid <= kMaxThreads; ++tid) {
+                auto waiter = find_thread(tid);
+                if (waiter && process_identity(*waiter->owner) == p->supervisor_identity) wake(waiter);
+            }
         }
         object::release(p->lifetime);
     }
@@ -421,6 +471,7 @@ void process_set_name(Process* p, const char* name) {
     if (!p || !name) return;
     usize len = libk::strlen(name);
     if (len >= sizeof(p->name)) len = sizeof(p->name) - 1;
+    kernel::LockGuard guard(g_lifecycle_lock);
     libk::memcpy(p->name, name, len);
     p->name[len] = '\0';
 }
@@ -462,6 +513,15 @@ object::Ref<Process> find_process(u32 pid) {
     kernel::LockGuard guard(g_lifecycle_lock);
     if (!pid || pid > kMaxProcs) return nullptr;
     return object::Ref<Process>(g_processes[pid]);
+}
+
+bool process_runtime_snapshot(u32 first_pid, MxDiagRuntimeBatch* out) {
+    static_assert(kMaxProcs == MX_DIAG_PROCESS_LIMIT);
+    kernel::LockGuard guard(g_lifecycle_lock);
+    if (!copy_runtime_batch(g_processes, kMaxProcs, first_pid, out)) return false;
+    out->sampled_ns = sched_clock_ns();
+    out->online_mask = online_cpu_mask();
+    return true;
 }
 
 void sweep_process_caps(void* target) {

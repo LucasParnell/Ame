@@ -1,38 +1,35 @@
 #pragma once
 // userland/fs/fs_internal.h — shared surface for the io.fs service modules.
 //
-// io.fs is a fixed-capacity, data-oriented filesystem service. The boot wiring
+// io.fs is an allocation-free, data-oriented filesystem service. The boot wiring
 // and the per-client SPSC session loop live in fs_ring.cc; everything else is
 // split by responsibility:
 //
-//   fs_core     — in-memory inode/extent/phys-ref core, checksums, formatting
+//   fs_core     — volatile/legacy inode/extent/phys-ref core and checksums
+//   store       — disk-resident B+trees, full-volume allocation, redo recovery
+//   fs_io       — per-client upload arenas and pinned immutable read views
 //   fs_handles  — open-handle table, per-session handle ownership, handlers
 //   fs_snapshot — copy-on-write snapshot pin/unpin and snapshot handlers
 //   fs_disk     — the midix-fs-v1 disk backend (GPT, B+tree, block cache)
 //   fs_ring     — boot wiring, per-client session loop, request dispatch
 //
 // Mount semantics, kept explicit here because the whole service depends on them
-// (see also docs/FS_SPEC.md and docs/CLEANUP_STATUS.md item 5):
+// (see also docs/FS_SPEC.md):
 //
-//   * The disk root is READ-ONLY. Every disk-backed handle is opened read-only
-//     (disk handles carry no mutation access), and FS_OPEN_WRITE/CREATE/TRUNC
-//     are rejected with MX_ERR_PERM before the request can reach the disk
-//     B+tree. Redirecting/overlaying the root read-only means a client can never
-//     mutate the signed disk image through io.fs.
+//   * The packaged disk root is READ-ONLY. Its handles carry no mutation
+//     authority. /data redirects to a separate mutable disk inode subtree.
 //
 //   * /tmp is VOLATILE. It lives only in the in-memory inode table, is
 //     redirected away from the disk root on open (fs_handles handle_open), and
 //     is discarded on service restart. Nothing under /tmp is ever written back
 //     to the disk image.
 //
-//   * /data is the DURABLE user volume. It is also served from the in-memory
-//     inode table (so the read-only root is never mutated), but on FS_SYNC the
-//     whole /data subtree is serialised into the disk's reserved journal region
-//     through the block service (BLK_WRITE) and flushed with BLK_FLUSH. On the
-//     next mount the region is replayed, so a file written and synced survives a
-//     reboot. When no writable region exists (memory backend, or a disk without
-//     a usable reserved region) /data is an explicitly NON-DURABLE in-memory
-//     volume and FS_SYNC returns MX_ERR_NOT_IMPLEMENTED. See fs_durable.cc.
+//   * /data uses store.cc's disk-resident trees and full-volume bitmaps. Each
+//     mutation commits ordered CoW data and metadata redo; FS_SYNC flushes the
+//     device. Bounded RAM limits cache/transaction working sets, not capacity.
+//     Legacy DUR1 checkpoint images retain fs_durable.cc for read/export and
+//     are never silently overwritten. Without a disk, /data remains volatile
+//     and FS_SYNC reports MX_ERR_NOT_IMPLEMENTED.
 
 #include "libk/bytes.h"
 #include "libk/hash.h"
@@ -45,11 +42,12 @@
 #include "mochi/fs.h"
 #include "mochi/boot.h"
 #include "midix/abi/protocols/fs.h"
+#include "store.h"
 using namespace mochi::va::fs;
 
 // ---------------------------------------------------------------------------
-// Geometry and shared limits. All storage is fixed-capacity on purpose: the
-// hot path never allocates, so every table is sized at compile time.
+// Geometry and bounded volatile-backend tables. Disk volume geometry comes
+// from its superblock; these table sizes do not cap disk files or disk capacity.
 // ---------------------------------------------------------------------------
 constexpr mx_u32_t kRingOrder = MX_DEFAULT_RING_ORDER;
 constexpr mx_u32_t kSectorSize = 512;
@@ -126,6 +124,7 @@ struct SnapshotState {
 struct OpenHandle {
     bool used;
     bool disk_backed;
+    bool volume_backed;
     // Session ownership. owner is the directory slot index; owner_generation is
     // the slot generation at open time. Both must match the currently served
     // client for the handle to be accepted, so a token minted before a client
@@ -164,6 +163,12 @@ extern mx_u32_t g_data_inode;
 // Currently served client, set by the session loop before dispatching a request.
 extern mx_u32_t g_session;
 extern mx_u64_t g_session_generation;
+extern mochi::store::State g_volume;
+struct FsTransfer { mx_handle_t peer, write_token; mx_u8_t* write; };
+extern FsTransfer g_transfers[];
+void close_transfer_session(mx_u32_t session);
+mx_i32_t volume_read(const OpenHandle&, const FsReadRequest&, FsReadReply&);
+mx_i32_t volume_write(const OpenHandle&, const FsWriteRequest&);
 
 // ---------------------------------------------------------------------------
 // Small freestanding helpers, shared by every module.
@@ -261,6 +266,8 @@ bool disk_mounted();
 bool disk_read_block(mx_u64_t block, mx_u8_t* out);
 // Write one fs block through the block service and keep the cache coherent.
 bool disk_write_block(mx_u64_t block, const mx_u8_t* data);
+bool disk_read_blocks(mx_u64_t block, mx_u32_t count, void* out);
+bool disk_write_blocks(mx_u64_t block, mx_u32_t count, const void* data);
 // BLK_FLUSH; returns MX_OK when the device reports durable completion.
 mx_i32_t disk_flush();
 // The reserved, non-root region io.fs may use for durable user data. Returns

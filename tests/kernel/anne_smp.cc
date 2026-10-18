@@ -52,6 +52,23 @@ void check_diagnostics() {
         sys_debug_read(MX_DIAG_SYSTEM, 0, reinterpret_cast<void*>(0x1000), sizeof(info)) != MX_ERR_FAULT)
         fail("DIAG_READ request validation failed\n");
     marker("DIAG_READ complete records=8 retained_repeatable=1 bounds_checked=1\n");
+    // This workload runs against the synthetic Huawei board. It must never
+    // access the phone's physical RPMB window or issue its vendor SMCs.
+    MxDiagEl3 el3{};
+    if (sys_debug_read(MX_DIAG_EL3, 0, &el3, sizeof(el3)) != sizeof(el3) ||
+        el3.available != 0 || el3.request_address != 0)
+        fail("DIAG_READ synthetic EL3 metadata failed\n");
+    for (uint64_t index = 1; index <= MX_DIAG_EL3_MAX_INDEX; ++index)
+        if (sys_debug_read(MX_DIAG_EL3, index, &el3, sizeof(el3)) != MX_ERR_NOT_IMPLEMENTED)
+            fail("DIAG_READ synthetic EL3 request executed\n");
+    if (sys_debug_read(MX_DIAG_EL3, MX_DIAG_EL3_MAX_INDEX + 1, &el3, sizeof(el3)) != MX_ERR_INVALID ||
+        sys_debug_read(MX_DIAG_EL3, ~uint64_t{0}, &el3, sizeof(el3)) != MX_ERR_INVALID ||
+        sys_debug_read(MX_DIAG_EL3, 0, reinterpret_cast<void*>(0x1000), sizeof(el3)) != MX_ERR_FAULT)
+        fail("DIAG_READ EL3 bounds failed\n");
+    char storage[96]; libk::str::Buffer line(storage);
+    line.format("DIAG_READ synthetic_el3_unavailable=1 native_requests_blocked=%llu\n",
+                static_cast<unsigned long long>(MX_DIAG_EL3_MAX_INDEX));
+    marker(line.data);
 }
 void worker(uint64_t expected) {
     const int64_t observed = sys_thread_get_cpu();

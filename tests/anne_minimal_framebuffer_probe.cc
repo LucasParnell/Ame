@@ -5,9 +5,12 @@
 
 int main() {
     using namespace anne::minimal;
-    static_assert(kCounterHz == 1920000 && kLedHoldTicks == 5760000);
-    static_assert(!elapsed(100, 5759999 + 100, kLedHoldTicks));
-    static_assert(elapsed(100, 5760000 + 100, kLedHoldTicks));
+    static_assert(kCounterHz == 1920000 && kLedHoldTicks == 0);
+    static_assert(elapsed(100, 100, kLedHoldTicks)); // LED stages never add a dwell
+    static_assert(!elapsed(100, 5759999 + 100, 5760000));
+    static_assert(elapsed(100, 5760000 + 100, 5760000));
+    static_assert(!elapsed(100, 100 + kBlinkTicks - 1, kBlinkTicks));
+    static_assert(elapsed(100, 100 + kBlinkTicks, kBlinkTicks));
     static_assert(elapsed(~std::uint64_t{0} - 5, 4, 10)); // counter wrap
     Registers r{1, 5u << 3, static_cast<unsigned>(kLogoBase), 270,
                 0, 0, 269, 2279, 1, 1079, 2279};

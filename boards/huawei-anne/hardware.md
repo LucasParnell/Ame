@@ -2,7 +2,7 @@
 
 Native eight-core Ressha startup is now hardware-verified: all eight pinned
 workers completed on their assigned cores, every core handled timer ticks and
-IPIs, and init reached service readiness without faults. See [the framebuffer handoff](../../docs/HUAWEI_FRAMEBUFFER_HANDOFF.md) for the
+IPIs, and init reached service readiness without faults. See [framebuffer reference](FRAMEBUFFER.md) for the
 latest LED test, artifacts and device state.
 
 Native framebuffer first light is now physically confirmed: `ANKO EL1` on a
@@ -200,13 +200,15 @@ also applies to these fastboot operations.
 ## Minimal framebuffer entry
 
 The current target is first-light v6, built from the archived v5 sources whose
-hashes were verified before modification. It holds red, blue and green LEDs for
-three seconds each, using the measured 1,920,000 Hz architectural counter rate;
+hashes were verified before modification. It records red, blue and green LED
+transitions using the measured 1,920,000 Hz architectural counter rate;
 the handset's CNTFRQ register incorrectly reports 16,384 Hz. White marks a fault
 and green blinking marks a returned reset pulse. The v5 LPM3 NMI pulse remains
 the reset mechanism. Logs now flush their complete written range and identify
 themselves as `AMEFL6`, with per-hold timestamps and PMIC control readbacks.
-These records can be recovered through pstore and Huawei DFX. Six entry/render/timing/fault
+These records can be recovered through pstore and Huawei DFX. The original v6
+capture used three-second LED holds; the current minimal and full-kernel boot
+paths record transitions without those delays. Six entry/render/timing/fault
 tests and seven native package/layout tests passed before the v6 flash. Physical
 LED visibility was observed on the handset: red, purple, purple, then reboot.
 Five 2642-byte `AMEFL6` pstore records survived restoration and TWRP startup.
@@ -454,4 +456,4 @@ The collector gathers recovery observations; bootloader state, partition backups
 framebuffer physical bounds, and handoff/reset behavior require additional
 verification. No boot addresses are generated from speculative defaults.
 
-See [the full port plan](../../docs/HUAWEI_P20_LITE_PLAN.md) for later milestones.
+See [the Dango plan](../../docs/HUAWEI_P20_LITE_DANGO_PLAN.md) for guest bring-up milestones.

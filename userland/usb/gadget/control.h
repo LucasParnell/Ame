@@ -76,16 +76,18 @@ inline bool service(Runtime& r) {
 }
 
 inline bool retry_pending(const Runtime& r) {
-    if (r.pending_function || (r.configuration && r.configure_next < kFunctionEndpointCount)) {
+    if (r.demand_pending || r.pending_function || (r.configuration && r.configure_next < kFunctionEndpointCount)) {
         return true;
     }
     if (!r.ep0_active && r.phase != ControlPhase::Idle && r.phase != ControlPhase::Function) {
         return true;
     }
-    for (const auto& function : r.functions) {
-        if (function.reset || function.rx_pending ||
+    for (mx_u32_t i = 0; i < 3; ++i) {
+        const auto& function = r.functions[i];
+        if ((function.reset && (i != 2 || r.fido2_requested)) || function.rx_pending ||
             (r.configuration && ((!function.rx_active && !function.rx_pending) ||
-                                 (function.tx_pending && !function.tx_active)))) {
+                                 (function.tx_pending && !function.tx_active &&
+                                  (i != 2 || function.tx_bytes == 64))))) {
             return true;
         }
     }
@@ -95,9 +97,12 @@ inline mx_u64_t readable_mask(const Runtime& r) {
     // Controller completions always remain consumable; function TX slots stay
     // queued while their previous chunk owns an IN packet/payload slice.
     const mx_u32_t packet_bytes = r.speed == MxUsbSpeed::High ? 512 : 64;
-    const auto readable = [&](const Function& function) {
-        return !function.tx_active && function.tx_bytes + MX_FUNCTION_INLINE_BYTES <= packet_bytes;
-    };
-    return 1u | (readable(r.functions[0]) ? 2u : 0u) | (readable(r.functions[1]) ? 4u : 0u);
+    mx_u64_t mask = 1;
+    for (mx_u32_t i = 0; i < 3; ++i) {
+        const auto& f = r.functions[i];
+        if (!f.tx_active && f.tx_bytes + MX_FUNCTION_INLINE_BYTES <= (i == 2 ? 64 : packet_bytes))
+            mask |= mx_u64_t{1} << (i + 1);
+    }
+    return mask;
 }
 } // namespace mochi::usb::gadget

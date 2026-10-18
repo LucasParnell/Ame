@@ -68,7 +68,14 @@ struct HwInfo {
 extern HwInfo g_hw;
 
 namespace platform {
+struct BootReservations;
 const HwInfo& get_board_fallback();
+// Bounded, allocation-free DTB -> hardware transform. Input stays immutable;
+// malformed data leaves hw unchanged. available=0 trusts the firmware extent.
+// Optional reservation output is invalidated on entry and published only when
+// complete. An invalid/overflowing reservation list does not discard hardware.
+bool probe_dtb(const u8* dtb, usize available, HwInfo& hw,
+               BootReservations* reservations = nullptr);
 // Fill g_hw from the DTB at dtb_phys; falls back to board constants on error.
 // Must be called before mm::phys_init().
 void probe(PhysAddr dtb_phys);

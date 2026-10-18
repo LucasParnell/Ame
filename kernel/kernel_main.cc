@@ -13,6 +13,7 @@
 #include "anko/console.h"
 #include "anko/fat_log.h"
 #include "anko/hw_info.h"
+#include "anko/boot_reservations.h"
 #include "libk/framebuffer.h"
 #include "anko/ipc.h"
 #include "anko/irq.h"
@@ -113,6 +114,25 @@ void reserve_prop(void* v, const char* name, const u8* data, u32 len, u32 depth)
 void reserve_dtb_regions(PhysAddr dtb_phys) {
     if (!dtb_phys) return;
     const auto* dtb = reinterpret_cast<const u8*>(dtb_phys);
+    const auto& cached = platform::boot_reservations();
+    if (cached.source == dtb) {
+        // Discovery validated and decoded both sections while caching was on.
+        // Only the sole boot CPU can consume this immutable batch; phys_init()
+        // has now made the allocator available. Preserve source order/counts.
+        for (u32 i = 0; i < cached.count; ++i) {
+            mm::reserve_phys_range(cached.ranges[i].base, cached.ranges[i].size);
+        }
+        if (cached.memreserve_count) {
+            ANKO_LOGF_INFO("kernel/dtb", "reserved memreserve entries=%u", cached.memreserve_count);
+        }
+        if (cached.count > cached.memreserve_count) {
+            ANKO_LOGF_INFO("kernel/dtb", "reserved-memory regs=%u",
+                           cached.count - cached.memreserve_count);
+        }
+        return;
+    }
+    // No complete batch (including overflow): retain the streaming fallback so
+    // a capacity bound or malformed DTB cannot silently drop protected memory.
     if (libk::be32(dtb) != fdt::kMagic) return;
 
     ReserveCtx memrsv{};
@@ -236,6 +256,12 @@ extern "C" [[noreturn]] void kernel_main() {
     mm::reserve_phys_range(anne::watchdog::kBase, PAGE_SIZE);
 #endif
     mm::reserve_phys_range(anne::kFirmwareFiqSource, PAGE_SIZE);
+#ifndef ANKO_ANNE_DIAG_TEST
+    // BL31 owns this region after Linux registers the RPMB request buffer.
+    // Keep it out of Ame's allocator so a later allocation cannot alias it.
+    mm::reserve_phys_range(anne::kRpmbSharedBase, anne::kRpmbSharedSize);
+    mm::reserve_phys_range(0xff390000, PAGE_SIZE); // Anne eMMC SDHCI + PHY
+#endif
     mm::reserve_phys_range(anne::kDebugRamBase, anne::kDebugRamBytes);
     mm::reserve_phys_range(anne::kDebugPmicBase, PAGE_SIZE);
     mm::reserve_phys_range(anne::kDebugSctrlBase, PAGE_SIZE);

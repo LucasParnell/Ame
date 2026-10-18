@@ -9,6 +9,7 @@
 #include "midix/abi/platform.h"
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
 #include "../../boards/huawei-anne/display_diagnostics.h"
+#include "../../boards/huawei-anne/emmc.h"
 #endif
 namespace platform {
 namespace {
@@ -16,7 +17,7 @@ Control domains[] = {{Domain::UsbPhy, 0, 0},
                      {Domain::UsbController, 0, 0},
                      {Domain::I2c, 0, 0},
                      {Domain::Display, 0, 0},
-                     {Domain::System, 0, 0}};
+                     {Domain::System, 0, 0}, {Domain::Emmc, 0, 0}};
 kernel::SpinLock domain_lock;
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
 u32 ref_logged;
@@ -51,6 +52,9 @@ SysError control(Control& object, u32 op, u64 arg, u64 owner) {
         if (arg || (object.owner && object.owner != owner)) {
             return E_BUSY;
         }
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+        if (object.domain == Domain::Emmc && !anne::emmc::claim_user(owner)) return E_BUSY;
+#endif
         object.owner = owner;
         return E_OK;
     }
@@ -150,8 +154,9 @@ void fence_owner(u64 owner) {
     for (auto& object : domains) {
         if (object.owner == owner) {
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
-            // Assert controller reset before cap/arena reclamation. PIO currently
-            // forbids DMA, but the lifetime fence remains mandatory for future DMA.
+            if (object.domain == Domain::Emmc) anne::emmc::release_user(owner);
+            // eMMC release_user fences ADMA and retains board ownership if reset
+            // fails. USB likewise requires reset before cap/arena reclamation.
             if (object.domain == Domain::UsbController || object.domain == Domain::UsbPhy) {
                 libk::Mmio crg{reinterpret_cast<volatile u8*>(0xfff35000), 4096};
                 crg.write32(0x90, 1u << 9);

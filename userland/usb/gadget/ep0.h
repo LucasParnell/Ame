@@ -25,6 +25,19 @@ inline void setup(Runtime& r, const MxDeviceEvent& event) {
     r.pending_function = false;
     r.address_pending = false;
     const auto& s = event.setup;
+    // Descriptor discovery and HID SET_IDLE are handled without spawning FIDO.
+    if (s.request_type == 0x81 && s.request == 6 && s.index == 3 &&
+        (s.value == 0x2200 || s.value == 0x2100)) {
+        const auto descriptor = s.value == 0x2200 ? fido_report_descriptor() : fido_hid_descriptor();
+        libk::copy_n(libk::slice(r.payload, 512, 512), descriptor, descriptor.size);
+        reply_data(r, descriptor.size);
+        return;
+    }
+    if (s.request_type == 0x21 && s.request == 10 && s.index == 3 && !s.length &&
+        !(s.value & 255) && r.configuration) {
+        r.phase = ControlPhase::StatusIn;
+        return;
+    }
     if ((s.request_type & 0x60) == 0x20 && (s.request_type & 31) == 1 && s.index == 0) {
         function_setup(r);
         return;
@@ -74,11 +87,11 @@ inline void setup(Runtime& r, const MxDeviceEvent& event) {
                !s.value && s.length == 2) {
         r.payload.data[512] = r.payload.data[513] = 0;
         reply_data(r, 2);
-    } else if (s.request == 10 && s.request_type == 0x81 && s.index < 3 && !s.value &&
+    } else if (s.request == 10 && s.request_type == 0x81 && s.index < 4 && !s.value &&
                s.length == 1) {
         r.payload.data[512] = 0;
         reply_data(r, 1);
-    } else if (s.request == 11 && s.request_type == 1 && s.index < 3 && !s.value && !s.length) {
+    } else if (s.request == 11 && s.request_type == 1 && s.index < 4 && !s.value && !s.length) {
         r.phase = ControlPhase::StatusIn;
     } else {
         stall(r);
@@ -123,7 +136,9 @@ inline void completion(Runtime& r, const MxDeviceEvent& done) {
         }
         return;
     }
-    const auto index = (done.endpoint & 15) >= 4 ? 1u : 0u;
+    const auto endpoint = done.endpoint & 15;
+    if (endpoint != 1 && endpoint != 2 && endpoint != 4 && endpoint != 5 && endpoint != 6) return;
+    const auto index = endpoint == 6 ? 2u : endpoint >= 4 ? 1u : 0u;
     auto& f = r.functions[index];
     if (done.endpoint & 128) {
         if (done.id != f.tx_id || !f.tx_active) {
@@ -140,6 +155,14 @@ inline void completion(Runtime& r, const MxDeviceEvent& done) {
         f.received = done.length;
         f.forwarded = 0;
         f.rx_pending = done.status == MxUsbStatus::Success && done.length;
+        if (index == 2) {
+            f.rx_pending = done.status == MxUsbStatus::Success && done.length == 64;
+            if (f.rx_pending && !r.fido2_requested) {
+                r.fido2_requested = true;
+                r.demand_pending = true;
+                f.reset = true;
+            }
+        }
     }
 }
 } // namespace mochi::usb::gadget

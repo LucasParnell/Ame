@@ -18,6 +18,10 @@
 #include "anko/types.h"
 #include "anko/smp.h"
 #include "midix/abi/cpu_limits.h"
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+#include "rpmb.h"
+#include "rpmb_diagnostics.h"
+#endif
 
 namespace drivers::timer { void handle_tick(); }
 
@@ -44,9 +48,26 @@ static volatile u32* g_dist = nullptr;
 static volatile u32* g_cpu  = nullptr;
 static u32 g_cpu_targets[MX_HOST_MAX_CPUS]{};
 
+static void enable_firmware_rpmb_sgi() {
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    // Banked SGI registers, on every CPU. Preserve firmware's security groups.
+    const u32 id = anne::rpmb::kRequestSgi;
+    const u32 shift = (id % 4) * 8;
+    u32 priority = g_dist[GICD_IPRIORITYR / 4 + id / 4];
+    priority = (priority & ~(0xffu << shift)) | (0xa0u << shift);
+    g_dist[GICD_IPRIORITYR / 4 + id / 4] = priority;
+    g_dist[GICD_ISENABLER / 4] = 1u << id;
+#ifndef ANKO_HOST_TEST
+    asm volatile("dsb sy" ::: "memory");
+#endif
+#endif
+}
+
 static void record_cpu_target() {
-    u64 logical;
+    u64 logical = 0;
+#ifndef ANKO_HOST_TEST
     asm volatile("mrs %0, tpidr_el1" : "=r"(logical));
+#endif
     if (logical >= MX_HOST_MAX_CPUS) return;
     u32 target = 0;
     // SGI/PPI target bytes are banked and identify this CPU's GIC interface.
@@ -71,6 +92,7 @@ void init(PhysAddr dist_base, PhysAddr cpu_base) {
     g_dist[GICD_CTLR / 4] = 1;
     g_cpu[GICC_CTLR / 4] = 1;
     record_cpu_target();
+    enable_firmware_rpmb_sgi();
 }
 
 void init_cpu() {
@@ -79,6 +101,7 @@ void init_cpu() {
     g_cpu[GICC_PMR / 4] = 0xFF;
     g_cpu[GICC_CTLR / 4] = 1;
     record_cpu_target();
+    enable_firmware_rpmb_sgi();
 }
 
 void irq_enable(u32 irq_id) {
@@ -92,7 +115,9 @@ void irq_enable(u32 irq_id) {
 void send_sgi(u32 cpu_id, u32 sgi_id) {
     const u32 target = cpu_target(cpu_id);
     if (!g_dist || !target || sgi_id >= 16) return;
+#ifndef ANKO_HOST_TEST
     asm volatile("dsb ishst" ::: "memory");
+#endif
     g_dist[GICD_SGIR / 4] = (target << 16) | (sgi_id & 0xFu);
 }
 
@@ -129,7 +154,9 @@ void spi_configure(u32 irq_id, u32 trigger, u32 target_cpu) {
     }
     const u32 targets = (target_cpu < 8) ? (1u << target_cpu) : 1u;
     dist_write_byte(GICD_ITARGETSR, irq_id, static_cast<u8>(targets));
+#ifndef ANKO_HOST_TEST
     asm volatile("dsb sy" ::: "memory");
+#endif
 }
 
 void spi_enable(u32 irq_id) {
@@ -167,10 +194,15 @@ void handle_irq() {
     if (!g_cpu) return;
     const u32 iar = g_cpu[GICC_IAR / 4];
     const u32 irq_id = iar & 0x3FFu;
+    bool rpmb_request = false;
     if (irq_id == g_hw.timer_irq) {
         drivers::timer::handle_tick();
     } else if (irq_id == 1) {
         smp::handle_ipi();
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    } else if (irq_id == anne::rpmb::kRequestSgi) {
+        rpmb_request = true;
+#endif
     } else if (irq_id < 1023) {
         // Bound SPI → wake the driver's doorbell. Timer and IPI are claimed
         // above; irq::deliver() also rejects any non-SPI id.
@@ -179,6 +211,18 @@ void handle_irq() {
     if (irq_id != 1023) {
         g_cpu[GICC_EOIR / 4] = iar;
     }
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    if (rpmb_request) {
+        u64 cpu = 0;
+#ifndef ANKO_HOST_TEST
+        asm volatile("dsb sy" ::: "memory");
+        asm volatile("mrs %0, tpidr_el1" : "=r"(cpu));
+#endif
+        anne::rpmb_diag::notify_request(static_cast<u32>(cpu));
+    }
+#else
+    (void)rpmb_request;
+#endif
 }
 
 } // namespace drivers::gic

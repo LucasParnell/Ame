@@ -113,6 +113,11 @@ def check_manifest(manifest: dict) -> list[str]:
             problems.append(f"{label}: unknown principal {svc.get('principal')!r}")
         if not isinstance(svc.get("restart"), str) or svc["restart"] not in RESTARTS:
             problems.append(f"{label}: unknown restart policy {svc.get('restart')!r}")
+        activation = svc.get("activation", "boot")
+        if not isinstance(activation, str) or activation not in {"boot", "usb-host"}:
+            problems.append(f"{label}: unknown activation policy")
+        elif activation == "usb-host" and svc["name"] != "usb.fn.fido2":
+            problems.append(f"{label}: usb-host activation is reserved for usb.fn.fido2")
         name(svc.get("object"), label + " object")
         if "affinity" in svc and (type(svc["affinity"]) is not int or not 0 <= svc["affinity"] < 64):
             problems.append(f"{label}: affinity must name a CPU in [0, 63]")
@@ -123,6 +128,8 @@ def check_manifest(manifest: dict) -> list[str]:
         for dep in dependencies[svc["name"]]:
             if dep not in by_name:
                 problems.append(f"{label}: start_after unknown service {dep!r}")
+            elif activation == "boot" and by_name[dep].get("activation", "boot") != "boot":
+                problems.append(f"{label}: boot service depends on a host-activated service")
         caps = names(svc, "caps")
         if len(",".join(caps)) >= 64:
             problems.append(f"{label}: capability alias list exceeds init storage")

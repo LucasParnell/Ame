@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "name": "logo_center_replay",
+  "firmware_sha256": "16e307a5d538a76803d2de3a5fd143fb0c61f4aba7a295b5eaa6ae957d7bee52",
+  "profile": "logo-center",
+  "bitmap": [2, 1],
+  "panel": [8, 8],
+  "bytes_per_pixel": 1,
+  "until": "0x4f028",
+  "checkpoints": ["0x4ebec", "0x4ecdc", "0x4f028"],
+  "watches": [{"address": "0x35000000", "size": "0x40"}],
+  "expected_checkpoints": ["0x4ebec", "0x4ecdc", "0x4f028"],
+  "expected_stop": "until",
+  "count": 100000,
+  "timeout_ms": 5000
+}

@@ -63,6 +63,8 @@
 .equ CTX_GUEST_ESR_EL1,   680
 .equ CTX_GUEST_AFSR0_EL1, 688
 .equ CTX_GUEST_AFSR1_EL1, 696
+.equ CTX_HOST_FPSIMD,     704
+.equ CTX_GUEST_FPSIMD,   1232
 
 #include "midix/abi/cpu_limits.h"
 .equ EL2_RUN_STATE_MAX_CPUS, MX_HOST_MAX_CPUS
@@ -210,6 +212,11 @@ el2_lower_sync:
     mrs     x0, AMAIR_EL1
     str     x0, [x21, #CTX_HOST_AMAIR]
 
+    // The scalar monitor must isolate the runner's userland vector state
+    // from every vCPU, including asynchronous IRQ/FIQ exits.
+    add     x0, x21, #CTX_HOST_FPSIMD
+    bl      arm64_fpsimd_save
+
     ldr     x0, [x21, #CTX_VTCR]
     msr     VTCR_EL2, x0
     ldr     x0, [x21, #CTX_VTTBR]
@@ -223,6 +230,8 @@ el2_lower_sync:
     msr     CNTHCTL_EL2, x0
     msr     CNTVOFF_EL2, xzr
     msr     CPTR_EL2, xzr
+    add     x0, x21, #CTX_GUEST_FPSIMD
+    bl      arm64_fpsimd_restore
 
     ldr     x0, [x21, #CTX_GUEST_VMPIDR]
     msr     VMPIDR_EL2, x0
@@ -348,6 +357,8 @@ el2_guest_exit:
 
 el2_guest_exit_common:
     mov     x22, x21
+    add     x0, x22, #CTX_GUEST_FPSIMD
+    bl      arm64_fpsimd_save
 
     ldp     x0, x1, [sp, #0]
     stp     x0, x1, [x22, #0]
@@ -537,6 +548,9 @@ el2_guest_exit_common:
     ldr     x0, [x22, #CTX_HOST_SCTLR]
     msr     SCTLR_EL1, x0
     isb
+
+    add     x0, x22, #CTX_HOST_FPSIMD
+    bl      arm64_fpsimd_restore
 
     ldr     x0, [x22, #CTX_HOST_ELR]
     msr     ELR_EL2, x0

@@ -254,11 +254,13 @@ struct Host {
             }
             const auto value = read(kHostPort);
             const bool attached = (value & kPortConnected) && !(value & kPortOvercurrent);
-            if (attached != connected) {
+            // A latched connect-change also records detach/replug between two
+            // polls. Do not let the replacement inherit the old source lease.
+            if (attached != connected || (value & (1u << 1))) {
                 connected = attached;
                 event = {++sequence, 1, port_speed(value), static_cast<mx_u8_t>(attached), 0};
                 event_pending = true;
-                if (!attached && device) {
+                if (device) {
                     (void)remove(device);
                 }
             }

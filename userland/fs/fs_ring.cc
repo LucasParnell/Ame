@@ -16,6 +16,7 @@
 #include "mochi/log.h"
 #include "mochi/boot_log.h"
 #include "mochi/sessions.h"
+#include "mochi/fs_private.h"
 
 
 static mochi::ServerSessions g_sessions;
@@ -86,15 +87,17 @@ extern "C" [[noreturn]] void _start() {
     fs_disk_init(boot);
 
     // Replay the durable /data region, if the mount exposed a safe one.
-    const bool data_durable = durable_available();
-    const bool data_loaded = durable_load();
+    const bool data_durable = g_volume.mounted || durable_available();
+    const bool data_loaded = !g_volume.mounted && durable_load();
 
     for (mx_u32_t i = 0; i < g_sessions.directory->count; ++i) {
         g_sessions.refresh(i, close_session);
     }
     // Root is read-only; /tmp is volatile; /data is durable only when a safe
     // reserved disk region is mounted (see fs_internal.h and fs_durable.cc).
-    if (!data_durable) {
+    if (g_volume.mounted) {
+        mochi::log_raw_marker("io.fs: read-only root, volatile /tmp, full-volume durable /data\n");
+    } else if (!data_durable) {
         mochi::log_raw_marker("io.fs: read-only root, volatile /tmp, non-durable /data\n");
     } else if (data_loaded) {
         mochi::log_raw_marker("io.fs: read-only root, volatile /tmp, durable /data replayed\n");
@@ -110,12 +113,20 @@ extern "C" [[noreturn]] void _start() {
             }
             g_session = i;
             g_session_generation = g_sessions.generation_of(i);
+            g_transfers[i].peer = g_sessions.directory->slots[i].client;
+            g_transfers[i].write_token = __atomic_load_n(
+                &g_sessions.directory->slots[i].client_write_arena, __ATOMIC_ACQUIRE);
+            g_transfers[i].write = g_sessions.directory->slots[i].write_arena ?
+                reinterpret_cast<mx_u8_t*>(mochi::va::sessions::write_arena(i)) : nullptr;
             const mochi::fs::Server fs{g_sessions.endpoints[i],
                                        mx_clock_ns() + mochi::kSessionReplyTimeoutNs};
             RingSlot slot{};
             // Bound each client's work so a full ring cannot starve its peers.
             for (mx_u32_t n = 0; n < 8 && fs.try_recv(&slot); ++n) {
-                handle_slot(fs, slot);
+                if (!(g_sessions.directory->slots[i].reserved & MX_SESSION_FIDO2_PRIVATE) &&
+                    mochi::fs::private_state_request(slot)) {
+                    (void)fs.send_error(slot, MX_ERR_PERM);
+                } else handle_slot(fs, slot);
                 progress = true;
                 if (!fs.reply_ok) {
                     break;

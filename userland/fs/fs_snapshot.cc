@@ -68,6 +68,8 @@ static void unpin_snapshot_extents(const SnapshotState& snap) {
 }
 
 void handle_snapshot(const mochi::fs::Server& fs, const RingSlot& slot) {
+    if (g_volume.mounted) { FsSnapshotReply reply{}; reply.status = MX_ERR_NOT_IMPLEMENTED; (void)fs.send_reply(slot, FS_SNAPSHOT_REPLY, reply); return; }
+
     FsSnapshotReply reply{};
     reply.status = static_cast<mx_i32_t>(MX_ERR_NOMEM);
 
@@ -94,6 +96,8 @@ void handle_snapshot(const mochi::fs::Server& fs, const RingSlot& slot) {
 }
 
 void handle_snapshot_mount(const mochi::fs::Server& fs, const RingSlot& slot) {
+    if (g_volume.mounted) { FsSnapshotMntReply reply{}; reply.status = MX_ERR_NOT_IMPLEMENTED; (void)fs.send_reply(slot, FS_SNAPSHOT_MNT_REPLY, reply); return; }
+
     FsSnapshotMntReply reply{};
     reply.status = static_cast<mx_i32_t>(MX_ERR_INVALID);
     FsSnapshotMntRequest req{};
@@ -109,6 +113,8 @@ void handle_snapshot_mount(const mochi::fs::Server& fs, const RingSlot& slot) {
 }
 
 void handle_snapshot_drop(const mochi::fs::Server& fs, const RingSlot& slot) {
+    if (g_volume.mounted) { send_status_only(fs, slot, FS_SNAPSHOT_DROP_REPLY, MX_ERR_NOT_IMPLEMENTED); return; }
+
     mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_INVALID);
     mx_u64_t snapshot_id = 0;
     if (mochi::message_get(slot, &snapshot_id)) {

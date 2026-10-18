@@ -160,6 +160,12 @@ static inline int64_t sys_notify(CapHandle db) { return _svc1(NR_NOTIFY, db); }
 static inline int64_t sys_wait_doorbell(CapHandle db, uint64_t expected) { return _svc2(NR_WAIT_DOORBELL, db, expected); }
 static inline uint64_t sys_doorbell_read(CapHandle db) { return static_cast<uint64_t>(_svc1(NR_DOORBELL_READ, db)); }
 static inline SysPair sys_supervisor_poll(CapHandle supervisor) { return _svc1_pair(NR_SUPERVISOR_POLL, supervisor); }
+static inline mx_status_t sys_supervisor_bind_doorbell(CapHandle supervisor, CapHandle doorbell) {
+    return _svc2(MX_NR_SUPERVISOR_BIND_DOORBELL, supervisor, doorbell);
+}
+static inline int64_t sys_supervisor_delegate(CapHandle supervisor, CapHandle child) {
+    return _svc2(MX_NR_SUPERVISOR_DELEGATE, supervisor, child);
+}
 static inline int64_t sys_thread_create(CapHandle proc, uint64_t entry, uint64_t arg, uint32_t flags) { return _svc4(NR_THREAD_CREATE, proc, entry, arg, flags); }
 static inline int64_t sys_thread_set_affinity(CapHandle thread, uint64_t cpu_mask) { return _svc2(NR_THREAD_SET_AFFINITY, thread, cpu_mask); }
 static inline int64_t sys_thread_resume(CapHandle thread) { return _svc1(NR_THREAD_RESUME, thread); }

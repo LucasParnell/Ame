@@ -30,6 +30,7 @@ static bool boot_map_fs(const MxBootInfo* boot) {
         {"fs.cmd.ring", kVaFsCmdRing, "fs.cmd.doorbell"},
         {"fs.reply.ring", kVaFsReplyRing, "fs.reply.doorbell"});
     g.have_fs = g.fs.ep.valid();
+    if (g.have_fs) (void)g.fs.map_write_arena(boot);
     return g.have_fs;
 }
 

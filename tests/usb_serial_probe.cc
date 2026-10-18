@@ -33,6 +33,11 @@ struct Fixture {
         assert(bridge.input.try_pop(&slot));
         assert(mochi::tty::accept_serial(slot, mirror, input));
         assert(mirror.generation == (configured ? generation : 0));
+        assert(input.retained() && input.flush(shell));
+        assert(shell.try_pop(&slot) && slot.type == MX_TERM_CONTROL);
+        MxTermControl control{};
+        assert(mochi::message_get(slot, &control, MX_TERM_CONTROL));
+        assert(control.code == (configured ? MX_TERM_CONTROL_FLOW_ON : MX_TERM_CONTROL_FLOW_OFF));
     }
 };
 static void input_backpressure() {
@@ -104,6 +109,38 @@ static void output_generations() {
     assert(!f.bridge.stream.tx().depth());
     assert(f.mirror.hold(raw) && f.mirror.pending.empty());
 }
+static void lifecycle_backpressure() {
+    Fixture f;
+    f.change(31, true);
+    const char filler = 'x';
+    for (unsigned i = 0; i < 8; ++i) {
+        assert(f.shell.try_write_bytes(&filler, 1));
+    }
+    MxRingSlot slot{};
+    const auto off = mochi::terminal::session_control(MX_TERM_CONTROL_FLOW_OFF, 0);
+    assert(mochi::message_put(&slot, MX_TERM_CONTROL, off));
+    assert(mochi::tty::accept_serial(slot, f.mirror, f.input));
+    assert(!f.mirror.generation && f.input.retained());
+    assert(!f.input.flush(f.shell));
+    assert(!f.input.hold(libk::as_bytes(&filler, 1)));
+    const auto on = mochi::terminal::session_control(MX_TERM_CONTROL_FLOW_ON, 32);
+    assert(mochi::message_put(&slot, MX_TERM_CONTROL, on));
+    assert(!mochi::tty::accept_serial(slot, f.mirror, f.input));
+    assert(!f.mirror.generation); // retain the old control until delivery
+    MxRingSlot drained{};
+    assert(f.shell.try_pop(&drained) && f.input.flush(f.shell));
+    assert(mochi::tty::accept_serial(slot, f.mirror, f.input));
+    assert(f.mirror.generation == 32 && !f.input.flush(f.shell));
+    for (unsigned i = 0; i < 7; ++i) assert(f.shell.try_pop(&drained));
+    assert(f.shell.try_pop(&drained));
+    MxTermControl control{};
+    assert(mochi::message_get(drained, &control, MX_TERM_CONTROL));
+    assert(control.code == MX_TERM_CONTROL_FLOW_OFF);
+    assert(f.input.flush(f.shell) && !f.input.retained());
+    assert(f.shell.try_pop(&drained));
+    assert(mochi::message_get(drained, &control, MX_TERM_CONTROL));
+    assert(control.code == MX_TERM_CONTROL_FLOW_ON);
+}
 static void render_backpressure_and_scroll() {
     Storage commands;
     char cells[15];
@@ -140,9 +177,10 @@ static void render_backpressure_and_scroll() {
             if (slot.type == FB_DRAW_TEXT) {
                 FbDrawTextCmd draw{};
                 assert(mochi::message_get(slot, &draw, FB_DRAW_TEXT));
-                assert(draw.len == 5);
+                assert(draw.len > 0 && draw.len <= 5);
                 const auto row = draw.y / 16;
-                assert(row < 3 && !std::memcmp(draw.text, render.line(row), draw.len));
+                const auto col = draw.x / 8;
+                assert(row < 3 && !std::memcmp(draw.text, render.line(row) + col, draw.len));
                 ++draws;
             }
         }
@@ -158,6 +196,7 @@ static void render_backpressure_and_scroll() {
 int main() {
     input_backpressure();
     output_generations();
+    lifecycle_backpressure();
     render_backpressure_and_scroll();
     std::puts("usb serial and terminal probe ok");
 }

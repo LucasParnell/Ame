@@ -15,7 +15,15 @@ constexpr u32 kProp      = 3;
 constexpr u32 kNop       = 4;
 constexpr u32 kEnd       = 9;
 
-// Callbacks for fdt::walk().  All three must be non-null.
+// Frequently consumed properties are classified once per strings-block offset,
+// rather than compared against the same literals for every node and consumer.
+// Unknown properties still carry their original name (notably /aliases keys).
+enum class Property : u8 {
+    Unknown, Compatible, Reg, Ranges, Status, Width, Height, Stride, Format, StdoutPath,
+};
+
+// Callbacks for fdt::walk(). begin_node/end_node and one property callback
+// must be non-null. property, when supplied, replaces prop.
 // begin_node: called when entering a node.  depth = node nesting level (0 = root).
 //             Return false to abort the walk (causes walk() to return false).
 // end_node:   called when leaving a node at the same depth as its begin_node.
@@ -25,6 +33,8 @@ struct Callbacks {
     bool (*begin_node)(void* ctx, const char* name, u32 depth);
     void (*end_node)(void* ctx, u32 depth);
     void (*prop)(void* ctx, const char* name, const u8* data, u32 len, u32 depth);
+    void (*property)(void* ctx, Property id, const char* name, const u8* data, u32 len,
+                     u32 depth) = nullptr;
 };
 
 // Walk the structure section of a DTB blob, delivering events to cb.

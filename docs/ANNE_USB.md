@@ -8,6 +8,11 @@ The USB-C keyboard plugs straight into the phone. The FUSB301 detects the
 partner UFP, the role service requests host mode and the Hi6523 supplies a
 500 mA source lease. The same connector attached to the Mac detects partner
 DFP and selects peripheral mode. These uses are sequential on one controller.
+The profile enables automatic switching with sink preference for computers,
+stable CC attachment checks, a fresh VBUS check before source enable, and source
+shutdown on detach/fault. Negotiation runs asynchronously after service ready;
+a keyboard can take roughly two seconds to acquire host power. See the
+[role policy and CDC notes](../boards/huawei-anne/CDC_SERIAL.md).
 
 Controller register/packet handling has no keyboard, terminal or charger code.
 Device startup is compared with the same hardware's vendor implementation in

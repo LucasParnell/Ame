@@ -84,6 +84,7 @@ struct Shell {
     mochi::terminal::Terminal term;
     mochi::fs::Client fs;
     mochi::svcctl::Client svcctl;
+    mochi::SpscEndpoint app_control;
     const mochi::svc::RegistryPage* svc_registry;
     EnvVar vars[kVarMax];
     char cwd[128];
@@ -101,6 +102,7 @@ struct Builtin {
     int (*fn)(int, char**);
     const char* help;
 };
+int cmd_container(int argc, char** argv);
 
 // Defined in main.cc: the interactive line buffer and parsed token block live
 // outside the stack because an initial userland thread only has 4 KiB.
@@ -166,6 +168,8 @@ int cmd_cat(int argc, char** argv);
 int cmd_mkdir(int argc, char** argv);
 int cmd_rm(int argc, char** argv);
 int cmd_touch(int argc, char** argv);
+int cmd_sync(int argc, char** argv);
+int cmd_fscheck(int argc, char** argv);
 // Diagnostics (msh_diag.cc).
 int cmd_diag(int argc, char** argv);
 // Introspection builtins (msh_svc.cc).

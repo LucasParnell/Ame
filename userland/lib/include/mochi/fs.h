@@ -4,6 +4,8 @@
 #include "libk/bytes.h"
 #include "libk/str.h"
 #include "mochi/endpoint.h"
+#include "mochi/boot.h"
+#include "libk/endian.h"
 #include "midix/abi/protocols/fs.h"
 
 namespace mochi::fs {
@@ -17,6 +19,18 @@ static inline mx_u8_t copy_inline_name(char (&dst)[N], const char* src) {
 
 struct Client {
     SpscEndpoint ep;
+    mx_handle_t write_cap = 0;
+    mx_u8_t* write_buffer = nullptr;
+
+    bool map_write_arena(const MxBootInfo* boot, mx_vaddr_t address = 0x2f010000) {
+        const auto cap = mochi::boot::handle(boot, "fs.write.arena");
+        MxCapInfo info{};
+        if (!cap || mx_cap_info(cap, &info) != MX_OK || info.type != MX_CAP_ARENA ||
+            info.size != FS_TRANSFER_MAX || mx_map_page(cap, address, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) return false;
+        write_cap = cap;
+        write_buffer = reinterpret_cast<mx_u8_t*>(address);
+        return true;
+    }
 
     bool valid() const {
         return ep.valid();
@@ -64,8 +78,13 @@ struct Client {
         req.handle = handle;
         req.offset = offset;
         req.length = length;
-        if (length > FS_INLINE_WRITE_MAX || (!data && length)) return false;
-        if (data) (void)libk::copy_n(libk::as_bytes(req.payload), libk::as_bytes(data, length), length);
+        if ((!data && length) || length > FS_TRANSFER_MAX) return false;
+        if (length > FS_INLINE_WRITE_MAX) {
+            if (!write_cap || !write_buffer) return false;
+            libk::copy_exact(libk::as_bytes(write_buffer, length), libk::as_bytes(data, length));
+            req.flags = FS_WRITE_ZERO_COPY;
+            (void)libk::write_le<mx_u64_t>(libk::as_bytes(req.payload, 8), write_cap);
+        } else if (data) (void)libk::copy_n(libk::as_bytes(req.payload), libk::as_bytes(data, length), length);
         if (!ep.try_send(FS_WRITE, &req, sizeof(req))) return false;
         return wait_write_reply(out);
     }
@@ -114,7 +133,38 @@ struct Client {
     }
 
     bool wait_read_reply(FsReadReply* out) const {
-        return wait_reply(FS_READ_REPLY, out) && out->length_read <= sizeof(out->inline_data);
+        return wait_reply(FS_READ_REPLY, out) &&
+            out->length_read <= (out->arena_cap ? FS_READ_ARENA_MAX : sizeof(out->inline_data));
+    }
+
+    // Consume an immutable arena reply before issuing another request. The
+    // returned capability belongs to this client; both mapping and cap pins
+    // must be released before the filesystem can reuse its cache page.
+    bool read_bytes(fs_handle_t handle, mx_u64_t offset, void* data, mx_u32_t length,
+                    mx_u32_t* received, mx_vaddr_t arena_va = 0x2f000000) const {
+        if (!received || (!data && length) || offset > ~mx_u64_t{0} - length) return false;
+        *received = 0;
+        while (*received < length) {
+            const auto remaining = length - *received;
+            FsReadReply reply{};
+            if (!try_read(handle, offset + *received,
+                          remaining > FS_READ_ARENA_MAX ? FS_READ_ARENA_MAX : remaining, &reply) || reply.status != MX_OK) return false;
+            if (!reply.length_read) return true;
+            if (reply.arena_cap) {
+                MxCapInfo info{};
+                const bool valid = mx_cap_info(reply.arena_cap, &info) == MX_OK && info.type == MX_CAP_ARENA &&
+                    info.size == FS_READ_ARENA_MAX && !(info.rights & MX_RIGHT_WRITE);
+                const bool mapped = valid && mx_map_page(reply.arena_cap, arena_va, MX_RIGHT_READ) == MX_OK;
+                if (mapped) libk::copy_exact(libk::as_bytes(static_cast<mx_u8_t*>(data) + *received, reply.length_read),
+                                             libk::as_bytes(reinterpret_cast<const void*>(arena_va), reply.length_read));
+                if (mapped) (void)sys_unmap_page(arena_va);
+                (void)sys_cap_revoke(reply.arena_cap);
+                if (!mapped) return false;
+            } else libk::copy_exact(libk::as_bytes(static_cast<mx_u8_t*>(data) + *received, reply.length_read),
+                                    libk::as_bytes(reply.inline_data, reply.length_read));
+            *received += reply.length_read;
+        }
+        return true;
     }
 
     bool wait_write_reply(FsWriteReply* out) const {

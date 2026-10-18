@@ -2,6 +2,18 @@
   "schema": 2,
   "resources": [
     {
+      "name": "emmc.dma",
+      "boot": "emmc.dma"
+    },
+    {
+      "name": "emmc.mmio",
+      "boot": "emmc.mmio"
+    },
+    {
+      "name": "emmc.control",
+      "boot": "emmc.control"
+    },
+    {
       "name": "uart",
       "boot": "uart.mmio"
     },
@@ -60,6 +72,14 @@
     {
       "name": "fb.control",
       "boot": "fb.control"
+    },
+    {
+      "name": "fido2.seed",
+      "boot": "fido2.seed"
+    },
+    {
+      "name": "fido2.presence.mmio",
+      "boot": "fido2.presence.mmio"
     }
   ],
   "channels": [
@@ -469,6 +489,63 @@
     {
       "name": "console_activate_db",
       "kind": "doorbell"
+    },
+    {
+      "name": "apps_stream_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "apps_stream_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "apps_control_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "apps_control_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "apps_wake",
+      "kind": "doorbell"
+    },
+    {
+      "name": "apps_control_reply_db",
+      "kind": "doorbell"
+    },
+    {
+      "name": "blk_buffer",
+      "kind": "arena",
+      "bytes": 131072
+    },
+    {
+      "name": "usb_fido_a",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_fido_b",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_fido_demand",
+      "kind": "ring",
+      "order": 6
+    },
+    {
+      "name": "usb_fido_wake",
+      "kind": "doorbell"
+    },
+    {
+      "name": "fido2_prompt_ring",
+      "kind": "ring",
+      "order": 6
     }
   ],
   "checks": [
@@ -922,6 +999,22 @@
           "name": "serial.out.doorbell",
           "rights": [
             "notify"
+          ]
+        },
+        {
+          "channel": "fido2_prompt_ring",
+          "name": "fido2.prompt.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "input_tty_db",
+          "name": "fido2.prompt.doorbell",
+          "rights": [
+            "wait"
           ]
         }
       ]
@@ -1683,6 +1776,10 @@
         {
           "name": "i2c.address",
           "value": 33
+        },
+        {
+          "name": "usb.device_only",
+          "value": 0
         }
       ]
     },
@@ -2132,6 +2229,10 @@
           "rights": [
             "wait"
           ]
+        },
+        {
+          "name": "usb.device_only",
+          "value": 0
         }
       ]
     },
@@ -2252,6 +2353,54 @@
             "read",
             "write",
             "map"
+          ]
+        },
+        {
+          "channel": "usb_fido_a",
+          "name": "function.2.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_fido_b",
+          "name": "function.2.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_fido_wake",
+          "name": "function.2.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_6",
+          "name": "function.2.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "usb_fido_demand",
+          "name": "fido2.demand.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "svc_ctl_req_db",
+          "name": "fido2.demand.db",
+          "rights": [
+            "notify"
           ]
         }
       ]
@@ -2425,7 +2574,8 @@
       "stage": "drivers",
       "start_after": [
         "usb.fn.acm",
-        "usb.fn.bulk"
+        "usb.fn.bulk",
+        "dev.apps"
       ],
       "caps": [],
       "provides": [],
@@ -2477,6 +2627,38 @@
           "name": "test.input.doorbell",
           "rights": [
             "notify"
+          ]
+        },
+        {
+          "channel": "apps_stream_a",
+          "name": "apps.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "apps_stream_b",
+          "name": "apps.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "apps_wake",
+          "name": "apps.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_wake_9",
+          "name": "apps.rx.db",
+          "rights": [
+            "wait"
           ]
         }
       ]
@@ -2560,6 +2742,269 @@
           ]
         }
       ]
+    },
+    {
+      "name": "dev.apps",
+      "object": "dev.apps",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "drivers",
+      "start_after": [
+        "usb.fn.bulk"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "apps_stream_b",
+          "name": "stream.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "apps_stream_a",
+          "name": "stream.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_9",
+          "name": "stream.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "apps_wake",
+          "name": "stream.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "apps_control_b",
+          "name": "control.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "apps_control_a",
+          "name": "control.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "apps_control_reply_db",
+          "name": "control.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "apps_wake",
+          "name": "control.rx.db",
+          "rights": [
+            "wait"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "drv.blk.emmc",
+      "object": "drv.blk.emmc",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "storage",
+      "start_after": [
+        "io.console"
+      ],
+      "caps": [
+        "mmio"
+      ],
+      "provides": [
+        "blk.emmc"
+      ],
+      "uses": [],
+      "bindings": [
+        {
+          "channel": "blk_req_ring",
+          "name": "blk.req.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "blk_reply_ring",
+          "name": "blk.reply.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "blk_req_db",
+          "name": "blk.req.doorbell",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "channel": "blk_reply_db",
+          "name": "blk.reply.doorbell",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "name": "emmc.mmio",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ],
+          "boot": "emmc.mmio"
+        },
+        {
+          "name": "emmc.control",
+          "rights": [
+            "write"
+          ],
+          "boot": "emmc.control"
+        },
+        {
+          "channel": "blk_buffer",
+          "name": "blk.buffer",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "name": "emmc.partition",
+          "value": 56
+        },
+        {
+          "name": "emmc.dma",
+          "boot": "emmc.dma",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "name": "emmc.bus_width",
+          "value": 8
+        }
+      ]
+    },
+    {
+      "name": "usb.fn.fido2",
+      "object": "usb.fn.fido2",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "activation": "usb-host",
+      "stage": "drivers",
+      "start_after": [
+        "io.usb.gadget",
+        "tty.fb0",
+        "io.fs"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [
+        "fs"
+      ],
+      "bindings": [
+        {
+          "channel": "usb_fido_b",
+          "name": "function.tx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_fido_a",
+          "name": "function.rx",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "usb_wake_6",
+          "name": "function.tx.db",
+          "rights": [
+            "notify"
+          ]
+        },
+        {
+          "channel": "usb_fido_wake",
+          "name": "function.rx.db",
+          "rights": [
+            "wait"
+          ]
+        },
+        {
+          "boot": "fido2.seed",
+          "name": "fido2.seed",
+          "rights": [
+            "read",
+            "map"
+          ]
+        },
+        {
+          "boot": "fido2.presence.mmio",
+          "name": "presence.mmio",
+          "rights": [
+            "read",
+            "map"
+          ]
+        },
+        {
+          "name": "usb.generation",
+          "value": 0
+        },
+        {
+          "channel": "fido2_prompt_ring",
+          "name": "prompt.ring",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
+        },
+        {
+          "channel": "input_tty_db",
+          "name": "prompt.doorbell",
+          "rights": [
+            "notify"
+          ]
+        }
+      ]
     }
   ],
   "profiles": {
@@ -2615,9 +3060,13 @@
         "io.usb.gadget",
         "usb.fn.acm",
         "usb.fn.bulk",
+        "dev.apps",
         "dev.usb-input",
         "dev.serial",
-        "msh"
+        "drv.blk.emmc",
+        "io.fs",
+        "msh",
+        "usb.fn.fido2"
       ],
       "overrides": {
         "io.usb": {
@@ -2909,6 +3358,26 @@
             {
               "name": "tty.scale",
               "value": 2
+            },
+            { "name": "tty.status.height", "value": 128 },
+            { "name": "tty.status.scale", "value": 2 },
+            { "name": "tty.status.margin", "value": 64 },
+            { "name": "tty.status.notch", "value": 448 },
+            {
+              "channel": "fido2_prompt_ring",
+              "name": "fido2.prompt.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "input_tty_db",
+              "name": "fido2.prompt.doorbell",
+              "rights": [
+                "wait"
+              ]
             }
           ],
           "affinity": 0
@@ -2918,10 +3387,111 @@
             "tty.fb0",
             "ui.input",
             "io.usb.role",
-            "dev.usb-input"
+            "dev.usb-input",
+            "io.fs"
           ],
-          "uses": [],
-          "affinity": 0
+          "uses": [
+            "fs"
+          ],
+          "affinity": 0,
+          "bindings": [
+            {
+              "channel": "term_input_ring",
+              "name": "term.input.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "term_input_db",
+              "name": "term.input.doorbell",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "term_output_ring",
+              "name": "term.output.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "input_tty_db",
+              "name": "term.output.doorbell",
+              "rights": [
+                "notify"
+              ]
+            },
+            {
+              "channel": "svc_ctl_req_ring",
+              "name": "svc.cmd.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "svc_ctl_req_db",
+              "name": "svc.cmd.doorbell",
+              "rights": [
+                "notify"
+              ]
+            },
+            {
+              "channel": "svc_ctl_reply_ring",
+              "name": "svc.reply.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "svc_ctl_reply_db",
+              "name": "svc.reply.doorbell",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "apps_control_a",
+              "name": "apps.control.tx",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "apps_control_b",
+              "name": "apps.control.rx",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "apps_wake",
+              "name": "apps.control.tx.db",
+              "rights": [
+                "notify"
+              ]
+            },
+            {
+              "channel": "apps_control_reply_db",
+              "name": "apps.control.rx.db",
+              "rights": [
+                "wait"
+              ]
+            }
+          ]
         },
         "drv.usb.dwc2": {
           "affinity": 0
@@ -2949,6 +3519,57 @@
         },
         "dev.serial": {
           "affinity": 0
+        },
+        "io.fs": {
+          "start_after": [
+            "drv.blk.emmc"
+          ],
+          "caps": [
+            "blk"
+          ],
+          "bindings": [
+            {
+              "channel": "blk_req_ring",
+              "name": "blk.req.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "blk_reply_ring",
+              "name": "blk.reply.ring",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            },
+            {
+              "channel": "blk_req_db",
+              "name": "blk.req.doorbell",
+              "rights": [
+                "notify"
+              ]
+            },
+            {
+              "channel": "blk_reply_db",
+              "name": "blk.reply.doorbell",
+              "rights": [
+                "wait"
+              ]
+            },
+            {
+              "channel": "blk_buffer",
+              "name": "blk.buffer",
+              "rights": [
+                "read",
+                "write",
+                "map"
+              ]
+            }
+          ]
         }
       }
     },
@@ -3002,6 +3623,20 @@
       "rings": [
         "usb_host_req_ring",
         "usb_host_reply_ring"
+      ]
+    },
+    {
+      "name": "apps.stream",
+      "rings": [
+        "apps_stream_a",
+        "apps_stream_b"
+      ]
+    },
+    {
+      "name": "apps.control",
+      "rings": [
+        "apps_control_a",
+        "apps_control_b"
       ]
     }
   ]

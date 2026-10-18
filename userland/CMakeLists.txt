@@ -13,6 +13,7 @@ set(MOCHI_INCLUDES
 # come from compiler-rt/libsupc++ (absent under -nostdlib). Currently the Itanium
 # __cxa_guard_* for function-local statics; see lib/runtime/cxx_guard.cc.
 add_library(mochi_runtime STATIC lib/runtime/cxx_guard.cc)
+set_property(TARGET mochi_runtime PROPERTY AME_USERLAND_SIMD TRUE)
 target_include_directories(mochi_runtime PRIVATE ${MOCHI_INCLUDES})
 
 function(mochi_service name src load_base)
@@ -25,11 +26,12 @@ function(mochi_service name src load_base)
     )
 
     add_executable(${name} ${src} ${ARGN})
+    set_property(TARGET ${name} PROPERTY AME_USERLAND_SIMD TRUE)
     target_include_directories(${name} PRIVATE ${MOCHI_INCLUDES})
     # Services must not touch the raw memory floor (libk/string.h); the header
     # rejects AME_MOCHI_SERVICE builds that try.
     target_compile_definitions(${name} PRIVATE AME_MOCHI_SERVICE=1)
-    target_link_libraries(${name} PRIVATE libk freestanding_memory ame_format mochi_runtime)
+    target_link_libraries(${name} PRIVATE libk_user freestanding_memory_user ame_format_user mochi_runtime)
     target_link_options(${name} PRIVATE
         -nostdlib -static -fno-pie
         -T ${LINKER_SCRIPT}
@@ -56,7 +58,8 @@ function(mochi_service name src load_base)
     )
 endfunction()
 
-set(MOCHI_SYSTEM_DESCRIPTOR "${CMAKE_CURRENT_SOURCE_DIR}/system.json")
+set(MOCHI_SYSTEM_DESCRIPTOR "${CMAKE_CURRENT_SOURCE_DIR}/system.json" CACHE FILEPATH
+    "Mochi service descriptor")
 # A board keeps its own profile by default. An explicit override permits local
 # bring-up of a new board's service policy on QEMU without claiming its hardware.
 set(MOCHI_SYSTEM_PROFILE "" CACHE STRING "Mochi service profile override (empty uses ANKO_BOARD)")
@@ -120,8 +123,56 @@ mochi_service(io.usb.role usb/role/main.cc 0x12500000)
 mochi_service(io.usb.gadget usb/gadget/main.cc 0x12600000)
 mochi_service(usb.fn.acm usb/functions/acm/main.cc 0x12700000)
 mochi_service(usb.fn.bulk usb/functions/bulk/main.cc 0x12800000)
+set(AME_FIDO2_ATTESTATION OFF CACHE BOOL "Enable packed x5c attestation")
+set(AME_FIDO2_SEED_FILE "" CACHE FILEPATH "Private 32-byte FIDO2 seed")
+set(AME_FIDO2_CA_KEY "" CACHE FILEPATH "Development attestation CA key")
+set(AME_FIDO2_CA_CERT "" CACHE FILEPATH "Development attestation CA cert")
+mochi_service(usb.fn.fido2 usb/functions/fido2/main.cc 0x13300000)
+target_include_directories(usb.fn.fido2 PRIVATE ${CMAKE_SOURCE_DIR}/third_party/monocypher)
+set_source_files_properties(${CMAKE_SOURCE_DIR}/third_party/micro-ecc/uECC.c PROPERTIES LANGUAGE CXX)
+add_library(fido2_p256 STATIC ${CMAKE_SOURCE_DIR}/third_party/micro-ecc/uECC.c)
+set_property(TARGET fido2_p256 PROPERTY AME_USERLAND_SIMD TRUE)
+target_include_directories(fido2_p256 PUBLIC ${CMAKE_SOURCE_DIR}/third_party/micro-ecc
+    PRIVATE ${CMAKE_SOURCE_DIR}/lib/include)
+target_compile_definitions(fido2_p256 PUBLIC uECC_SUPPORTS_secp160r1=0 uECC_SUPPORTS_secp192r1=0
+    uECC_SUPPORTS_secp224r1=0 uECC_SUPPORTS_secp256k1=0 uECC_SUPPORT_COMPRESSED_POINT=0)
+target_link_libraries(usb.fn.fido2 PRIVATE fido2_p256)
+set_source_files_properties(${CMAKE_SOURCE_DIR}/third_party/tiny-aes/aes.c PROPERTIES LANGUAGE CXX)
+add_library(fido2_aes STATIC ${CMAKE_SOURCE_DIR}/third_party/tiny-aes/aes.c)
+set_property(TARGET fido2_aes PROPERTY AME_USERLAND_SIMD TRUE)
+target_include_directories(fido2_aes PUBLIC ${CMAKE_SOURCE_DIR}/third_party/tiny-aes
+    PRIVATE ${CMAKE_SOURCE_DIR}/lib/include ${CMAKE_CURRENT_SOURCE_DIR}/usb/functions/fido2/compat)
+target_compile_definitions(fido2_aes PUBLIC AES256=1 CBC=1 ECB=0 CTR=0)
+target_link_libraries(usb.fn.fido2 PRIVATE fido2_aes)
+if(AME_FIDO2_ATTESTATION)
+    if(NOT AME_FIDO2_SEED_FILE OR NOT AME_FIDO2_CA_KEY OR NOT AME_FIDO2_CA_CERT)
+        message(FATAL_ERROR "AME_FIDO2_ATTESTATION requires AME_FIDO2_SEED_FILE, AME_FIDO2_CA_KEY and AME_FIDO2_CA_CERT")
+    endif()
+    set(AME_FIDO2_ATTESTATION_HEADER ${CMAKE_BINARY_DIR}/generated/attestation_cert.h)
+    set(AME_FIDO2_ATTESTATION_CERT ${CMAKE_BINARY_DIR}/generated/attestation_leaf.der)
+    add_custom_command(
+        OUTPUT ${AME_FIDO2_ATTESTATION_HEADER} ${AME_FIDO2_ATTESTATION_CERT}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/fido2/attestation.py issue
+                --seed ${AME_FIDO2_SEED_FILE}
+                --aaguid-header ${CMAKE_CURRENT_SOURCE_DIR}/usb/functions/fido2/attestation.h
+                --ca-key ${AME_FIDO2_CA_KEY}
+                --ca-cert ${AME_FIDO2_CA_CERT}
+                --out-header ${AME_FIDO2_ATTESTATION_HEADER}
+                --out-cert ${AME_FIDO2_ATTESTATION_CERT}
+        DEPENDS ${AME_FIDO2_SEED_FILE} ${AME_FIDO2_CA_KEY} ${AME_FIDO2_CA_CERT}
+                ${CMAKE_SOURCE_DIR}/scripts/fido2/attestation.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/usb/functions/fido2/attestation.h
+        COMMENT "Issuing Ame FIDO2 attestation certificate"
+        VERBATIM)
+    add_custom_target(fido2_attestation_header
+        DEPENDS ${AME_FIDO2_ATTESTATION_HEADER} ${AME_FIDO2_ATTESTATION_CERT})
+    add_dependencies(usb.fn.fido2 fido2_attestation_header)
+    target_include_directories(usb.fn.fido2 PRIVATE ${CMAKE_BINARY_DIR}/generated)
+    target_compile_definitions(usb.fn.fido2 PRIVATE AME_FIDO2_ATTESTATION=1)
+endif()
 mochi_service(dev.usb-input debug/usb/main.cc 0x12900000)
 mochi_service(dev.serial   usb/serial/main.cc   0x12A00000)
+mochi_service(dev.apps     apps/main.cc         0x12B00000)
 mochi_service(drv.usb.hid     drivers/usb/hid/main.cc    0x10B00000)
 option(MOCHI_USB_TRACE_INPUT "Development-only USB input regression diagnostics" OFF)
 if(MOCHI_USB_TRACE_INPUT)
@@ -132,8 +183,11 @@ if(MOCHI_USB_TRACE_INPUT)
 endif()
 mochi_service(ui.input        drivers/input/main.cc      0x10C00000)
 mochi_service(drv.blk.virtio  drivers/blk/virtio/main.cc 0x10D00000)
+mochi_service(drv.blk.emmc "drivers/blk/emmc/main.cc;${CMAKE_SOURCE_DIR}/shared/drivers/emmc/sdhci.cc" 0x13200000)
 # io.fs is split into cohesive modules behind fs/fs_internal.h.
 set(FS_SOURCES
+    fs/store.cc
+    fs/fs_io.cc
     fs/fs_ring.cc
     fs/fs_core.cc
     fs/fs_handles.cc
@@ -152,9 +206,14 @@ set(MSH_SOURCES
     msh/msh_svc.cc
     msh/msh_diag.cc
     msh/msh_power.cc
+    msh/msh_apps.cc
 )
 mochi_service(msh "${MSH_SOURCES}" 0x10F00000)
 mochi_service(app.hello   app/hello/main.cc       0x11400000)
+mochi_service(app.stream-test app/stream-test/main.cc 0x12C00000)
+mochi_service(app.stream-metrics app/stream-metrics/main.cc 0x12D00000)
+add_custom_target(stream_test DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/app.stream-test.mxi
+                                     ${CMAKE_CURRENT_BINARY_DIR}/app.stream-metrics.mxi)
 mochi_service(test.anne_smp ${CMAKE_SOURCE_DIR}/tests/kernel/anne_smp.cc 0x11500000)
 
 set(DANGO_LINUX_ARTIFACT_DIR "" CACHE PATH "Optional prebuilt Dango Linux artifact directory")
@@ -359,6 +418,17 @@ add_custom_target(mochi_system ALL
 
 # Regression processes are built explicitly and never included in system.mxb.
 if(ANKO_BUILD_DEV)
+    mochi_service(test.simd ${CMAKE_SOURCE_DIR}/tests/kernel/simd.cc 0x13100000
+                  ${CMAKE_SOURCE_DIR}/tests/kernel/simd_regs.S)
+    # Keep arbitrary register patterns live across C++ calls in this harness.
+    # Normal services and their separate runtime libraries retain SIMD support.
+    target_compile_options(test.simd PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mgeneral-regs-only>)
+    add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/simd.mxb
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test/package-simd.py ${CMAKE_BINARY_DIR}
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/test.simd.mxi
+                ${CMAKE_SOURCE_DIR}/scripts/test/package-simd.py
+        VERBATIM)
+    add_custom_target(simd_regressions DEPENDS ${CMAKE_BINARY_DIR}/simd.mxb)
     mochi_service(test.poweroff ${CMAKE_SOURCE_DIR}/tests/kernel/power.cc 0x11600000)
     mochi_service(test.reboot ${CMAKE_SOURCE_DIR}/tests/kernel/power.cc 0x11600000)
     target_compile_definitions(test.reboot PRIVATE MOCHI_TEST_POWER_OPERATION=MX_PLATFORM_SYSTEM_RESET)
@@ -367,6 +437,15 @@ if(ANKO_BUILD_DEV)
         ${CMAKE_CURRENT_BINARY_DIR}/test.reboot.mxi)
     mochi_service(test.lifecycle ${CMAKE_SOURCE_DIR}/tests/kernel/lifecycle.cc 0x11000000)
     mochi_service(test.busy ${CMAKE_SOURCE_DIR}/tests/kernel/busy.cc 0x11100000)
+    mochi_service(test.app_stream ${CMAKE_SOURCE_DIR}/tests/kernel/app_stream.cc 0x13000000)
+    add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/app-stream.mxb
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test/package-app-stream.py ${CMAKE_BINARY_DIR}
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/test.app_stream.mxi
+                ${CMAKE_CURRENT_BINARY_DIR}/app.stream-test.mxi
+                ${CMAKE_CURRENT_BINARY_DIR}/test.busy.mxi
+                ${CMAKE_SOURCE_DIR}/scripts/test/package-app-stream.py
+        VERBATIM)
+    add_custom_target(app_stream_regressions DEPENDS ${CMAKE_BINARY_DIR}/app-stream.mxb)
     mochi_service(test.share ${CMAKE_SOURCE_DIR}/tests/kernel/share.cc 0x11200000)
     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/lifecycle.mxb
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test/package-lifecycle.py ${CMAKE_BINARY_DIR}

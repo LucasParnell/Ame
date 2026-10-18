@@ -4,7 +4,8 @@
 // Spec ref: §5.2 Memory Management, §5.7 Arenas
 //
 // V0 memory model:
-//   - 4 KiB pages, 48-bit VA, TTBR0=user TTBR1=kernel.
+//   - 4 KiB pages, 48-bit VA; TTBR0 holds userspace and kernel identity mappings.
+//     A shared high-half TTBR1 kernel mapping is not installed yet.
 //   - Simple physical page allocator (bitmap over discovered RAM).
 //   - No demand paging — all V0 memory is eagerly mapped.
 //   - Kernel-owned metadata allocated from kernel heap.
@@ -106,6 +107,7 @@ void free_page(PhysAddr pa);
 void free_page_for(u32 owner_pid, PhysAddr pa);
 void free_page_for_identity(u64 identity, PhysAddr pa);
 u64 allocated_page_count();
+u64 total_page_count();
 
 void heap_init();
 void* heap_alloc(usize size, usize align);

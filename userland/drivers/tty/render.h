@@ -3,14 +3,17 @@
 // lives in the service arena; rows rotate on scroll instead of being copied.
 // Dirty column ranges collapse a byte burst into a small set of commands.
 #include "mochi/framebuffer.h"
+#include "status.h"
 #include "libk/str.h"
 namespace mochi::tty {
 struct Render {
     static constexpr mx_u32_t kRows = 256, kFg = 0xe6f1ff, kBg = 0x001020;
     mochi::framebuffer::Client fb;
+    StatusBar status;
     char* cells;
     mx_u32_t cols, rows, cell_w, cell_h, origin_x, origin_y, scale;
     mx_u32_t x, y, first_row, scan_row, dirty_count;
+    mx_u32_t scroll_rows;
     mx_u16_t dirty_first[kRows], dirty_end[kRows];
     mx_u32_t cursor_row, cursor_col;
     bool clear_pending, cursor_pending, cursor_visible, present_pending;
@@ -53,10 +56,21 @@ struct Render {
         } else {
             first_row = (first_row + 1) % rows;
             libk::fill(libk::as_bytes(line(rows - 1), cols), ' ');
-            // Logical row contents changed; repaint once after the burst.
-            for (mx_u32_t row = 0; row < rows; ++row) {
-                dirty(row, 0, cols);
+            // Move only the hot dirty metadata alongside the logical rows.
+            // Already queued draws stay ordered before the eventual pixel copy;
+            // unsent ranges move with their cells, including a hidden cursor.
+            dirty_count = 0;
+            scan_row = 0;
+            for (mx_u32_t row = 0; row + 1 < rows; ++row) {
+                dirty_first[row] = dirty_first[row + 1];
+                dirty_end[row] = dirty_end[row + 1];
+                dirty_count += dirty_first[row] != dirty_end[row];
             }
+            dirty_first[rows - 1] = dirty_end[rows - 1] = 0;
+            dirty(rows - 1, 0, cols);
+            // Coalesce a burst into one copy. A whole-screen scroll needs no
+            // old pixels; every row will have acquired a full dirty range.
+            if (!clear_pending && scroll_rows < rows) ++scroll_rows;
         }
     }
     void character(char ch) {
@@ -113,7 +127,7 @@ struct Render {
         }
     }
     bool pending() const {
-        return clear_pending || dirty_count || cursor_pending || present_pending;
+        return clear_pending || status.pending() || scroll_rows || dirty_count || cursor_pending || present_pending;
     }
     bool flush(mx_u32_t budget = 64) {
         bool progress = false;
@@ -124,6 +138,17 @@ struct Render {
                     break;
                 }
                 clear_pending = false;
+            } else if (status.pending()) {
+                if (!status.flush(fb)) break;
+                present_pending = true;
+            } else if (scroll_rows) {
+                if (scroll_rows < rows) {
+                    const FbCopyRectCmd command{origin_x, origin_y + scroll_rows * cell_h,
+                                                origin_x, origin_y, cols * cell_w,
+                                                (rows - scroll_rows) * cell_h};
+                    if (!fb.try_send(FB_COPY_RECT, &command, sizeof(command))) break;
+                }
+                scroll_rows = 0;
             } else if (dirty_count) {
                 while (scan_row < rows && dirty_first[scan_row] == dirty_end[scan_row]) {
                     ++scan_row;

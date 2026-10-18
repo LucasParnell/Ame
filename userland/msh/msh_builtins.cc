@@ -6,6 +6,7 @@
 
 const Builtin kBuiltins[] = {
     {"help", cmd_help, "show builtin commands"},
+    {"container", cmd_container, "start/stop/status of the temporary USB app runner"},
     {"exit", cmd_exit, "exit msh"},
     {"echo", cmd_echo, "print arguments"},
     {"printf", cmd_printf, "print arguments without implicit newline unless requested"},
@@ -19,8 +20,10 @@ const Builtin kBuiltins[] = {
     {"mkdir", cmd_mkdir, "create an io.fs directory"},
     {"rm", cmd_rm, "remove an io.fs file or empty directory"},
     {"touch", cmd_touch, "create an empty io.fs file"},
+    {"sync", cmd_sync, "flush durable filesystem writes"},
+    {"fscheck", cmd_fscheck, "write/read a 3 MiB /data/storage-check.bin diagnostic"},
     {"bootinfo", cmd_bootinfo, "show BootInfo entries"},
-    {"diag", cmd_diag, "serial diagnostics: all (default), el2, log"},
+    {"diag", cmd_diag, "diagnostics: all, el2, el3, log, runtime [milliseconds]"},
     {"svc", cmd_svc, "service registry: list/tree/groups/deps/log/start/stop/restart"},
     {"cap", cmd_cap, "capability tools: ls/tree/inspect/revoke"},
     {"arena", cmd_arena, "arena tools: ls/show"},
@@ -49,7 +52,8 @@ int cmd_help(int, char**) {
     putln("  cap ls | cap tree | cap inspect HANDLE | cap revoke HANDLE");
     putln("  arena ls | arena show NAME");
     putln("  ring stats | doorbell stats");
-    putln("  diag [all|el2|log]");
+    putln("  diag [all|el2|el3|el3-canary|log]");
+    putln("  diag runtime [100..30000 milliseconds]");
     putln("  shutdown | reboot [fastboot|bootloader]");
     putln("  vm list | vm start linux0 | vm console linux0");
     return 0;

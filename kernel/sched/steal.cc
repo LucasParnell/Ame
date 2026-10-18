@@ -33,12 +33,12 @@ static bool is_stealable(const Thread* t, u32 thief_cpu) {
     return band == SCHED_BAND_FAIR || band == SCHED_BAND_BATCH || band == SCHED_BAND_VM_FAIR;
 }
 
-static Thread* select_stealable_from_band(FairPrincipalQueue& q, u32 thief_cpu) {
+static Thread* select_stealable_from_band(Eki& victim, FairPrincipalQueue& q, u32 thief_cpu) {
     const SchedBand sb = q.band;
     for (u32 i = 0; i < q.size; ++i) {
         PrincipalEntity* pe = q.data[i];
         if (!pe) continue;
-        BandQueue& threads = band_threads(*pe, sb);
+        BandQueue& threads = band_threads(victim, *pe, sb);
         for (u32 j = 0; j < threads.size; ++j) {
             if (is_stealable(threads.data[j], thief_cpu)) return threads.data[j];
         }
@@ -49,9 +49,9 @@ static Thread* select_stealable_from_band(FairPrincipalQueue& q, u32 thief_cpu) 
 static Thread* select_stealable(Eki& victim, u32 thief_cpu) {
     // Steal only lower-priority, migration-safe work.  VM fair vCPUs are
     // migration-exempt by default unless SCHED_CTX_STEALABLE is set.
-    if (Thread* t = select_stealable_from_band(victim.fair_principals, thief_cpu)) return t;
-    if (Thread* t = select_stealable_from_band(victim.vm_fair_principals, thief_cpu)) return t;
-    if (Thread* t = select_stealable_from_band(victim.batch_principals, thief_cpu)) return t;
+    if (Thread* t = select_stealable_from_band(victim, victim.fair_principals, thief_cpu)) return t;
+    if (Thread* t = select_stealable_from_band(victim, victim.vm_fair_principals, thief_cpu)) return t;
+    if (Thread* t = select_stealable_from_band(victim, victim.batch_principals, thief_cpu)) return t;
     return nullptr;
 }
 

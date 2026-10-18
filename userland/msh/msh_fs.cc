@@ -364,3 +364,72 @@ int cmd_touch(int argc, char** argv) {
     }
     return rc;
 }
+
+int cmd_sync(int, char**) {
+    mx_i32_t status = MX_ERR_NOT_IMPLEMENTED;
+    if (!g.have_fs || !g.fs.try_sync(&status) || status != MX_OK) {
+        put("sync: "); put_status(status); put("\r\n"); return 1;
+    }
+    putln("sync: durable");
+    return 0;
+}
+
+// Fixed buffers keep large transfers outside the shell's small thread stack.
+// A separate read mode validates persistence after a real reboot.
+alignas(4096) static mx_u8_t check_bytes[FS_TRANSFER_MAX];
+static mx_u8_t check_pattern(mx_u64_t offset) {
+    return static_cast<mx_u8_t>(offset * 17 + (offset >> 16) + 3);
+}
+int cmd_fscheck(int argc, char** argv) {
+    if (argc != 2 || (!streq(argv[1], "write") && !streq(argv[1], "read"))) {
+        putln("usage: fscheck write|read (/data/storage-check.bin, 3 MiB)"); return 1;
+    }
+    if (!g.have_fs) return notimpl("fscheck io.fs");
+    const bool writing = streq(argv[1], "write");
+    ResolvedPath file{};
+    mx_u32_t flags = FS_OPEN_READ;
+    if (writing) flags |= FS_OPEN_WRITE | FS_OPEN_CREATE | FS_OPEN_TRUNC;
+    if (!resolve_path("/data/storage-check.bin", flags, &file)) {
+        putln("fscheck: open failed"); return 1;
+    }
+    const auto start = mx_clock_ns();
+    constexpr mx_u32_t total = 3 * 1024 * 1024;
+    if (writing) {
+        for (mx_u32_t offset = 0; offset < total; offset += sizeof(check_bytes)) {
+            for (mx_u32_t i = 0; i < sizeof(check_bytes); ++i) check_bytes[i] = check_pattern(offset + i);
+            FsWriteReply reply{};
+            if (!g.fs.try_write(file.handle, offset, check_bytes, sizeof(check_bytes), &reply) ||
+                reply.status != MX_OK || reply.bytes_written != sizeof(check_bytes)) {
+                put("fscheck: write failed: "); put_status(reply.status); put("\r\n");
+                close_resolved(file); return 1;
+            }
+        }
+        mx_i32_t status = MX_ERR_FAULT;
+        if (!g.fs.try_sync(&status) || status != MX_OK) {
+            putln("fscheck: sync failed"); close_resolved(file); return 1;
+        }
+    }
+    for (mx_u32_t offset = 0; offset < total; offset += sizeof(check_bytes)) {
+        mx_u32_t received = 0;
+        if (!g.fs.read_bytes(file.handle, offset, check_bytes, sizeof(check_bytes), &received) ||
+            received != sizeof(check_bytes)) {
+            putln("fscheck: read failed"); close_resolved(file); return 1;
+        }
+        for (mx_u32_t i = 0; i < received; ++i) {
+            if (check_bytes[i] != check_pattern(offset + i)) {
+                putln("fscheck: byte mismatch"); close_resolved(file); return 1;
+            }
+        }
+    }
+    // Detect an unexpected suffix as well as missing or damaged bytes.
+    FsReadReply eof{};
+    const bool complete = g.fs.try_read(file.handle, total, 1, &eof) && eof.status == MX_OK && !eof.length_read;
+    close_resolved(file);
+    if (!complete) { putln("fscheck: wrong file size"); return 1; }
+    char message[128];
+    libk::snprintf(message, sizeof(message), "fscheck: 3145728 bytes %s verified in %llu ms",
+                  writing ? "written, synced and" : "read and",
+                  static_cast<unsigned long long>((mx_clock_ns() - start) / 1000000));
+    putln(message);
+    return 0;
+}

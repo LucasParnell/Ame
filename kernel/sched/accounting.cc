@@ -1,14 +1,13 @@
 // kernel/sched/accounting.cc — principal accounting, budgets, and throttling.
 //
-// Owns the global principal table (PrincipalSchedState): per-principal runtime,
-// period/budget refill, throttle state, class/weight metadata, and the
+// Owns the published principal policy, CPU-owned runtime columns,
+// atomic period/budget windows, class/weight metadata, and the
 // allocation lifecycle.  account_current() charges the running thread's elapsed
 // time back to thread, process, and principal before each context switch and on
 // every tick.
 
 #include "anko/sched.h"
 #include "anko/spinlock.h"
-#include "libk/string.h"
 #include "sched_internal.h"
 
 namespace sched {
@@ -19,58 +18,62 @@ namespace sched {
 static PrincipalSchedState g_principal_sched[kMaxPrincipalsLocal]{};
 static u32 g_next_principal_id = 1; // principal 0 is reserved for the kernel/bootstrap bucket
 static kernel::SpinLock g_principal_lock{};
-struct alignas(64) PrincipalGuard { kernel::SpinLock lock; };
-static PrincipalGuard g_principal_guards[kMaxPrincipalsLocal]{};
 static u32 g_principal_generations[kMaxPrincipalsLocal]{};
 static u32 g_principal_references[kMaxPrincipalsLocal]{};
 
-// Entry locks serialize charging and period rollover across CPUs. Allocation
-// takes the table lock before an entry lock; scheduling only takes entry locks.
-static void refill(PrincipalSchedState& ps, u64 now) {
-    if (!ps.budget_ns || !ps.period_ns || now < ps.period_start_ns ||
-        now - ps.period_start_ns < ps.period_ns) return;
-    ps.period_start_ns += ((now - ps.period_start_ns) / ps.period_ns) * ps.period_ns;
-    ps.used_in_period_ns = 0;
-    ps.throttled = false;
+// One writer per CPU; diagnostics sum these columns only when requested.
+// Principals shared across CPUs no longer bounce one runtime cache line on
+// every tick. Relaxed stores/loads permit concurrent diagnostics without a
+// read-modify-write on the charging path. Lifecycle clears a column only after
+// the final process/context reference has gone, so it has no charging writer.
+struct alignas(64) CpuRuntime { u64 principal[kMaxPrincipalsLocal]; u64 busy_ns; };
+static CpuRuntime g_runtime[kMaxCpus]{};
+
+static u64 published_policy(u32 pid) {
+    return pid < kMaxPrincipalsLocal
+        ? __atomic_load_n(&g_principal_sched[pid].dispatch, __ATOMIC_ACQUIRE) : 0;
 }
 
 bool principal_allocated(u32 pid) {
-    if (pid >= kMaxPrincipalsLocal) return false;
-    kernel::LockGuard guard(g_principal_guards[pid].lock);
-    return g_principal_sched[pid].allocated;
+    return published_policy(pid) != 0;
 }
 
 bool principal_throttled(u32 pid) {
-    if (pid >= kMaxPrincipalsLocal) return true;
-    kernel::LockGuard guard(g_principal_guards[pid].lock);
+    return !principal_dispatch(pid).available;
+}
+
+PrincipalDispatch principal_dispatch(u32 pid) {
+    const u64 policy = published_policy(pid);
+    if (!policy) return {0, NICE_0_WEIGHT, false};
     auto& ps = g_principal_sched[pid];
-    refill(ps, sched_clock_ns());
-    return !ps.allocated || ps.throttled;
+    // The caller owns a process/context reference for this ID, keeping policy
+    // immutable. Unbudgeted work needs neither a clock read nor a shared RMW.
+    const bool available = !ps.budget_ns || ps.budget_window.charge(
+        0, sched_clock_ns(), ps.period_ns).used_ns < ps.budget_ns;
+    return {static_cast<u32>(policy >> 32), static_cast<u32>(policy), available};
 }
 
 u32 principal_weight(u32 pid) {
-    if (pid >= kMaxPrincipalsLocal) return NICE_0_WEIGHT;
-    kernel::LockGuard guard(g_principal_guards[pid].lock);
-    const u32 weight = g_principal_sched[pid].weight;
+    const u32 weight = static_cast<u32>(published_policy(pid));
     return weight ? weight : NICE_0_WEIGHT;
 }
 
 u32 principal_generation(u32 pid) {
-    if (pid >= kMaxPrincipalsLocal) return 0;
-    kernel::LockGuard guard(g_principal_guards[pid].lock);
-    return g_principal_sched[pid].generation;
+    return static_cast<u32>(published_policy(pid) >> 32);
 }
 
 bool thread_budget_available(const Thread* t) {
-    return t && (!t->principal_generation || t->principal_generation == principal_generation(t->principal_id)) &&
-        !principal_throttled(t->principal_id) && sched_context_available(t->sched_context);
+    if (!t) return false;
+    const auto policy = principal_dispatch(t->principal_id);
+    return (!t->principal_generation || t->principal_generation == policy.generation) &&
+        policy.available && sched_context_available(t->sched_context);
 }
 
 bool retain_principal(u32 pid) {
     if (!pid) return true;
     if (pid >= kMaxPrincipalsLocal) return false;
-    kernel::LockGuard guard(g_principal_guards[pid].lock);
-    if (!g_principal_sched[pid].allocated) return false;
+    kernel::LockGuard guard(g_principal_lock);
+    if (!principal_allocated(pid)) return false;
     ++g_principal_references[pid];
     return true;
 }
@@ -78,12 +81,11 @@ bool retain_principal(u32 pid) {
 // Reserve principal 0 for kernel/bootstrap work.  User processes and VMs get
 // unique IDs; PrincipalClass is authorization metadata, not the fairness bucket.
 void principal_init_bootstrap() {
-    g_principal_sched[0].principal_id = 0;
-    g_principal_sched[0].class_ = PRINCIPAL_KERNEL;
-    g_principal_sched[0].allocated = 1;
-    g_principal_sched[0].weight = NICE_0_WEIGHT;
-    g_principal_sched[0].generation = 1;
-    g_principal_sched[0].period_start_ns = sched_clock_ns();
+    auto& ps = g_principal_sched[0];
+    ps.class_ = PRINCIPAL_KERNEL;
+    ps.budget_window.reset(sched_clock_ns());
+    for (auto& cpu : g_runtime) __atomic_store_n(&cpu.principal[0], 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ps.dispatch, (1ull << 32) | NICE_0_WEIGHT, __ATOMIC_RELEASE);
 }
 
 // Mirror principal weights into one CPU's per-principal entities.
@@ -97,36 +99,29 @@ void principal_mirror_weights(u32 cpu_id) {
 // Runtime accounting — charge elapsed time to thread / process / principal.
 // Called before every context switch and on tick.
 // ---------------------------------------------------------------------------
-void account_current(Eki& e) {
-    Thread* t = e.current;
-    if (!t || t == e.idle) return;
-    // A blocking syscall has already changed state, but still owns execution
-    // until post_syscall saves its frame. Charge that last interval too.
-    kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
+static void account_owned(Eki& e, Thread* t) {
     const u64 now = sched_clock_ns();
     const u64 delta = now - t->last_start_ns;
     t->last_start_ns = now;
     t->runtime_ns += delta;
+    auto& busy = g_runtime[e.cpu_id].busy_ns;
+    __atomic_store_n(&busy, __atomic_load_n(&busy, __ATOMIC_RELAXED) + delta, __ATOMIC_RELAXED);
     if (t->owner) __atomic_add_fetch(&t->owner->runtime_ns, delta, __ATOMIC_RELAXED);
 
     const u32 pid = t->principal_id;
     if (pid >= kMaxPrincipalsLocal) return;
-    bool exhausted = false;
-    {
-        kernel::LockGuard guard(g_principal_guards[pid].lock);
-        auto& ps = g_principal_sched[pid];
-        refill(ps, now);
-        ps.runtime_ns += delta;
-        ps.used_in_period_ns += delta;
-        exhausted = ps.budget_ns && ps.used_in_period_ns >= ps.budget_ns;
-        ps.throttled = exhausted;
-    }
+    auto& runtime = g_runtime[e.cpu_id].principal[pid];
+    __atomic_store_n(&runtime, __atomic_load_n(&runtime, __ATOMIC_RELAXED) + delta,
+                     __ATOMIC_RELAXED);
+    auto& ps = g_principal_sched[pid];
+    const bool exhausted = ps.budget_ns && ps.budget_window.charge(
+        delta, now, ps.period_ns).used_ns >= ps.budget_ns;
     PrincipalEntity& pe = e.principal_entities[pid];
     pe.weight = principal_weight(pid);
-    pe.runtime_ns += delta;
-    const u32 bi = band_index(t->sched.sched_class);
     const u64 principal_delta = delta * NICE_0_WEIGHT / pe.weight;
-    pe.vruntime[bi] += principal_delta;
+    // This shared clock orders every band containing the principal. Legacy
+    // per-band clocks and a second runtime total had no selection/metric reader;
+    // keep the authoritative totals above and the clocks used by the picker.
     pe.service_vruntime_ns += principal_delta;
     // A principal may have threads in several bands. Every heap containing it
     // uses the same service clock, so all of those positions need repair.
@@ -137,7 +132,7 @@ void account_current(Eki& e) {
     t->vruntime_ns += delta * NICE_0_WEIGHT / tw;
     u64 minimum = t->vruntime_ns;
     for (u32 b = 1; b < NUM_BANDS; ++b) {
-        if (auto* queued = ftq_peek_min(band_threads(pe, static_cast<SchedBand>(b)))) {
+        if (auto* queued = ftq_peek_min(band_threads(e, pe, static_cast<SchedBand>(b)))) {
             const u64 key = effective_key(queued);
             if (key < minimum) minimum = key;
         }
@@ -151,15 +146,35 @@ void account_current(Eki& e) {
         request_switch(true, SWITCH_BUDGET);
 }
 
+void account_current(Eki& e) {
+    // IRQ exclusion protects the single CPU writer, including syscall callers
+    // outside post_syscall. It does not wait for any other CPU.
+    kernel::InterruptGuard irq;
+    Thread* t = e.current;
+    if (!t || t == e.idle) return;
+    if (t->state == TS_RUNNING) {
+        // Wakers and context binders cannot change a running thread. Its owner
+        // can charge without acquiring a lock that those remote paths may hold.
+        account_owned(e, t);
+    } else {
+        // Blocking has exposed wake metadata before the frame is published.
+        // Serialize the final charge with that exceptional transition.
+        kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
+        account_owned(e, t);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Explicit bulk refill for diagnostics. Dispatch refills only the principal it
 // examines, including when the station has spent a whole period idle.
 // ---------------------------------------------------------------------------
 void refill_principal_budgets() {
+    kernel::LockGuard guard(g_principal_lock);
     const u64 now = sched_clock_ns();
     for (u32 i = 0; i < kMaxPrincipalsLocal; ++i) {
-        kernel::LockGuard guard(g_principal_guards[i].lock);
-        refill(g_principal_sched[i], now);
+        auto& ps = g_principal_sched[i];
+        if (principal_allocated(i) && ps.budget_ns)
+            ps.budget_window.charge(0, now, ps.period_ns);
     }
 }
 
@@ -172,35 +187,32 @@ u32 allocate_principal(PrincipalClass class_, u32 weight, u64 budget_ns, u64 per
     u32 id = 0;
     for (u32 scan = 0; scan < kMaxPrincipalsLocal - 1; ++scan) {
         const u32 candidate = ((g_next_principal_id - 1 + scan) % (kMaxPrincipalsLocal - 1)) + 1;
-        if (!g_principal_sched[candidate].allocated) {
+        if (!principal_allocated(candidate)) {
             id = candidate;
             g_next_principal_id = (candidate % (kMaxPrincipalsLocal - 1)) + 1;
             break;
         }
     }
     if (id == 0) return 0;
-    kernel::LockGuard entry(g_principal_guards[id].lock);
     PrincipalSchedState& ps = g_principal_sched[id];
-    libk::memset(&ps, 0, sizeof(ps));
-    ps.principal_id = id;
     ps.class_ = class_;
-    ps.allocated = 1;
     g_principal_references[id] = 1;
-    ps.generation = ++g_principal_generations[id];
-    if (!ps.generation) ps.generation = ++g_principal_generations[id];
-    ps.weight = weight ? weight : NICE_0_WEIGHT;
+    u32 generation = ++g_principal_generations[id];
+    if (!generation) generation = ++g_principal_generations[id];
     ps.budget_ns = budget_ns;
     ps.period_ns = period_ns;
-    ps.period_start_ns = sched_clock_ns();
+    ps.budget_window.reset(sched_clock_ns());
+    for (auto& cpu : g_runtime) __atomic_store_n(&cpu.principal[id], 0, __ATOMIC_RELAXED);
+    const u64 policy = static_cast<u64>(generation) << 32 | (weight ? weight : NICE_0_WEIGHT);
+    __atomic_store_n(&ps.dispatch, policy, __ATOMIC_RELEASE);
     return id;
 }
 
 void release_principal(u32 id) {
     if (id == 0 || id >= kMaxPrincipalsLocal) return;
     kernel::LockGuard guard(g_principal_lock);
-    kernel::LockGuard entry(g_principal_guards[id].lock);
     if (!g_principal_references[id] || --g_principal_references[id]) return;
-    g_principal_sched[id] = {};
+    __atomic_store_n(&g_principal_sched[id].dispatch, 0, __ATOMIC_RELEASE);
     if (id < g_next_principal_id) g_next_principal_id = id;
     // Per-CPU entities belong to their CPU. Enqueue notices a new generation
     // and resets an empty local entity; teardown never clears a peer's heaps.
@@ -209,19 +221,31 @@ void release_principal(u32 id) {
 // ---------------------------------------------------------------------------
 // Principal runtime / fairness accessors
 // ---------------------------------------------------------------------------
+u64 busy_runtime_ns() {
+    u64 total = 0;
+    for (auto& cpu : g_runtime)
+        total += __atomic_load_n(&cpu.busy_ns, __ATOMIC_RELAXED);
+    return total;
+}
+
 u64 principal_runtime(u32 pid) {
     if (pid >= kMaxPrincipalsLocal) return 0;
-    kernel::LockGuard guard(g_principal_guards[pid].lock);
-    return g_principal_sched[pid].runtime_ns;
+    const u64 policy = published_policy(pid);
+    if (!policy) return 0;
+    u64 total = 0;
+    for (auto& cpu : g_runtime)
+        total += __atomic_load_n(&cpu.principal[pid], __ATOMIC_RELAXED);
+    // Diagnostics must not mix counters from two lifetimes of a recycled ID.
+    return published_policy(pid) == policy ? total : 0;
 }
 
 u64 principal_class_runtime(PrincipalClass class_) {
+    kernel::LockGuard guard(g_principal_lock);
     u64 total = 0;
     for (u32 i = 0; i < kMaxPrincipalsLocal; ++i) {
-        kernel::LockGuard guard(g_principal_guards[i].lock);
         PrincipalSchedState& ps = g_principal_sched[i];
-        if (ps.allocated && ps.class_ == class_) {
-            total += ps.runtime_ns;
+        if (principal_allocated(i) && ps.class_ == class_) {
+            total += principal_runtime(i);
         }
     }
     return total;

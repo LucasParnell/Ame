@@ -4,10 +4,9 @@ Ame is an experimental AArch64 operating system with the Anko microkernel,
 Mochi userland services, and Dango virtual machine support. Internal `midix`
 and `mx` names remain in the source and ABI.
 
-The development-readiness cleanup is in progress. See
-[the implementation checkpoint](docs/CLEANUP_STATUS.md) for completed checks
-and remaining work. Architecture and older protocol documents include design
-targets that are not yet implemented.
+See [feature status](docs/FEATURE_STATUS.md) for implementation coverage and
+[the architecture specification](docs/architecture.md) for the design. Architecture
+and older protocol documents include targets that are not yet implemented.
 
 ## Build
 
@@ -165,11 +164,12 @@ active display can be written. See the investigation notes for interpretation.
 - `third_party/monocypher/`: pinned signature implementation and provenance.
 
 Normal service supervision, per-client IPC sessions, filesystem mount semantics,
-and application interfaces still need cleanup. The `/data` volume is durable when
-a writable disk exposes a safe reserved region (`FS_SYNC` writes it back through
-`BLK_WRITE` and commits with `BLK_FLUSH`; `scripts/test/durable-persistence.py`
-proves a written-and-synced file survives a reboot). `/tmp` is always volatile,
-the read-only root is never mutated, and with no durable region `FS_SYNC` returns
-not-implemented rather than implying persistence. The journaled on-disk B+tree
-writer, hardware IRQ bind/ack, and physical Switch acceptance remain later
-milestones.
+and application interfaces still need cleanup. `/data` uses disk-resident keyed
+B+trees, full-volume bitmaps, CoW data and a metadata redo journal. The P20 Lite
+uses its existing 50.6 GiB userdata partition through an 8-bit ADMA2 eMMC driver.
+`scripts/test/durable-persistence.py` verifies a 3 MiB file across two QEMU boots
+and checks immutable read-arena lifetimes. `/tmp` remains volatile; packaged root
+handles remain read-only. Without durable backing, `FS_SYNC` reports
+not-implemented. Disk snapshots, hardware IRQ bind/ack, and physical Switch
+acceptance remain later milestones. See [FS_SPEC](docs/FS_SPEC.md) for the
+implemented protocol, journal extensions and bounded working sets.

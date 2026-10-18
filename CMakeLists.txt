@@ -110,7 +110,9 @@ endif()
 add_compile_options(
     -ffreestanding
     $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>
-    -mgeneral-regs-only
+    # Userland opts in per target. Kernel/early-boot/shared scalar objects
+    # retain the restriction, including compiler-generated memory operations.
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<BOOL:$<TARGET_PROPERTY:AME_USERLAND_SIMD>>>>:-mgeneral-regs-only>
     -fno-exceptions
     -fno-rtti
     -fno-stack-protector

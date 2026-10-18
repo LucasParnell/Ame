@@ -40,8 +40,7 @@ PrincipalEntity* fpq_peek_min(const FairPrincipalQueue& q);
 void fpq_resift(FairPrincipalQueue& q, PrincipalEntity* pe);
 bool fpq_remove(FairPrincipalQueue& q, PrincipalEntity* pe);
 FairPrincipalQueue& band_for(Eki& e, SchedBand band);
-BandQueue& band_threads(PrincipalEntity& pe, SchedBand band);
-u64& min_vruntime_for(Eki& e, SchedBand band);
+BandQueue& band_threads(Eki& e, const PrincipalEntity& pe, SchedBand band);
 
 // --- Per-CPU stations and core queues (runqueue.cc) ------------------------
 Eki& eki_for_cpu(u32 cpu_id);
@@ -55,6 +54,14 @@ bool dequeue_from_principal(Eki& e, Thread* t);
 // --- Principal accounting / budgets / throttle (accounting.cc) -------------
 bool principal_allocated(u32 pid);
 bool principal_throttled(u32 pid);
+// Atomic generation/weight publication; eligibility uses an atomic budget window.
+// Budget queries require a live thread/process/context holding this principal.
+struct PrincipalDispatch {
+    u32 generation;
+    u32 weight;
+    bool available;
+};
+PrincipalDispatch principal_dispatch(u32 pid);
 u32  principal_weight(u32 pid);
 u32  principal_generation(u32 pid);
 bool retain_principal(u32 pid);

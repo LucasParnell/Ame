@@ -19,6 +19,7 @@ struct ServerSessions {
     uint64_t generations[MX_MAX_SESSIONS]{};
     bool live[MX_MAX_SESSIONS]{};
     bool mapped[MX_MAX_SESSIONS]{};
+    bool write_mapped[MX_MAX_SESSIONS]{};
 
     bool map(const MxBootInfo* boot, uint64_t directory_va = va::sessions::kDirectory) {
         auto cap = boot::handle(boot, "sessions");
@@ -51,6 +52,11 @@ struct ServerSessions {
         const auto generation = __atomic_load_n(&slot.generation, __ATOMIC_ACQUIRE);
         if (generation != generations[i]) {
             close(i);
+            if (write_mapped[i]) {
+                for (uint64_t page = 0; page < 65536; page += 4096)
+                    (void)sys_unmap_page(va::sessions::write_arena(i) + page);
+                write_mapped[i] = false;
+            }
             const uint64_t request_va = va::sessions::request(i);
             const uint64_t reply_va = va::sessions::reply(i);
             if (mapped[i]) {
@@ -68,6 +74,14 @@ struct ServerSessions {
                 return false;
             }
             mapped[i] = true;
+            if (slot.write_arena) {
+                MxCapInfo info{};
+                if (mx_cap_info(slot.write_arena, &info) != MX_OK || info.type != MX_CAP_ARENA ||
+                    info.size != 65536 || sys_map_page(slot.write_arena, va::sessions::write_arena(i),
+                                                     RIGHT_READ | RIGHT_WRITE)) return false;
+                write_mapped[i] = true;
+                libk::zero(reinterpret_cast<void*>(va::sessions::write_arena(i)), 65536);
+            }
             auto* request = reinterpret_cast<RingPage*>(request_va);
             auto* reply = reinterpret_cast<RingPage*>(reply_va);
             // The old client has exited and the replacement is suspended.

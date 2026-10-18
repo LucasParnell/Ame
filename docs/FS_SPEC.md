@@ -1,6 +1,6 @@
 # Midix Filesystem Specification (FS_SPEC)
 
-Companion to `Midix_Architecture_3.md §17, §9, §20`.
+Companion to [the architecture specification](architecture.md), §17, §9 and §20.
 
 ---
 
@@ -39,8 +39,9 @@ The model deliberately borrows two proven filesystem lessons:
   journal/replay layer is an optimization and recovery aid, not the core API.
 
 For V1, snapshots remain a small optional hook for testing CoW/refcount behavior.
-They are not required for boot success. The durable journal/replay path is a
-post-V1 milestone.
+They are not required for boot success. The disk store implements ordered CoW
+data plus physical metadata redo and recovery (§7); logical delta records and
+disk snapshots remain future work.
 
 References used while shaping V1:
 
@@ -61,8 +62,8 @@ Blocks K+..   Data area         (first_data_block = journal_start_block + N)
 ```
 
 The superblock encodes reserved log bounds. The allocator must not touch those
-blocks. V1 only needs the bounds and checkpoint fields; full journal replay uses
-the same reserved area later.
+blocks. Metadata redo records occupy this reserved area; file payloads and
+metadata home blocks allocate from the remaining volume (§7).
 
 ### 2.1 Superblock (block 0, exactly 4096 bytes)
 
@@ -78,7 +79,7 @@ struct FsSuperblock {
     u64  free_extent_count;        // hint; not authoritative
     u64  snapshot_tree_root;       // B+tree root for snapshot list
     u64  journal_start_block;      // first reserved log block (== 2 for new volumes)
-    u64  journal_block_count;      // reserved log block count; replay is post-V1
+    u64  journal_block_count;      // reserved log block count
     u64  first_data_block;         // first allocatable data block
     u64  current_generation;       // generation assigned to new metadata/data mappings
     u32  flags;                    // FS_FLAG_DIRTY=1 (cleared on clean unmount)
@@ -91,12 +92,13 @@ static_assert(sizeof(FsSuperblock) == 4096);
 
 ### 2.2 Checkpoint Record (block 1, exactly 4096 bytes)
 
-Written after an ordered metadata checkpoint. V1 treats this as the clean/dirty
-boundary; durable replay from `lsn` is the post-V1 journal layer.
+Written after the committed metadata after-images reach their home blocks.
+The journal also contains a complete checkpoint after-image, so a torn block 1
+can be recovered (§7).
 
 ```cpp
 struct FsCheckpoint {
-    u64  lsn;                      // last committed metadata sequence / future journal LSN
+    u64  lsn;                      // last committed journal LSN
     u64  inode_table_root;
     u64  extent_bitmap_root;
     u64  phys_refcount_root;
@@ -264,6 +266,10 @@ static_assert(sizeof(SnapshotLeafEntry) == 64);
 
 ### 3.4 Metadata CoW Rule
 
+The following rules describe optional snapshot-capable metadata CoW. The current
+disk store has no disk snapshots and updates metadata home blocks through redo
+transactions (§7); memory snapshots use their own bounded backend.
+
 B+tree node writes obey copy-on-write when a snapshot is active:
 
 - On insert/delete: if `node.generation < fs.current_generation`, allocate a new node block
@@ -289,23 +295,12 @@ referencing an inode see the same policy class.
 
 ### 4.1 `cow_write_extent` (user-data inodes)
 
-```
-1. Lookup ExtentLeafEntry at logical_block.
-2. Split the logical extent into block-aligned before/write/after ranges as needed.
-3. For the write range, lookup the PhysExtentLeafEntry range by phys_block.
-4. If phys_refcount > 1:
-     Allocate new extent (alloc_extent).
-     Decrement/split the old PhysExtentLeafEntry range for the overwritten blocks.
-     Write data to the new extent.
-     Update the inode extent tree to point at the new phys_block with
-     generation = fs.current_generation.
-5. Else:
-     Write data in place (sole owner, not snapshot-reachable).
-```
-
-Because user-visible snapshots pin their reachable physical extents before
-becoming mountable, a physical refcount of 1 means the range has no live inode or
-snapshot sharer and may be overwritten in place.
+The disk writer always allocates a new 4 KiB data block, including sole-owner
+updates. Partial writes preserve and checksum the old bytes; holes read as zero.
+It updates the extent mapping and physical range refcounts in the same metadata
+transaction. Old blocks remain unavailable for reuse until the replacement
+mapping commits. This preserves the previous committed bytes through power loss.
+Contiguous data writes batch up to 64 KiB before the journal durability barrier.
 
 ### 4.2 `promote(content_store_handle)` → `new_user_data_handle`
 
@@ -398,7 +393,7 @@ struct FsOpenRequest {             // 48 bytes
 static_assert(sizeof(FsOpenRequest) == 48);
 
 struct FsOpenReply {               // 48 bytes
-    u32  status;                   // 0 = ok; negative = mx_status_t error
+    i32  status;                   // 0 = ok; negative = mx_status_t error
     fs_handle_t handle;            // FS-local handle (u32)
     u64  inode_number;
     u64  size;
@@ -424,7 +419,7 @@ struct FsReadRequest {             // 24 bytes (fits in 48-byte payload, 24 spar
 static_assert(sizeof(FsReadRequest) == 24);
 
 struct FsReadReply {               // 48 bytes
-    u32  status;
+    i32  status;
     u32  length_read;
     mx_cap_handle_t arena_cap;     // u64; non-zero = zero-copy; client maps and revokes
     u8   inline_data[32];          // used when arena_cap == 0 (length_read ≤ 32)
@@ -442,13 +437,13 @@ struct FsWriteRequest {            // 48 bytes
     u64  offset;
     u32  length;
     u32  reserved;
-    u8   payload[24];              // if FS_WRITE_ZERO_COPY: payload[0..7] = mx_cap_handle_t arena_cap
+    u8   payload[24];              // if FS_WRITE_ZERO_COPY: token[0..7], byte offset[8..15], zero[16..23]
                                    // else: inline data (length ≤ 24)
 };
 static_assert(sizeof(FsWriteRequest) == 48);
 
 struct FsWriteReply {              // 8 bytes
-    u32  status;
+    i32  status;
     u32  bytes_written;
 };
 static_assert(sizeof(FsWriteReply) == 8);
@@ -456,23 +451,12 @@ static_assert(sizeof(FsWriteReply) == 8);
 
 #### Readdir / Readdir Reply
 
-```cpp
-struct FsReaddirRequest {          // 16 bytes
-    fs_handle_t handle;
-    u32  cookie;                   // 0 = start; opaque continuation token
-    u32  flags;
-    u32  reserved;
-};
-static_assert(sizeof(FsReaddirRequest) == 16);
-
-struct FsReaddirReply {            // 16 bytes
-    u32  status;
-    u32  entry_count;
-    mx_cap_handle_t arena_cap;     // CAP_ARENA containing DirLeafEntry[entry_count]
-                                   // arena_cap == 0 means no more entries (end of directory)
-};
-static_assert(sizeof(FsReaddirReply) == 16);
-```
+The version-2 ABI returns one inline entry per 48-byte reply: signed `status`,
+`entry_count`, `next_cookie`, `inode_number` (each 32 bits), `type` (16 bits),
+`name_len` and `flags` (8 bits each), then `name[28]`. Flags distinguish an entry,
+EOF and a truncated display name. The 16-byte request contains `handle`,
+`cookie`, `flags` and `reserved`. See the canonical structs in
+`shared/include/midix/abi/protocols/fs.h`; directory names on disk retain 48 bytes.
 
 #### Mkdir / Unlink / Rename
 
@@ -520,7 +504,7 @@ struct FsPromoteRequest {          // 8 bytes
 static_assert(sizeof(FsPromoteRequest) == 8);
 
 struct FsPromoteReply {            // 8 bytes
-    u32  status;
+    i32  status;
     fs_handle_t new_handle;        // handle to new user-data inode
 };
 static_assert(sizeof(FsPromoteReply) == 8);
@@ -536,7 +520,7 @@ struct FsSnapshotRequest {         // 16 bytes
 static_assert(sizeof(FsSnapshotRequest) == 16);
 
 struct FsSnapshotReply {           // 16 bytes
-    u32  status;
+    i32  status;
     u32  reserved;
     u64  snapshot_id;
 };
@@ -550,7 +534,7 @@ struct FsSnapshotMntRequest {      // 16 bytes
 static_assert(sizeof(FsSnapshotMntRequest) == 16);
 
 struct FsSnapshotMntReply {        // 8 bytes
-    u32  status;
+    i32  status;
     fs_handle_t dir_handle;        // root dir handle, read-only
 };
 static_assert(sizeof(FsSnapshotMntReply) == 8);
@@ -605,163 +589,132 @@ struct Server {
 
 ---
 
-## 6. Zero-Copy Path
+## 6. Arena Transport and Cache Coherence
 
-Disk blocks are not directly mappable as memory pages. Zero-copy is implemented via the
-**FS read cache arena**:
+Control requests remain 48-byte ring payloads. Reads up to 32 bytes are inline;
+larger disk reads return a read-only `CAP_ARENA` view of up to 4 KiB, also selected
+explicitly by `FS_READ_ZERO_COPY`. `Client::read_bytes` loops across pages.
 
-```
-Disk extent
-    │
-    ▼  virtio DMA (wired arena → device)
-FS wired DMA arena  (physically pinned, IOVA-registered)
-    │
-    ▼  FS copies DMA arena → read cache arena (one memcpy; DMA-to-CPU-cache, not CPU-to-CPU)
-FS read cache arena  (ordinary CAP_ARENA, cached, CPU-accessible)
-    │
-    ▼  sys_arena_derive → read-only CAP_ARENA cap
-Client-visible arena cap  (client maps via sys_map_arena)
-```
+`io.fs` has 16 immutable read-view slots, with two retained slots per session.
+Identities (owner, inode, offset, committed generation) are separate from page
+payloads. A changed generation selects a new view. An arena can be reused only
+when kernel object references show that its owning cap and server mapping are
+the only references left. Clients must **both unmap and revoke** after use.
+Revoking a cap while keeping a mapping continues to pin the old bytes. Session
+teardown drops server references; surviving client references retain that old
+object and a later session receives a fresh object. Exhausted pinned slots
+return `MX_ERR_BUSY`.
 
-### FS_READ_DIRECT flag (optional, V1)
+Each FS session also receives a separate 64 KiB writable upload arena from init.
+`FS_WRITE_ZERO_COPY` encodes the client's granted arena token and byte offset as
+two little-endian `u64`s in `FsWriteRequest.payload`, followed by a zero `u64`.
+The service validates the pregranted token, request bounds and reserved fields;
+it never interprets a caller-local token as authority in its own cap table.
+The client owns the upload bytes until request publication and must keep them
+stable until the reply. This avoids inline-only 24-byte writes. It is arena
+transport, with copies at the storage boundary; direct client DMA is unsupported.
+`FS_READ_DIRECT` returns `MX_ERR_NOT_IMPLEMENTED`.
 
-Client pre-allocates a wired arena and sends its cap in a future read-direct request.
-FS programs virtio DMA directly into client's arena. Bypasses read cache.
-Requires client to hold a wired-arena cap (`CAP_ARENA` with `ARENA_WIRED` flag).
-V0: not implemented.
+On Anne, ADMA2 uses a separate permanently pinned, contiguous 68 KiB arena:
+one descriptor page plus 64 KiB of data. All CPU aliases are Normal
+Non-Cacheable. Driver barriers publish descriptors/data before command submission
+and consume device writes after completion. Client and filesystem arenas remain
+ordinary CPU-coherent write-back memory. Only the block driver sees the DMA bus
+address. DMA failures never publish partial reads or retry uncertain writes.
 
-### Threshold
-
-- `length_read ≤ FS_INLINE_READ_MAX (32)`: inline path, data in `FsReadReply.inline_data`
-- `length_read > 32`: zero-copy path, `FsReadReply.arena_cap` is non-zero
-
-Client **must revoke** or unmap the returned `arena_cap` after use. FS tracks outstanding
-derived caps per extent; eviction of cached pages blocked until refcount reaches zero.
+The 32-entry block cache separates tags/ages from aligned payload pages and
+invalidates every affected page **before** a write, including partial failures.
+A block IPC timeout poisons that connection: an uncorrelated late ACK cannot
+allow the shared transfer arena to be reused.
 
 ---
 
-## 7. V1 Fast Safety & Future Journal
+## 7. Disk Transactions and Recovery
 
-### 7.1 V1 Ordered Update Contract
+### 7.1 Volume geometry and working sets
 
-V1 uses an ordered metadata contract, not a full replay journal:
+`store.cc` uses disk-resident keyed B+trees for inodes, directories, per-file
+extents, physical reference ranges and full-volume free-space bitmap ranges.
+The superblock determines capacity. On Anne this is the existing userdata GPT
+partition: 13,260,800 × 4,096 bytes (54,316,236,800 bytes, about 50.6 GiB).
+The old 1 MiB journal snapshot is no longer the writable capacity limit.
+Packaged root handles remain read-only; `/data` redirects to user inode
+`0x80000000`. `/tmp` remains a separate volatile memory filesystem.
 
-```
-1. Write or copy file data into its target physical extent.
-2. Update the ExtentLeafEntry checksum/generation.
-3. Update inode size/dirent/refcount metadata.
-4. On FS_SYNC: verify extent checksums and phys-refcount invariants.
-5. Serialise the durable /data volume into the reserved disk region (BLK_WRITE).
-6. issue BLK_FLUSH where supported.
-7. Mark the in-memory checkpoint clean.
-```
+RAM is bounded independently of volume size: 96 staged metadata pages, eight
+tree descent levels and 16 transfer pages. Large file/truncate/promote operations
+use bounded transactions. Internal nodes with header flag bit 0 store subtree
+entry counts in the first eight reserved bytes of each internal entry; older
+nodes without counts remain readable. Directory lookup scans equal hash keys
+to resolve collisions by name. Rename prevents directory cycles.
 
-This mirrors ext4's practical V1 lesson: metadata safety matters, but full data
-journaling is too expensive for the default path. The bcachefs lesson is that
-ordered keyed metadata plus invariant checking gives a clean foundation for a
-later logical journal.
+Bitmap states are 0 free, 1 allocated, 2 pending release and 3 emergency metadata
+reserve. State 2 exists only in staged transaction state; released blocks cannot
+be reused before commit. A 32-block reserve supports metadata reclamation at
+ENOSPC and is replenished from freed blocks. Truncate/unlink detach data
+atomically, then reclaim extents in bounded batches; persistent orphan markers
+resume unfinished cleanup on mount. Promote builds a hidden orphan, increments
+shared physical references in batches and publishes only its complete mapping.
 
-### 7.1.1 Implemented durability (V1, `userland/fs/fs_durable.cc`)
+Checkpoint padding begins with the `FTX1` extension (little-endian `0x31585446`):
+`u32 magic, next_inode, orphan_count, reserve_count`, followed by 32 `u64` reserved
+block addresses and a `u32` CRC over the first 336 bytes of the complete
+checkpoint. The original checkpoint CRC over its first 56 bytes is retained.
+Inode reserved bytes 0..3 store the parent inode; byte 4 marks pending cleanup.
+These fields do not change any on-disk structure sizes.
 
-What is actually durable in this tree, stated precisely:
+### 7.2 Journal format
 
-- **Read-only root.** The signed midix-fs-v1 root is never mutated. Disk-backed
-  handles are read-only and write/create/truncate are rejected before the B+tree.
-- **`/tmp` is volatile.** It lives only in the in-memory inode table and is
-  discarded on service restart. `sync` does not make `/tmp` durable.
-- **`/data` is durable when the mount exposes a safe reserved region.** The whole
-  `/data` subtree is serialised into the disk's reserved journal region
-  (`superblock.journal_start_block`, `journal_block_count`) using `BLK_WRITE`, and
-  committed with one `BLK_FLUSH`. On the next mount the region is replayed, so a
-  file written and synced survives a reboot.
-- **Commit protocol.** The region header is written first with `state=Dirty`, then
-  the records, then the header again with `state=Committed`, then flushed. A crash
-  between the two header writes leaves a `Dirty` header that the loader rejects
-  rather than replaying a torn tree. Every record carries a record CRC and a folded
-  data CRC, validated in full before anything is imported.
-- **Non-durable mode is explicit.** With no usable region (memory backend, or a
-  disk whose reserved region is missing or not provably disjoint from the root)
-  `durable_available()` is false, `/data` is an ordinary in-memory volume, and
-  `FS_SYNC` returns `MX_ERR_NOT_IMPLEMENTED`. A successful sync therefore means
-  "durable bytes", and a sync that cannot be honoured says so.
-- **`FS_SYNC` reply hygiene.** `FS_CLOSE_REPLY` and `FS_SNAPSHOT_DROP_REPLY` are
-  dedicated reply types appended to `FsMsgType`; a close/drop acknowledgement can
-  no longer be mistaken for a sync result.
+The canonical `JournalRecord` and `JournalCommit` are each 4 KiB. Record types
+1–7 retain their logical-delta assignments for future use. The implemented
+`JRN_METADATA_FRAGMENT=8` stores a physical metadata after-image fragment:
 
-The reserved region is deliberately *not* the on-disk B+tree: the journaled
-B+tree writer (below) is still the post-V1 milestone. The region is only exposed
-when `journal_start_block + journal_block_count <= first_data_block`, so it can
-never overlap a block the read-only root allocates.
+| Offset within `JournalRecord.data` | Field |
+| --- | --- |
+| 0 | `u32` target block, repeated inside CRC-covered payload |
+| 4 | `u16` byte offset (0 or 4056) |
+| 6 | `u16` length (4056 or 40) |
+| 8 | after-image bytes; unused remainder zero |
 
-### 7.2 Future Journal Record (exactly 4096 bytes per record)
+Two records represent one metadata page. Each record CRC covers all 4064 data
+bytes; the commit batch CRC covers those data fields concatenated in LSN order.
+Records start at `journal_start_block`, and the commit occupies the **last**
+reserved log block. The checkpoint after-image is the final page in the batch.
+This is a bounded, reusable transaction slot rather than a circular logical log.
 
-```cpp
-enum JournalRecordType : u32 {
-    JRN_EXTENT_ALLOC  = 1,
-    JRN_EXTENT_FREE   = 2,
-    JRN_INODE_WRITE   = 3,
-    JRN_DIR_INSERT    = 4,
-    JRN_DIR_DELETE    = 5,
-    JRN_PHYS_REF_INC  = 6,
-    JRN_PHYS_REF_DEC  = 7,
-};
+### 7.3 Durable commit
 
-struct JournalRecord {
-    u64  lsn;                      // monotonic log sequence number
-    u32  type;                     // JournalRecordType
-    u32  target_block;             // block being modified
-    u64  timestamp_ns;
-    u32  record_crc32;             // CRC32 of data[] field alone
-    u32  reserved;
-    u8   data[4064];               // serialized before-image or operation params
-};
-static_assert(sizeof(JournalRecord) == 4096);
-```
+1. Write new CoW data and metadata fragment records. Flush the device.
+2. Write the commit with its LSN range, count and batch CRC. Flush again.
+3. Apply metadata after-images to home blocks, write checkpoint block 1, and
+   flush before acknowledging the mutation.
 
-### 7.3 Future Journal Commit Record (exactly 4096 bytes)
+File payloads are not journaled. After step 2, redo is sufficient to finish any
+torn home writes. Before it, the preceding committed mapping remains valid.
+Each successful mutation is committed; `FS_SYNC` performs a further device flush.
+Data checksums are verified on reads and partial overwrites, and affected tree,
+allocation and refcount invariants are checked during mutations. `FS_SYNC` is
+not a whole-volume scrub. Failed or ambiguous writes poison the mount until
+fresh recovery; no successful durability reply is fabricated.
 
-```cpp
-struct JournalCommit {
-    u64  lsn;                      // LSN of this commit record
-    u64  first_record_lsn;         // LSN of first record in this batch
-    u32  record_count;
-    u32  batch_crc32;              // CRC32 of all record data[] fields concatenated
-    u64  timestamp_ns;
-    u8   pad[4064];
-};
-static_assert(sizeof(JournalCommit) == 4096);
-```
+### 7.4 Recovery and compatibility
 
-### 7.4 Post-V1 Durable Commit Sequence (B+tree journal — not yet implemented)
+Mount validates superblock geometry, checkpoint CRC/roots and the entire journal
+batch before issuing any home write. It checks fragment targets, offsets,
+lengths, sequence, record CRCs and the batch CRC. Only a fully committed valid
+batch is replayed, idempotently, followed by a flushed checkpoint. A torn
+checkpoint can be reconstructed from its journal after-image. Replay also applies
+a valid batch whose LSN equals the checkpoint: the checkpoint sector may have persisted before metadata home blocks during their
+shared final flush. An incomplete overwritten journal with a valid checkpoint
+retains that preceding state. If neither checkpoint nor committed redo is
+usable, the mount fails.
 
-This is the still-unimplemented journaled-B+tree path. The V1 `/data` store in
-§7.1.1 is a separate, simpler mechanism that does not write B+tree nodes. When
-the journaled writer lands it must follow this sequence for power-fail safety:
-
-```
-1. Write JournalRecord(s) to circular journal.
-2. BLK_FLUSH to virtio driver (drain device write buffer).
-3. Write JournalCommit with CRC.
-4. BLK_FLUSH.
-5. Apply operations in-memory (update B+tree nodes / checkpoint).
-6. Write FsCheckpoint to block 1 with updated LSN.
-7. BLK_FLUSH.
-```
-
-Steps 1-4 are the atomicity boundary. A partial write to the commit block is
-detected by CRC mismatch; that batch is skipped on replay.
-
-### 7.5 Post-V1 Recovery on Resume
-
-```
-1. Read FsCheckpoint from block 1.
-2. If FsSuperblock.flags & FS_FLAG_DIRTY:
-     Scan journal from checkpoint.lsn to latest commit.
-     For each committed batch: re-apply JournalRecords.
-     Truncate journal head to latest applied LSN.
-3. Clear FS_FLAG_DIRTY. Write checkpoint. BLK_FLUSH.
-4. Resume serving requests.
-```
+A populated legacy `DUR1` snapshot is not overwritten or automatically migrated;
+the legacy backend remains available for read/export. Without a writable disk,
+`/data` is volatile and `FS_SYNC` reports `MX_ERR_NOT_IMPLEMENTED`. Optional disk
+snapshots currently return `MX_ERR_NOT_IMPLEMENTED`; memory snapshots retain
+their existing small test implementation. Logical delta replay, disk snapshots,
+tiering and direct client DMA remain separate milestones.
 
 ---
 
@@ -769,7 +722,9 @@ detected by CRC mismatch; that batch is skipped on replay.
 
 Snapshots are **not on the V1 critical path**. V1 keeps the message ABI and a
 small read-only implementation so CoW/refcount behavior can be exercised, but
-boot success and ordinary file I/O must not depend on snapshot creation.
+boot success and ordinary file I/O must not depend on snapshot creation. The
+following snapshot design is prospective for the disk store; its current
+handlers explicitly return not-implemented on disk mounts.
 
 ### 8.1 User-Visible Snapshots vs. Service-State Preservation
 
@@ -929,7 +884,7 @@ struct BlkRequest {                // 40 bytes (fits in 48-byte payload)
 static_assert(sizeof(BlkRequest) == 40);
 
 struct BlkReply {                  // 8 bytes
-    u32  status;                   // 0=ok, 1=io_error, 2=timeout, 3=unsupported
+    i32  status;                   // 0=ok, 1=io_error, 2=timeout, 3=unsupported
     u32  sectors_transferred;
 };
 static_assert(sizeof(BlkReply) == 8);
@@ -990,53 +945,49 @@ obtain an `MxEndpointDesc` containing the cmd/reply ring caps and doorbells.
 | 7 | V1 ordered sync: extent checksums, refcount invariant check, BLK_FLUSH if available | `FS V1 smoke OK` |
 | 8 | Read cache arena + zero-copy path (arena_cap derivation) | `FS zero-copy OK` |
 | 9 | Optional snapshot B+tree + `FS_SNAPSHOT` / `FS_SNAPSHOT_MNT` | `FS snapshot flush OK` |
-| 10 | Future journal + CRC + crash recovery replay | `FS journal replay OK` |
+| 10 | Physical metadata redo + CRC + crash recovery replay (implemented); logical deltas deferred | crash-boundary host tests pass |
 | 11 | Suspend/resume: `pre_suspend` + arena registration + flush target | `MIDIX V0 FILESYSTEM OK` |
 | 12 | Tiering + prefetch hints | `FS tiering migration OK` |
 
 ---
 
-## 13. Files to Create
+## 13. Implementation Files
 
 | Path | Purpose |
-|---|---|
-| `shared/include/midix/abi/protocols/fs.h` | `FsMsgType`, `FsFrame`, all request/reply structs, `BlkRequest`/`BlkReply` |
-| `userland/lib/include/mochi/fs.h` | `mochi::fs::Client`, `mochi::fs::Server` |
-| `userland/fs/main.cc` | Service bootstrap, ring dispatch, nameservice registration |
-| `userland/fs/btree.h` / `btree.cc` | Generic B+tree engine, typed leaf formats, CoW node alloc |
-| `userland/fs/inode.h` / `inode.cc` | Inode CRUD, `InodeLeafEntry`, extent tree per inode |
-| `userland/fs/extent.h` / `extent.cc` | `FreeSpaceLeafEntry`, bitmap allocator, sequential hint |
-| `userland/fs/refcount.h` / `refcount.cc` | `PhysExtentLeafEntry`, global refcount tree, inc/dec |
-| `userland/fs/directory.h` / `directory.cc` | `DirLeafEntry`, compound key, path resolution |
-| `userland/fs/cow.h` / `cow.cc` | `cow_write_extent()`, `promote()` |
-| `userland/fs/snapshot.h` / `snapshot.cc` | Optional `SnapshotLeafEntry`, `FS_SNAPSHOT`, `pre_suspend` |
-| `userland/fs/journal.h` / `journal.cc` | Future `JournalRecord`, `JournalCommit`, commit sequence, replay |
-| `userland/fs/cache.h` / `cache.cc` | Read cache arena, zero-copy derivation |
-| `userland/fs/tiering.h` | `TierDesc`, placement policy |
-| `userland/drivers/blk/virtio/main.cc` | virtio-mmio init, wired DMA arena, queue management |
-| `userland/CMakeLists.txt` | Add `io.fs` + `drv.blk.virtio` targets |
-| `userland/system.json` | Add manifest entries |
+| --- | --- |
+| `shared/include/midix/abi/protocols/fs.h` | Disk structs, messages, journal record ABI |
+| `userland/lib/include/mochi/fs.h` | Client/server transport and arena helpers |
+| `userland/fs/fs_ring.cc` | Bootstrap, per-client sessions and dispatch |
+| `userland/fs/store.h` / `store.cc` | Disk trees, allocator, refcounts, transactions and recovery |
+| `userland/fs/fs_disk.cc` | Block IPC, geometry, mount and coherent block cache |
+| `userland/fs/fs_handles.cc` | Session-owned handles and authority |
+| `userland/fs/fs_io.cc` | Immutable read views and per-session upload transport |
+| `userland/fs/fs_core.cc` / `fs_snapshot.cc` | Volatile backend and memory snapshots |
+| `userland/fs/fs_durable.cc` | Legacy DUR1 checkpoint compatibility |
+| `userland/drivers/blk/virtio/main.cc` | Virtio block service |
+| `userland/drivers/blk/emmc/main.cc` | Anne partition-scoped eMMC block service |
+| `shared/drivers/emmc/sdhci.cc` | Shared PIO/ADMA2 SDHCI transport and flush |
+| `kernel/init/boot_caps.cc` | Pinned uncached DMA arena and device authority |
 
 ---
 
 ## 14. Verification
 
 ```sh
-scripts/claude/ame-build.sh drv.blk.virtio
-scripts/claude/ame-build.sh io.fs
-scripts/claude/ame-run.sh
-scripts/claude/ame-log.sh build/dango-guest.log
+python3 -m unittest discover -s tests -p 'test_fs*.py'
+python3 -m unittest discover -s tests -p test_emmc.py
+python3 scripts/test/durable-persistence.py --build out/verify --timeout 60 --keep
 ```
 
-Expected guest log markers (in order):
-```
-BLK read/write smoke OK
-FS service registered OK
-FS V1 smoke OK
-```
-
-Later milestones add `FS zero-copy OK`, `FS snapshot flush OK`, and
-`FS journal replay OK`.
+Host sanitizer tests cover scalable directory trees, 2.5 MiB file writes,
+physical-tail allocation, sparse offsets beyond 50 GiB, shared-extent promotion,
+CoW isolation, ENOSPC reclamation and 2,790 sector-torn/reordered power-cut
+cases across overwrite, truncate, unlink, rename and promotion.
+The two-boot guest fixture writes and reads 3 MiB through actual IPC, and tests
+read-only arena rights, generation coherence and cap/mapping lifetime pinning.
+On a connected Anne, `fscheck write` writes/syncs/verifies a 3 MiB diagnostic;
+`fscheck read` verifies it after reboot. Hardware results are recorded in
+[EMMC.md](../boards/huawei-anne/EMMC.md).
 
 ### Handle access (protocol version 2)
 

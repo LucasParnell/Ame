@@ -1,5 +1,5 @@
-// First-light v6: C++ holds red/blue/green for three seconds each, then this
-// entry code uses the v5 LPM3 reset pulse. No PSCI or WFI-based timed waits.
+// First-light v6: C++ records red/blue/green transitions without LED dwell,
+// then this entry uses the v5 LPM3 reset pulse. No PSCI or WFI timed waits.
 .section .text.entry, "ax"
 .global _start
 _start:

@@ -17,7 +17,8 @@ class Filesystem(unittest.TestCase):
                 '-I' + str(ROOT / 'userland/lib/include'),
                 '-I' + str(ROOT / 'shared/include'),
                 '-I' + str(ROOT / 'lib/include'),
-                str(ROOT / 'tests/fs_probe.cc'), str(ROOT / 'lib/libk/printf.cc'), '-o', probe],
+                str(ROOT / 'tests/fs_probe.cc'), str(ROOT / 'userland/fs/store.cc'), str(ROOT / 'userland/fs/fs_io.cc'),
+                str(ROOT / 'lib/libk/printf.cc'), '-o', probe],
                 capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([probe], capture_output=True, text=True, timeout=10)

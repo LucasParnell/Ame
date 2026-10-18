@@ -5,6 +5,7 @@
 #include "midix/abi/protocols/usb_device.h"
 #include "midix/abi/protocols/usb_function.h"
 #include "descriptors.h"
+#include "midix/abi/protocols/fido2.h"
 namespace mochi::usb::gadget {
 enum class ControlPhase : mx_u8_t { Idle, In, OutClass, Function, StatusIn, StatusOut, Stall };
 struct Function {
@@ -13,15 +14,17 @@ struct Function {
     bool rx_active, rx_pending, tx_pending, tx_active, reset;
 };
 struct Runtime {
-    mochi::SpscEndpoint links[3];
+    mochi::SpscEndpoint links[4];
+    mochi::Ring fido2_demand;
     libk::bytes payload;
     MxDeviceEvent setup;
     MxFunctionSetup function_request;
-    Function functions[2];
+    Function functions[3];
     mx_u64_t generation, function_generation, next_id;
     mx_u32_t length, sent, configuration, configure_next;
     mx_u8_t pending_address;
     bool address_pending, ep0_active, zlp, pending_function;
+    bool fido2_requested, demand_pending;
     ControlPhase phase;
     MxUsbSpeed speed;
 };
@@ -60,7 +63,7 @@ inline void reply_data(Runtime& r, mx_u32_t length) {
     r.ep0_active = false;
 }
 // Fixed endpoint rows describe function allocation; no controller knowledge.
-constexpr mx_u8_t kFunctionEndpoints[] = {1, 0x82, 0x83, 4, 0x85};
+constexpr mx_u8_t kFunctionEndpoints[] = {1, 0x82, 0x83, 4, 0x85, 6, 0x86};
 constexpr mx_u32_t kFunctionEndpointCount = sizeof(kFunctionEndpoints);
 inline bool configure(Runtime& r) {
     bool progress = false;
@@ -71,10 +74,11 @@ inline bool configure(Runtime& r) {
                                      0,
                                      0,
                                      static_cast<mx_u16_t>(ep == 0x83                    ? 16
+                                                           : (ep & 15) == 6             ? 64
                                                            : r.speed == MxUsbSpeed::High ? 512
                                                                                          : 64),
                                      ep,
-                                     ep == 0x83 ? MxUsbTransferType::Interrupt
+                                     ep == 0x83 || (ep & 15) == 6 ? MxUsbTransferType::Interrupt
                                                 : MxUsbTransferType::Bulk,
                                      0,
                                      0};
@@ -94,6 +98,8 @@ inline void reset_functions(Runtime& r) {
         mx_exit(MX_ERR_OVERFLOW);
     }
     ++r.function_generation;
+    if (r.fido2_requested) r.demand_pending = true;
+    r.fido2_requested = false;
     for (auto& function : r.functions) {
         function = {};
         function.reset = true;

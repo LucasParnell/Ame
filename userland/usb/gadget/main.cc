@@ -20,12 +20,16 @@ extern "C" [[noreturn]] void _start() {
     r->links[2] = mochi::driver::link(
         boot, "function.1",
         (mochi::va::native_driver::kLinks + 2 * mochi::va::native_driver::kLinkStride));
+    r->links[3] = mochi::driver::link(
+        boot, "function.2", mochi::va::native_driver::kLinks + 3 * mochi::va::native_driver::kLinkStride);
+    r->fido2_demand = mochi::boot::map_ring(boot, {"fido2.demand.ring",
+        mochi::va::native_driver::kLinks + 4 * mochi::va::native_driver::kLinkStride, "fido2.demand.db"});
     r->payload =
         mochi::usb::map_payload(boot, "device.payload", mochi::va::native_driver::kPayload);
     r->next_id = mx_clock_ns();
     r->function_generation = r->next_id | 1;
     if (!r->payload.data || r->payload.size < 8192 || !r->links[0].valid() ||
-        !r->links[1].valid() || !r->links[2].valid()) {
+        !r->links[1].valid() || !r->links[2].valid() || !r->links[3].valid() || !r->fido2_demand.valid()) {
         mochi::boot::invalid_boot();
     }
     mochi::boot::ready(boot);
@@ -37,7 +41,7 @@ extern "C" [[noreturn]] void _start() {
         const auto deadline = mochi::usb::gadget::retry_pending(*r)
                                   ? mx_clock_ns() + mochi::driver::kBackpressureRetryNs
                                   : 0;
-        mochi::driver::idle(r->links, 3, r->links[0].rx_doorbell, deadline,
+        mochi::driver::idle(r->links, 4, r->links[0].rx_doorbell, deadline,
                             mochi::usb::gadget::readable_mask(*r));
     }
 }

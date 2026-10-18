@@ -7,7 +7,7 @@
 // (SYS_IRQ_BIND_DOORBELL). The kernel programmes the interrupt controller so
 // the line is delivered to the driver's CPU, then on delivery notifies the
 // doorbell. The binding table is a fixed, power-of-two-indexed array: a hostile
-// irq_id can never index outside it, even speculatively (Architecture_3.md §18).
+// irq_id can never index outside it, even speculatively (docs/architecture.md §18).
 //
 // Owned lines only: SGIs (0-15) and PPIs (16-31) belong to the kernel (timer,
 // IPI) and are never redirected to a driver.

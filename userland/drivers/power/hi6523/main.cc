@@ -2,6 +2,7 @@
 // not charging-current or battery policy. Values follow the pinned Hi6250
 // schargerV300 vendor sequence; 500 mA is the conservative Type-C default.
 #include "mochi/drivers/i2c.h"
+#include "mochi/drivers/hi6523.h"
 #include "mochi/log.h"
 #include "mochi/boot_log.h"
 #include "midix/abi/protocols/board_usb.h"
@@ -11,7 +12,7 @@ struct Runtime {
     mochi::SpscEndpoint control;
     MxBoardReply reply;
     mx_u64_t lease, feed;
-    bool enabled, pending;
+    bool enabled, pending, faulted, startup_check;
 };
 bool disable(Runtime& r) {
     const bool ok = r.bus.update(0x80, 0x40, 0);
@@ -38,6 +39,7 @@ bool enable(Runtime& r) {
         return false;
     }
     r.enabled = true;
+    r.startup_check = true;
     r.feed = mx_clock_ns() + 1000000000ull;
     return true;
 }
@@ -73,12 +75,28 @@ extern "C" [[noreturn]] void _start() {
     for (;;) {
         const auto now = mx_clock_ns();
         if (r->enabled && now >= r->lease) {
+            r->faulted = true;
+            mochi::log_raw_marker("drv.power.hi6523: source lease expired\n");
             (void)disable(*r);
         }
         if (r->enabled && now >= r->feed) {
-            mx_u8_t faults = 0;
-            if (!r->bus.read(0x0c, faults) || (faults & 0x1e) || !r->bus.write(0xe8, 1)) {
+            const auto health = mochi::hi6523::maintain_source(r->bus, r->startup_check);
+            r->startup_check = false;
+            if (!health.ok()) {
+                char line[128];
+                const int length = libk::snprintf(line, sizeof(line),
+                    "drv.power.hi6523: source stopped reason=%u status=0x%02x faults=0x%02x\n",
+                    static_cast<unsigned>(health.failure), static_cast<unsigned>(health.status),
+                    static_cast<unsigned>(health.faults));
+                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) mochi::log_raw_marker(line);
+                r->faulted = true;
                 (void)disable(*r);
+            } else if (health.faults & 0x1c) {
+                char line[112];
+                const int length = libk::snprintf(line, sizeof(line),
+                    "drv.power.hi6523: startup event cleared; boost healthy status=0x%02x faults=0x%02x\n",
+                    static_cast<unsigned>(health.status), static_cast<unsigned>(health.faults));
+                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) mochi::log_raw_marker(line);
             }
             r->feed = now + 1000000000ull;
         }
@@ -91,7 +109,13 @@ extern "C" [[noreturn]] void _start() {
             mochi::message_get(slot, &request, MX_POWER_SET)) {
             bool ok = !request.reserved && (request.value == 0 || request.value == 500);
             if (ok) {
-                ok = request.value ? (r->enabled || enable(*r)) : disable(*r);
+                // A renewal cannot silently restart a failed/expired session.
+                // The role owner must acknowledge shutdown before starting anew.
+                if (request.value) ok = !r->faulted && (r->enabled || enable(*r));
+                else {
+                    ok = disable(*r);
+                    if (ok) r->faulted = false;
+                }
             }
             if (!ok) {
                 (void)disable(*r);

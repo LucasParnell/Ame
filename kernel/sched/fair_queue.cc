@@ -105,9 +105,8 @@ FairPrincipalQueue& band_for(Eki& e, SchedBand band) {
     default: return e.fair_principals;
     }
 }
-BandQueue& band_threads(PrincipalEntity& pe, SchedBand band) {
+BandQueue& band_threads(Eki& e, const PrincipalEntity& pe, SchedBand band) {
     const u32 index = band_index(band);
-    return pe.bands[index ? index - 1 : SCHED_BAND_FAIR - 1];
+    return e.thread_heaps[pe.principal_id][index ? index - 1 : SCHED_BAND_FAIR - 1];
 }
-u64& min_vruntime_for(Eki& e, SchedBand band) { return e.min_vruntime[band_index(band)]; }
 } // namespace sched

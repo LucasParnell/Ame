@@ -6,10 +6,9 @@
 namespace vm {
 
 namespace {
-void release_creator(void* target) {
+template <class Endpoint> void release_creator(Endpoint* target) {
     if (!target) return;
-    auto* record = object::acquire(target);
-    object::release(record); object::release(record);
+    object::release(target->lifetime);
 }
 
 

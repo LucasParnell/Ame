@@ -15,17 +15,20 @@ inline libk::const_bytes qualifier() {
     static constexpr mx_u8_t bytes[] = {10, 6, 0, 2, 0xef, 2, 1, 64, 1, 0};
     return libk::as_bytes(bytes);
 }
-// IAD + CDC control/data + independent vendor bulk interface. Endpoint
+// IAD + CDC control/data + vendor bulk + FIDO HID interface. Endpoint
 // assignment belongs to this composition, never to the DWC2 class.
 inline mx_u32_t configuration(libk::bytes destination, bool high, bool other = false) {
     mx_u8_t bytes[] = {
-        9,    2,    98, 0, 3, 1, 0, 0x80, 50, 8,    11,   0, 2,    2,    2, 1, 0, 9,    4, 0,
+        9,    2,   130, 0, 4, 1, 0, 0x80, 50, 8,    11,   0, 2,    2,    2, 1, 0, 9,    4, 0,
         0,    1,    2,  2, 1, 0, 5, 0x24, 0,  0x10, 1,    5, 0x24, 1,    0, 1, 4, 0x24, 2, 2,
         5,    0x24, 6,  0, 1, 7, 5, 0x83, 3,  16,   0,    9, 9,    4,    1, 0, 2, 0x0a, 0, 0,
         0,    7,    5,  1, 2, 0, 2, 0,    7,  5,    0x82, 2, 0,    2,    0, 9, 4, 2,    0, 2,
         0xff, 0,    0,  0, 7, 5, 4, 2,    0,  2,    0,    7, 5,    0x85, 2, 0, 2, 0,
+        9, 4, 3, 0, 2, 3, 0, 0, 0,
+        9, 0x21, 0x11, 1, 0, 1, 0x22, 34, 0,
+        7, 5, 6, 3, 64, 0, 5, 7, 5, 0x86, 3, 64, 0, 5,
     };
-    static_assert(sizeof(bytes) == 98);
+    static_assert(sizeof(bytes) == 130);
     bytes[1] = other ? 7 : 2;
     // Descriptor walkers make packet-size patching independent of byte offsets.
     for (mx_u32_t at = 0; at < sizeof(bytes); at += bytes[at]) {
@@ -35,6 +38,19 @@ inline mx_u32_t configuration(libk::bytes destination, bool high, bool other = f
         }
     }
     return libk::copy_n(destination, libk::as_bytes(bytes), sizeof(bytes)) ? sizeof(bytes) : 0;
+}
+inline libk::const_bytes fido_report_descriptor() {
+    static constexpr mx_u8_t bytes[] = {
+        0x06, 0xd0, 0xf1, 0x09, 1, 0xa1, 1,
+        0x09, 0x20, 0x15, 0, 0x26, 0xff, 0, 0x75, 8, 0x95, 64, 0x81, 2,
+        0x09, 0x21, 0x15, 0, 0x26, 0xff, 0, 0x75, 8, 0x95, 64, 0x91, 2, 0xc0,
+    };
+    static_assert(sizeof(bytes) == 34);
+    return libk::as_bytes(bytes);
+}
+inline libk::const_bytes fido_hid_descriptor() {
+    static constexpr mx_u8_t bytes[] = {9, 0x21, 0x11, 1, 0, 1, 0x22, 34, 0};
+    return libk::as_bytes(bytes);
 }
 inline mx_u32_t string_descriptor(libk::bytes destination, mx_u8_t index) {
     if (index == 0) {

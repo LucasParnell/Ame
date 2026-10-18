@@ -8,8 +8,17 @@ namespace mochi::tty {
 struct InputBuffer {
     mx_u8_t storage[MX_TERM_INLINE_BYTES];
     libk::ByteCursor pending;
+    MxTermControl control;
+    bool control_pending;
+    bool retained() const { return control_pending || !pending.empty(); }
+    bool hold_control(const MxTermControl& next) {
+        if (retained()) return false;
+        control = next;
+        control_pending = true;
+        return true;
+    }
     bool hold(libk::const_bytes bytes) {
-        if (!pending.empty() || !bytes.size || bytes.size > sizeof(storage)) {
+        if (retained() || !bytes.size || bytes.size > sizeof(storage)) {
             return false;
         }
         if (!libk::copy_n(libk::as_bytes(storage), bytes, bytes.size)) {
@@ -19,6 +28,11 @@ struct InputBuffer {
         return true;
     }
     bool flush(const terminal::InputSink& sink) {
+        if (control_pending) {
+            if (!sink.try_push_msg(MX_TERM_CONTROL, control)) return false;
+            control_pending = false;
+            return true;
+        }
         if (pending.empty()) {
             return false;
         }
@@ -68,7 +82,7 @@ struct SerialMirror {
 inline bool accept_serial(const MxRingSlot& slot, SerialMirror& mirror, InputBuffer& input) {
     if (slot.type == MX_TERM_CONTROL) {
         MxTermControl control{};
-        if (!message_get(slot, &control, slot.type) || control.reserved0) {
+        if (!message_get(slot, &control, slot.type) || control.reserved0 || input.retained()) {
             return false;
         }
         if (control.code == MX_TERM_CONTROL_FLOW_OFF) {
@@ -82,7 +96,7 @@ inline bool accept_serial(const MxRingSlot& slot, SerialMirror& mirror, InputBuf
         } else {
             return false;
         }
-        return true;
+        return input.hold_control(control);
     }
     mx_u64_t generation = 0;
     libk::const_bytes bytes;

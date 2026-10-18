@@ -382,6 +382,9 @@ struct Ring {
     // Relax iterations this ring may spin before arming its sleep flag.
     // refresh_poll_budget() seeds it from the principal policy.
     uint32_t poll_budget = 0;
+    // Set only when the peer runs on another CPU. A same-core peer cannot make
+    // progress while this thread spins, so the policy budget is ignored there.
+    bool cross_core = false;
 
     bool valid() const { return ring_valid(ring, order); }
     RingPage* raw() const { return ring; }
@@ -448,8 +451,8 @@ struct Ring {
     // Wait with the ring's policy budget. Same-core peers should keep it 0:
     // they cannot make progress while this thread spins.
     bool wait_readable_auto() const {
-        return handle ? wait_cursor(false, 1, poll_budget)
-                      : ring_wait_readable(ring, order, doorbell);
+        if (!handle) return ring_wait_readable(ring, order, doorbell);
+        return wait_cursor(false, 1, cross_core ? poll_budget : 0);
     }
     bool wait_readable(uint32_t poll_budget = 0, bool* parked = nullptr) const {
         if (!handle) return ring_wait_readable(ring, order, doorbell);

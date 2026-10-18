@@ -199,3 +199,21 @@ different-CPU placement.
 Parks and wakes are counted per principal at the doorbell park and wake sites.
 The counts are the input a userspace controller needs; the kernel itself keeps
 no heuristic and no timer.
+
+### The controller
+
+`mochi::BudgetController` (userland, header-only) scores one window of 64 waits:
+if at least half parked, the peer keeps answering just after we slept, so the
+budget doubles; a window with no parks only counts toward a quiet streak, and
+eight consecutive quiet windows give back one eighth. Everything else is a dead
+band, which is what stops per-message oscillation. The shape is deliberate:
+growing late costs latency on the next message, decaying late only costs cycles,
+so growth is fast and decay is slow. Floor 64, cap 4096, seeded from the
+principal policy; the ring reports whether a wait actually parked
+(`wait_readable(budget, &parked)`) and the caller applies a change through the
+same clamped syscall.
+
+Measured against a fixed 1024 on the same six-pair harness: RPC blocking within
++3..+12%, stream/256 11% faster, everything else inside noise. A fixed value is
+still marginally better for one steady workload - the controller exists for
+processes that mix bulk and latency traffic, where no single constant is right.

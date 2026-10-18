@@ -17,13 +17,19 @@ namespace sched {
 // ---------------------------------------------------------------------------
 static PrincipalSchedState g_principal_sched[kMaxPrincipalsLocal]{};
 
+// One cell per principal, two cache lines: parks are written by the CPU that
+// parks and wakes by the CPU that notifies, so the two counters must never
+// share a line - otherwise a cross-CPU wake invalidates the parker's line.
 // Separate from PrincipalSchedState so its 64-byte layout contract is intact.
-struct IpcPolicyCell {
+struct alignas(64) IpcPolicyCell {
     u64 parks;
+    u32 budget;      // 0 = park immediately
+    u32 generation;  // bumped on every accepted set
+    u8  _pad0[48];
     u64 wakes;
-    u32 budget;   // 0 = never spin
-    u32 generation;
+    u8  _pad1[56];
 };
+static_assert(sizeof(IpcPolicyCell) == 128 && alignof(IpcPolicyCell) == 64);
 static IpcPolicyCell g_ipc_policy[kMaxPrincipalsLocal]{};
 static u32 g_next_principal_id = 1; // principal 0 is reserved for the kernel/bootstrap bucket
 static kernel::SpinLock g_principal_lock{};

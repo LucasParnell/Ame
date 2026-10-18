@@ -451,9 +451,9 @@ struct Ring {
         return handle ? wait_cursor(false, 1, poll_budget)
                       : ring_wait_readable(ring, order, doorbell);
     }
-    bool wait_readable(uint32_t poll_budget = 0) const {
+    bool wait_readable(uint32_t poll_budget = 0, bool* parked = nullptr) const {
         if (!handle) return ring_wait_readable(ring, order, doorbell);
-        return wait_cursor(false, 1, poll_budget);
+        return wait_cursor(false, 1, poll_budget, parked);
     }
     bool wait_readable_after_notify(CapHandle notify, uint32_t flags = 0) const {
         if (!handle) return mx_doorbell_notify(notify) == MX_OK && wait_readable();
@@ -468,7 +468,10 @@ struct Ring {
         if (!handle || !space_doorbell) return false;
         return wait_cursor(true, slots, poll_budget);
     }
-    bool wait_cursor(bool writable, uint32_t slots = 1, uint32_t poll_budget = 0) const {
+    // parked reports whether the wait actually entered the kernel, which is
+    // what the budget controller needs to score a window.
+    bool wait_cursor(bool writable, uint32_t slots = 1, uint32_t poll_budget = 0,
+                     bool* parked = nullptr) const {
         if (!valid() || !slots || slots > capacity()) return false;
         auto* flag = writable ? &ring->space.producer_about_to_sleep : &ring->flags.receiver_about_to_sleep;
         for (;;) {
@@ -486,6 +489,7 @@ struct Ring {
             }
             (void)__atomic_exchange_n(flag, 1u, __ATOMIC_ACQ_REL);
             const auto cursor = writable ? tail : head;
+            if (parked) *parked = true;
             const auto rc = sys_wait_ring(handle, writable ? space_doorbell : doorbell,
                                            cursor, writable ? MX_RING_WAIT_WRITABLE : MX_RING_WAIT_READABLE);
             __atomic_store_n(flag, 0u, __ATOMIC_RELEASE);

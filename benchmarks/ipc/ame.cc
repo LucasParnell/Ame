@@ -7,6 +7,7 @@
 #include "mochi/framed_ring.h"
 #include "slotwise_reference.h"
 #include "libk/cpu.h"
+#include "mochi/ipc_budget.h"
 #include "midix/format/bundle.h"
 #include "midix/abi/image.h"
 #include "midix/abi/debug_counters.h"
@@ -31,6 +32,12 @@
 #define AME_IPC_BENCH_POLL_BUDGET 64
 #endif
 
+// 1 = let BudgetController choose the budget from observed parks; the compile
+// time value then only seeds it.
+#ifndef AME_IPC_BENCH_ADAPTIVE
+#define AME_IPC_BENCH_ADAPTIVE 0
+#endif
+
 namespace {
 using namespace ipc_bench;
 using u8 = std::uint8_t;
@@ -53,6 +60,7 @@ struct Ame {
     u32 cpus;
     u64 identity, peer;
     bool spin = false;
+    mochi::BudgetController budget{};
     bool pending_notify = false, server_role = false;
     const char* transport() const { return "ame_mochi_ring_framed"; }
     const char* diagnostic_scope() const { return "isolated_system"; }
@@ -147,7 +155,15 @@ struct Ame {
             if (result == mochi::FrameProgress::Complete) break;
             if (result == mochi::FrameProgress::Blocked) {
                 if (spin) libk::cpu::relax();
+#if AME_IPC_BENCH_ADAPTIVE
+                else {
+                    bool parked = false;
+                    check(incoming.wait_readable(budget.budget, &parked), "ring receive/wait");
+                    if (const u32 next = budget.note_wait(parked)) (void)mx_ipc_policy_set_budget(next);
+                }
+#else
                 else check(incoming.wait_readable_auto(), "ring receive/wait");
+#endif
             }
         }
         message.kind = reader.type(); message.sequence = reader.sequence(); message.size = reader.size();
@@ -228,6 +244,7 @@ extern "C" [[noreturn]] void _start() {
         (void)mx_ipc_policy_set_budget(kPollBudget);
         backend.outgoing.poll_budget = mx_ipc_policy_budget();
         backend.incoming.poll_budget = backend.outgoing.poll_budget;
+        backend.budget.seed(backend.incoming.poll_budget);
         if (role->aux0 == 2) ipc_bench::server(backend, *state);
         else {
             const Config config{AME_IPC_BENCH_ITERATIONS, AME_IPC_BENCH_WARMUP, AME_IPC_BENCH_SAMPLES,

@@ -740,7 +740,9 @@ void init() {
 // Scheduler main loops
 // ---------------------------------------------------------------------------
 [[noreturn]] static void enter_cpu_scheduler(u32 cpu_id) {
-    fpsimd::enable();
+    // EL0 FP/SIMD traps by default; a thread opens FPEN only when it claims
+    // its state on first use. EL1 stays usable for save/restore.
+    fpsimd::close();
     Eki& e = eki_for_cpu(cpu_id);
     for (;;) {
         drain_pending_wakes(e);
@@ -767,7 +769,14 @@ void init() {
                        "dispatch tid=%u pid=%u elr=%llx",
                        next->tid, next->pid,
                        static_cast<unsigned long long>(next->tf.elr));
-        fpsimd::restore(&next->fpsimd);
+        if (next->fp_used) {
+            fpsimd::restore(&next->fpsimd);
+            next->fp_live = true;
+            if (!e.fp_open) {
+                fpsimd::open();
+                e.fp_open = true;
+            }
+        }
         enter_user_frame(&next->tf);
     }
 }
@@ -898,6 +907,42 @@ void mark_current_dead(bool whole_process) {
 
 
 // ---------------------------------------------------------------------------
+// FP/SIMD ownership
+//
+// A thread's vector state is live in the registers only while it runs. Every
+// switch-out saves it and closes FPEN (CPACR_EL1.FPEN = 0b01, EL0 traps, EL1
+// free for these routines), so a thread that never touches FP/SIMD costs
+// nothing. The first EL0 FP instruction after a switch takes the 0x07 trap,
+// restores the saved state and reopens FPEN; the faulting instruction then
+// re-executes.
+// ---------------------------------------------------------------------------
+static bool fpsimd_release(Eki& e, Thread* t) {
+    if (!t || !t->fp_live) return false;
+    fpsimd::save(&t->fpsimd);
+    t->fp_live = false;
+    if (e.fp_open) {
+        fpsimd::close();
+        e.fp_open = false;
+    }
+    return true;
+}
+
+extern "C" void fpsimd_claim() {
+    Eki& e = current_eki();
+    Thread* cur = e.current;
+    if (!cur) return;
+    if (!cur->fp_live) {
+        fpsimd::restore(&cur->fpsimd);
+        cur->fp_live = true;
+        cur->fp_used = true;
+    }
+    if (!e.fp_open) {
+        fpsimd::open();
+        e.fp_open = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // post_syscall — called on every syscall return.
 // Saves TrapFrame, performs context switch if needed.
 // ---------------------------------------------------------------------------
@@ -919,7 +964,7 @@ extern "C" TrapFrame* post_syscall_frame(void* frame_ptr) {
     // A same-thread return uses the live exception frame directly. Copy all
     // registers only when dispatch may relinquish execution ownership; deferred
     // remote wakes still cannot observe the thread until this save completes.
-    fpsimd::save(&cur->fpsimd);
+    const bool cur_fp_saved = fpsimd_release(e, cur);
     (void)libk::copy_exact(libk::as_bytes(&cur->tf, sizeof(cur->tf)),
                            libk::as_bytes(frame, sizeof(*frame)));
     // Retain only on the switch path. After remote publication this CPU uses
@@ -1050,7 +1095,17 @@ extern "C" TrapFrame* post_syscall_frame(void* frame_ptr) {
         finish_thread(cur);
         current_reference.reset();
     }
-    fpsimd::restore(&next->fpsimd);
+    // Threads that have used FP/SIMD pay the eager restore once per dispatch,
+    // exactly as before. Threads that never did keep the registers closed.
+    if (next->fp_used) {
+        // A same-thread switch never clobbered the registers; only reopen.
+        if (next != cur || !cur_fp_saved) fpsimd::restore(&next->fpsimd);
+        next->fp_live = true;
+        if (!e.fp_open) {
+            fpsimd::open();
+            e.fp_open = true;
+        }
+    }
     return &next->tf;
 }
 

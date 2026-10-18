@@ -361,7 +361,10 @@ struct alignas(64) Thread {
     PublishedThreadState state;
     WakeReason last_wake_reason;
     LatencyHint latency_hint;
-    u8 _pad0;
+    // True while this thread's FP/SIMD state is live in the registers. Only a
+    // running thread can hold it; switching out saves and clears it. Reuses the
+    // former pad byte so the 64-byte layout contract below is unchanged.
+    u8 fp_live;
     u32 heap_idx;
     bool in_drain_quantum, has_donation, on_runqueue, migration_rebase;
     u64 affinity_mask;
@@ -384,7 +387,11 @@ struct alignas(64) Thread {
 
     u64 switches, runtime_ns;
     u64 ipc_hot_until_ns, drain_quantum_start_ns, handoff_deadline_ns, donated_key;
-    u32 sched_context_id, _pad2;
+    u32 sched_context_id;
+    // Sticky: this thread has executed FP/SIMD at least once. From then on the
+    // switch path restores eagerly instead of paying a trap per residency.
+    u8  fp_used;
+    u8  _pad2[3];
     SchedContext* sched_context;
 
     alignas(64) TrapFrame tf;
@@ -464,7 +471,9 @@ struct alignas(64) Eki {
     bool         switch_pending;
     bool         requeue_current;
     SwitchReason pending_reason;
-    u8           _pad[5];
+    // FPEN is open only while the running thread owns the FP/SIMD registers.
+    u8           fp_open;
+    u8           _pad[7];
 
     // --- Metrics ---
     u64 context_switches;
@@ -591,6 +600,8 @@ void drain_pending_wakes();
 void request_switch(bool requeue_current, SwitchReason reason);
 extern "C" void post_syscall(void* frame_ptr);
 extern "C" TrapFrame* post_syscall_frame(void* frame_ptr);
+// EL0 FP/SIMD access trap: restore the current thread's state and open FPEN.
+extern "C" void fpsimd_claim();
 void mark_current_dead(bool whole_process = false);
 
 // ---------------------------------------------------------------------------

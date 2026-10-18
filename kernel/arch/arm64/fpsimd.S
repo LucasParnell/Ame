@@ -12,6 +12,30 @@ arm64_fpsimd_enable:
     ret
 .size arm64_fpsimd_enable, . - arm64_fpsimd_enable
 
+// FPEN=0b11: ordinary EL0 FP/SIMD execution, no trap.
+.global arm64_fpsimd_open
+.type arm64_fpsimd_open, %function
+arm64_fpsimd_open:
+    mrs x0, cpacr_el1
+    orr x0, x0, #(3 << 20)
+    msr cpacr_el1, x0
+    isb
+    ret
+.size arm64_fpsimd_open, . - arm64_fpsimd_open
+
+// FPEN=0b01: trap EL0 FP/SIMD, keep EL1 free for the save/restore routines.
+// A thread that has never claimed its state pays one trap on first use.
+.global arm64_fpsimd_close
+.type arm64_fpsimd_close, %function
+arm64_fpsimd_close:
+    mrs x0, cpacr_el1
+    and x0, x0, #~((3) << 20)
+    orr x0, x0, #(1 << 20)
+    msr cpacr_el1, x0
+    isb
+    ret
+.size arm64_fpsimd_close, . - arm64_fpsimd_close
+
 .global arm64_fpsimd_save
 .type arm64_fpsimd_save, %function
 arm64_fpsimd_save:

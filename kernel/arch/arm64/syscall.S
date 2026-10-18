@@ -12,6 +12,7 @@
 .extern syscall_dispatch
 .extern syscall_fault
 .extern post_syscall_frame
+.extern fpsimd_claim
 .extern irq_dispatch
 
 // Stack frame layout (288 bytes):
@@ -53,6 +54,15 @@ syscall_entry:
     cmp     x13, #0x15
     b.eq    1f
 
+    // FP/SIMD access trap (EC 0x07): the thread touched a vector register
+    // before claiming its state. Restore it, open FPEN and re-execute the
+    // faulting instruction; ELR already points at it.
+    cmp     x13, #0x07
+    b.ne    4f
+    bl      fpsimd_claim
+    b       2f
+
+4:
     // Non-SVC EL0 sync fault: kill current thread and reschedule.
     mrs     x1, FAR_EL1
     mov     x0, x12

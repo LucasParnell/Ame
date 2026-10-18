@@ -178,21 +178,37 @@ void return_frame_checks() {
     for (u32 i = 0; i < 31; ++i) frame.x[i] = 0x1000 + i;
     frame.elr = 0x2000; frame.spsr = 0x40; frame.sp_el0 = 0x3000;
     fpsimd::live = {};
-    fpsimd::live.v[31][1] = 0x123456789abcdef0;
-    fpsimd::live.fpcr = 1u << 22;
-    fpsimd::live.fpsr = 0x1f;
     fpsimd::saves = fpsimd::restores = 0;
     sched::post_syscall(&frame);
     assert(sched::current() == &t && !t.tf.elr);
     assert(!fpsimd::saves && !fpsimd::restores); // no extra traffic on ordinary syscalls
     assert(vm_activations == 1 && vm_last_root == owner.ttbr0);
+    // Lazy FP: ownership starts empty and is claimed by the trap handler.
+    assert(!t.fp_live);
+    sched::fpsimd_claim();
+    assert(t.fp_live);
+    fpsimd::live.v[31][1] = 0x123456789abcdef0;
+    fpsimd::live.fpcr = 1u << 22;
+    fpsimd::live.fpsr = 0x1f;
+    fpsimd::saves = fpsimd::restores = 0;
     sched::yield(); sched::post_syscall(&frame);
     assert(sched::current() == &t && !std::memcmp(&frame, &t.tf, sizeof(frame)));
+    // Switching out saves once and drops ownership; nothing restores eagerly.
+    // Switching out saved the vector state once; dispatching the same thread
+    // again reloads it eagerly (sticky FP user), never via a trap.
     assert(fpsimd::saves == 1 && fpsimd::restores == 1);
-    assert(!std::memcmp(&fpsimd::live, &t.fpsimd, sizeof(t.fpsimd)));
+    assert(t.fp_live && t.fp_used);
+    assert(t.fpsimd.v[31][1] == 0x123456789abcdef0 && t.fpsimd.fpcr == (1u << 22) &&
+           t.fpsimd.fpsr == 0x1f);
+    // A thread that never touched FP keeps the registers closed: dispatch it
+    // and confirm the switch costs no vector traffic at all.
+    auto plain = make_thread(pid, SCHED_BAND_FAIR);
+    fpsimd::saves = fpsimd::restores = 0;
+    dispatch(plain);
+    assert(!plain.fp_used && !fpsimd::restores);
     sched::current_eki().current = nullptr;
     sched::release_principal(pid);
-    std::puts("same-thread return restores address space; switch saves every frame register");
+    std::puts("same-thread return restores address space; FP saves only on switch-out and restores on claim");
 
     bool destroyed = false;
     auto* record = object::create(&destroyed, [](void* p) { *static_cast<bool*>(p) = true; });

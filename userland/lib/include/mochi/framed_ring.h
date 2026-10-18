@@ -67,7 +67,7 @@ public:
         ring_write_slot(ring_slots(page)[head & ring.mask()], type_ | kFrameFirst | kFrameLast,
                         data_, length_, sequence_);
         complete_ = true;
-        ring_publish(page, head + 1, ring.doorbell, ring.deferred_notify);
+        ring_publish(page, head + 1, ring.doorbell, ring.deferred_notify, ring.peer_polls);
         return FrameProgress::Complete;
     }
 
@@ -92,7 +92,7 @@ private:
             slot.length = length_;
             slot.seq = sequence_;
             frame_copy_into(page, ring.order, head, data_, length_);
-            ring_publish(page, head + needed, ring.doorbell, ring.deferred_notify);
+            ring_publish(page, head + needed, ring.doorbell, ring.deferred_notify, ring.peer_polls);
             complete_ = true;
             return FrameProgress::Complete;
         }
@@ -114,7 +114,7 @@ private:
         } while (!complete_ && written < available);
         // Publish one bounded available run once. Retain the established atomic
         // sleep-flag claim; batching must not weaken the wait/wake handshake.
-        ring_publish(page, head + written, ring.doorbell, ring.deferred_notify);
+        ring_publish(page, head + written, ring.doorbell, ring.deferred_notify, ring.peer_polls);
         return complete_ ? FrameProgress::Complete : FrameProgress::Progress;
     }
 };
@@ -152,7 +152,7 @@ public:
                                           libk::as_bytes(slot.payload), length);
             size_ = length;
             started_ = complete_ = true;
-            ring_release(page, tail + 1, notify_credits ? ring.space_doorbell : kNullCap);
+            ring_release(page, tail + 1, notify_credits ? ring.space_doorbell : kNullCap, ring.peer_polls);
             return FrameProgress::Complete;
         }
         return pop_slow(ring, max_slots, notify_credits);
@@ -184,7 +184,7 @@ private:
             frame_copy_out(page, ring.order, tail, data_, length);
             size_ = length;
             started_ = complete_ = true;
-            ring_release(page, tail + needed, notify_credits ? ring.space_doorbell : kNullCap);
+            ring_release(page, tail + needed, notify_credits ? ring.space_doorbell : kNullCap, ring.peer_polls);
             return FrameProgress::Complete;
         }
         // Release a bounded copy run so a producer on another CPU can refill
@@ -210,7 +210,7 @@ private:
             ++taken;
             complete_ = last;
         } while (!complete_ && taken < limit);
-        if (taken) ring_release(page, tail + taken, notify_credits ? ring.space_doorbell : kNullCap);
+        if (taken) ring_release(page, tail + taken, notify_credits ? ring.space_doorbell : kNullCap, ring.peer_polls);
         // Invalid framing poisons this reader. Callers must abandon the stream
         // rather than guessing a new message boundary or silently dropping it.
         if (invalid_) return FrameProgress::Invalid;

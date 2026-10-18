@@ -420,7 +420,7 @@ add_custom_target(mochi_system ALL
 if(ANKO_BUILD_DEV)
     # Isolated IPC workload, built on demand. Kernel optimization is controlled
     # by the chosen build tree; the benchmark loop uses the same -O2 as Linux.
-    foreach(pair ITERATIONS WARMUP SAMPLES ROUNDS WINDOW PAYLOAD_MASK SPIN SERVER_CPU REFERENCE_FRAMING)
+    foreach(pair ITERATIONS WARMUP SAMPLES ROUNDS WINDOW PAYLOAD_MASK SPIN SERVER_CPU REFERENCE_FRAMING POLL_BUDGET)
         if(NOT DEFINED AME_IPC_BENCH_${pair})
             if(pair STREQUAL "ITERATIONS")
                 set(AME_IPC_BENCH_${pair} 1024 CACHE STRING "IPC benchmark parameter")
@@ -434,6 +434,11 @@ if(ANKO_BUILD_DEV)
                 set(AME_IPC_BENCH_${pair} 32 CACHE STRING "IPC benchmark parameter")
             elseif(pair STREQUAL "PAYLOAD_MASK")
                 set(AME_IPC_BENCH_${pair} 31 CACHE STRING "IPC benchmark parameter")
+            elseif(pair STREQUAL "POLL_BUDGET")
+                # Relax iterations before a wait arms its sleep flag. 1024 rides
+                # out a 256-byte cross-core round trip without parking; 64 was
+                # the pre-measurement value and is still selectable.
+                set(AME_IPC_BENCH_${pair} 1024 CACHE STRING "IPC benchmark parameter")
             else()
                 set(AME_IPC_BENCH_${pair} 0 CACHE STRING "IPC benchmark parameter")
             endif()
@@ -449,7 +454,7 @@ if(ANKO_BUILD_DEV)
         ${CMAKE_SOURCE_DIR}/benchmarks/ipc/workload.h)
     target_compile_definitions(bench.ipc PRIVATE IPC_BENCH_CONTRACT_SHA256="${AME_IPC_CONTRACT_HASH}")
     target_compile_options(bench.ipc PRIVATE -O2)
-    foreach(pair ITERATIONS WARMUP SAMPLES ROUNDS WINDOW PAYLOAD_MASK SPIN SERVER_CPU REFERENCE_FRAMING)
+    foreach(pair ITERATIONS WARMUP SAMPLES ROUNDS WINDOW PAYLOAD_MASK SPIN SERVER_CPU REFERENCE_FRAMING POLL_BUDGET)
         target_compile_definitions(bench.ipc PRIVATE AME_IPC_BENCH_${pair}=${AME_IPC_BENCH_${pair}})
     endforeach()
     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/ipc-bench.mxb

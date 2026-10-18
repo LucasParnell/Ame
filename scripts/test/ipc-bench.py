@@ -236,7 +236,7 @@ def run_ame(args):
                 'ring_order': 7 if packed else 6, 'inline_slot_payload_bytes': 48,
                 'transport_framing': 'copied packed records; legacy FIRST/LAST fallback' if packed else 'FIRST/LAST native ring slots; copied reassembly for logical payloads over 48 bytes',
                 'tx_backpressure': 'cursor/credit wait in blocking mode; CPU relax in spin mode' if packed else 'yield when full in blocking mode; CPU relax in spin mode',
-                'adaptive_poll_max_iterations': 64 if packed else 0,
+                'adaptive_poll_max_iterations': int(cache.get('AME_IPC_BENCH_POLL_BUDGET', '64')) if packed else 0,
                 'adaptive_poll_placement': 'different_cpu only; zero same_cpu polling',
                 'clock_implementation': 'mx_clock_ns syscall; platform-corrected monotonic system counter',
                 'background': 'isolated bundle: bootstrap parent parks; two trusted worker processes; ordinary services absent'}

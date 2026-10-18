@@ -25,11 +25,17 @@
 #define AME_IPC_BENCH_SERVER_CPU 0
 #endif
 
+// Bounded userspace poll before a wait arms its sleep flag. Cross-core only:
+// a same-core peer cannot make progress while this thread spins.
+#ifndef AME_IPC_BENCH_POLL_BUDGET
+#define AME_IPC_BENCH_POLL_BUDGET 64
+#endif
+
 namespace {
 using namespace ipc_bench;
 using u8 = std::uint8_t;
 constexpr u32 kOrder = AME_IPC_BENCH_REFERENCE_FRAMING ? MX_DEFAULT_RING_ORDER : MX_DEFAULT_FRAMED_RING_ORDER;
-[[maybe_unused]] constexpr u32 kPollBudget = AME_IPC_BENCH_SERVER_CPU ? 64 : 0;
+[[maybe_unused]] constexpr u32 kPollBudget = AME_IPC_BENCH_SERVER_CPU ? AME_IPC_BENCH_POLL_BUDGET : 0;
 
 [[noreturn]] void failure(const char* why) {
     constexpr char prefix[] = "IPC_BENCH_ERROR: ";
@@ -55,7 +61,13 @@ struct Ame {
     const char* placement_scope() const { return AME_IPC_BENCH_SERVER_CPU ? "different_cpu" : "same_cpu"; }
     bool supports_placement(bool different) const { return different == (AME_IPC_BENCH_SERVER_CPU != 0); }
     bool supports_polling() const { return true; }
-    void polling(bool value) { spin = value; }
+    void polling(bool value) {
+        spin = value;
+        // Negotiated case policy: while spin is set the peer never arms its
+        // sleep flag, so publishes can skip the wake handshake entirely.
+        outgoing.peer_polls = value;
+        incoming.peer_polls = value;
+    }
     u64 process() const { return identity; }
     u64 peer_process() const { return peer; }
     [[noreturn]] void fail(const char* why) { failure(why); }

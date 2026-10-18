@@ -151,6 +151,9 @@ template <class Backend> void server(Backend& backend, State& state) {
             continue;
         }
         if (message.kind == Finish) {
+            // The peer stops polling before it sends Finish. Drop the polling
+            // contract before the reply, or its wait would never be notified.
+            backend.polling(false);
             control(state.outgoing, Closed);
             backend.send(state.outgoing);
             return;

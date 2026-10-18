@@ -151,3 +151,31 @@ Use a freshly built original snapshot with the same compiler, QEMU, CPU model,
 workload, parameters and build type for the before/after comparison. Retain raw
 samples, independent runs, binaries and logs. The supplied older A57/TCG
 collection is historical context and is not a matched A53 baseline.
+
+## Wake policy and FP/SIMD ownership
+
+Two costs sit outside the copy path on a Cortex-A53: the one-shot wake handshake
+and the per-switch vector state.
+
+A ring whose consumer is a negotiated poller sets `Ring::peer_polls`. Publishers
+then only release-store the head: no claim exchange on the shared flags line and
+no doorbell notification, because that consumer never arms its sleep flag. The
+contract is static per case; dropping it before a reply that the peer may be
+waiting for (see the Finish path in `benchmarks/ipc/workload.h`) is mandatory.
+
+`Ring::wait_cursor(poll_budget)` relaxes before arming. The benchmark selects
+1024 iterations for cross-core placement: a 256-byte round trip completes inside
+the budget, so the pair does not park and re-wake per message, while a genuinely
+idle wait still falls through to the kernel. The value is a latency/CPU trade:
+64 leaves 256-byte RPC at ~35 us, 1024 brings it to ~3.3 us because the peers
+stop paying two sleeps and two IPIs per round trip.
+
+FP/SIMD state is owned lazily. `CPACR_EL1.FPEN` stays at `0b01` (EL0 traps, EL1
+usable for the save/restore routines) and a thread's 528-byte state is live only
+while it runs. The first EL0 vector instruction after a switch takes the 0x07
+trap, restores the thread's state, opens `FPEN` and re-executes the instruction.
+Threads that never touch a vector register - every kernel path, and the scalar
+service code - therefore cross a switch with zero FP traffic instead of 528
+bytes stored and 528 bytes loaded. A thread that does use FP becomes sticky:
+from its second dispatch the switch path restores eagerly, so it never pays more
+than one trap in its lifetime and behaves exactly as the eager scheme did.

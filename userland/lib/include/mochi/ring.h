@@ -66,8 +66,13 @@ static inline void ring_write_slot(RingSlot& slot, uint32_t type, const void* da
 }
 
 static inline void ring_publish(RingPage* r, uint64_t head, CapHandle doorbell,
-                                bool* deferred_notify = nullptr) {
+                                bool* deferred_notify = nullptr, bool peer_polls = false) {
     __atomic_store_n(&r->head.v, head, __ATOMIC_RELEASE);
+    // A negotiated polling peer never arms receiver_about_to_sleep, so there is
+    // no waiter to claim and the RMW below would only dirty the shared flags
+    // line on the far core. The caller must guarantee the peer stays in its
+    // poll loop for the whole channel policy, not just around one publish.
+    if (peer_polls) return;
     // Keep the existing unconditional RMW handshake. A speculative flag load
     // before this exchange would need an additional wait/wake ordering proof.
     if (__atomic_exchange_n(&r->flags.receiver_about_to_sleep, 0u, __ATOMIC_ACQ_REL)) {
@@ -76,9 +81,10 @@ static inline void ring_publish(RingPage* r, uint64_t head, CapHandle doorbell,
     }
 }
 
-static inline void ring_release(RingPage* r, uint64_t tail, CapHandle space_doorbell = kNullCap) {
+static inline void ring_release(RingPage* r, uint64_t tail, CapHandle space_doorbell = kNullCap,
+                                bool peer_polls = false) {
     __atomic_store_n(&r->tail.v, tail, __ATOMIC_RELEASE);
-    if (space_doorbell &&
+    if (!peer_polls && space_doorbell &&
         __atomic_exchange_n(&r->space.producer_about_to_sleep, 0u, __ATOMIC_ACQ_REL))
         (void)mx_doorbell_notify(space_doorbell);
 }
@@ -104,7 +110,7 @@ static inline void ring_publish_sleep(RingPage* r, uint64_t counter) {
 static inline bool ring_try_push(RingPage* r, uint32_t order,
                                  uint32_t type, const void* data, uint32_t len,
                                  CapHandle doorbell_cap, const uint64_t* sequence = nullptr,
-                                 bool* deferred_notify = nullptr) {
+                                 bool* deferred_notify = nullptr, bool peer_polls = false) {
     if (!ring_valid(r, order) || (!data && len != 0)) return false;
     const uint64_t mask = mx_ring_mask(order);
 
@@ -128,23 +134,25 @@ static inline bool ring_try_push(RingPage* r, uint32_t order,
     // has not yet entered wait_doorbell(), this exchange still works because
     // sys_notify increments the doorbell counter.  The later wait sees the
     // counter changed and returns immediately instead of sleeping.
-    ring_publish(r, head + 1, doorbell_cap, deferred_notify);
+    ring_publish(r, head + 1, doorbell_cap, deferred_notify, peer_polls);
 
     return true;
 }
 
 // Preserve a protocol-owned correlation token when forwarding a complete frame.
 static inline bool ring_try_push_frame(RingPage* r, uint32_t order,
-                                       const RingSlot& frame, CapHandle doorbell) {
+                                       const RingSlot& frame, CapHandle doorbell,
+                                       bool peer_polls = false) {
     return mochi::message_valid(frame) &&
-           ring_try_push(r, order, frame.type, frame.payload, frame.length, doorbell, &frame.seq);
+           ring_try_push(r, order, frame.type, frame.payload, frame.length, doorbell, &frame.seq,
+                         nullptr, peer_polls);
 }
 
 // Publish the valid prefix that fits. Input remains caller-owned; no persistent
 // cursor cache can go stale when another value view uses these same helpers.
 static inline uint32_t ring_try_push_frames(RingPage* r, uint32_t order,
                                             const RingSlot* frames, uint32_t count,
-                                            CapHandle doorbell) {
+                                            CapHandle doorbell, bool peer_polls = false) {
     if (!ring_valid(r, order) || !frames || !count) return 0;
     const uint64_t capacity = mx_ring_capacity(order), mask = capacity - 1;
     const uint64_t head = __atomic_load_n(&r->head.v, __ATOMIC_RELAXED);
@@ -161,7 +169,7 @@ static inline uint32_t ring_try_push_frames(RingPage* r, uint32_t order,
                         frame.length, frame.seq);
         ++written;
     }
-    if (written) ring_publish(r, head + written, doorbell);
+    if (written) ring_publish(r, head + written, doorbell, nullptr, peer_polls);
     return written;
 }
 
@@ -179,7 +187,7 @@ static inline bool ring_push(RingPage* r, uint32_t order,
 // Returns false if ring is empty.  Does not yield, sleep, or touch doorbells.
 // ---------------------------------------------------------------------------
 static inline bool ring_pop_space(RingPage* r, uint32_t order, RingSlot* out,
-                                  CapHandle space_doorbell) {
+                                  CapHandle space_doorbell, bool peer_polls = false) {
     if (!ring_valid(r, order) || !out) return false;
     const uint64_t mask = mx_ring_mask(order);
     const uint64_t tail = __atomic_load_n(&r->tail.v, __ATOMIC_RELAXED);
@@ -196,7 +204,7 @@ static inline bool ring_pop_space(RingPage* r, uint32_t order, RingSlot* out,
     out->seq = src->seq;
     (void)libk::copy_exact(libk::as_bytes(out->payload), libk::as_bytes(src->payload));
 
-    ring_release(r, tail + 1, space_doorbell);
+    ring_release(r, tail + 1, space_doorbell, peer_polls);
     return true;
 }
 
@@ -215,7 +223,7 @@ static inline bool ring_pop(RingPage* r, uint32_t order,
 // into shared storage escapes; producers may reuse it as soon as tail advances.
 static inline uint32_t ring_pop_batch(RingPage* r, uint32_t order,
                                       RingSlot* out, uint32_t count,
-                                      CapHandle space_doorbell = kNullCap) {
+                                      CapHandle space_doorbell = kNullCap, bool peer_polls = false) {
     if (!ring_valid(r, order) || !out || !count) return 0;
     const uint64_t capacity = mx_ring_capacity(order), mask = capacity - 1;
     const uint64_t tail = __atomic_load_n(&r->tail.v, __ATOMIC_RELAXED);
@@ -225,7 +233,7 @@ static inline uint32_t ring_pop_batch(RingPage* r, uint32_t order,
     const uint32_t taken = pending < count ? static_cast<uint32_t>(pending) : count;
     const auto* slots = ring_slots(r);
     for (uint32_t i = 0; i < taken; ++i) out[i] = slots[(tail + i) & mask];
-    ring_release(r, tail + taken, space_doorbell);
+    ring_release(r, tail + taken, space_doorbell, peer_polls);
     return taken;
 }
 
@@ -235,10 +243,11 @@ static inline uint32_t ring_pop_batch(RingPage* r, uint32_t order,
 // by a caller-owned retry budget.
 static inline bool ring_send_spinning(RingPage* r, uint32_t order,
                                       uint32_t type, const void* data, uint32_t len,
-                                      CapHandle doorbell_cap, uint32_t max_yields) {
+                                      CapHandle doorbell_cap, uint32_t max_yields,
+                                      bool peer_polls = false) {
     if (!ring_valid(r, order) || (!data && len != 0)) return false;
     for (;;) {
-        if (ring_try_push(r, order, type, data, len, doorbell_cap)) return true;
+        if (ring_try_push(r, order, type, data, len, doorbell_cap, nullptr, nullptr, peer_polls)) return true;
         if (max_yields == 0) return false;
         --max_yields;
         sys_yield();
@@ -259,7 +268,8 @@ static inline bool ring_send_spinning(RingPage* r, uint32_t order,
 // the retry/drop policy for the remaining bytes.
 static inline uint32_t ring_push_bytes_spinning(RingPage* r, uint32_t order, uint32_t type,
                                                 const void* data, uint32_t len,
-                                                CapHandle doorbell_cap, uint32_t max_yields) {
+                                                CapHandle doorbell_cap, uint32_t max_yields,
+                                                bool peer_polls = false) {
     if (!data || !ring_valid(r, order)) return 0;
     const auto* p = static_cast<const uint8_t*>(data);
     const uint64_t capacity = mx_ring_capacity(order), mask = capacity - 1;
@@ -288,7 +298,7 @@ static inline uint32_t ring_push_bytes_spinning(RingPage* r, uint32_t order, uin
             off += chunk;
             ++written;
         }
-        ring_publish(r, head + written, doorbell_cap);
+        ring_publish(r, head + written, doorbell_cap, nullptr, peer_polls);
         retries = max_yields;
     }
     return off;
@@ -366,6 +376,9 @@ struct Ring {
     // Exclusive sender-owned storage, never placed in shared memory. A caller
     // deferring a wake must flush it before blocking or leaving the operation.
     bool* deferred_notify = nullptr;
+    // Set only when the peer has agreed to poll for the whole channel policy.
+    // Publishes then skip the one-shot wake handshake; see ring_publish().
+    bool peer_polls = false;
 
     bool valid() const { return ring_valid(ring, order); }
     RingPage* raw() const { return ring; }
@@ -374,21 +387,24 @@ struct Ring {
 
     // --- publish (producer) -------------------------------------------------
     bool try_push(uint32_t type, const void* data, uint32_t len) const {
-        return ring != nullptr && ring_try_push(ring, order, type, data, len, doorbell, nullptr, deferred_notify);
+        return ring != nullptr && ring_try_push(ring, order, type, data, len, doorbell, nullptr,
+                                                deferred_notify, peer_polls);
     }
     bool try_push_frame(const RingSlot& frame) const {
-        return ring != nullptr && ring_try_push_frame(ring, order, frame, doorbell);
+        return ring != nullptr && ring_try_push_frame(ring, order, frame, doorbell, peer_polls);
     }
     uint32_t try_push_frames(const RingSlot* frames, uint32_t count) const {
-        return ring_try_push_frames(ring, order, frames, count, doorbell);
+        return ring_try_push_frames(ring, order, frames, count, doorbell, peer_polls);
     }
     bool push(uint32_t type, const void* data, uint32_t len, uint32_t max_yields = 1024) const {
-        return ring != nullptr && ring_send_spinning(ring, order, type, data, len, doorbell, max_yields);
+        return ring != nullptr &&
+               ring_send_spinning(ring, order, type, data, len, doorbell, max_yields, peer_polls);
     }
     bool push_bounded(uint32_t type, const void* data, uint32_t len, mx_u64_t deadline_ns) const {
         if (!valid() || (!data && len != 0)) return false;
         for (;;) {
-            if (ring_try_push(ring, order, type, data, len, doorbell)) return true;
+            if (ring_try_push(ring, order, type, data, len, doorbell, nullptr, nullptr, peer_polls))
+                return true;
             if (mx_clock_ns() >= deadline_ns) return false;
             sys_yield();
         }
@@ -399,8 +415,9 @@ struct Ring {
                         uint32_t max_yields = 0) const {
         if (!ring) return 0;
         return max_yields == 0
-                   ? ring_push_bytes(ring, order, type, data, len, doorbell)
-                   : ring_push_bytes_spinning(ring, order, type, data, len, doorbell, max_yields);
+                   ? ring_push_bytes_spinning(ring, order, type, data, len, doorbell, 0, peer_polls)
+                   : ring_push_bytes_spinning(ring, order, type, data, len, doorbell, max_yields,
+                                              peer_polls);
     }
     template <typename T>
     bool try_push_msg(uint32_t type, const T& msg) const {
@@ -412,9 +429,11 @@ struct Ring {
     }
 
     // --- consume (consumer) -------------------------------------------------
-    bool try_pop(RingSlot* out) const { return ring != nullptr && ring_pop_space(ring, order, out, space_doorbell); }
+    bool try_pop(RingSlot* out) const {
+        return ring != nullptr && ring_pop_space(ring, order, out, space_doorbell, peer_polls);
+    }
     uint32_t try_pop_batch(RingSlot* out, uint32_t count) const {
-        return ring_pop_batch(ring, order, out, count, space_doorbell);
+        return ring_pop_batch(ring, order, out, count, space_doorbell, peer_polls);
     }
     bool wait_readable(uint32_t poll_budget = 0) const {
         if (!handle) return ring_wait_readable(ring, order, doorbell);

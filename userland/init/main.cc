@@ -45,6 +45,7 @@ using integrity::bytes_equal;
 #include "midix/abi/image.h"
 #include "midix/abi/protocols/nameservice.h"
 #include "midix/abi/protocols/fs.h"
+#include "midix/abi/diagnostics.h"
 #include "midix/abi/protocols/gpu_service.h"
 #include "supervision.h"
 #include "system_channels.h"
@@ -95,6 +96,8 @@ static CapHandle g_prof_load, g_prof_store, g_prof_req, g_prof_ack;
 static ProfMailbox* g_prof_store_va = nullptr;
 static ProfMailbox* g_prof_load_va = nullptr;
 static bool g_profile_synced = false;
+static bool g_profile_learned = false;
+static uint64_t g_boot_ns = 0;
 constexpr uint32_t kManifestScanLimit = 64 * 1024;
 
 static uint8_t g_policy_sha256[MX_SHA256_SIZE]{};
@@ -504,11 +507,57 @@ static bool profiler_call(uint32_t op, uint32_t* out_len) {
     return true;
 }
 
+// The supervisor counters are pid-addressed; the runtime diagnostic table is
+// the only place a name maps to a live pid.
+static uint32_t service_pid(const char* name) {
+    static MxDiagRuntimeBatch batch;
+    uint32_t first = 1;
+    while (first && first <= MX_DIAG_PROCESS_LIMIT) {
+        const int64_t rc = sys_debug_read(MX_DIAG_RUNTIME, first, &batch, sizeof(batch));
+        if (rc < 0) return 0;
+        for (uint32_t i = 0; i < batch.count && i < MX_DIAG_RUNTIME_ROWS; ++i)
+            if (streq(batch.rows[i].name, name)) return batch.rows[i].pid;
+        first = batch.next_pid;
+    }
+    return 0;
+}
+
+// First pass, as soon as the profiler is up: adopt whatever the file says so
+// services launched afterwards inherit it through their boot entry.
 static void sync_profile() {
     if (g_profile_synced || !g_prof_store_va) return;
     const ServiceSpec* prof = find_service(g_rt.services, g_rt.service_count, "ipc.profiler");
     if (!prof || !prof->ready) return;
     g_profile_synced = true;
+    uint32_t loaded = 0;
+    if (profiler_call(kProfLoad, &loaded) && loaded && loaded <= sizeof(g_prof_load_va->data))
+        (void)g_ipc_profile.decode(g_prof_load_va->data, loaded);
+}
+
+// Second pass, after the system has run long enough to have counters: read each
+// child, pick a budget from its park ratio, apply it and persist the result.
+static void learn_profile() {
+    if (g_profile_learned || !g_profile_synced || !g_prof_store_va) return;
+    if (!g_boot_ns || mx_clock_ns() - g_boot_ns < 2000000000ull) return;
+    g_profile_learned = true;
+    uint32_t applied = 0;
+    for (uint32_t i = 0; i < g_rt.service_count; ++i) {
+        ServiceSpec& svc = g_rt.services[i];
+        if (!svc.ready || !svc.proc || !svc.name[0]) continue;
+        const uint32_t pid = service_pid(svc.name);
+        if (!pid) continue;
+        const SysPair counts = mx_ipc_policy_counts_for(pid);
+        if (counts.value < 0) continue;
+        const uint64_t parks = static_cast<uint64_t>(counts.value);
+        const uint64_t wakes = static_cast<uint64_t>(counts.detail);
+        uint32_t budget = 0;
+        if (parks && parks * 2 >= wakes) budget = 1024;        // parking dominates
+        else if (wakes > parks * 8) budget = 0;                // bulk: no spin
+        else continue;                                          // dead band: keep
+        if (mx_ipc_policy_set_for(pid, budget) < 0) continue;
+        (void)g_ipc_profile.set(mochi::profile_name_hash(svc.name), budget);
+        ++applied;
+    }
     uint8_t blob[8 + 32 * 16]{};
     const uint32_t size = g_ipc_profile.encode(blob, sizeof(blob));
     if (size && size <= sizeof(g_prof_store_va->data)) {
@@ -517,10 +566,10 @@ static void sync_profile() {
         uint32_t stored = 0;
         (void)profiler_call(kProfStore, &stored);
     }
-    uint32_t loaded = 0;
-    if (profiler_call(kProfLoad, &loaded) && loaded && loaded <= sizeof(g_prof_load_va->data)) {
-        (void)g_ipc_profile.decode(g_prof_load_va->data, loaded);
-    }
+    char text[96]{};
+    libk::str::Buffer line(text);
+    line.format("init: ipc.profile applied=%u entries=%u\n", applied, g_ipc_profile.count);
+    console_log(line.data);
 }
 
 static void share_service_log(ServiceSpec& svc, CapHandle console_db) {
@@ -1426,6 +1475,7 @@ static bool handle_fido2_demand() {
 
 extern "C" [[noreturn]] void _start() {
     const uint64_t started = mx_clock_ns();
+    g_boot_ns = started;
     const MxBootInfo* boot = mochi::boot::map();
     // Image-provisioned poll budgets: decode once, forward per service below.
     if (kIpcProfileBlobSize) (void)g_ipc_profile.decode(kIpcProfileBlob, kIpcProfileBlobSize);
@@ -1542,6 +1592,7 @@ extern "C" [[noreturn]] void _start() {
         // Sample before draining either source to preserve a racing wake.
         const auto expected = sys_doorbell_read(g_rt.svcctl.ep.rx_doorbell);
         sync_profile();
+        learn_profile();
         bool progress = handle_svc_control_requests();
         if (handle_fido2_demand()) progress = true;
         if (supervise_services()) progress = true;
@@ -1555,6 +1606,12 @@ extern "C" [[noreturn]] void _start() {
             if (svc.proc || !svc.desired || !svc.restart_pending) continue;
             const auto retry = svc.retry_at ? svc.retry_at : mx_clock_ns();
             if (!deadline || retry < deadline) deadline = retry;
+        }
+        // A pending learning pass needs a timer, otherwise the steady-state
+        // wait is indefinite and the pass would never run.
+        if (!g_profile_learned) {
+            const uint64_t soon = mx_clock_ns() + 100000000ull;
+            if (!deadline || soon < deadline) deadline = soon;
         }
         RingPage* incoming[] = {g_rt.svcctl.ep.rx_ring, g_rt.fido2_demand.ring};
         require_ok(mochi::InboxWait{incoming, g_rt.fido2_demand.valid() ? 2u : 1u, kRingOrder,

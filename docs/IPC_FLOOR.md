@@ -283,8 +283,15 @@ first version used `read_bytes()`, which switches to an arena above 32 bytes and
 failed on the very first boot-time read; the inline path removes that dependency
 entirely.
 
-At boot `init` encodes the compiled profile, asks the profiler to store it, then
-asks it to load it back and decodes what returns - a full write/read/parse cycle
-through the real filesystem, logged as `stored=` / `loaded=` by the service.
-Applying the loaded values to already-running children needs a pid lookup
-(the supervisor counters are pid-addressed), which is the next step.
+At boot `init` asks the profiler what the file says and decodes it, so services
+launched afterwards inherit it. Two seconds later it samples each child: the
+runtime diagnostic table maps a service name to a live pid, the supervisor
+counter read gives parks/wakes for that pid, and a park-dominant child is moved
+to 1024 while a bulk child is moved to 0. The result is applied through the
+supervisor-gated set and written back through the profiler, logged as
+`init: ipc.profile applied=N entries=M` and `ipc.profiler: stored=`.
+
+One caveat that is environmental, not architectural: `/data` is non-durable on
+this image, so the file survives a service restart within a boot but not a
+power cycle in QEMU. The read path handles a missing file (status -4) as an
+empty profile rather than an error.

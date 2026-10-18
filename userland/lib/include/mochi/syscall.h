@@ -276,6 +276,11 @@ static inline SysPair mx_ipc_policy_counts() { return _svc1_pair(MX_NR_IPC_POLIC
 static inline SysPair mx_ipc_policy_counts_for(uint32_t pid) {
     return _svc2_pair(MX_NR_IPC_POLICY, 3, pid);
 }
+// Supervisor-only: apply a budget to a direct child. Returns the clamped value
+// or a negative status.
+static inline int64_t mx_ipc_policy_set_for(uint32_t pid, uint32_t budget) {
+    return _svc3(MX_NR_IPC_POLICY, 4, pid, budget);
+}
 
 static inline void mx_yield() { sys_yield(); }
 static inline void mx_exit(int32_t code) { sys_exit(code); }

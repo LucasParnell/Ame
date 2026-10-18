@@ -84,6 +84,17 @@ constexpr uint32_t kMaxManifestServices = 32;
 // Image-provisioned per-service poll budget. Empty or invalid means defaults;
 // the kernel clamps whatever reaches it.
 static mochi::IpcProfile g_ipc_profile;
+
+// init supervises every service, so it can read child counters and apply child
+// budgets; it has no io.fs session, so file I/O goes through ipc.profiler over
+// two shared pages and two doorbells (profile <= 520 bytes).
+struct ProfMailbox { uint32_t op, len; uint8_t data[1024]; };
+constexpr uint32_t kProfLoad = 1, kProfStore = 2;
+constexpr mx_vaddr_t kProfStoreVa = 0x1b000000, kProfLoadVa = 0x1b010000;
+static CapHandle g_prof_load, g_prof_store, g_prof_req, g_prof_ack;
+static ProfMailbox* g_prof_store_va = nullptr;
+static ProfMailbox* g_prof_load_va = nullptr;
+static bool g_profile_synced = false;
 constexpr uint32_t kManifestScanLimit = 64 * 1024;
 
 static uint8_t g_policy_sha256[MX_SHA256_SIZE]{};
@@ -123,6 +134,8 @@ struct ServiceSpec {
     uint8_t image_sha256[MX_SHA256_SIZE];
     bool image_sha256_valid;
 };
+static void wire_profiler(ServiceSpec& svc);
+
 
 struct InitRuntime {
     const MxBootInfo* boot;
@@ -406,6 +419,7 @@ static void boot_init_for_service(ServiceSpec& svc, uint32_t ordinal,
     boot_add(svc, MX_BOOT_ENTRY_VALUE, "cpu.count", kNullCap, g_cpu_count);
     boot_add(svc, MX_BOOT_ENTRY_VALUE, "cpu.mask", kNullCap, g_cpu_mask);
     boot_add(svc, MX_BOOT_ENTRY_VALUE, "launch.id", kNullCap, ordinal, 0);
+    wire_profiler(svc);
     if (const uint16_t budget = g_ipc_profile.lookup(mochi::profile_name_hash(svc.name), 0))
         boot_add(svc, MX_BOOT_ENTRY_VALUE, "ipc.budget", kNullCap, budget);
     if (svc.image_sha256_valid) {
@@ -454,6 +468,59 @@ static CapHandle share_doorbell_to(ServiceSpec& svc, CapHandle db, const char* n
     if (child == kNullCap) fail_halt("init: doorbell share failed\n");
     boot_add(svc, MX_BOOT_ENTRY_DOORBELL, name, child, 0, 0);
     return child;
+}
+
+static void wire_profiler(ServiceSpec& svc) {
+    if (!streq(svc.name, "ipc.profiler") || g_prof_store) return;
+    g_prof_load = as_cap(sys_arena_create(4096, 0));
+    g_prof_store = as_cap(sys_arena_create(4096, 0));
+    if (!g_prof_load || !g_prof_store) fail_halt("init: profiler arena failed\n");
+    grant_to(svc, g_prof_load, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, MX_BOOT_ENTRY_ARENA, "prof.load");
+    grant_to(svc, g_prof_store, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, MX_BOOT_ENTRY_ARENA, "prof.store");
+    g_prof_req = as_cap(sys_doorbell_create());
+    g_prof_ack = as_cap(sys_doorbell_create());
+    if (!g_prof_req || !g_prof_ack) fail_halt("init: profiler doorbell failed\n");
+    share_doorbell_to(svc, g_prof_req, "prof.req", RIGHT_WAIT);
+    share_doorbell_to(svc, g_prof_ack, "prof.ack", RIGHT_NOTIFY);
+    if (sys_map_page(g_prof_store, kProfStoreVa, RIGHT_READ | RIGHT_WRITE) != 0 ||
+        sys_map_page(g_prof_load, kProfLoadVa, RIGHT_READ | RIGHT_WRITE) != 0)
+        fail_halt("init: profiler map failed\n");
+    g_prof_store_va = reinterpret_cast<ProfMailbox*>(kProfStoreVa);
+    g_prof_load_va = reinterpret_cast<ProfMailbox*>(kProfLoadVa);
+}
+
+// One bounded request/reply with the profiler. Returns false on timeout.
+static bool profiler_call(uint32_t op, uint32_t* out_len) {
+    if (!g_prof_store_va) return false;
+    const uint64_t expected = sys_doorbell_read(g_prof_ack);
+    __atomic_store_n(&g_prof_store_va->op, op, __ATOMIC_RELEASE);
+    if (sys_notify(g_prof_req) < 0) return false;
+    const uint64_t deadline = mx_clock_ns() + 200000000ull;
+    while (sys_doorbell_read(g_prof_ack) == expected) {
+        if (mx_clock_ns() >= deadline) return false;
+        sys_yield();
+    }
+    if (out_len) *out_len = g_prof_load_va->len;
+    return true;
+}
+
+static void sync_profile() {
+    if (g_profile_synced || !g_prof_store_va) return;
+    const ServiceSpec* prof = find_service(g_rt.services, g_rt.service_count, "ipc.profiler");
+    if (!prof || !prof->ready) return;
+    g_profile_synced = true;
+    uint8_t blob[8 + 32 * 16]{};
+    const uint32_t size = g_ipc_profile.encode(blob, sizeof(blob));
+    if (size && size <= sizeof(g_prof_store_va->data)) {
+        for (uint32_t i = 0; i < size; ++i) g_prof_store_va->data[i] = blob[i];
+        g_prof_store_va->len = size;
+        uint32_t stored = 0;
+        (void)profiler_call(kProfStore, &stored);
+    }
+    uint32_t loaded = 0;
+    if (profiler_call(kProfLoad, &loaded) && loaded && loaded <= sizeof(g_prof_load_va->data)) {
+        (void)g_ipc_profile.decode(g_prof_load_va->data, loaded);
+    }
 }
 
 static void share_service_log(ServiceSpec& svc, CapHandle console_db) {
@@ -1474,6 +1541,7 @@ extern "C" [[noreturn]] void _start() {
         // Exit notifications and control messages converge on one doorbell.
         // Sample before draining either source to preserve a racing wake.
         const auto expected = sys_doorbell_read(g_rt.svcctl.ep.rx_doorbell);
+        sync_profile();
         bool progress = handle_svc_control_requests();
         if (handle_fido2_demand()) progress = true;
         if (supervise_services()) progress = true;

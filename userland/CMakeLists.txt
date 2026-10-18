@@ -211,6 +211,7 @@ set(FS_SOURCES
     fs/fs_disk.cc
     fs/fs_durable.cc)
 mochi_service(io.fs        "${FS_SOURCES}"               0x10E00000)
+mochi_service(ipc.profiler "profiler/main.cc"            0x10F00000)
 # msh is split into cohesive modules behind userland/msh/msh.h.
 set(MSH_SOURCES
     msh/main.cc

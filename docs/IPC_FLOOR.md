@@ -268,3 +268,23 @@ a service it is still launching, which risks a boot-order deadlock; a service
 that does have fs access (msh) is not the supervisor of anything else. Until one
 of those is solved deliberately, the profile stays image-provisioned and the
 controller adapts within each boot.
+
+### The profiler proxy
+
+`init` supervises every service, so it can read their counters and apply their
+budgets, but it holds no io.fs session. `ipc.profiler` closes that gap: a small
+service with fs access that only touches the profile file. The transport is two
+shared pages and two doorbells - a request page and a reply page - so there is
+no ring protocol to get wrong and no chunking beyond the 520-byte bound.
+
+File I/O is deliberately inline-only: reads step in <= 32-byte requests and
+writes in <= 24-byte requests, which the fs replies carry in `inline_data`. The
+first version used `read_bytes()`, which switches to an arena above 32 bytes and
+failed on the very first boot-time read; the inline path removes that dependency
+entirely.
+
+At boot `init` encodes the compiled profile, asks the profiler to store it, then
+asks it to load it back and decodes what returns - a full write/read/parse cycle
+through the real filesystem, logged as `stored=` / `loaded=` by the service.
+Applying the loaded values to already-running children needs a pid lookup
+(the supervisor counters are pid-addressed), which is the next step.

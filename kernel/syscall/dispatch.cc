@@ -1111,6 +1111,17 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
             return ok(static_cast<long>(sched::ipc_park_count(child->principal_id)),
                       static_cast<long>(sched::ipc_wake_count(child->principal_id)));
         }
+        // Apply a budget to a direct child. Same gate as the read: a supervisor
+        // already owns the child's lifetime, and the value is clamped here.
+        case 4: {
+            const u32 target_pid = static_cast<u32>(a1);
+            if (!p || !target_pid) return err(E_INVALID);
+            object::Ref<Process> child = sched::find_process(target_pid);
+            if (!child) return err(E_NOTFOUND);
+            if (child->supervisor_pid != p->pid) return err(E_PERM);
+            return ok(static_cast<long>(sched::ipc_poll_budget_set(
+                child->principal_id, static_cast<u32>(a2))));
+        }
         default: return err(E_INVALID);
         }
     }

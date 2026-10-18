@@ -3005,6 +3005,23 @@
           ]
         }
       ]
+    },
+    {
+      "name": "ipc.profiler",
+      "object": "ipc.profiler",
+      "bundle": "system",
+      "principal": "native_trusted",
+      "restart": "always",
+      "stage": "storage",
+      "start_after": [
+        "io.fs"
+      ],
+      "caps": [],
+      "provides": [],
+      "uses": [
+        "fs"
+      ],
+      "bindings": []
     }
   ],
   "profiles": {
@@ -3025,7 +3042,8 @@
       "drv.blk.virtio",
       "io.fs",
       "msh",
-      "app.hello"
+      "app.hello",
+      "ipc.profiler"
     ],
     "switch-t210": [
       "nameservice",
@@ -3359,10 +3377,22 @@
               "name": "tty.scale",
               "value": 2
             },
-            { "name": "tty.status.height", "value": 128 },
-            { "name": "tty.status.scale", "value": 2 },
-            { "name": "tty.status.margin", "value": 64 },
-            { "name": "tty.status.notch", "value": 448 },
+            {
+              "name": "tty.status.height",
+              "value": 128
+            },
+            {
+              "name": "tty.status.scale",
+              "value": 2
+            },
+            {
+              "name": "tty.status.margin",
+              "value": 64
+            },
+            {
+              "name": "tty.status.notch",
+              "value": 448
+            },
             {
               "channel": "fido2_prompt_ring",
               "name": "fido2.prompt.ring",

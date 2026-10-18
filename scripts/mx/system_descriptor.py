@@ -70,7 +70,7 @@ def check_manifest(manifest: dict) -> list[str]:
             problems.append(f"service {record['name']}: duplicate {key}")
         return values
 
-    services = records("services", 32)
+    services = records("services", 33)
     resources = {r["name"]: r for r in records("resources", 64)}
     channels = {c["name"]: c for c in records("channels", 128)}
     by_name = {s["name"]: s for s in services}

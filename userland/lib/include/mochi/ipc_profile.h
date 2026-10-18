@@ -47,15 +47,17 @@ inline uint32_t profile_name_hash(const char* name) {
     return profile_fnv1a(name, n);
 }
 
+// Hash exactly the 12 on-wire bytes, in wire order, so the generator and the
+// parser cannot disagree about field packing.
 inline uint32_t profile_check(const IpcProfileEntry& e) {
     uint8_t raw[12];
-    const uint32_t fields[3] = {e.name_hash, static_cast<uint32_t>(e.budget) << 16 | e.flags, e.reserved};
-    for (unsigned i = 0; i < 3; ++i) {
-        raw[i * 4 + 0] = static_cast<uint8_t>(fields[i]);
-        raw[i * 4 + 1] = static_cast<uint8_t>(fields[i] >> 8);
-        raw[i * 4 + 2] = static_cast<uint8_t>(fields[i] >> 16);
-        raw[i * 4 + 3] = static_cast<uint8_t>(fields[i] >> 24);
-    }
+    const uint32_t name_hash = e.name_hash;
+    for (unsigned i = 0; i < 4; ++i) raw[i] = static_cast<uint8_t>(name_hash >> (8 * i));
+    raw[4] = static_cast<uint8_t>(e.budget);
+    raw[5] = static_cast<uint8_t>(e.budget >> 8);
+    raw[6] = static_cast<uint8_t>(e.flags);
+    raw[7] = static_cast<uint8_t>(e.flags >> 8);
+    for (unsigned i = 0; i < 4; ++i) raw[8 + i] = static_cast<uint8_t>(e.reserved >> (8 * i));
     return profile_fnv1a(raw, sizeof(raw));
 }
 

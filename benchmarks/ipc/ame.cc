@@ -244,6 +244,7 @@ extern "C" [[noreturn]] void _start() {
         (void)mx_ipc_policy_set_budget(kPollBudget);
         backend.outgoing.poll_budget = mx_ipc_policy_budget();
         backend.incoming.poll_budget = backend.outgoing.poll_budget;
+        check(backend.incoming.poll_budget == kPollBudget, "ipc policy roundtrip");
         backend.budget.seed(backend.incoming.poll_budget);
         // Only cross-core placement may spin: a same-core peer needs this CPU.
         backend.incoming.cross_core = AME_IPC_BENCH_SERVER_CPU != 0;

@@ -217,3 +217,38 @@ Measured against a fixed 1024 on the same six-pair harness: RPC blocking within
 +3..+12%, stream/256 11% faster, everything else inside noise. A fixed value is
 still marginally better for one steady workload - the controller exists for
 processes that mix bulk and latency traffic, where no single constant is right.
+
+### Provisioning
+
+`config/ipc-profile.conf` (`service=budget`) is compiled by
+`scripts/gen-ipc-profile.py` into a small binary object with the same format as
+`mochi/ipc_profile.h`: magic, version, count, 16-byte checksummed entries keyed
+by FNV-1a of the service name. A malformed line, a duplicate name, more than 32
+entries or a budget above 4096 fails the build instead of shipping a silent
+default. `init` decodes the blob once, looks each service up by name and adds a
+single `ipc.budget` BootInfo entry; `mochi::boot::map()` applies it through the
+normal clamped syscall, so there is no privileged "set another principal"
+operation anywhere.
+
+A writable amefs copy would need `init` to hold an io.fs session and to read
+other principals' counters, i.e. a new aggregation authority. That was left out
+deliberately: the image-provisioned file plus the in-process controller already
+covers the measured need, and the profile stays a hint that cannot widen the
+kernel's bound. `msh ipc` prints the running budget and the park/wake counts.
+
+### Three-way check
+
+Zero budget (policy off), fixed 1024, and the adaptive controller, three
+interleaved boots each, different-CPU, medians:
+
+| case | zero | fixed | adaptive |
+|---|---:|---:|---:|
+| rpc blocking 0 | 28,791 | 523 | 521 |
+| rpc blocking 256 | 33,393 | 3,387 | 3,593 |
+| rpc blocking 8 | 29,092 | 711 | 834 |
+| stream blocking 0 | 895 | 134 | 156 |
+| stream blocking 8 | 1,024 | 191 | 203 |
+| stream blocking 256 | 2,245 | 2,005 | 1,910 |
+
+The controller lands within a few percent of the best fixed value on the RPC
+cases and beats it on stream/256, while giving budget back when nothing parks.

@@ -78,6 +78,22 @@ add_custom_command(
     VERBATIM
 )
 mochi_service(init "init/main.cc;${MOCHI_CHANNEL_HEADER}" 0x10010000)
+
+# Image-provisioned IPC poll budget. Generated at build time, compiled into
+# init, forwarded to each service through its BootInfo entry, clamped in the
+# kernel. Absent file or entry means "use the default zero".
+set(IPC_PROFILE_HEADER ${CMAKE_BINARY_DIR}/generated/ipc_profile_blob.h)
+add_custom_command(OUTPUT ${IPC_PROFILE_HEADER}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-ipc-profile.py
+            --config ${CMAKE_SOURCE_DIR}/config/ipc-profile.conf
+            --header ${IPC_PROFILE_HEADER}
+            --binary ${CMAKE_BINARY_DIR}/generated/ipc-profile.bin
+    DEPENDS ${CMAKE_SOURCE_DIR}/config/ipc-profile.conf
+            ${CMAKE_SOURCE_DIR}/scripts/gen-ipc-profile.py
+    COMMENT "Generating IPC poll profile")
+add_custom_target(ipc_profile_gen DEPENDS ${IPC_PROFILE_HEADER})
+add_dependencies(init ipc_profile_gen)
+target_include_directories(init PRIVATE ${CMAKE_BINARY_DIR}/generated)
 target_include_directories(init PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 mochi_service(nameservice   nameservice/main.cc 0x10100000)
 mochi_service(io.console    console/main.cc    0x10200000)

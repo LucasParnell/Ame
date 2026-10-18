@@ -34,6 +34,8 @@ using integrity::bytes_equal;
 #include "midix/abi/protocols/fido2.h"
 #include "mochi/log.h"
 #include "mochi/fs.h"
+#include "mochi/ipc_profile.h"
+#include "ipc_profile_blob.h"
 #include "mochi/console_config.h"
 #include "midix/abi/dango_guest_layout.h"  // guest layout: VA spans
 #include "mochi/svc_registry.h"
@@ -78,6 +80,10 @@ static int64_t set_service_affinity(CapHandle thread, uint64_t preferred) {
 }
 
 constexpr uint32_t kMaxManifestServices = 32;
+
+// Image-provisioned per-service poll budget. Empty or invalid means defaults;
+// the kernel clamps whatever reaches it.
+static mochi::IpcProfile g_ipc_profile;
 constexpr uint32_t kManifestScanLimit = 64 * 1024;
 
 static uint8_t g_policy_sha256[MX_SHA256_SIZE]{};
@@ -400,6 +406,8 @@ static void boot_init_for_service(ServiceSpec& svc, uint32_t ordinal,
     boot_add(svc, MX_BOOT_ENTRY_VALUE, "cpu.count", kNullCap, g_cpu_count);
     boot_add(svc, MX_BOOT_ENTRY_VALUE, "cpu.mask", kNullCap, g_cpu_mask);
     boot_add(svc, MX_BOOT_ENTRY_VALUE, "launch.id", kNullCap, ordinal, 0);
+    if (const uint16_t budget = g_ipc_profile.lookup(mochi::profile_name_hash(svc.name), 0))
+        boot_add(svc, MX_BOOT_ENTRY_VALUE, "ipc.budget", kNullCap, budget);
     if (svc.image_sha256_valid) {
         boot_add(svc, MX_BOOT_ENTRY_VALUE, "image.sha256", kNullCap,
                  libk::load_le<uint64_t>(svc.image_sha256),
@@ -1352,6 +1360,8 @@ static bool handle_fido2_demand() {
 extern "C" [[noreturn]] void _start() {
     const uint64_t started = mx_clock_ns();
     const MxBootInfo* boot = mochi::boot::map();
+    // Image-provisioned poll budgets: decode once, forward per service below.
+    if (kIpcProfileBlobSize) (void)g_ipc_profile.decode(kIpcProfileBlob, kIpcProfileBlobSize);
     g_rt.boot = boot;
     if (const auto* entry = mochi::boot::find(boot, "cpu.count")) g_cpu_count = entry->aux0;
     if (!g_cpu_count || g_cpu_count > MX_HOST_MAX_CPUS) fail_halt("init: invalid CPU count\n");

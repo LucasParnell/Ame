@@ -28,6 +28,7 @@ const Builtin kBuiltins[] = {
     {"cap", cmd_cap, "capability tools: ls/tree/inspect/revoke"},
     {"arena", cmd_arena, "arena tools: ls/show"},
     {"ring", cmd_ring, "ring stats"},
+    {"ipc", cmd_ipc, "show this process's IPC poll budget and park/wake counts"},
     {"doorbell", cmd_doorbell, "doorbell stats"},
     {"vm", cmd_vm, "VM tools"},
     {"shutdown", cmd_shutdown, "power off the system"},

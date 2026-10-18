@@ -172,6 +172,7 @@ int cmd_sync(int argc, char** argv);
 int cmd_fscheck(int argc, char** argv);
 // Diagnostics (msh_diag.cc).
 int cmd_diag(int argc, char** argv);
+int cmd_ipc(int argc, char** argv);
 // Introspection builtins (msh_svc.cc).
 int cmd_bootinfo(int argc, char** argv);
 int cmd_svc(int argc, char** argv);

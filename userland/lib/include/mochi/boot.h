@@ -67,6 +67,15 @@ static inline MxBootInfo* map(mx_vaddr_t va = kDefaultBootInfoVa) {
     if (!valid(info)) {
         invalid_boot();
     }
+    // One place every service passes through: adopt the image's poll budget.
+    // The kernel clamps it again, and an absent entry leaves the default zero.
+    for (uint16_t i = 0; i < info->entry_count; ++i) {
+        const MxBootEntry& entry = info->entries[i];
+        if (entry.type == MX_BOOT_ENTRY_VALUE && streq(entry.name, "ipc.budget")) {
+            (void)mx_ipc_policy_set_budget(static_cast<uint32_t>(entry.aux0));
+            break;
+        }
+    }
     return info;
 }
 

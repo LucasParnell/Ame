@@ -1485,6 +1485,16 @@ int boot_log(const MxDiagSystem& info) {
 }
 }
 
+int cmd_ipc(int argc, char** argv) {
+    (void)argc; (void)argv;
+    const SysPair counts = mx_ipc_policy_counts();
+    line("ipc.budget=%u parks=%llu wakes=%llu",
+         static_cast<unsigned>(mx_ipc_policy_budget()),
+         static_cast<unsigned long long>(counts.value),
+         static_cast<unsigned long long>(counts.detail));
+    return 0;
+}
+
 int cmd_diag(int argc, char** argv) {
     if (argc >= 2 && streq(argv[1], "el3-rpmb")) {
         g.output_failed = false;

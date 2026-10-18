@@ -160,13 +160,16 @@ bool bind_console() {
         const libk::Framebuffer32 fb{p.dma.address, 1080, 2280};
         if (!libk::framebuffer_fits(fb, kLogoBase, kLogoBytes)) continue;
         libk::framebuffer_fill(fb, console::FramebufferConsole::kBackground);
-        if (!screen.bind(fb, kLogoBase, kLogoBytes, {64, 224, 952, 1960, 2},
+        // Row 0 of the former viewport is kept as a fixed status line: the
+        // log viewport wraps, so without it the newest stage can land mid-screen.
+        if (!screen.bind(fb, kLogoBase, kLogoBytes, {64, 256, 952, 1928, 2},
                          console::FramebufferConsole::Overflow::Wrap)) continue;
         screen.draw_text(64, 144, 3, g_boot_el == 1 ? "ANKO EL1" : "ANKO EL2", 0xff7ee6a8);
         debug_clean(fb.address, fb.width * fb.height * 4);
         screen_enabled = true;
         text("DISPLAY console.ready channel="); value(channel.index); text("address="); value(fb.address);
-        text("cols=59 rows=61 inset=64,224 scale=2\n"); boot_log_flush();
+        text("cols=59 rows=60 inset=64,256 scale=2\n"); boot_log_flush();
+        console_status("stage: console.ready");
         return true;
     }
     text("DISPLAY console=skip no_verified_32bit_scanout\n"); boot_log_flush();
@@ -185,6 +188,17 @@ void handoff_console() {
     console_flush();
     kernel::LockGuard guard(screen_lock);
     __atomic_store_n(&screen_enabled, false, __ATOMIC_RELEASE);
+}
+void console_status(const char* text) {
+    kernel::LockGuard guard(screen_lock);
+    if (!screen_enabled || !text) return;
+    char line[60];
+    u32 n = 0;
+    while (text[n] && n < 59) { line[n] = text[n]; ++n; }
+    while (n < 59) line[n++] = ' ';
+    line[59] = '\0';
+    // Same cell as the viewport's first row, so it never shifts with the ring.
+    screen.draw_text(64, 224, 2, line, 0xffffd070);
 }
 void console_putchar(char c) {
     kernel::LockGuard guard(screen_lock);

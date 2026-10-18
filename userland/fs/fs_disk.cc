@@ -175,6 +175,11 @@ bool disk_write_blocks(mx_u64_t block, mx_u32_t count, const void* input) {
     for (mx_u32_t i = 0; i < count; ++i) disk_cache_store(block + i, data + i * kBlockSize);
     return true;
 }
+// Device-level read accounting for the mount phases: cache hits are excluded,
+// so this counts real round trips to the block service.
+mx_u64_t g_dev_reads = 0;
+mx_u64_t g_dev_read_ns = 0;
+
 bool disk_write_block(mx_u64_t block, const mx_u8_t* data) {
     return disk_write_blocks(block, 1, data);
 }
@@ -190,6 +195,19 @@ bool disk_read_blocks(mx_u64_t block, mx_u32_t count, void* out) {
     return true;
 }
 
+// Each 4 KiB block otherwise costs a full request/reply round trip to the block
+// service, so contiguous metadata is fetched one request deep.
+alignas(4096) static mx_u8_t g_readahead[16 * kBlockSize];
+static void disk_readahead(mx_u64_t first, mx_u32_t count) {
+    if (!g_blk_available || !g_blk_dma || !count) return;
+    if (count > 16) count = 16;
+    const mx_u64_t started = mx_clock_ns();
+    const bool ok = disk_read_blocks(first, count, g_readahead);
+    g_dev_read_ns += mx_clock_ns() - started;
+    ++g_dev_reads;
+    (void)ok;  // A failed read-ahead only means the caller reads block by block.
+}
+
 bool disk_read_block(mx_u64_t block, mx_u8_t* out) {
     if (!g_blk_available || !g_blk_dma || !out) {
         return false;
@@ -199,7 +217,11 @@ bool disk_read_block(mx_u64_t block, mx_u8_t* out) {
     if (disk_cache_lookup(block, out)) {
         return true;
     }
-    if (!disk_read_sectors(sector, kSectorsPerFsBlock, out)) {
+    const mx_u64_t read_started = mx_clock_ns();
+    const bool read_ok = disk_read_sectors(sector, kSectorsPerFsBlock, out);
+    g_dev_read_ns += mx_clock_ns() - read_started;
+    ++g_dev_reads;
+    if (!read_ok) {
         return false;
     }
     disk_cache_store(block, out);
@@ -571,8 +593,13 @@ static bool mount_disk_fs() {
     if (!g_blk_available || !g_blk_dma) {
         return false;
     }
+    const mx_u64_t mount_started = mx_clock_ns();
+    g_dev_reads = 0;
+    g_dev_read_ns = 0;
     disk_cache_reset();
     (void)select_ameroot_partition();
+    // Superblock, checkpoint and the start of the journal are contiguous.
+    disk_readahead(0, 16);
     if (!disk_read_block(0, g_disk_block)) {
         return false;
     }
@@ -595,11 +622,16 @@ static bool mount_disk_fs() {
         [](void*, mx_u64_t first, mx_u32_t count, void* out) { return disk_read_blocks(first, count, out); },
         [](void*, mx_u64_t first, mx_u32_t count, const void* data) { return disk_write_blocks(first, count, data); },
         [](void*) { return disk_flush() == MX_OK; }};
+    mochi::log_counter("io.fs.mount_super_ns", mx_clock_ns() - mount_started);
+    const mx_u64_t store_started = mx_clock_ns();
     if (!mochi::store::mount(g_volume, io) && g_volume.error != MX_ERR_NOT_IMPLEMENTED) {
         mochi::log_raw_marker("io.fs: disk recovery failed; volume not writable\n");
         g_volume.mounted = false;
         return false;
     }
+    mochi::log_counter("io.fs.store_mount_ns", mx_clock_ns() - store_started);
+    mochi::log_counter("io.fs.mount_dev_reads", g_dev_reads);
+    mochi::log_counter("io.fs.mount_dev_read_ns", g_dev_read_ns);
     if (g_volume.mounted) {
         g_disk_inode_root = g_volume.checkpoint.inode_table_root;
         mochi::log_raw_marker("io.fs: full-volume /data allocator and journal ready\n");

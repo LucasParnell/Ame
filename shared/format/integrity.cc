@@ -99,13 +99,31 @@ u32 crc32c(const u8* data, usize size, Progress progress) {
 u32 crc32c_zero_field(const u8* data, usize size, usize zero_offset, usize zero_size,
                      Progress progress) {
     u32 crc = 0xffffffffu;
-    for (usize i = 0; i < size; ++i) {
-        if (!(i & 4095)) progress.poll();
-        // Subtract after the lower-bound check: offset + size can wrap for
-        // caller-supplied ranges. Bytes outside the buffer are never read.
-        const bool zero = i >= zero_offset && i - zero_offset < zero_size;
-        crc = libk::crc32c_byte(crc, zero ? 0 : data[i]);
+    if (!size) return ~crc;
+    // Same "zeroed field" semantics, fed as three ranges so the checksum stays
+    // on the wide path instead of one table lookup per byte.
+    const usize z0 = zero_offset < size ? zero_offset : size;
+    const usize room = size - z0;
+    const usize zeros = zero_size < room ? zero_size : room;
+    const usize z1 = z0 + zeros;
+    auto feed = [&](const u8* bytes, usize count) {
+        while (count) {
+            progress.poll();
+            const usize chunk = count < 4096 ? count : 4096;
+            crc = libk::crc32c_update(crc, libk::as_bytes(bytes, chunk));
+            bytes += chunk;
+            count -= chunk;
+        }
+    };
+    const u8 zero_block[4096]{};
+    feed(data, z0);
+    for (usize done = 0; done < zeros;) {
+        progress.poll();
+        const usize chunk = zeros - done < sizeof(zero_block) ? zeros - done : sizeof(zero_block);
+        crc = libk::crc32c_update(crc, libk::as_bytes(zero_block, chunk));
+        done += chunk;
     }
+    feed(data + z1, size - z1);
     return ~crc;
 }
 

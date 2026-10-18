@@ -43,7 +43,9 @@ constexpr const char* kStageNames[] = {
     "iommu.begin", "iommu.done", "gic.begin", "gic.done", "timer.begin", "timer.done",
     "caps.done", "ipc.done", "vm.done", "scheduler.done", "smp.done",
     "bundle.begin", "bundle.authenticated", "init.spawn.begin", "init.spawn.done", "init.caps.done",
-    "scheduler.enter", "timer.first_tick", "services.ready"
+    "scheduler.enter", "timer.first_tick", "services.ready",
+    "caps.enter", "caps.bootpage", "caps.slab", "caps.slot0", "bundle.loaded",
+    "caps.arena", "caps.manifest", "caps.copy", "caps.grants"
 };
 struct IrqGuard {
     u64 saved;
@@ -288,6 +290,14 @@ void boot_checkpoint(BootStage stage) {
     if (stage == BootStage::ServicesReady && !ANKO_ANNE_DIAG_RESET_AT_READY)
         state.capture_start = minimal::counter();
     if (stage == BootStage::ServicesReady && ANKO_ANNE_DIAG_RESET_AT_READY) capture_reset("services.ready");
+#endif
+#ifdef ANKO_ANNE_FRAMEBUFFER
+    // Only once the console is bound: the lock and the console objects live in
+    // .bss, which is not safe to touch at the entry checkpoints, and drawing
+    // before the scanout is verified would go nowhere.
+    if (state.screen_ready)
+        native_display::console_status(current < sizeof(kStageNames) / sizeof(kStageNames[0])
+                                           ? kStageNames[current] : "unknown");
 #endif
 }
 void boot_log_putchar(char c) {

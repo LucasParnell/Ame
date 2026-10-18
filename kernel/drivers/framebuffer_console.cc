@@ -47,11 +47,17 @@ void FramebufferConsole::clear_row(u32 row) {
 void FramebufferConsole::newline() {
     x_ = 0;
     if (overflow_ == Overflow::Wrap) {
-        // Work depends on one row, even after arbitrarily many log messages.
-        // This avoids reading megabytes of uncached scanout memory in boot's
-        // synchronous logger and leaves the banner/margins intact.
+        // Page flip, not a ring: when the last row is used, clear the whole text
+        // area and start again at the top. Overwriting rows one at a time left
+        // the screen holding new lines above stale ones, which reads as a freeze.
+        // The full clear costs one viewport fill per page, not per line.
         y_ = (y_ + 1) % rows_;
-        clear_row(y_);
+        if (y_ == 0) {
+            for (u32 row = 0; row < rows_; ++row) clear_row(row);
+            dirty(view_.y, rows_ * 16 * view_.scale);
+        } else {
+            clear_row(y_);
+        }
         return;
     }
     if (++y_ < rows_) return;

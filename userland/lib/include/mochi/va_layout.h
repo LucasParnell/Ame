@@ -50,7 +50,7 @@ namespace console {
 
 constexpr uint32_t kLogRingOrder  = 6;
 constexpr uint64_t kLogRingStride = 0x1'0000ull;
-constexpr uint64_t kLogRingCount  = 32; // == ConsoleBootConfig::kMaxRings
+constexpr uint64_t kLogRingCount  = 40; // == ConsoleBootConfig::kMaxRings
 constexpr uint64_t kLogRingSpan   = kLogRingStride * kLogRingCount;
 static_assert(kLogRingStride >= mx_ring_page_bytes(kLogRingOrder),
               "log ring VA stride must hold one ring page");

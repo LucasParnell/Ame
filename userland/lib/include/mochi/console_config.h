@@ -13,7 +13,10 @@
 struct ConsoleBootConfig {
     static constexpr uint32_t kMagic   = 0x434F4E46u; // 'CONF'
     static constexpr uint16_t kVersion = 2u;
-    static constexpr uint32_t kMaxRings = 32u;
+    // Kernel rings (one per CPU) + the init ring + one per service. The full
+    // huawei-anne-usb profile is 24 services, so 32 was exactly saturated and
+    // any new service halted the boot in the console restart path.
+    static constexpr uint32_t kMaxRings = 40u;
 
     uint32_t magic;             // written last by init; console spins until set
     uint16_t version;

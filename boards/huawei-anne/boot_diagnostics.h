@@ -28,7 +28,12 @@ enum class BootStage : u32 {
     IommuBegin, IommuDone, GicBegin, GicDone, TimerBegin, TimerDone,
     CapsDone, IpcDone, VmDone, SchedulerDone, SmpDone,
     BundleBegin, BundleAuthenticated, InitSpawnBegin, InitSpawnDone, InitCapsDone,
-    SchedulerEnter, FirstTimerTick, ServicesReady
+    SchedulerEnter, FirstTimerTick, ServicesReady,
+    // Caps issuance is a long stretch of allocation and granting; these split
+    // it so a stall names the call instead of the whole function.
+    CapsEnter, CapsBootPage, CapsSlab, CapsSlot0,
+    BundleLoaded,
+    CapsArena, CapsManifest, CapsCopy, CapsGrants
 };
 void boot_checkpoint(BootStage stage);
 void boot_log_putchar(char c);

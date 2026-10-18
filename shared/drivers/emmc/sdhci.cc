@@ -308,8 +308,10 @@ Error Driver::initialize(u32 input, bool arasan, u32 bus_width) {
         return fail(Error::Unsupported);
     if ((partition_ & 7) && (e = select(partition_ & ~7u)) != Error::Ok)
         return e;
-    // Legacy eMMC supports up to 26 MHz; 12.5 MHz from the 200 MHz Anne input.
-    if ((e = clock(input, 12500000)) != Error::Ok)
+    // Backward-compatible timing tops out at 26 MHz. The 200 MHz Anne input
+    // divides to 25 MHz, which is the fastest clock that needs no HS_TIMING
+    // switch; 12.5 MHz left the 8-bit bus at a quarter of its throughput.
+    if ((e = clock(input, 26000000)) != Error::Ok)
         return e;
     if (bus_width == 8 && (rd(0x40) & (1u << 18))) {
         // Board policy authorizes eight data lines; SDHCI must advertise them.

@@ -126,8 +126,11 @@ extern "C" [[noreturn]] void _start() {
         // just before the snapshot would otherwise be waited past forever.
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
         if (g_store->op == kOpIdle) {
-            const mx_u64_t counter = sys_doorbell_read(g_req);
-            while (sys_doorbell_read(g_req) == counter && g_store->op == kOpIdle) sys_yield();
+            const mx_u64_t counter = mx_doorbell_read(g_req);
+            // Block, do not spin: init always notifies after posting the op, so
+            // the counter is the only wake source and this cannot miss a
+            // request. The spin cost a permanent slice of one CPU at idle.
+            if (g_store->op == kOpIdle) (void)mx_doorbell_wait(g_req, counter);
             continue;
         }
         const mx_u32_t op = g_store->op;

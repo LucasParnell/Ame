@@ -524,14 +524,29 @@ static uint32_t service_pid(const char* name) {
 
 // First pass, as soon as the profiler is up: adopt whatever the file says so
 // services launched afterwards inherit it through their boot entry.
+// Boot-phase counters: init's log sink is not wired yet when these run, so the
+// values are carried into the timing line printed after wiring.
+static uint64_t g_parse_json_ns = 0;
+static uint64_t g_manifest_hash_ns = 0;
+static uint64_t g_archive_resolve_ns = 0;
+
 static void sync_profile() {
     if (g_profile_synced || !g_prof_store_va) return;
     const ServiceSpec* prof = find_service(g_rt.services, g_rt.service_count, "ipc.profiler");
     if (!prof || !prof->ready) return;
     g_profile_synced = true;
     uint32_t loaded = 0;
-    if (profiler_call(kProfLoad, &loaded) && loaded && loaded <= sizeof(g_prof_load_va->data))
+    const bool replied = profiler_call(kProfLoad, &loaded);
+    if (replied && loaded && loaded <= sizeof(g_prof_load_va->data)) {
         (void)g_ipc_profile.decode(g_prof_load_va->data, loaded);
+        console_log("init: profile loaded\n");
+    } else if (!replied) {
+        // Silent before: a wedged or absent ipc.profiler looked identical to an
+        // empty profile, and the boot log simply stopped here.
+        console_log("init: profile timeout\n");
+    } else {
+        console_log("init: profile empty\n");
+    }
 }
 
 // Second pass, after the system has run long enough to have counters: read each
@@ -1519,10 +1534,14 @@ extern "C" [[noreturn]] void _start() {
     uint32_t service_count = 0;
     if (manifest_map == 0) {
         const char* manifest_text = reinterpret_cast<const char*>(kVaManifest);
+        const uint64_t parse_started = mx_clock_ns();
         service_count = parse_manifest_json_services(manifest_text, manifest_services);
+        g_parse_json_ns = mx_clock_ns() - parse_started;
+        const uint64_t hash_started = mx_clock_ns();
         sha256(reinterpret_cast<const uint8_t*>(manifest_text),
                      slen(manifest_text),
                      g_policy_sha256);
+        g_manifest_hash_ns = mx_clock_ns() - hash_started;
         g_policy_sha256_valid = true;
     }
     if (service_count == 0) fail_halt("init: manifest failed\n");
@@ -1531,6 +1550,7 @@ extern "C" [[noreturn]] void _start() {
     g_rt.service_count = service_count;
 
     const auto* initrd = reinterpret_cast<const uint8_t*>(initrd_map == 0 ? kVaInitrd : 0);
+    const uint64_t archive_started = mx_clock_ns();
     for (uint32_t i = 0; i < service_count; ++i) {
         services[i].image_data = archive_find(initrd,
                                               services[i].image,
@@ -1539,6 +1559,7 @@ extern "C" [[noreturn]] void _start() {
         services[i].image_sha256_valid = services[i].image_data != nullptr;
     }
 
+    g_archive_resolve_ns = mx_clock_ns() - archive_started;
     const uint64_t parsed = mx_clock_ns();
     for (uint32_t i = 0; i < service_count; ++i) {
         if (!services[i].image_data || services[i].image_size == 0) {
@@ -1581,10 +1602,14 @@ extern "C" [[noreturn]] void _start() {
     parse_dependencies();
     char timing[144];
     libk::str::Buffer line(timing);
-    line.format("boot.parse_ns=%llu spawn_ns=%llu wiring_ns=%llu",
+    line.format("boot.parse_ns=%llu spawn_ns=%llu wiring_ns=%llu "
+                "json_ns=%llu hash_ns=%llu archive_ns=%llu",
                 static_cast<unsigned long long>(parsed - started),
                 static_cast<unsigned long long>(spawned - parsed),
-                static_cast<unsigned long long>(mx_clock_ns() - spawned));
+                static_cast<unsigned long long>(mx_clock_ns() - spawned),
+                static_cast<unsigned long long>(g_parse_json_ns),
+                static_cast<unsigned long long>(g_manifest_hash_ns),
+                static_cast<unsigned long long>(g_archive_resolve_ns));
     console_log(line.data);
     launch_prepared_services();
     while (true) {

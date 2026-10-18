@@ -62,16 +62,20 @@ void issue_boot_caps(Process& init_proc,
                      usize    manifest_size,
                      PhysAddr initrd_phys,
                      usize    initrd_size) {
+    ANKO_BOOT_CHECKPOINT(CapsEnter);
     if (!init_proc.cap_table) panic("init has no cap table");
     const PhysAddr boot_page = mm::alloc_page_for(init_proc.pid);
+    ANKO_BOOT_CHECKPOINT(CapsBootPage);
     auto* boot_arena = static_cast<Arena*>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
     if (!boot_page || !boot_arena) panic("init BootInfo allocation failed");
+    ANKO_BOOT_CHECKPOINT(CapsSlab);
     libk::memset(reinterpret_cast<void*>(boot_page), 0, PAGE_SIZE);
     libk::memset(boot_arena, 0, sizeof(*boot_arena));
     boot_arena->phys_base = boot_page; boot_arena->size = PAGE_SIZE;
     boot_arena->owner_pid = init_proc.pid; boot_arena->rights = RIGHT_READ;
     const CapHandle boot_cap = cap::alloc(*init_proc.cap_table, CAP_ARENA, boot_arena, RIGHT_READ | RIGHT_MAP);
     if (cap_index(boot_cap) != 0 || !boot_cap) panic("init BootInfo must be slot zero");
+    ANKO_BOOT_CHECKPOINT(CapsSlot0);
     auto* boot = reinterpret_cast<MxBootInfo*>(boot_page);
     boot->version = MX_BOOT_VERSION;
     auto add = [&](const char* name, CapHandle handle, u64 size = 0) {
@@ -87,6 +91,7 @@ void issue_boot_caps(Process& init_proc,
         add(name, h, size); return h;
     };
 
+    ANKO_BOOT_CHECKPOINT(CapsArena);
     auto* manifest = static_cast<MemoryObject*>(mm::heap_alloc(sizeof(MemoryObject), alignof(MemoryObject)));
     auto* initrd = static_cast<MemoryObject*>(mm::heap_alloc(sizeof(MemoryObject), alignof(MemoryObject)));
     if (!manifest || !initrd) return;
@@ -102,9 +107,11 @@ void issue_boot_caps(Process& init_proc,
                      reinterpret_cast<const void*>(manifest_addr),
                      manifest_size);
     }
+    ANKO_BOOT_CHECKPOINT(CapsManifest);
     manifest->phys_base = manifest_page;
     manifest->size = manifest_alloc_size;
 
+    ANKO_BOOT_CHECKPOINT(CapsCopy);
     initrd->phys_base = initrd_phys;
     initrd->size = initrd_size;
 
@@ -497,6 +504,7 @@ void issue_boot_caps(Process& init_proc,
             ANKO_LOG_WARN("kernel/init", "virtio-blk cap object allocation failed");
         }
     }
+    ANKO_BOOT_CHECKPOINT(CapsGrants);
     __atomic_store_n(&boot->magic, MX_BOOT_MAGIC, __ATOMIC_RELEASE);
 }
 
@@ -580,6 +588,7 @@ void create_init_process() {
         !load_system_bundle_from_disk(&initrd_base, &initrd_size)) {
         panic("no external system bundle");
     }
+    ANKO_BOOT_CHECKPOINT(BundleLoaded);
     if (!init_archive(initrd_base, initrd_size)) panic("system bundle authentication failed");
     ANKO_BOOT_CHECKPOINT(BundleAuthenticated);
 

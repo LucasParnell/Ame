@@ -75,6 +75,9 @@ bool bind_console();
 bool framebuffer(u64& address, u32& width, u32& height);
 void handoff_console();
 void console_putchar(char c);
+// Fixed top row of the text viewport. The log viewport below wraps as a ring,
+// so the newest checkpoint is otherwise mid-screen after the ring turns over.
+void console_status(const char* text);
 void console_flush();
 bool console_active();
 u64 console_characters();

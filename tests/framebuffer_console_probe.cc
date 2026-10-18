@@ -46,14 +46,19 @@ int main() {
                        console::FramebufferConsole::Overflow::Wrap));
     screen.write("one\ntwo\nthree\nfour", 18);
     assert(screen.take_dirty(dirty, bytes)); // Discard initial viewport damage.
-    u32 saved_row[16 * width];
-    std::memcpy(saved_row, storage + guard + 48 * width, sizeof(saved_row));
     screen.write("\nfive", 5);
-    assert(screen.cell(0, 0) == 'f' && screen.cell(1, 0) == 't');
-    assert(screen.cell(2, 0) == 't' && screen.cell(3, 0) == 'f');
+    // Page flip on rollover: the text area is cleared, not wrapped over, so no
+    // stale line survives above the newest one.
+    assert(screen.cell(0, 0) == 'f' && screen.cell(0, 1) == 'i');
+    for (u32 row = 1; row < 4; ++row)
+        for (u32 col = 0; col < screen.columns(); ++col) assert(screen.cell(row, col) == ' ');
     assert(screen.take_dirty(dirty, bytes));
-    assert(dirty == address + 32 * width * 4 && bytes == 16 * width * 4);
-    assert(std::memcmp(saved_row, storage + guard + 48 * width, sizeof(saved_row)) == 0);
+    assert(dirty == address + 32 * width * 4 && bytes == 64 * width * 4);
+    // The banner above y=24 was painted earlier; everything else outside the
+    // text viewport must still be untouched.
+    for (u32 y = 24; y < height; ++y)
+        if (y < 32 || y >= 96)
+            for (u32 x = 0; x < width; ++x) assert(storage[guard + y * width + x] == untouched);
     static u32 phone[1080 * 2280];
     for (auto& pixel : phone) pixel = untouched;
     const u64 phone_address = reinterpret_cast<u64>(phone);

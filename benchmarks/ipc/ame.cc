@@ -122,7 +122,8 @@ struct Ame {
             if (result == mochi::FrameProgress::Blocked) {
                 flush_notify();
                 if (spin) libk::cpu::relax();
-                else check(outgoing.wait_writable(writer.required_space(outgoing), kPollBudget), "producer space wait");
+                else check(outgoing.wait_writable(writer.required_space(outgoing),
+                                                  outgoing.poll_budget), "producer space wait");
             }
         }
 #endif
@@ -146,7 +147,7 @@ struct Ame {
             if (result == mochi::FrameProgress::Complete) break;
             if (result == mochi::FrameProgress::Blocked) {
                 if (spin) libk::cpu::relax();
-                else check(incoming.wait_readable(kPollBudget), "ring receive/wait");
+                else check(incoming.wait_readable_auto(), "ring receive/wait");
             }
         }
         message.kind = reader.type(); message.sequence = reader.sequence(); message.size = reader.size();
@@ -222,6 +223,11 @@ extern "C" [[noreturn]] void _start() {
         // them on first publication instead of deferring until the whole window.
         backend.outgoing.deferred_notify = &backend.pending_notify;
 #endif
+        // Publish the benchmark's bounded poll through the kernel policy path,
+        // then read it back the way a service or profiler would.
+        (void)mx_ipc_policy_set_budget(kPollBudget);
+        backend.outgoing.poll_budget = mx_ipc_policy_budget();
+        backend.incoming.poll_budget = backend.outgoing.poll_budget;
         if (role->aux0 == 2) ipc_bench::server(backend, *state);
         else {
             const Config config{AME_IPC_BENCH_ITERATIONS, AME_IPC_BENCH_WARMUP, AME_IPC_BENCH_SAMPLES,

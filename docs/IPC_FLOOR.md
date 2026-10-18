@@ -179,3 +179,23 @@ service code - therefore cross a switch with zero FP traffic instead of 528
 bytes stored and 528 bytes loaded. A thread that does use FP becomes sticky:
 from its second dispatch the switch path restores eagerly, so it never pays more
 than one trap in its lifetime and behaves exactly as the eager scheme did.
+
+### Policy surface
+
+`SYS_IPC_POLICY` (75) is the only knob a process has over its own wake policy:
+`op 0` reads the principal's poll budget, `op 1` sets it, `op 2` returns park and
+wake counts in x0/x1. The kernel clamps the budget to
+`kIpcPollBudgetMax` (4096) and refuses to address any principal but the
+caller's own, so a stale or hostile profile cannot turn a wait into an
+unbounded spin. Defaults are zero: a process that never calls the syscall parks
+exactly as before.
+
+`mochi::Ring::refresh_poll_budget()` seeds a ring from that policy once, and
+`wait_readable_auto()` uses it. Ring helpers that know the peer runs on the same
+core must keep the budget at zero - the peer cannot make progress while this
+thread spins - which is the same reason the benchmark only sets it for
+different-CPU placement.
+
+Parks and wakes are counted per principal at the doorbell park and wake sites.
+The counts are the input a userspace controller needs; the kernel itself keeps
+no heuristic and no timer.

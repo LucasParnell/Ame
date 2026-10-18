@@ -379,6 +379,9 @@ struct Ring {
     // Set only when the peer has agreed to poll for the whole channel policy.
     // Publishes then skip the one-shot wake handshake; see ring_publish().
     bool peer_polls = false;
+    // Relax iterations this ring may spin before arming its sleep flag.
+    // refresh_poll_budget() seeds it from the principal policy.
+    uint32_t poll_budget = 0;
 
     bool valid() const { return ring_valid(ring, order); }
     RingPage* raw() const { return ring; }
@@ -434,6 +437,19 @@ struct Ring {
     }
     uint32_t try_pop_batch(RingSlot* out, uint32_t count) const {
         return ring_pop_batch(ring, order, out, count, space_doorbell, peer_polls);
+    }
+    // Read the principal's adaptive budget once; 0 leaves the caller's own
+    // explicit budget in charge.
+    uint32_t refresh_poll_budget() {
+        const uint32_t policy = mx_ipc_policy_budget();
+        if (policy) poll_budget = policy;
+        return poll_budget;
+    }
+    // Wait with the ring's policy budget. Same-core peers should keep it 0:
+    // they cannot make progress while this thread spins.
+    bool wait_readable_auto() const {
+        return handle ? wait_cursor(false, 1, poll_budget)
+                      : ring_wait_readable(ring, order, doorbell);
     }
     bool wait_readable(uint32_t poll_budget = 0) const {
         if (!handle) return ring_wait_readable(ring, order, doorbell);

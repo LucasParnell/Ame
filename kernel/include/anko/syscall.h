@@ -52,6 +52,7 @@ enum Syscall : unsigned {
     SYS_DEBUG_PUTS = MX_NR_DEBUG_PUTS,
     SYS_DEBUG_COUNTERS = MX_NR_DEBUG_COUNTERS,
     SYS_DEBUG_READ = MX_NR_DEBUG_READ,
+    SYS_IPC_POLICY = MX_NR_IPC_POLICY,
 
     // V0 support extensions. These keep the bring-up path small while the
     // base architecture is still being made spec-complete.

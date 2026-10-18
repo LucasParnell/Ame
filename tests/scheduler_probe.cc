@@ -168,6 +168,25 @@ void queue_capacity_checks() {
     std::puts("bounded runnable counters preserve all 64 queue slots and overflow rollback");
 }
 
+void ipc_policy_checks() {
+    const u32 pid = sched::allocate_principal(PRINCIPAL_NATIVE_SANDBOXED, 1024, 0, 0);
+    auto t = make_thread(pid, SCHED_BAND_FAIR);
+    dispatch(t);
+    assert(sched::ipc_poll_budget(pid) == 0);          // park immediately by default
+    assert(sched::ipc_poll_budget_set(pid, 512) == 512);
+    assert(sched::ipc_poll_budget(pid) == 512);
+    assert(sched::ipc_poll_budget_set(pid, 99999) == kIpcPollBudgetMax);
+    assert(sched::ipc_poll_budget(pid) == kIpcPollBudgetMax);
+    const u64 parks = sched::ipc_park_count(pid), wakes = sched::ipc_wake_count(pid);
+    sched::ipc_note_park(pid); sched::ipc_note_park(pid); sched::ipc_note_wake(pid);
+    assert(sched::ipc_park_count(pid) == parks + 2 && sched::ipc_wake_count(pid) == wakes + 1);
+    // Out-of-range principals are inert rather than memory writes.
+    assert(sched::ipc_poll_budget_set(0xffffu, 10) == 0 && sched::ipc_poll_budget(0xffffu) == 0);
+    sched::current_eki().current = nullptr;
+    sched::release_principal(pid);
+    std::puts("ipc policy clamps the budget, counts parks/wakes and ignores bad principals");
+}
+
 void return_frame_checks() {
     reset();
     const u32 pid = sched::allocate_principal(PRINCIPAL_NATIVE_SANDBOXED, 1024, 0, 0);
@@ -303,6 +322,7 @@ int main() {
     heap_checks();
     compact_dispatch_checks();
     queue_capacity_checks();
+    ipc_policy_checks();
     return_frame_checks();
     remote_batch_checks();
     static_assert(alignof(Eki) >= 64);

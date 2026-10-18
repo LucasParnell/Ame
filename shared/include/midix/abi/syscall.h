@@ -93,6 +93,11 @@ enum MxSyscall : mx_u64_t {
     // Delegate supervision to a direct child; requires an existing supervisor
     // with SPAWN authority and a process capability with SPAWN authority.
     MX_NR_SUPERVISOR_DELEGATE = 70,
+    // (op, arg): per-principal IPC wake policy for the calling principal.
+    // op 0 = get budget, op 1 = set budget (clamped), op 2 = park/wake counts.
+    // Budget is the bounded relax count a ring helper may spin before arming
+    // its sleep flag; 0 means it parks immediately.
+    MX_NR_IPC_POLICY = 75,
     // (own supervisor, notify doorbell or 0): signal after child teardown has
     // published a pollable exit. Binding retains the doorbell until unbound.
     MX_NR_SUPERVISOR_BIND_DOORBELL = 71,

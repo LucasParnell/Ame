@@ -153,6 +153,7 @@ SysError notify_object(Doorbell* db) {
         __atomic_store_n(&waiter->waiting_doorbell, nullptr, __ATOMIC_RELEASE);
         ++db->wake_count;
         metric_inc(stats.wakes);
+        sched::ipc_note_wake(waiter->principal_id);
     } else {
         metric_inc(stats.no_waiter);
     }
@@ -250,6 +251,7 @@ SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
         // Fallback: wake receiver (if any) via the normal path and return.
         if (receiver) {
             metric_inc(stats.wakes);
+            sched::ipc_note_wake(receiver->principal_id);
             const u32 target = sched::wake_ipc(
                 receiver, sender, db->sched_hints, db->home_cpu);
             if (target == sched::current_cpu_id()) {
@@ -263,6 +265,7 @@ SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
 
     // --- Synchronous handoff ---
     metric_inc(stats.wakes);
+    sched::ipc_note_wake(receiver->principal_id);
     metric_inc(stats.local);
 
     // Deliver payload_word to receiver in x1 (x0 will hold the counter on return
@@ -455,6 +458,7 @@ SysError wait_doorbell_object(const cap::Ref& e, u64 expected, u64 deadline,
     __atomic_store_n(&cur->waiting_doorbell, db, __ATOMIC_RELEASE);
     cur->state = TS_SLEEPING;
     metric_inc(stats.sleeps);
+    sched::ipc_note_park(cur->principal_id);
     sched::block(cur);
     unlock(db);
     object::release(previous_wait); // final destruction runs outside this doorbell's lock

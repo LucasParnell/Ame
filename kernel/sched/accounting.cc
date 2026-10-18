@@ -16,6 +16,15 @@ namespace sched {
 // Principal table
 // ---------------------------------------------------------------------------
 static PrincipalSchedState g_principal_sched[kMaxPrincipalsLocal]{};
+
+// Separate from PrincipalSchedState so its 64-byte layout contract is intact.
+struct IpcPolicyCell {
+    u64 parks;
+    u64 wakes;
+    u32 budget;   // 0 = never spin
+    u32 generation;
+};
+static IpcPolicyCell g_ipc_policy[kMaxPrincipalsLocal]{};
 static u32 g_next_principal_id = 1; // principal 0 is reserved for the kernel/bootstrap bucket
 static kernel::SpinLock g_principal_lock{};
 static u32 g_principal_generations[kMaxPrincipalsLocal]{};
@@ -89,6 +98,36 @@ void principal_init_bootstrap() {
 }
 
 // Mirror principal weights into one CPU's per-principal entities.
+void ipc_note_park(u32 id) {
+    if (id >= kMaxPrincipalsLocal) return;
+    __atomic_add_fetch(&g_ipc_policy[id].parks, 1, __ATOMIC_RELAXED);
+}
+
+void ipc_note_wake(u32 id) {
+    if (id >= kMaxPrincipalsLocal) return;
+    __atomic_add_fetch(&g_ipc_policy[id].wakes, 1, __ATOMIC_RELAXED);
+}
+
+u32 ipc_poll_budget(u32 id) {
+    return id < kMaxPrincipalsLocal ? __atomic_load_n(&g_ipc_policy[id].budget, __ATOMIC_RELAXED) : 0;
+}
+
+u32 ipc_poll_budget_set(u32 id, u32 budget) {
+    if (id >= kMaxPrincipalsLocal) return 0;
+    if (budget > kIpcPollBudgetMax) budget = kIpcPollBudgetMax;
+    __atomic_store_n(&g_ipc_policy[id].budget, budget, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&g_ipc_policy[id].generation, 1, __ATOMIC_RELAXED);
+    return budget;
+}
+
+u64 ipc_park_count(u32 id) {
+    return id < kMaxPrincipalsLocal ? __atomic_load_n(&g_ipc_policy[id].parks, __ATOMIC_RELAXED) : 0;
+}
+
+u64 ipc_wake_count(u32 id) {
+    return id < kMaxPrincipalsLocal ? __atomic_load_n(&g_ipc_policy[id].wakes, __ATOMIC_RELAXED) : 0;
+}
+
 void principal_mirror_weights(u32 cpu_id) {
     Eki& e = eki_for_cpu(cpu_id);
     for (u32 i = 0; i < kMaxPrincipals; ++i)

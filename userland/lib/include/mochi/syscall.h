@@ -253,6 +253,17 @@ static inline mx_status_t mx_status_from_value(int64_t value, mx_handle_t* out =
 
 static inline uint64_t mx_clock_ns() { return static_cast<uint64_t>(_svc1(MX_NR_CLOCK_NS, 0)); }
 
+// Per-principal IPC wake policy. The kernel clamps the budget to 4096 and only
+// the caller's own principal is addressable.
+static inline uint32_t mx_ipc_policy_budget() {
+    return static_cast<uint32_t>(_svc2(MX_NR_IPC_POLICY, 0, 0));
+}
+static inline uint32_t mx_ipc_policy_set_budget(uint32_t budget) {
+    return static_cast<uint32_t>(_svc2(MX_NR_IPC_POLICY, 1, budget));
+}
+// x0 = parks, x1 = wakes.
+static inline SysPair mx_ipc_policy_counts() { return _svc1_pair(MX_NR_IPC_POLICY, 2); }
+
 static inline void mx_yield() { sys_yield(); }
 static inline void mx_exit(int32_t code) { sys_exit(code); }
 static inline mx_status_t mx_map_page(mx_handle_t cap, mx_vaddr_t va, mx_rights_t rights) { return sys_map_page(cap, va, rights); }

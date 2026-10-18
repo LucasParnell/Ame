@@ -1086,6 +1086,23 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2,
 
     case SYS_CLOCK_NS: return ok(static_cast<long>(sched::sched_clock_ns()));
 
+    // Per-principal IPC wake policy: (op, arg). A process can only address its
+    // own principal, and the kernel clamps the budget, so a stale or hostile
+    // profile can never turn a wait into an unbounded spin.
+    case SYS_IPC_POLICY: {
+        Thread* cur = sched::current();
+        if (!cur) return err(E_DEAD);
+        const u32 principal_id = cur->principal_id;
+        switch (a0) {
+        case 0: return ok(static_cast<long>(sched::ipc_poll_budget(principal_id)));
+        case 1: return ok(static_cast<long>(sched::ipc_poll_budget_set(
+                    principal_id, static_cast<u32>(a1))));
+        case 2: return ok(static_cast<long>(sched::ipc_park_count(principal_id)),
+                          static_cast<long>(sched::ipc_wake_count(principal_id)));
+        default: return err(E_INVALID);
+        }
+    }
+
     // Phase D: PCI device assignment into a VM (§6, §7, §8.11/§8.12).
     case SYS_VM_ASSIGN_DEVICE: {
         // a0 = vm_cap, a1 = host function cap, a2 = flags

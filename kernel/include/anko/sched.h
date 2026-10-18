@@ -230,6 +230,9 @@ static_assert(__is_trivially_constructible(FairThreadQueue));
 // Constants
 // ---------------------------------------------------------------------------
 constexpr u32 kMaxPrincipals = 64;
+// Upper bound for the adaptive cross-core poll budget. The ring helper clamps
+// to this before it ever spins, so a bad profile cannot become a busy loop.
+constexpr u32 kIpcPollBudgetMax = 4096;
 constexpr u32 kMaxRtPrio     = 16;
 constexpr u32 kMaxCpus       = MX_HOST_MAX_CPUS;
 constexpr u32 kInvalidCpu    = ~0u;
@@ -569,6 +572,16 @@ void     process_set_name(Process* p, const char* name);
 bool     process_charge_page(u32 pid);
 void     process_uncharge_page(u32 pid);
 void     sweep_process_caps(void* target);
+
+// Per-principal IPC wake policy. Budget is the bounded relax count a ring
+// helper uses before arming its sleep flag; counters report parks and wakes so
+// a userspace controller can retune it without kernel heuristics.
+void     ipc_note_park(u32 principal_id);
+void     ipc_note_wake(u32 principal_id);
+u32      ipc_poll_budget(u32 principal_id);
+u32      ipc_poll_budget_set(u32 principal_id, u32 budget);
+u64      ipc_park_count(u32 principal_id);
+u64      ipc_wake_count(u32 principal_id);
 
 void     enqueue(Thread* t);
 void     dequeue_thread(Thread* t);

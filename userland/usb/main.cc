@@ -171,7 +171,7 @@ bool cold(uint32_t type, MxUsbControllerRequest request, MxUsbControllerReply* r
     if (!g->controller.tx().push_msg(type, request, 1024) || !wait_cold()) {
         return false;
     }
-    if (reply) {
+    if (reply && !g->cold_is_completion) {
         *reply = g->cold_reply;
     }
     return !g->cold_is_completion && g->cold_reply.status == MX_OK;
@@ -196,7 +196,16 @@ bool control(DeviceCold& dev, MxUsbSetup setup) {
 }
 bool remove_device(MxUsbToken token) {
     auto* dev = device(token);
-    if (!dev || !cold(MX_USB_CONTROLLER_REMOVE_DEVICE, {0, dev->controller_device, 0, 0, 0, 0})) {
+    if (!dev) {
+        return false;
+    }
+    MxUsbControllerReply removed{};
+    // The controller revokes its endpoints as soon as it sees disconnect,
+    // before its port event reaches this process. Already absent is a valid
+    // removal result: still release our topology and notify class drivers.
+    // Timeouts and other failures must retain the rows for a later attempt.
+    if (!cold(MX_USB_CONTROLLER_REMOVE_DEVICE, {0, dev->controller_device, 0, 0, 0, 0}, &removed) &&
+        removed.status != MX_ERR_NOT_FOUND) {
         return false;
     }
     for (uint32_t i = 0; i < kInterfaces; ++i) {
@@ -219,24 +228,37 @@ bool remove_device(MxUsbToken token) {
     device_pool.release(token);
     return true;
 }
+void enumeration_failed(uint8_t port, const char* stage) {
+    char line[112];
+    const int length = libk::snprintf(line, sizeof(line),
+                                    "io.usb: port %u enumeration failed at %s\n",
+                                    static_cast<unsigned>(port), stage);
+    if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+        mochi::log_raw_marker(line);
+    }
+}
 bool enumerate(uint8_t port) {
     const auto token = device_pool.acquire();
     if (!token) {
+        enumeration_failed(port, "device table");
         return false;
     }
     auto& dev = *device(token);
     dev.port = port;
     MxUsbControllerReply reply{};
     if (!cold(MX_USB_CONTROLLER_ADDRESS, {0, 0, 0, 0, port, 0}, &reply)) {
+        enumeration_failed(port, "address/reset");
         device_pool.release(token);
         return false;
     }
     dev.controller_device = reply.device;
     dev.ep0 = reply.endpoint;
     dev.speed = reply.speed;
+    const char* stage = "device descriptor prefix";
     bool ok = control(dev, {0x80, 6, 0x100, 0, 8});
     uint16_t packet = 0;
     if (ok) {
+        stage = "EP0 packet size";
         const auto raw = g->controller_payload.data;
         packet = dev.speed >= MxUsbSpeed::Super && raw[7] == 9 ? 512 : raw[7];
         ok = raw[0] == 18 && raw[1] == 1 &&
@@ -245,28 +267,34 @@ bool enumerate(uint8_t port) {
     }
     midix::usb::DeviceDescriptor descriptor{};
     if (ok) {
+        stage = "device descriptor";
         ok = control(dev, {0x80, 6, 0x100, 0, 18}) &&
              midix::usb::parse_device(libk::as_bytes(g->controller_payload.data, 18), dev.speed,
                                       &descriptor);
     }
     if (ok) {
+        stage = "configuration header";
         ok = control(dev, {0x80, 6, 0x200, 0, 9});
     }
     const uint16_t bytes = ok ? libk::load_le<uint16_t>(g->controller_payload.data + 2) : 0;
     if (ok) {
+        stage = "configuration descriptor";
         ok = bytes >= 9 && bytes <= kBytes && control(dev, {0x80, 6, 0x200, 0, bytes});
     }
     midix::usb::Configuration config{dev.interfaces, dev.endpoints, 16, 32, 0, 0, 0, 0, 0, 0};
     if (ok) {
+        stage = "configuration parse";
         libk::copy_n(libk::as_bytes(dev.descriptors),
                      libk::as_bytes(g->controller_payload.data, bytes), bytes);
         ok = midix::usb::parse_configuration(libk::as_bytes(dev.descriptors, bytes), dev.speed,
                                              &config);
     }
     if (ok) {
+        stage = "SET_CONFIGURATION";
         ok = control(dev, {0, 9, config.value, 0, 0});
     }
     if (!ok) {
+        enumeration_failed(port, stage);
         (void)remove_device(token);
         return false;
     }
@@ -279,6 +307,7 @@ bool enumerate(uint8_t port) {
         }
         const auto iface = interface_pool.acquire();
         if (!iface) {
+            enumeration_failed(port, "interface table");
             (void)remove_device(token);
             return false;
         }

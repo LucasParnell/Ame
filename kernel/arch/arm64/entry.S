@@ -19,6 +19,27 @@
 .section .text.entry, "ax"
 #include "midix/abi/cpu_limits.h"
 #include "anko/el2_boot.h"
+
+// Firmware may leave lower-EL traps, virtual CPU IDs and timer offsets behind.
+// Run only after observing EL2, before any EL1 register access or C++ diagnostics.
+// The host stays at EL1; EL2 remains owned by Dango's monitor.
+.macro init_el2_host
+    mov     x9, #(1 << 31)             // AArch64 EL1, stage 2 and host traps off
+    msr     HCR_EL2, x9
+    isb
+    mov     x9, #0x33ff                // Armv8.0 RES1 bits, FP/SIMD traps off
+    msr     CPTR_EL2, x9
+    msr     HSTR_EL2, xzr
+    msr     VTTBR_EL2, xzr
+    mrs     x9, MIDR_EL1
+    msr     VPIDR_EL2, x9
+    mrs     x9, MPIDR_EL1
+    msr     VMPIDR_EL2, x9
+    mov     x9, #3                     // EL1 physical counter and timer access
+    msr     CNTHCTL_EL2, x9
+    msr     CNTVOFF_EL2, xzr
+    isb
+.endm
 .global _start
 _start:
     // AArch64 Linux Image header. QEMU -kernel and U-Boot both enter at the
@@ -37,11 +58,15 @@ _start:
 .Lprimary_entry:
     msr     DAIFSet, #15
     msr     SPSel, #1
-    msr     TPIDR_EL1, xzr
     // Save DTB pointer in callee-saved register across BSS clear.
     mov     x19, x0
     mrs     x20, CurrentEL
     lsr     x20, x20, #2
+    cmp     x20, #2
+    b.ne    .Lprimary_host_state
+    init_el2_host
+.Lprimary_host_state:
+    msr     TPIDR_EL1, xzr
     // Capture the firmware handoff independently from monitor availability.
     adrp    x9, g_el2_boot_cpus
     add     x9, x9, :lo12:g_el2_boot_cpus
@@ -105,13 +130,11 @@ _start:
     adrp    x0, el2_vectors
     add     x0, x0, :lo12:el2_vectors
     msr     VBAR_EL2, x0
-    mov     x0, #(1 << 31)              // HCR_EL2.RW = 1 (EL1 is AArch64)
-    msr     HCR_EL2, x0
-    mov     x0, #0x33ff
-    msr     CPTR_EL2, x0                // disable trapping of FP/SIMD at EL2
-    mov     x0, #3
-    msr     CNTHCTL_EL2, x0
-    msr     CNTVOFF_EL2, xzr
+    // SP_EL1 is independent of the active EL2 stack. Make exceptions and
+    // early EL1 diagnostics safe immediately on ERET, before the common setup.
+    adrp    x0, __boot_stack_top
+    add     x0, x0, :lo12:__boot_stack_top
+    msr     SP_EL1, x0
     mov     x0, #0x0800
     movk    x0, #0x30d0, lsl #16
     msr     SCTLR_EL1, x0               // EL1 reset value (MMU off)
@@ -235,6 +258,11 @@ _start:
 secondary_start:
     msr     DAIFSet, #15
     msr     SPSel, #1
+    mrs     x0, CurrentEL
+    cmp     x0, #8
+    b.ne    .Lsecondary_host_state
+    init_el2_host
+.Lsecondary_host_state:
     // Resolve the full physical affinity; legacy firmware need not retain x0.
     mrs     x1, MPIDR_EL1
     movz    x2, #0xffff
@@ -278,13 +306,11 @@ secondary_start:
     adrp    x1, el2_vectors
     add     x1, x1, :lo12:el2_vectors
     msr     VBAR_EL2, x1
-    mov     x0, #(1 << 31)
-    msr     HCR_EL2, x0
-    mov     x0, #0x33ff
-    msr     CPTR_EL2, x0
-    mov     x0, #3
-    msr     CNTHCTL_EL2, x0
-    msr     CNTVOFF_EL2, xzr
+    adrp    x0, g_cpu_stacks
+    add     x0, x0, :lo12:g_cpu_stacks
+    add     x2, x19, #1
+    add     x0, x0, x2, lsl #14
+    msr     SP_EL1, x0
     mov     x0, #0x0800
     movk    x0, #0x30d0, lsl #16
     msr     SCTLR_EL1, x0

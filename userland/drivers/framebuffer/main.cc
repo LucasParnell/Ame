@@ -226,14 +226,17 @@ extern "C" [[noreturn]] void _start() {
         mochi::park();
     }
 
+    uint64_t pixel_offset = 0;
+    if (const auto* entry = mochi::boot::find(boot, "fb.offset")) pixel_offset = entry->aux0;
     MxCapInfo extent{};
     if(mx_cap_info(fb_arena,&extent)!=MX_OK||extent.attr!=MX_MMIO_NORMAL_NC||
-       extent.size<static_cast<uint64_t>(kFbWidth)*kFbHeight*4) mochi::boot::invalid_boot();
+       pixel_offset >= 4096 || (pixel_offset & 3) || pixel_offset > extent.size ||
+       extent.size-pixel_offset<static_cast<uint64_t>(kFbWidth)*kFbHeight*4) mochi::boot::invalid_boot();
     if(const auto control=mochi::boot::handle(boot,"fb.control")) {
         if(mx_platform_control(control,MX_PLATFORM_CLAIM)!=MX_OK||
            mx_platform_control(control,MX_PLATFORM_DISPLAY_HANDOFF)!=MX_OK) mochi::boot::invalid_boot();
     }
-    const mochi::framebuffer::Raster raster{reinterpret_cast<uint32_t*>(kVaFbPixels),
+    const mochi::framebuffer::Raster raster{reinterpret_cast<uint32_t*>(kVaFbPixels + pixel_offset),
                                            kFbWidth, kFbHeight};
     raster.clear(kClearColor);
     libk::cpu::data_sync();

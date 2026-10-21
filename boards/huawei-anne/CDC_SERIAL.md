@@ -77,6 +77,27 @@ batches work, and treats CRLF as one newline across packet boundaries.
 The Mac helper tolerates disappearance of a tty during settings restoration
 and closes its descriptor without hiding the disconnect error.
 
+## Host topology cleanup after disconnect
+
+The DWC2 controller removes a disconnected device and revokes its endpoints
+before io.usb consumes the port event. io.usb previously required a successful
+second removal, so the controller's `NOT_FOUND` reply left stale interfaces,
+claims and endpoint records behind and omitted the keyboard detach notice.
+It now accepts an already absent controller device as removed and releases
+its own topology. Other errors, timeouts and unexpected completion messages
+still retain that topology.
+
+The host regression runs the production io.usb implementation through 32
+removal cycles, alternating successful and already absent replies. It checks
+resource reclamation and one detach event per interface, plus preservation on
+controller failure/timeout. Enumeration failures now log their port and stage
+to the normal console/retained log, including reset/address, descriptor reads
+and SET_CONFIGURATION.
+
+This fixes a reproduced disconnect cleanup defect. Physical keyboard
+attachment after an empty boot, keyboard replug and Linux CDC reconnection
+still need retesting; those symptoms are not established as sharing one cause.
+
 ## Physical validation of the previous sink-only image
 
 Tested on ANE-LX1, firmware 8.0.0.151(C782), with release run tag

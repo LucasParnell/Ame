@@ -15,6 +15,7 @@ class UsbCore(unittest.TestCase):
                                ('usb_debug_probe.cc','usb debug probe ok'),
                                ('usb_device_probe.cc','usb device probe ok'),
                                ('usb_gadget_probe.cc','usb gadget control probe ok'),
+                               ('usb_host_hotplug_probe.cc','usb host hotplug probe ok'),
                                ('usb_schedule_probe.cc','usb scheduling probe ok'),
                                ('usb_serial_probe.cc','usb serial and terminal probe ok')]:
             with self.subTest(source=source), tempfile.TemporaryDirectory(prefix='ame-usb-') as work:
@@ -26,6 +27,7 @@ class UsbCore(unittest.TestCase):
                     '-I' + str(ROOT / 'shared/include'),
                     '-I' + str(ROOT / 'userland/lib/include'),
                     '-idirafter', str(ROOT / 'lib/include'), str(ROOT / 'tests' / source),
+                    *([str(ROOT / 'lib/libk/printf.cc')] if source == 'usb_host_hotplug_probe.cc' else []),
                     '-o', probe], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 result = subprocess.run([probe], capture_output=True, text=True, timeout=20)

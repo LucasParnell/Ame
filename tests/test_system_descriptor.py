@@ -22,7 +22,7 @@ class SystemDescriptor(unittest.TestCase):
         self.assertEqual(switch['checks'], [])
         self.assertNotIn('dango.manager', mksystem.legacy_view(switch))
         self.assertEqual(policy.check_manifest(switch), [])
-        self.assertEqual(len(self.manifest['services']), 17)
+        self.assertEqual(len(self.manifest['services']), 18)
 
     def test_anne_bootstrap_profile_does_not_require_el2_or_qemu_devices(self):
         anne = policy.load_profile(self.path, 'huawei-anne')
@@ -38,6 +38,9 @@ class SystemDescriptor(unittest.TestCase):
         anne=policy.load_profile(self.path,'huawei-anne-usb')
         self.assertEqual(policy.check_manifest(anne),[])
         services={s['name']:s for s in anne['services']}
+        self.assertEqual(services['dango.manager']['caps'], ['vm'])
+        self.assertEqual(services['dango.manager']['affinity'], 1)
+        self.assertIn('dango.auth_probe', services)
         self.assertNotIn('drv.usb.xhci',services)
         self.assertEqual(services['io.usb']['start_after'],['drv.usb.dwc2'])
         self.assertEqual(services['msh']['uses'],['fs'])

@@ -224,11 +224,18 @@ void issue_boot_caps(Process& init_proc,
 #ifdef ANKO_ANNE_FRAMEBUFFER
         u64 address=0; u32 width=0,height=0;
         if (anne::native_display::framebuffer(address,width,height)) {
-            const usize size = libk::align_up(u64{width}*height*4,PAGE_SIZE);
-            if (!mm::register_noncached_range(address,size)) panic("Anne framebuffer attributes failed");
+            // LK's logo scanout is pixel aligned, but not necessarily page aligned.
+            const u64 base = address & ~(u64{PAGE_SIZE} - 1);
+            const u64 offset = address - base;
+            const usize size = libk::align_up(offset + u64{width}*height*4, PAGE_SIZE);
+            if (!mm::register_noncached_range(base,size)) panic("Anne framebuffer attributes failed");
             auto* range = static_cast<MmioRange*>(mm::slab_alloc(sizeof(MmioRange),alignof(MmioRange)));
             if (!range) panic("Anne framebuffer allocation failed");
-            *range = {address,size,MX_MMIO_NORMAL_NC,0,0,0};
+            *range = {base,size,MX_MMIO_NORMAL_NC,0,0,0};
+            if (boot->entry_count >= MX_BOOT_MAX_ENTRIES) panic("boot capability allocation failed");
+            auto& pixel_offset = boot->entries[boot->entry_count++];
+            pixel_offset.type = MX_BOOT_ENTRY_VALUE; pixel_offset.aux0 = offset;
+            libk::memcpy(pixel_offset.name, "fb.offset", 10);
             grant("fb.memory",CAP_MMIO,range,RIGHT_READ|RIGHT_WRITE|RIGHT_MAP|RIGHT_DUP);
             grant("fb.control",CAP_PLATFORM,platform::board_control(platform::Domain::Display),RIGHT_WRITE|RIGHT_DUP);
         }

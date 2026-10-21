@@ -3085,7 +3085,9 @@
         "io.fs",
         "ipc.profiler",
         "msh",
-        "usb.fn.fido2"
+        "usb.fn.fido2",
+        "dango.manager",
+        "dango.auth_probe"
       ],
       "overrides": {
         "io.usb": {
@@ -3600,6 +3602,11 @@
                 "map"
               ]
             }
+          ]
+        },
+        "dango.manager": {
+          "caps": [
+            "vm"
           ]
         }
       }

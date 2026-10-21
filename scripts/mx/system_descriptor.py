@@ -207,7 +207,7 @@ def load_profile(path: Path, profile: str) -> dict:
     if any(s not in services for s in selected):
         raise ValueError(f"{profile}: profile selects an unknown service")
     descriptor["services"] = [copy.deepcopy(services[s]) for s in selected]
-    if len(selected)>24:
+    if len(selected)>28:
         raise ValueError(f"{profile}: selected services exceed registry capacity")
     for service in descriptor["services"]:
         if service["name"] in overrides:

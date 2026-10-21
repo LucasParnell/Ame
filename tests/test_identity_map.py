@@ -1,5 +1,6 @@
 from pathlib import Path
 import shutil
+import platform
 import subprocess
 import tempfile
 import unittest
@@ -15,8 +16,10 @@ class IdentityMap(unittest.TestCase):
                 with self.subTest(board=board):
                     program = Path(directory) / board
                     defines = ['-DANKO_HOST_TEST=1']
+                    if platform.machine().lower() in ('x86_64', 'amd64'):
+                        defines += ['-mcx16']
                     if board != 'generic':
-                        defines += ['-DANKO_BOARD_HUAWEI_ANNE=1']
+                        defines += ['-DANKO_BOARD_HUAWEI_ANNE=1', '-DANKO_ANNE_FRAMEBUFFER=1']
                     if board == 'anne-synthetic':
                         defines += ['-DANKO_ANNE_DIAG_TEST=1', '-DANKO_ANNE_FRAMEBUFFER=1']
                     build = subprocess.run([

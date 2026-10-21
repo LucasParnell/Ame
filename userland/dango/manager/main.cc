@@ -831,7 +831,13 @@ extern "C" [[noreturn]] void _start() {
     const CapHandle fb_window_cap = mochi::boot::handle(boot, "fb.memory");
     if (fb_window_cap && sys_cap_identify(fb_window_cap) == kCapTypeMmio &&
         sys_map_mmio(fb_window_cap, kVaFbWindow, dango::RIGHT_READ) == 0) {
-        fb_window = reinterpret_cast<const uint8_t*>(kVaFbWindow);
+        uint64_t pixel_offset = 0;
+        if (const auto* entry = mochi::boot::find(boot, "fb.offset")) pixel_offset = entry->aux0;
+        MxCapInfo extent{};
+        if (pixel_offset >= 4096 || (pixel_offset & 3) ||
+            mx_cap_info(fb_window_cap, &extent) != MX_OK || pixel_offset >= extent.size)
+            fail("invalid framebuffer pixel offset\n");
+        fb_window = reinterpret_cast<const uint8_t*>(kVaFbWindow + pixel_offset);
     }
 
     dango_log("manager starting\n");
@@ -851,7 +857,12 @@ extern "C" [[noreturn]] void _start() {
     if (el < 0 || el > 3 || el2 < 0 || vhe < 0) fail("el2 detection failed\n");
     dango_counter("vm.current_el", static_cast<uint64_t>(el));
     dango_counter("vm.el2_available", static_cast<uint64_t>(el2));
-    if (el2 == 0) fail("el2 unavailable: dango VM cannot run guest\n");
+    if (el2 == 0) {
+        console_log("el2 unavailable: dango VM cannot run guest\n");
+        // EL1 firmware still supports the native desktop. Sleep without ever
+        // issuing HVC or attempting a guest on a CPU without its monitor.
+        mochi::park();
+    }
     dango_debug("el2 available\n");
 
     const dango::VmLayout layout = have_linux ? linux.layout : dango::v3_layout();

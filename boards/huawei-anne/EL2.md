@@ -71,6 +71,40 @@ to locate the transition into the kernel. Record the responsible component and
 an evidenced entry mechanism before constructing a phone EL2 handoff probe.
 No lower boot-stage modification is part of this implementation.
 
+## Receiving an EL2 firmware handoff
+
+The ANE entry path accepts an AArch64 non-secure EL2 handoff as well as the
+existing EL1 handoff. No build switch selects the level: `CurrentEL` determines
+the path on each CPU. EL2 hardware capability alone does not enable Dango.
+
+On EL2 entry, assembly now normalizes HCR/CPTR/HSTR, clears the inherited
+stage-2 table pointer, restores physical CPU IDs in VPIDR/VMPIDR, enables EL1
+physical timer/counter access and clears CNTVOFF before early diagnostics.
+Both primary and secondary paths use this setup. Each installs Dango's EL2
+vectors and its own EL2 stack, initializes SP_EL1, then returns to the host at
+EL1h with interrupts masked. Dango retains EL2 and enters guests through the
+installed monitor; moving the host to EL1 does not relinquish EL2.
+
+The loader must supply the existing Linux Image ABI: x0 points to the physical
+DTB, MMU/data cache are off, and the CPUs are coherent. The primary retains the
+existing rejection of MMU/data-cache-on handoffs. Secure firmware must permit
+HVC (`SCR_EL3.HCE=1`) and supply EL2 to secondary CPUs too for Dango to run on
+them. Ame cannot configure EL3 from EL2 or promote an EL1 handoff to EL2.
+These requirements follow the [AArch64 boot protocol](https://www.kernel.org/doc/html/v6.12/arch/arm64/booting.html).
+
+Check `diag el2` before attempting the ANE guest: each CPU intended to run a
+vCPU must report `boot_entry_el=2` and `monitor_ready=1`. An EL1 handoff still
+boots with its monitor flag clear, including when the hardware supports EL2.
+Monitor readiness establishes configuration; a successful guest run is still
+required to establish working Dango execution on the phone.
+
+Local validation uses the production entry assembly on synthetic Anne QEMU
+peripherals. The firmware fixture seeds EL2 traps, bogus virtual CPU IDs, a
+nonzero timer offset and an empty SP_EL1 before an eight-core boot/workload;
+a second case hands off at EL1 on an EL2-capable CPU and checks the fallback.
+The native `anne-native-dev` kernel also builds. These checks require no phone
+access and do not establish that ANE firmware supplies EL2.
+
 ## EL3 compatibility probe
 
 The INFILTRATE 2019 presentation describes a Kirin 970/P20-specific RPMB
@@ -202,3 +236,33 @@ SHA-256 `84f9c18b7d71a7574c7a05164bfbdd55f26de04060188e49a117ff58a8e6a98e`.
 Its AVB signature/hash and stock restore image were verified locally. This
 follow-up package has **not** been flashed; the phone deployment above remains
 the earlier image without the shell diagnostic command.
+
+## Native Dango profile and framebuffer handoff (21 October 2026)
+
+The `huawei-anne-usb` profile now starts `dango.manager` and its restricted
+capability probe. The manager receives VM authority without PCI/GPU assignment.
+The native Image selects its EL1 or EL2 entry path from `CurrentEL`; the same
+installed kernel accepts either firmware handoff. Dango queries the installed
+monitor at runtime. With an EL1 handoff it reports EL2 unavailable and parks,
+leaving the native console running without issuing HVC. An EL2 handoff installs
+the monitor on each CPU and permits VM operations there.
+
+This enables the manager and channel diagnostics. The native package does not
+include a Linux guest payload, so it does not claim Linux guest execution.
+The service registry now holds 28 entries, which still fits the original 4 KiB
+page, accommodating the phone's existing services and both Dango services.
+
+The 21 October physical EL2 test booted through a RAM-patched copy of the
+handset's stock LK with a staged TEE image. All eight CPUs reported EL2 entry
+and an installed monitor. The factory LK instead selected a fake panel and
+left display hardware inactive; stock LK detected the BOE OTM1911A panel.
+Stock LK's framebuffer begins at `0x5d964b00`. Its covering pages are now mapped
+Normal NC, and `fb.offset=0xb00` travels through init to framebuffer consumers.
+This fixes the previous stage-44 `Anne framebuffer attributes failed` panic.
+A RAM boot with the mapping fix displayed the Ame terminal and enumerated the
+Ame USB diagnostics device.
+
+Installing the kernel does not persist the RAM LK patch. An ordinary stock-LK
+handoff can remain EL1; the runtime detection handles that without promoting
+EL1 or pretending the EL2 monitor exists. Firmware images and device captures
+remain in the private workspace, outside this source repository.

@@ -76,6 +76,7 @@ static uint64_t g_manifest_size = 0;
 static uint64_t g_bundle_size = 0;
 static uint32_t g_cpu_count = 1;
 static uint64_t g_cpu_mask = 1;
+static uint64_t g_fb_offset = 0;
 static int64_t set_service_affinity(CapHandle thread, uint64_t preferred) {
     return sys_thread_set_affinity(thread, (preferred & g_cpu_mask) ? (preferred & g_cpu_mask) : g_cpu_mask);
 }
@@ -944,6 +945,7 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
             share_doorbell_to(svc, g_rt.gpu_reply_db, "gpu.reply.doorbell", RIGHT_NOTIFY);
             if (sys_cap_identify(kCapFbMemory) == kCapTypeMmio) {
                 grant_to(svc, kCapFbMemory, RIGHT_READ | RIGHT_MAP, MX_BOOT_ENTRY_MMIO, "fb.memory");
+                boot_add(svc, MX_BOOT_ENTRY_VALUE, "fb.offset", kNullCap, g_fb_offset);
             }
         }
         publish_resume_service(svc);
@@ -960,8 +962,10 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
     }
     if (streq(svc.name, "io.framebuffer")) {
         share_service_log(svc, g_rt.console_db);
-        if (sys_cap_identify(kCapFbMemory) == kCapTypeMmio)
+        if (sys_cap_identify(kCapFbMemory) == kCapTypeMmio) {
             grant_to(svc, kCapFbMemory, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, MX_BOOT_ENTRY_MMIO, "fb.memory");
+            boot_add(svc, MX_BOOT_ENTRY_VALUE, "fb.offset", kNullCap, g_fb_offset);
+        }
         // Phase J: the client half of the appliance endpoint. Absent without the
         // GPU function, so the framebuffer stays ramfb-only on every other boot.
         if (g_rt.gpu_cmd_ring != kNullCap) {
@@ -1510,6 +1514,7 @@ extern "C" [[noreturn]] void _start() {
     kCapVmRoot = mochi::boot::handle(boot, "vm.root");
     kCapLogDoorbell = mochi::boot::require_handle(boot, "log.doorbell");
     kCapFbMemory = mochi::boot::handle(boot, "fb.memory");
+    if (const auto* entry = mochi::boot::find(boot, "fb.offset")) g_fb_offset = entry->aux0;
     kCapXhciMmio = mochi::boot::handle(boot, "xhci.mmio");
     kCapXhciIrq = mochi::boot::handle(boot, "xhci.irq");
     kCapXhciDma = mochi::boot::handle(boot, "xhci.dma");

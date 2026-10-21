@@ -12,7 +12,7 @@ namespace mochi::svc {
 
 constexpr mx_u32_t kRegistryMagic = 0x53564352u; // 'SVCR'
 constexpr mx_u16_t kRegistryVersion = 1;
-constexpr mx_u32_t kMaxRegistryEntries = 24;
+constexpr mx_u32_t kMaxRegistryEntries = 28;
 
 constexpr mx_u32_t kStateSpawned = 1u << 0;
 constexpr mx_u32_t kStateBootPublished = 1u << 1;

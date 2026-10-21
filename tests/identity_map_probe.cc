@@ -180,6 +180,27 @@ int main() {
     assert(((descriptor(second.pgd_phys, 0x401ff000) >> 2) & 7) == 2);
     assert(((descriptor(second.pgd_phys, 0x40202000) >> 2) & 7) == 0);
 
+    // Real Anne logo pixels begin 0xb00 bytes into a page. The whole span
+    // must use NC attributes, including the extra last page, in every alias.
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    constexpr u64 scanout = 0x5d964b00;
+    constexpr u64 pixel_bytes = 1080ull * 2280 * 4;
+    constexpr u64 pixel_offset = scanout & 4095;
+    constexpr u64 fb_base = scanout - pixel_offset;
+    constexpr u64 fb_size = (pixel_offset + pixel_bytes + 4095) & ~4095ull;
+    assert(!mm::register_noncached_range(scanout, fb_size));
+    assert(mm::register_noncached_range(fb_base, fb_size));
+    assert(mm::range_is_noncached(fb_base, fb_size));
+    assert(((descriptor(first.pgd_phys, fb_base) >> 2) & 7) == 2);
+    assert(((descriptor(first.pgd_phys, fb_base + fb_size - 4096) >> 2) & 7) == 2);
+    constexpr u64 fb_va = 0x30000000;
+    assert(mm::vm_map_range(first, fb_va, fb_base, fb_size, RIGHT_READ | RIGHT_WRITE));
+    assert(mm::user_va_to_pa(first, fb_va + pixel_offset, RIGHT_WRITE, &translated));
+    assert(translated == scanout);
+    assert(mm::user_va_to_pa(first, fb_va + pixel_offset + pixel_bytes - 1, RIGHT_WRITE, &translated));
+    assert(translated == scanout + pixel_bytes - 1);
+#endif
+
     const auto allocated = pages.size();
     for (int budget = 0; budget < 8; ++budget) {
         allocation_budget = budget;

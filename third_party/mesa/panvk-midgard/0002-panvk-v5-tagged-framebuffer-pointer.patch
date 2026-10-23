@@ -1,0 +1,43 @@
+On Midgard the DRAW descriptor aliases "Thread Storage" and "FBD" onto the
+same bits (start 28:0 in genxml/v5.xml), so the value stored in the batch's
+thread storage slot must carry the FRAMEBUFFER_POINTER tag, not a bare
+descriptor address.
+
+The Gallium v5 path does this by packing FRAMEBUFFER_POINTER with
+render_target_count and storing the tagged result. The forward port stored the
+raw address instead, so the tiler job read an untagged framebuffer pointer.
+On the T830 that surfaced as a job fault on the tiler slot with
+DATA_INVALID_FAULT, fault pointer equal to the framebuffer descriptor, and the
+v5 decoder warning "Unexpected framebuffer pointer settings". The fragment job
+then faulted on the polygon list body the tiler had never populated.
+
+With the tag applied, the same image renders a verified triangle on the T830:
+"panvk: T830 static triangle pixels verified checksum=355e1a23" and
+"GPU: Vulkan status=0 frames=1 checksum=355e1a23 display_restored=1", with no
+js fault, DATA_INVALID or MMU fault anywhere in the boot.
+
+diff --git a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+@@ -224,7 +224,20 @@ panvk_per_arch(cmd_alloc_tls_desc)(struct panvk_cmd_buffer *cmdbuf, bool gfx)
+       VkResult result = panvk_per_arch(cmd_alloc_fb_desc)(cmdbuf);
+       if (result != VK_SUCCESS)
+          return result;
+-      batch->tls = batch->fb.desc;
++      /* On Midgard the thread storage pointer is the framebuffer descriptor
++       * itself, tagged the same way the tiler job's FBD field is: the DRAW
++       * struct aliases "Thread Storage" and "FBD" onto bits 28:0, so the value
++       * handed to both must carry the FRAMEBUFFER_POINTER tag. Storing the raw
++       * descriptor address here made the tiler read an untagged pointer and
++       * fault with DATA_INVALID. Mirror what the Gallium v5 path does.
++       */
++      struct mali_framebuffer_pointer_packed tag;
++      pan_pack(tag.opaque, FRAMEBUFFER_POINTER, cfg) {
++         cfg.zs_crc_extension_present = false;
++         cfg.render_target_count = 1;
++      }
++      batch->tls.cpu = batch->fb.desc.cpu;
++      batch->tls.gpu = batch->fb.desc.gpu | tag.opaque[0];
+       return VK_SUCCESS;
+    }
+ #endif

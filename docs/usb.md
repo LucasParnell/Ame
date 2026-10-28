@@ -41,6 +41,36 @@ this run. Evidence:
 `out/panvk-completion/usb-v44-after-reopen.log` and
 `out/anne-device-private/kernel-install-20261028T102327Z/result.json`.
 
+The follow-up audit checked the register offsets, repeated 32-bit FIFO0 reads,
+packet-status encodings, MMIO device attributes and mutually exclusive role
+executors against the pinned vendor source and Linux. It did not establish the
+cause of the first invalid status. RXFLVL is a read-only FIFO level indication;
+the vendor driver's write to that bit is not evidence that adding a W1C
+acknowledgement would fix this fault. The one-shot audit is also incomplete:
+the zero entry consumes its logging allowance, so the later ASCII entries have
+no retained peek/pop pair or preceding packet history.
+
+The little-endian words `0x3a636d6d` and `0x6f6c7075` spell `mmc:` and `uplo`.
+They match aligned words in the RAM bootloader transport's
+`getvar:emmc:kernel` and `upload_*` commands. `uplo` is absent from the captured
+v44 graphics/console log fields. This makes stale FIFO contents a useful lead;
+it does not prove their origin or explain the queue boundary loss. In
+particular, no complete bootloader command was captured as a status stream.
+
+The host device model now tracks unread payload words and rejects a subsequent
+status peek/pop until those words are consumed; excess FIFO reads fail too.
+The production receive loop passes all 513 packet lengths (0..512), interleaved
+with another OUT endpoint, SETUP and count-bearing status-only records, including
+unaligned CPU destinations and partial final words. Deliberately injected
+under-drains and over-drains fail the strengthened model. This closes a test
+coverage gap, but does not model hardware clocks, SRAM retention or establish
+the physical root cause. The USB model/sanitizer suite passes. Evidence:
+`out/panvk-completion/usb-rx-word-boundary-{tests,negative}.log`.
+No controller policy change or new flash was made during this follow-up. A live
+USB check found BootROM; the user confirmed manually resetting the phone, so
+that observation is not evidence of another spontaneous reset. The saved v44
+EP0 log remains available at the path above.
+
 During the PanVK CTS runs, control/vendor USB requests remained responsive while
 the CDC shell stalled. A host-model regression reproduces a deadlock: the gadget
 only consumed ACM control replies while no bulk IN packet was outstanding, so a

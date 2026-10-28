@@ -19,6 +19,7 @@ struct Model {
     mx_u8_t tx[512]{};
     mx_u32_t head = 0, tail = 0, tx_bytes = 0;
     mx_u32_t rx_payload_reads = 0, raw_fifo_reads = 0;
+    mx_u32_t unread_rx_words = 0, rx_words_read = 0;
     mx_u32_t accesses_during_flush = 0;
     mx_u32_t tx_space[8]{128, 128, 128, 128, 128, 128, 128, 128};
     mx_u32_t tx_calls = 0;
@@ -27,7 +28,19 @@ struct Model {
     bool hold_flush = false;
     bool keep_setup_window_enabled = false;
     bool pending() const {
-        return head != tail;
+        return head != tail || unread_rx_words;
+    }
+    mx_u32_t pop_payload_word() {
+        // GRXSTSP and FIFO0 advance one receive stream. A payload must be
+        // consumed in whole words before another status can be popped.
+        assert(unread_rx_words);
+        const auto at = ((current.bytes + 3) / 4 - unread_rx_words) * 4;
+        mx_u32_t value = 0;
+        for (unsigned i = 0; i < 4 && at + i < current.bytes; ++i)
+            value |= mx_u32_t{current.data[at + i]} << (8 * i);
+        --unread_rx_words;
+        ++rx_words_read;
+        return value;
     }
     void receive(mx_u32_t kind, mx_u32_t ep, libk::const_bytes data = {}) {
         assert(head - tail < 16 && data.size <= 512);
@@ -72,7 +85,12 @@ struct Model {
                 auto& m = *static_cast<Model*>(p);
                 if (reg != kReset && (m.words[kReset / 4] & (kTxFlush | kRxFlush)))
                     ++m.accesses_during_flush;
-                if (reg == fifo_register(0)) ++m.raw_fifo_reads;
+                if (reg == fifo_register(0)) {
+                    ++m.raw_fifo_reads;
+                    assert(out);
+                    *out = m.pop_payload_word();
+                    return true;
+                }
                 if (!out || reg >= sizeof(m.words) || reg % 4) {
                     return false;
                 }
@@ -81,13 +99,15 @@ struct Model {
                     *out |= m.pending() ? kRxAvailable : 0;
                 }
                 if (reg == kRxStatusPeek) {
-                    *out = m.pending() ? m.fifo[m.tail % 16].status : 0;
+                    assert(!m.unread_rx_words);
+                    *out = m.head != m.tail ? m.fifo[m.tail % 16].status : 0;
                 }
                 if (reg == kRxStatusPop) {
-                    assert(m.pending());
+                    assert(!m.unread_rx_words && m.head != m.tail);
                     m.current = m.fifo[m.tail++ % 16];
                     *out = m.current.status;
                     const auto kind = (*out >> 17) & 15u;
+                    m.unread_rx_words = (kind == 2 || kind == 6) ? (m.current.bytes + 3) / 4 : 0;
                     if (kind == 6) {
                         m.words[Device::reg(true, 0) / 4] &= ~(1u << 31);
                         if (m.keep_setup_window_enabled) {
@@ -145,8 +165,13 @@ struct Model {
                 auto& m = *static_cast<Model*>(p);
                 if (m.words[kReset / 4] & (kTxFlush | kRxFlush)) ++m.accesses_during_flush;
                 ++m.rx_payload_reads;
-                return reg == fifo_register(0) && destination.size == m.current.bytes &&
-                       libk::copy_n(destination, libk::as_bytes(m.current.data), destination.size);
+                if (reg != fifo_register(0) || (destination.size && !destination.data)) return false;
+                for (mx_u32_t at = 0; at < destination.size; at += 4) {
+                    const auto word = m.pop_payload_word();
+                    for (unsigned i = 0; i < 4 && at + i < destination.size; ++i)
+                        destination.data[at + i] = static_cast<mx_u8_t>(word >> (8 * i));
+                }
+                return true;
             },
             [](void* p, mx_u32_t reg, libk::const_bytes source) {
                 auto& m = *static_cast<Model*>(p);

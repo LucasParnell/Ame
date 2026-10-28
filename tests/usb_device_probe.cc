@@ -2,6 +2,49 @@
 // publishes the real shared-ring messages; no hardware or phone is involved.
 #include "usb_device_model.h"
 #include <cstdio>
+static void mixed_packets_preserve_receive_word_boundaries() {
+    mx_u8_t payload[8192]{}, first[512]{}, second[]{0, 0xc2, 1, 0, 0, 0, 8};
+    Device device{};
+    Model model{};
+    device.payload = libk::as_bytes(payload);
+    Geometry geometry{};
+    assert(decode_geometry(0x4f54310a, 0, 0x22affc50, 0x0f80d4e8, 0xfff08060, &geometry));
+    host_now = 0;
+    assert(device.activate(model.registers(), geometry));
+    device.poll(); host_now = 150000; device.poll();
+    // Every legal byte count, including ZLP and each partial final word.
+    // Interleave another endpoint, SETUP and status-only records so an under-
+    // or over-drain cannot be hidden by the model replacing current payload.
+    for (unsigned length = 0; length <= sizeof(first); ++length) {
+        libk::fill(libk::as_bytes(payload), 0xa5);
+        for (unsigned i = 0; i < length; ++i) first[i] = (i * 37 + length) & 255;
+        for (unsigned ep = 2; ep <= 3; ++ep) {
+            auto& row = device.out[ep];
+            row = {};
+            row.configured = row.active = true;
+            row.max_packet = 512;
+            row.offset = ep == 2 ? 33 : 1025; // unaligned CPU destinations
+            row.length = ep == 2 ? length : sizeof(second);
+        }
+        const auto words_before = model.rx_words_read;
+        model.receive(2, 2, libk::as_bytes(first, length));
+        model.status(1, 0, 0x7ff);
+        model.setup({0x21, 0x20, 0, 0, 7});
+        model.receive(2, 3, libk::as_bytes(second));
+        model.status(3, 2, 0x7ff);
+        model.status(3, 3, 0x7ff);
+        device.receive_fifo();
+        assert(!model.pending() && !model.unread_rx_words);
+        assert(model.rx_words_read - words_before == (length + 3) / 4 + 2 + 2);
+        assert(device.out[2].terminal && device.out[2].actual == length);
+        assert(device.out[3].terminal && device.out[3].actual == sizeof(second));
+        assert(device.setup_pending && device.setup.setup.request == 0x20);
+        for (unsigned i = 0; i < length; ++i) assert(payload[33 + i] == first[i]);
+        for (unsigned i = 0; i < sizeof(second); ++i) assert(payload[1025 + i] == second[i]);
+        assert(payload[32] == 0xa5 && payload[33 + length] == 0xa5);
+        assert(payload[1024] == 0xa5 && payload[1025 + sizeof(second)] == 0xa5);
+    }
+}
 static void a_packet_waits_for_its_full_fifo_capacity() {
     constexpr unsigned lengths[]{7, 512};
     for (const unsigned length : lengths) {
@@ -210,6 +253,7 @@ static void status_only_entries_do_not_consume_payload() {
     for (unsigned i = 0; i < sizeof(coding); ++i) assert(payload[i] == coding[i]);
 }
 int main() {
+    mixed_packets_preserve_receive_word_boundaries();
     detach_waits_for_connect_flush_without_exposing_the_pullup();
     a_packet_waits_for_its_full_fifo_capacity();
     setup_abort_waits_for_flush_before_other_controller_io();

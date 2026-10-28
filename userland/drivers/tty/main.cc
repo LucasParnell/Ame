@@ -1,7 +1,6 @@
 // tty.fb0 owns shell-input multiplexing and terminal rendering. USB/CDC
 // stays in dev.serial/usb.fn.acm; render.h and transport.h have no boot policy.
-#include "render.h"
-#include "transport.h"
+#include "output.h"
 #include "mochi/driver.h"
 #include "mochi/input.h"
 #include "mochi/log.h"
@@ -122,18 +121,11 @@ bool service_input() {
     return false;
 }
 bool service_output() {
-    bool progress = g_tty->serial.flush();
-    // Shell bytes stay queued while the serial mirror owns a blocked suffix.
-    // Offline mirrors consume quickly; a slow live host applies backpressure.
-    for (mx_u32_t i = 0; i < 64 && console_live() && g_tty->serial.pending.empty(); ++i) {
-        MxRingSlot slot{};
-        if (!g_tty->shell_output.try_read(&slot)) {
-            break;
-        }
-        g_tty->render.write(libk::as_bytes(slot.payload, slot.length));
-        (void)g_tty->serial.hold(slot);
-        (void)g_tty->serial.flush();
-        progress = true;
+    const bool was_stalled = g_tty->serial.output_stalled;
+    bool progress = mochi::tty::service_shell_output(g_tty->shell_output, g_tty->serial,
+                                                    g_tty->render, console_live(), mx_clock_ns());
+    if (!was_stalled && g_tty->serial.output_stalled) {
+        mochi::log_raw_marker("tty.fb0: serial output gap after stalled mirror; local terminal continuing\n");
     }
     for (mx_u32_t i = 0; i < 4; ++i) {
         MxRingSlot slot{};

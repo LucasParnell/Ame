@@ -84,6 +84,30 @@ Evidence: `out/mesa-panvk-midgard/phone-usb-code-audit-v44-retest-20261028T10580
 `out/panvk-completion/usb-v44-retest-20261028T105801Z-after-reopen.log` and
 `out/anne-device-private/kernel-install-20261028T105844Z/result.json`.
 
+The user then reported that `diag log` stopped mid-CPU6 line on the **phone's
+own screen**, not the PC terminal. Fresh EP0 state/log reads still worked; the
+saved full log from the same boot continued through CPU7, eight CPUs online and
+all services ready. This exposed a separate, reproducible terminal defect:
+`tty.fb0` stopped consuming shell output while its serial mirror retained a
+blocked suffix. Its wait mask also stopped watching the shell output ring.
+Once that ring filled, `msh` waited to publish more bytes and the local display
+stopped at whichever byte happened to be last. A blocked USB copy could therefore
+freeze the phone's local command output without a kernel or SMP startup stall.
+
+The corrected mirror preserves ordinary backpressure for one second without
+accepted bytes, then discards its pending suffix and stops mirroring until the
+next session notification. Local rendering and shell output can then continue;
+input/session generation checks are preserved. Dropped copy bytes are counted,
+and the retained log reports the serial output gap. The production output pump
+has a held-USB regression that fails on the old code and reaches the local
+`msh:/$` prompt with the fix. Additional checks cover partial progress resetting
+the budget, byte preservation for a slow host, and reconnect restoring mirroring.
+USB/shell sanitizer tests pass. Evidence:
+`out/panvk-completion/tty-usb-stall-{red,green}.log` and
+`out/panvk-completion/usb-user-log-cutoff-20261028T110552Z.log`.
+This addresses the local terminal consequence; it does not explain or fix the
+controller's RX-status corruption. Physical validation of this change follows.
+
 During the PanVK CTS runs, control/vendor USB requests remained responsive while
 the CDC shell stalled. A host-model regression reproduces a deadlock: the gadget
 only consumed ACM control replies while no bulk IN packet was outstanding, so a
@@ -490,8 +514,10 @@ The development USB identity is [pid.codes' private test PID](https://pid.codes/
 The serial bridge retains one input chunk and one output slot, returning progress
 only when a message is consumed or bytes are accepted. TTY retains shell input
 under backpressure rather than dropping it, and alternates serial/keyboard
-readers. A slow connected host backpressures the serial mirror and shell output;
-an offline mirror lets the local terminal continue. All buffers are fixed arena
+readers. A slow connected host briefly backpressures the serial mirror and shell
+output. After one second without accepted mirror bytes, TTY reports a serial
+output gap and continues locally, discarding USB copies until the next session
+notification. An offline mirror also lets the local terminal continue. All buffers are fixed arena
 state, and ordinary SPSC release/acquire publication orders their CPU bytes.
 
 Function RESET reports configured versus inactive state and revokes a distinct

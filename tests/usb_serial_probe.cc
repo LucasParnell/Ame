@@ -2,7 +2,7 @@
 // ownership under full rings and connection changes, with no phone involved.
 #include "../userland/usb/serial/bridge.h"
 #include "../userland/drivers/tty/transport.h"
-#include "../userland/drivers/tty/render.h"
+#include "../userland/drivers/tty/output.h"
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -222,6 +222,75 @@ static void render_backpressure_and_scroll() {
     assert(!cursor.advance(4) && cursor.remaining() == 3);
     assert(cursor.advance(2) && cursor.next(32).size == 1);
 }
+static void stalled_usb_cannot_hold_the_local_prompt() {
+    Fixture f;
+    f.change(61, true);
+    const char filler = 'z';
+    for (unsigned i = 0; i < 8; ++i)
+        assert(f.mirror.output.try_write(MX_TERM_SESSION_OUTPUT_BYTES, 61,
+                                        libk::as_bytes(&filler, 1)) == 1);
+    Storage shell_output;
+    mochi::terminal::OutputSink producer{{&shell_output.page, 3, 1}};
+    mochi::terminal::OutputSource source{{&shell_output.page, 3, 1}};
+    char log[384], cells[1280];
+    std::memset(log, 'x', sizeof(log));
+    std::memcpy(log + sizeof(log) - 9, "\r\nmsh:/$ ", 9);
+    assert(producer.try_write_bytes(log, sizeof(log)));
+    assert(!producer.try_write_bytes(&filler, 1)); // shell producer is backpressured too
+    mochi::tty::Render render{};
+    render.cells = cells;
+    render.rows = 32; render.cols = 40;
+    render.scale = 1; render.cell_w = 8; render.cell_h = 16;
+    render.init();
+    assert(mochi::tty::service_shell_output(source, f.mirror, render, true, 1));
+    assert(source.depth() == 7 && !f.mirror.pending.empty());
+    assert(!mochi::tty::service_shell_output(source, f.mirror, render, true, 1000000000));
+    assert(source.depth() == 7); // preserve a bounded wait for an ordinary slow host
+    assert(mochi::tty::service_shell_output(source, f.mirror, render, true, 1000000001));
+    assert(!source.depth() && f.mirror.pending.empty());
+    assert(render.x == 7 && !std::memcmp(render.line(render.y), "msh:/$ ", 7));
+    assert(producer.try_write_bytes(&filler, 1)); // the next local command can write
+    assert(f.mirror.output_stalled && f.mirror.dropped_output == sizeof(log));
+    MxRingSlot slot{};
+    while (f.mirror.output.try_pop(&slot)) {}
+    f.change(62, true);
+    assert(!f.mirror.output_stalled);
+    assert(mochi::tty::service_shell_output(source, f.mirror, render, true, 1000000002));
+    assert(f.mirror.output.try_pop(&slot));
+    mx_u64_t generation = 0;
+    libk::const_bytes bytes;
+    assert(mochi::terminal::session_bytes(slot, MX_TERM_SESSION_OUTPUT_BYTES, &generation, &bytes));
+    assert(generation == 62 && bytes.size == 1 && bytes.data[0] == filler);
+}
+static void slow_serial_progress_preserves_the_pending_suffix() {
+    Fixture f;
+    f.change(71, true);
+    const char filler = 'z';
+    for (unsigned i = 0; i < 8; ++i)
+        assert(f.mirror.output.try_write(MX_TERM_SESSION_OUTPUT_BYTES, 71,
+                                        libk::as_bytes(&filler, 1)) == 1);
+    MxRingSlot raw{}, slot{};
+    raw.type = MX_TERM_OUTPUT_BYTES;
+    raw.length = 48;
+    std::memset(raw.payload, 'a', raw.length);
+    assert(f.mirror.hold(raw));
+    assert(!f.mirror.flush(10));
+    assert(f.mirror.output.try_pop(&slot));
+    assert(f.mirror.flush(999999999) && f.mirror.pending.remaining() == 8);
+    // The accepted 40-byte prefix restarted the budget for its owned suffix.
+    assert(!f.mirror.flush(1000000010) && !f.mirror.output_stalled);
+    assert(f.mirror.output.try_pop(&slot));
+    assert(f.mirror.flush(1000000011) && f.mirror.pending.empty());
+    assert(!f.mirror.output_stalled && !f.mirror.dropped_output);
+    unsigned actual = 0;
+    while (f.mirror.output.try_pop(&slot)) {
+        mx_u64_t generation = 0;
+        libk::const_bytes bytes;
+        assert(mochi::terminal::session_bytes(slot, MX_TERM_SESSION_OUTPUT_BYTES, &generation, &bytes));
+        if (bytes.data[0] == 'a') actual += bytes.size;
+    }
+    assert(actual == raw.length);
+}
 // A serial host must be able to wake its own console. The tty gate used to need
 // three ESC keycodes from a keyboard, which a serial-only board cannot send, so
 // the FLOW_ON lifecycle record was dropped by the same predicate that closed the
@@ -311,6 +380,8 @@ static void reset_reaches_held_row() {
     assert(f.bridge.generation == 52 && !f.bridge.rx_held);
 }
 int main() {
+    stalled_usb_cannot_hold_the_local_prompt();
+    slow_serial_progress_preserves_the_pending_suffix();
     no_unsolicited_output_before_host_input();
     host_reopen_keeps_output_alive();
     reset_reaches_held_row();

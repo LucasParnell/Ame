@@ -71,6 +71,19 @@ USB check found BootROM; the user confirmed manually resetting the phone, so
 that observation is not evidence of another spontaneous reset. The saved v44
 EP0 log remains available at the path above.
 
+At the user's request, the same frozen v44 image was flashed again after the
+host-model audit, with backup and full 24 MiB readback verified. The repeat
+graphics gate passes 51 supported cases, two skips, 25 Vulkan frames, display
+restoration and 296 GLES frames with no captured GPU faults. Again, two CDC
+reopen challenges pass and the third fails. A fresh EP0 log read succeeds and
+contains the same zero/`mmc:`/`uplo` status sequence followed by USB service
+restarts. This repeat confirms the fault on v44; the intervening changes were
+host tests/documentation and did not change the installed controller code.
+Evidence: `out/mesa-panvk-midgard/phone-usb-code-audit-v44-retest-20261028T105801Z/`,
+`out/mesa-panvk-midgard/usb-reconnect-code-audit-v44-retest-20261028T105801Z/`,
+`out/panvk-completion/usb-v44-retest-20261028T105801Z-after-reopen.log` and
+`out/anne-device-private/kernel-install-20261028T105844Z/result.json`.
+
 During the PanVK CTS runs, control/vendor USB requests remained responsive while
 the CDC shell stalled. A host-model regression reproduces a deadlock: the gadget
 only consumed ACM control replies while no bulk IN packet was outstanding, so a

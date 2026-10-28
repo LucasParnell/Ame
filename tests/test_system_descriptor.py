@@ -141,3 +141,14 @@ class SystemDescriptor(unittest.TestCase):
         channel = next(c for c in self.manifest['channels'] if c['name'] == 'blk_req_ring')
         channel['order'] = 10
         self.assertTrue(any('equal orders' in p for p in policy.check_manifest(self.manifest)))
+
+    def test_fs_session_requires_provider_before_client(self):
+        manifest = policy.load_profile(self.path, 'huawei-anne-gpu')
+        services = {svc['name']: svc for svc in manifest['services']}
+        manager = services['dango.manager']
+        self.assertEqual(manager['uses'], ['fs'])
+        manager['start_after'] = ['io.console']
+        self.assertTrue(any('FS session requires' in p for p in policy.check_manifest(manifest)))
+        # A transitive dependency is sufficient too.
+        manager['start_after'] = ['msh']
+        self.assertEqual(policy.check_manifest(manifest), [])

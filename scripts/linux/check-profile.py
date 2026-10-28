@@ -5,7 +5,7 @@ import sys
 import tomllib
 
 
-def check(directory, expected):
+def check(directory, expected, guest=None):
     root = pathlib.Path(directory)
     manifest_path = root / 'manifest.toml'
     manifest = tomllib.loads(manifest_path.read_text())
@@ -14,6 +14,8 @@ def check(directory, expected):
             f'Linux artifact profile does not match {expected}: {manifest_path} declares '
             f'profile={manifest.get("profile", "hello")!r}, the build wants {expected!r}\n'
             f'  Rebuild the guest set with: scripts/linux/build-gpu-linux-docker.sh')
+    if guest is not None and manifest.get('guest','minimal') != guest:
+        raise ValueError(f'Linux artifact guest layout does not match {guest}: {manifest_path}')
     for name, key in [('Image', 'kernel_size'), ('initramfs.cpio', 'initramfs_size'),
                       ('dango-linux.dtb', 'dtb_size')]:
         path = root / name

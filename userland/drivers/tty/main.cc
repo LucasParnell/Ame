@@ -21,6 +21,11 @@ struct TtyState {
     mochi::terminal::InputSink shell_input;
     mx_handle_t activation;
     mx_u32_t esc_streak, next_input;
+    // Mirrors the CDC bridge's configured state. On a USB-console board the
+    // serial host *is* the terminal, so an attached host opens the same gate a
+    // local keyboard opens: requiring three ESC keycodes from a device that may
+    // have no keyboard at all left the console permanently deaf.
+    bool serial_attached;
     bool shell_attached, input_unlocked;
 };
 TtyState* g_tty;
@@ -36,8 +41,14 @@ constexpr KeyRun kNavigation[] = {
     {0x52, "\x1b[A", 3}, {0x51, "\x1b[B", 3}, {0x4f, "\x1b[C", 3},  {0x50, "\x1b[D", 3},
     {0x4a, "\x1b[H", 3}, {0x4d, "\x1b[F", 3}, {0x4c, "\x1b[3~", 4},
 };
+// One predicate for every gate below, so "console is live" cannot drift apart
+// between the input, output and drain paths.
+static inline bool console_live() {
+    return g_tty->input_unlocked || g_tty->serial_attached;
+}
+
 bool keyboard(const InputEvent& event) {
-    if (!g_tty->input_unlocked) {
+    if (!console_live()) {
         if (event.type == INPUT_KEY_DOWN || event.type == INPUT_KEY_REPEAT) {
             g_tty->esc_streak = event.keycode == 0x29 ? g_tty->esc_streak + 1 : 0;
             if (g_tty->esc_streak == 3) {
@@ -85,8 +96,23 @@ bool service_input() {
             (void)keyboard(event);
         } else {
             MxRingSlot slot{};
-            if (!g_tty->input_unlocked || !g_tty->serial_input.try_pop(&slot)) {
+            if (!g_tty->serial_input.try_pop(&slot)) {
                 continue;
+            }
+            // Session control is lifecycle, not user input: it carries the
+            // generation every byte must match. Consuming it regardless of the
+            // gate is what lets an attached host become usable at all, because
+            // the FLOW_ON record is produced by the same bridge that the gate
+            // would otherwise silence.
+            if (slot.type == MX_TERM_CONTROL) {
+                (void)mochi::tty::accept_serial(slot, g_tty->serial, g_tty->pending_input);
+                g_tty->serial_attached = g_tty->serial.generation != 0;
+                g_tty->next_input = index ^ 1;
+                return true;
+            }
+            if (!console_live()) {
+                g_tty->next_input = index ^ 1;
+                return true; // bytes for a closed console are consumed, not queued
             }
             (void)mochi::tty::accept_serial(slot, g_tty->serial, g_tty->pending_input);
         }
@@ -99,7 +125,7 @@ bool service_output() {
     bool progress = g_tty->serial.flush();
     // Shell bytes stay queued while the serial mirror owns a blocked suffix.
     // Offline mirrors consume quickly; a slow live host applies backpressure.
-    for (mx_u32_t i = 0; i < 64 && g_tty->input_unlocked && g_tty->serial.pending.empty(); ++i) {
+    for (mx_u32_t i = 0; i < 64 && console_live() && g_tty->serial.pending.empty(); ++i) {
         MxRingSlot slot{};
         if (!g_tty->shell_output.try_read(&slot)) {
             break;
@@ -130,18 +156,20 @@ bool service_output() {
         };
         if (view.state == MX_FIDO2_WAITING) {
             write("\n[Security key]\n");
-            if (view.operation == MX_FIDO2_SELECT) write("Select this key for the browser.");
-            else {
+            if (view.operation == MX_FIDO2_SELECT) {
+                write("Select this key for the browser.");
+            } else {
                 write(view.operation == 1 ? "Register with: " : "Sign in to: ");
                 write(view.rp);
             }
             write("\nPress VOLUME UP to approve within 30 seconds.\n");
         } else {
-            write(view.state == MX_FIDO2_SELECTED ? "\nSecurity key: selected. Continue in the browser.\n"
-                  : view.state == MX_FIDO2_APPROVED ? "\nSecurity key: approved.\n"
+            write(view.state == MX_FIDO2_SELECTED
+                      ? "\nSecurity key: selected. Continue in the browser.\n"
+                  : view.state == MX_FIDO2_APPROVED  ? "\nSecurity key: approved.\n"
                   : view.state == MX_FIDO2_CANCELLED ? "\nSecurity key: cancelled.\n"
-                  : view.state == MX_FIDO2_EXPIRED ? "\nSecurity key: request expired.\n"
-                                                  : "\nSecurity key: request rejected.\n");
+                  : view.state == MX_FIDO2_EXPIRED   ? "\nSecurity key: request expired.\n"
+                                                     : "\nSecurity key: request rejected.\n");
         }
         progress = true;
     }
@@ -190,8 +218,8 @@ extern "C" [[noreturn]] void _start() {
         boot, {"term.output.ring", kVaShellOutputRing, "term.output.doorbell"})};
     g_tty->serial_input =
         mochi::boot::map_ring(boot, {"serial.in.ring", kVaSerialInRing, "serial.in.doorbell"});
-    g_tty->fido_prompt = mochi::boot::map_ring(boot, {"fido2.prompt.ring",
-        kVaFido2Prompt, "fido2.prompt.doorbell"});
+    g_tty->fido_prompt =
+        mochi::boot::map_ring(boot, {"fido2.prompt.ring", kVaFido2Prompt, "fido2.prompt.doorbell"});
     g_tty->serial.output = {
         mochi::boot::map_ring(boot, {"serial.out.ring", kVaSerialOutRing, "serial.out.doorbell"})};
     g_tty->shell_attached = g_tty->shell_input.valid() && g_tty->shell_output.valid();
@@ -219,15 +247,20 @@ extern "C" [[noreturn]] void _start() {
     const auto bar_height = mochi::driver::value(boot, "tty.status.height", 64);
     if (mochi::driver::value(boot, "tty.status", 1) && bar_height < info.height &&
         render.status.configure(info.width, bar_height,
-            mochi::driver::value(boot, "tty.status.scale", 1),
-            mochi::driver::value(boot, "tty.status.margin", 16),
-            mochi::driver::value(boot, "tty.status.notch", 0))) {
-        if (!mochi::boot::find(boot, "tty.y")) render.origin_y = bar_height + 16;
+                                mochi::driver::value(boot, "tty.status.scale", 1),
+                                mochi::driver::value(boot, "tty.status.margin", 16),
+                                mochi::driver::value(boot, "tty.status.notch", 0))) {
+        if (!mochi::boot::find(boot, "tty.y")) {
+            render.origin_y = bar_height + 16;
+        }
         // Explicit terminal geometry must leave the status panels untouched.
-        if (render.origin_y < bar_height) render.status.enabled = false;
+        if (render.origin_y < bar_height) {
+            render.status.enabled = false;
+        }
     }
-    if (render.origin_x > info.width || render.origin_y > info.height)
+    if (render.origin_x > info.width || render.origin_y > info.height) {
         mochi::boot::invalid_boot();
+    }
     if (!mochi::boot::find(boot, "tty.cols")) {
         g_tty->render.cols = (info.width - g_tty->render.origin_x) / g_tty->render.cell_w;
     }
@@ -269,7 +302,9 @@ extern "C" [[noreturn]] void _start() {
         if (!g_tty->input_unlocked && mx_doorbell_read(g_tty->activation)) {
             g_tty->input_unlocked = true;
         }
-        if (render.status.sample(mx_clock_ns())) render.present_pending = true;
+        if (render.status.sample(mx_clock_ns())) {
+            render.present_pending = true;
+        }
         const bool exhausted = mochi::driver::run_batch([] {
             const bool input = service_input();
             const bool output = service_output();
@@ -282,17 +317,19 @@ extern "C" [[noreturn]] void _start() {
         const bool input_blocked = g_tty->pending_input.retained();
         const bool output_blocked = !g_tty->serial.pending.empty();
         const bool retry = input_blocked || output_blocked || g_tty->render.pending();
-        auto deadline = retry ? mx_clock_ns() + mochi::driver::kBackpressureRetryNs
-                              : !g_tty->input_unlocked ? mx_clock_ns() + 10000000ull
-                                                       : 0;
-        if (g_tty->fido_view.expires && (!deadline || g_tty->fido_view.expires < deadline))
+        auto deadline = retry             ? mx_clock_ns() + mochi::driver::kBackpressureRetryNs
+                        : !console_live() ? mx_clock_ns() + 10000000ull
+                                          : 0;
+        if (g_tty->fido_view.expires && (!deadline || g_tty->fido_view.expires < deadline)) {
             deadline = g_tty->fido_view.expires;
+        }
         if (render.status.enabled && !render.status.pending() &&
-            (!deadline || render.status.next_sample < deadline))
+            (!deadline || render.status.next_sample < deadline)) {
             deadline = render.status.next_sample;
+        }
         const mx_u64_t readable = (!input_blocked ? 1u : 0u) | 2u | 8u |
-                                  (g_tty->input_unlocked && !output_blocked ? 4u : 0u) |
-                                  (g_tty->input_unlocked && !input_blocked ? 16u : 0u) | 32u;
+                                  (console_live() && !output_blocked ? 4u : 0u) |
+                                  (console_live() && !input_blocked ? 16u : 0u) | 32u;
         mochi::driver::idle_on_counter(readers, 6, g_tty->input.doorbell, expected, deadline,
                                        readable);
     }

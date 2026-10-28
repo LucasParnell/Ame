@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Enforce the Linux appliance minimal-configuration policy.
 
-See docs/LINUX_APPLIANCE_MINIMAL.md. Given a *resolved* kernel .config (after
+See docs/linux-appliances.md#linux_appliance_minimal. Given a *resolved* kernel .config (after
 `olddefconfig`), assert that:
 
   * every entry on the baseline deny-list is off (=n / not set); and
@@ -26,7 +26,7 @@ DENY = [
 
 # Observed to resist `=n` on arm64 in the current baseline; reported as warnings
 # rather than failures until their forcing path is removed. Evidence in
-# docs/LINUX_APPLIANCE_MINIMAL.md ("Known forced-on").
+# docs/linux-appliances.md#linux_appliance_minimal ("Known forced-on").
 KNOWN_FORCED = {
     "SMP": "arm64 Kconfig: `config SMP def_bool y` (architecture-forced)",
     "CPU_IDLE": "default y if ACPI; forcing path not yet removed",
@@ -42,11 +42,23 @@ FLOWS = {
                     "DRM", "DRM_VIRTIO_GPU"],
         "allow": ["PCI"],
     },
+    "panfrost": {
+        "require": ["DRM", "DRM_PANFROST", "DEVTMPFS", "PROC_FS", "SYSFS",
+                    "BINFMT_ELF", "BLK_DEV_INITRD", "ARM_GIC", "ARM_ARCH_TIMER"],
+        "allow": [],
+    },
     "amdgpu": {
         "require": ["PCI", "PCI_HOST_GENERIC", "VIRTIO", "VIRTIO_PCI",
                     "DRM", "DRM_AMDGPU"],
         "allow": ["PCI"],
     },
+}
+
+# Explicit opt-in for the renderer's immutable, file-backed runtime image.
+FLOWS["panfrost-squashfs"] = {
+    "require": FLOWS["panfrost"]["require"] +
+               ["BLOCK", "BLK_DEV", "BLK_DEV_LOOP", "MISC_FILESYSTEMS", "SQUASHFS", "SQUASHFS_XZ"],
+    "allow": ["BLOCK"],
 }
 
 
@@ -91,6 +103,19 @@ def main() -> int:
         for key in ("DRM_NOUVEAU", "DRM_AMDGPU", "DRM_RADEON"):
             if is_on(cfg.get(key, "n")):
                 problems.append(f"  DENY  CONFIG_{key} enabled in the virtio-only profile")
+
+    if args.flow in ("panfrost", "panfrost-squashfs"):
+        for key in ("DRM_VIRTIO_GPU", "DRM_AMDGPU", "DRM_NOUVEAU", "DRM_LIMA",
+                    "DRM_FBDEV_EMULATION", "KALLSYMS", "DEBUG_MISC", "CPU_IDLE"):
+            if is_on(cfg.get(key, "n")):
+                problems.append(f"  DENY  CONFIG_{key} enabled in the Panfrost appliance")
+        for key in flow["require"]:
+            if cfg.get(key) == "m":
+                problems.append(f"  NEED  CONFIG_{key}=y (driver must be built in)")
+        if args.flow == "panfrost-squashfs":
+            for key in ("BLK_DEV_RAM", "BLK_DEV_NBD", "VIRTIO_BLK", "BLK_DEV_NVME", "MTD", "MMC"):
+                if is_on(cfg.get(key, "n")):
+                    problems.append(f"  DENY  CONFIG_{key} enabled in the file-backed runtime profile")
 
     warnings = []
     for key, why in KNOWN_FORCED.items():

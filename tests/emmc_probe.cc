@@ -91,7 +91,11 @@ int main(int argc, char** argv) {
         return 0;
     }
     assert(m.get(0x3e, 2) == 8); // inherited 1.8V signaling preserved
-    assert((m.get(0x2c, 2) & 0xff00) == 0x0800); // 200MHz / 16
+    // Backward-compatible timing: 200 MHz / 8 = 25 MHz. The divisor is the
+    // ceiling-rounded even value for the 26 MHz target, encoded as divisor/2 in
+    // the high byte, so 26 MHz lands on 0x04. This used to assert 0x0800 (12.5
+    // MHz) and was left behind when the bus moved off that clock.
+    assert((m.get(0x2c, 2) & 0xff00) == 0x0400); // 200MHz / 8 = 25MHz
     m.commands.clear();
     Frame request = frame(2), response{};
     if (scenario == "buffered-flush") {

@@ -43,6 +43,7 @@ set(ANKO_SOURCES
     smp.cc
     platform/cpu_topology.cc
     kernel_main.cc
+    vm/progress.cc
 
     # ---- Phase 1/2: minimal kernel + userspace bring-up --------------------
     mm/phys.cc
@@ -89,6 +90,8 @@ set(ANKO_SOURCES
     vm/vm_shared.cc
 
     # ---- Phase D: PCI device assignment + interrupt virtualization --------
+    vm/mali.cc
+    vm/mali_shadow.cc
     vm/vm_device.cc
     vm/vm_device_irq.cc
     vm/vm_device_selftest.cc

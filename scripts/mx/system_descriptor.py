@@ -187,6 +187,23 @@ def check_manifest(manifest: dict) -> list[str]:
 
     for service in dependencies:
         visit(service)
+    # Init waits for the filesystem server to acknowledge a client session
+    # before resuming that client. It cannot launch a later boot wave while
+    # waiting, so FS users must depend on their provider (directly or transitively).
+    for svc in services:
+        uses = svc.get("uses")
+        if not isinstance(uses, list) or "fs" not in uses or "fs" not in provided:
+            continue
+        required = provided["fs"]
+        reached, pending = set(), list(dependencies.get(svc["name"], []))
+        while pending:
+            dependency = pending.pop()
+            if dependency in reached:
+                continue
+            reached.add(dependency)
+            pending.extend(dependencies.get(dependency, []))
+        if required not in reached:
+            problems.append(f"service {svc['name']}: FS session requires start_after {required!r}")
     return problems
 
 

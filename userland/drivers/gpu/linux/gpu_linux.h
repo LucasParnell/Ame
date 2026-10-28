@@ -17,7 +17,6 @@
 
 #include "mochi/ring.h"
 #include "midix/abi/protocols/gpu_service.h"
-#include "vulkan_broker.h"
 
 namespace drv::gpu::linux {
 
@@ -125,21 +124,12 @@ public:
     void set_buffer(uint64_t buffer_id, uint64_t boot_generation);
     bool buffer_ready() const { return buffer_id_ != 0; }
 
-    // Bind the Vulkan session broker this endpoint serves (spec §14.7). The
-    // broker owns one logical session per client identity on this ring and
-    // enforces every quota; `backend` executes a session's work (the guest
-    // dango-vkd in production). Passing a backend with no functions brokers
-    // sessions that advertise no Vulkan device, so a submit is refused and the
-    // native client keeps its local path -- it never fakes a present.
-    void init_vulkan(const VulkanBackend& backend, mx_u32_t client_id);
-
     // Serve one request, blocking on the request doorbell between requests.
     // Returns false only when the endpoint is unusable.
     bool serve_once(PresentFn present, void* ctx);
 
 private:
     bool reply(uint32_t type, const void* payload, uint32_t length);
-    bool reply_frame(const MxVkFrame& frame);
     void error(uint32_t opcode, mx_status_t status, uint64_t detail);
 
     Endpoint endpoint_{};
@@ -148,9 +138,6 @@ private:
     uint64_t boot_generation_ = 0;
     uint64_t frame_index_ = 0;
     uint32_t consecutive_failures_ = 0;
-    VulkanSessionBroker vk_{};
-    mx_u32_t vk_client_id_ = 0;
-    bool vk_enabled_ = false;
 };
 
 } // namespace drv::gpu::linux

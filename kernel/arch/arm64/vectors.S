@@ -59,6 +59,9 @@ vectors:
 // kernel_unexpected_exception(vector_index, esr, far, frame).
 vec_unexpected:
 #ifdef ANKO_BOARD_HUAWEI_ANNE
+    sub sp, sp, #32
+    stp x4, x9, [sp, #0]
+    stp x10, x11, [sp, #16]
     mov x4, x9
     b anne_diag_fault_entry
 #endif
@@ -98,6 +101,9 @@ vec_unexpected:
 // the pre-fault SP_EL1 value.
 vec_kernel_sync:
 #ifdef ANKO_BOARD_HUAWEI_ANNE
+    sub sp, sp, #32
+    stp x4, x9, [sp, #0]
+    stp x10, x11, [sp, #16]
     mov x4, #4
     b anne_diag_fault_entry
 #endif

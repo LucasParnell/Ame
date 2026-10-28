@@ -1,0 +1,24 @@
+MIN/MAX ignore API blend factors and always read the destination.
+Normalize the factors before destination-load detection and shader generation.
+
+diff --git a/src/panfrost/vulkan/midgard/panvk_v5_blend.c b/src/panfrost/vulkan/midgard/panvk_v5_blend.c
+--- a/src/panfrost/vulkan/midgard/panvk_v5_blend.c
++++ b/src/panfrost/vulkan/midgard/panvk_v5_blend.c
+@@ -126,6 +126,17 @@
+             .alpha_src_factor = vk_blend_factor_to_pipe(att->src_alpha_blend_factor),
+             .alpha_dst_factor = vk_blend_factor_to_pipe(att->dst_alpha_blend_factor),
+          };
++         /* MIN/MAX ignore the API's blend factors and always read both
++          * operands. Canonical factors also make destination-load detection
++          * correct when the application supplies a zero destination factor. */
++         if (rt->equation.rgb_func == PIPE_BLEND_MIN || rt->equation.rgb_func == PIPE_BLEND_MAX) {
++            rt->equation.rgb_src_factor = PIPE_BLENDFACTOR_ONE;
++            rt->equation.rgb_dst_factor = PIPE_BLENDFACTOR_ONE;
++         }
++         if (rt->equation.alpha_func == PIPE_BLEND_MIN || rt->equation.alpha_func == PIPE_BLEND_MAX) {
++            rt->equation.alpha_src_factor = PIPE_BLENDFACTOR_ONE;
++            rt->equation.alpha_dst_factor = PIPE_BLENDFACTOR_ONE;
++         }
+          if (!util_format_has_alpha(rt->format)) {
+             rt->equation.rgb_src_factor = util_blend_dst_alpha_to_one(rt->equation.rgb_src_factor);
+             rt->equation.rgb_dst_factor = util_blend_dst_alpha_to_one(rt->equation.rgb_dst_factor);

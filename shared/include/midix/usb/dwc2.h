@@ -9,7 +9,7 @@ namespace midix::usb::dwc2 {
 
 constexpr mx_u32_t kAhbConfig = 0x008, kUsbConfig = 0x00c, kReset = 0x010;
 constexpr mx_u32_t kInterruptStatus = 0x014, kInterruptMask = 0x018;
-constexpr mx_u32_t kRxStatusPop = 0x020, kRxFifoSize = 0x024;
+constexpr mx_u32_t kRxStatusPeek = 0x01c, kRxStatusPop = 0x020, kRxFifoSize = 0x024;
 constexpr mx_u32_t kNonperiodicTxSize = 0x028, kNonperiodicTxStatus = 0x02c;
 constexpr mx_u32_t kCoreId = 0x040, kHardware1 = 0x044, kHardware2 = 0x048;
 constexpr mx_u32_t kHardware3 = 0x04c, kHardware4 = 0x050;

@@ -1,0 +1,44 @@
+--- a/src/panfrost/vulkan/panvk_buffer.c
++++ b/src/panfrost/vulkan/panvk_buffer.c
+@@ -9,6 +9,7 @@
+ #include "panvk_entrypoints.h"
+ 
+ #include "vk_log.h"
++#include "pan_props.h"
+ 
+ #define PANVK_MAX_BUFFER_SIZE (1 << 30)
+ 
+@@ -47,6 +48,10 @@
+ panvk_BindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
+                         const VkBindBufferMemoryInfo *pBindInfos)
+ {
++   VK_FROM_HANDLE(panvk_device, dev, device);
++   const struct panvk_physical_device *phys = to_panvk_physical_device(dev->vk.physical);
++   const bool cpu_index_search = pan_arch(phys->kmod.props.gpu_prod_id) != 5;
++
+    for (uint32_t i = 0; i < bindInfoCount; ++i) {
+       VK_FROM_HANDLE(panvk_device_memory, mem, pBindInfos[i].memory);
+       VK_FROM_HANDLE(panvk_buffer, buffer, pBindInfos[i].buffer);
+@@ -64,17 +69,19 @@
+        *
+        * Make sure this goes away as soon as we fixed indirect draws.
+        */
+-      if (buffer->vk.usage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT) {
++      /* v5 gathers indices and vertex data on the GPU. Do not keep the old
++       * CPU index-search mapping for it, including its extra mmap lifetime. */
++      if (cpu_index_search && (buffer->vk.usage & VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) {
+          VkDeviceSize offset = pBindInfos[i].memoryOffset;
+          VkDeviceSize pgsize = getpagesize();
+          off_t map_start = offset & ~(pgsize - 1);
+          off_t map_end = offset + buffer->vk.size;
+          void *map_addr =
+             pan_kmod_bo_mmap(mem->bo, map_start, map_end - map_start,
+-                             PROT_WRITE, MAP_SHARED, NULL);
++                             PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
+ 
+          assert(map_addr != MAP_FAILED);
+-         buffer->host_ptr = map_addr + (offset & pgsize);
++         buffer->host_ptr = map_addr + (offset & (pgsize - 1));
+       }
+ 
+       pan_kmod_bo_put(old_bo);

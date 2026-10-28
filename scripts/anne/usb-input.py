@@ -46,6 +46,33 @@ def encode(sequence: int, kind: int, payload: bytes = b"") -> bytes:
 
 from usb_bulk import Bulk
 
+# Ame's own USB identity (see scripts/anne/usb_bulk.py and the board profile).
+AME_VID, AME_PID = 0x1209, 0x0001
+
+
+def ame_serial_candidates() -> list[str]:
+    """Every plausible path for Ame's CDC port on this host.
+
+    The udev rule writes a stable /dev/ame symlink; by-id is what Linux creates
+    regardless of udev policy; /dev/ttyACM* is the raw node; /dev/cu.usbmodem* is
+    the macOS spelling this tool was originally written against. Ordered by
+    preference and de-duplicated, so a host with several CDC ports still picks
+    Ame's rather than an unrelated modem.
+    """
+    seen: list[str] = []
+    targets: set[str] = set()
+    patterns = ("/dev/ame",
+                "/dev/serial/by-id/usb-Ame_*",
+                "/dev/cu.usbmodem*",     # macOS
+                "/dev/ttyACM*")          # Linux fallback
+    for pattern in patterns:
+        for path in sorted(glob.glob(pattern)):
+            target = os.path.realpath(path)
+            if os.path.exists(path) and target not in targets:
+                seen.append(path)
+                targets.add(target)
+    return seen
+
 
 class Sender:
     def __init__(self, transport, timeout: float = 3):
@@ -153,9 +180,11 @@ def main() -> int:
                 raise ValueError("console uses the CDC serial port; omit --bulk")
             path = args.serial
             if not path:
-                paths = glob.glob("/dev/cu.usbmodem*")
+                paths = ame_serial_candidates()
                 if len(paths) != 1:
-                    raise ValueError("Use --serial with Ame's USB serial device")
+                    raise ValueError(
+                        "Use --serial with Ame's USB serial device"
+                        + (f"; found {paths}" if paths else "; no CDC port found"))
                 path = paths[0]
             return console_mode(path, args.send, args.enter, args.read)
         if not args.bulk:

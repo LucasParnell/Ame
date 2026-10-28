@@ -1,9 +1,12 @@
 #include "anko/vm.h"
+#include "anko/arm64_timer.h"
 
 extern "C" u64 vm_el2_run(vm::El2RunState*);
 extern "C" void test_simd_seed(u64, u64, u64);
 extern "C" void test_simd_capture(fpsimd::State*);
 extern "C" void simd_guest_no_fp();
+extern "C" void timer_guest_disable();
+extern "C" void timer_guest_busy();
 alignas(4096) static u64 stage2[512];
 alignas(16) static u8 guest_stacks[2][4096];
 static vm::El2RunState states[2];
@@ -75,5 +78,42 @@ extern "C" void simd_el2_test() {
     fpsimd::State host;
     test_simd_capture(&host);
     check(host, 23, 1u << 22, 0x15, 19);
+    // A guest cannot disable the host's preemption clock. Its physical timer
+    // accesses must trap, and even an IRQ-masked guest that never exits must
+    // return through the production monitor on the host timer interrupt.
+    u64 frequency;
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+    const u64 delay = frequency / 10, enabled = 1;
+    asm volatile("msr cntp_tval_el0, %0; msr cntp_ctl_el0, %1; isb"
+                 :: "r"(delay), "r"(enabled) : "memory");
+    states[0].pc = reinterpret_cast<u64>(&timer_guest_disable);
+    vm_el2_run(&states[0]);
+    require(states[0].exit_kind == 0 && states[0].exit_esr >> 26 == 0x18, 24);
+    arm64::PhysicalTimerAccess access{};
+    require(arm64::decode_physical_timer(states[0].exit_esr, access) &&
+            access.reg == 1 && access.rt == 31 && !access.read, 27);
+    u64 control;
+    asm volatile("mrs %0, cntp_ctl_el0" : "=r"(control));
+    require(control & 1, 25); // host access is restored too
+
+    auto* dist = reinterpret_cast<volatile u32*>(0x08000000);
+    auto* cpu = reinterpret_cast<volatile u32*>(0x08010000);
+    dist[0] = 1;
+    dist[0x100/4] = 1u << 30;
+    cpu[0] = 1; cpu[4/4] = 255;
+    const u64 quantum = frequency / 100;
+    asm volatile("msr cntp_tval_el0, %0; msr cntp_ctl_el0, %1; dsb sy; isb"
+                 :: "r"(quantum), "r"(enabled) : "memory");
+    states[0].pc = reinterpret_cast<u64>(&timer_guest_busy);
+    states[0].guest_cntp_ctl = 0;
+    states[0].guest_cntp_cval = ~0ull;
+    for (u32 reg = 0; reg < 31; ++reg) states[0].regs[reg] = 0xfedcba0000000000ull | reg;
+    vm_el2_run(&states[0]);
+    require(states[0].exit_kind == 1, 26);
+    for (u32 reg = 0; reg < 31; ++reg)
+        require(states[0].regs[reg] == (0xfedcba0000000000ull | reg), 28);
+    test_simd_capture(&host);
+    check(host, 23, 1u << 22, 0x15, 29);
+    asm volatile("msr cntp_ctl_el0, xzr; isb" ::: "memory");
     finish(0);
 }

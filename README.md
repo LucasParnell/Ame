@@ -4,17 +4,14 @@ Ame is an experimental AArch64 operating system with the Anko microkernel,
 Mochi userland services, and Dango virtual machine support. Internal `midix`
 and `mx` names remain in the source and ABI.
 
-See [feature status](docs/FEATURE_STATUS.md) for implementation coverage and
-[the architecture specification](docs/architecture.md) for the design. Architecture
-and older protocol documents include targets that are not yet implemented.
-See [the performance refactor notes](docs/PERFORMANCE_REFACTOR.md) for boot
-measurements, library boundaries, idle behavior and validation limits.
-See [the IPC benchmark guide](docs/IPC_BENCHMARK.md) and [initial raw baselines](docs/IPC_BASELINE.md)
-for two-process latency/throughput measurements and reproducible comparisons.
-The [IPC and scheduler refactor](docs/IPC_REFACTOR.md) describes the current
-fast paths, wakeup ordering and validation.
-See [Cortex-A53 IPC execution paths](docs/IPC_FLOOR.md) for the P20 Lite-oriented
-ASID, framing, combined IPC and scheduler changes.
+[Architecture](docs/architecture.md) describes the current system, implementation
+boundaries and remaining work. It is also the index for the consolidated
+[ABI](docs/abi.md), [IPC](docs/ipc.md#ipc), [scheduler](docs/scheduler.md),
+[filesystem](docs/FS_SPEC.md), [graphics](docs/graphics.md),
+[Linux appliance](docs/linux-appliances.md), [USB](docs/usb.md),
+[FIDO2](docs/fido2.md) and [performance](docs/performance.md) guides.
+Phone hardware, installation and firmware evidence starts at
+[the Anne reference](boards/huawei-anne/hardware.md#hardware).
 
 ## Build
 
@@ -37,6 +34,10 @@ ctest --preset qemu-dev
 
 Linux guest construction is optional and disabled in the presets. Enable
 `DANGO_BUILD_LINUX_ARTIFACTS` explicitly when preparing guest regression runs.
+For the minimal ANE-LX1 Mali-T830 driver image and GPU-independent Ame channel
+test, see [the Panfrost appliance workflow](docs/linux-appliances.md#anne_gpu_appliance).
+The GPU-disabled QEMU channel test and physical phone rendering are separate
+acceptance paths; see [graphics](docs/graphics.md) for the recorded phone results.
 
 ### Build targets
 
@@ -172,13 +173,16 @@ active display can be written. See the investigation notes for interpretation.
 - `tests/`: host sanitizer tests and QEMU kernel lifecycle fixtures.
 - `third_party/monocypher/`: pinned signature implementation and provenance.
 
-Normal service supervision, per-client IPC sessions, filesystem mount semantics,
-and application interfaces still need cleanup. `/data` uses disk-resident keyed
-B+trees, full-volume bitmaps, CoW data and a metadata redo journal. The P20 Lite
+Init implements dependency-aware supervision and generation-tagged restart;
+nameservice and FS use bounded per-client sessions. General application/window
+interfaces and broader mount/session semantics remain work in progress. `/data`
+uses disk-resident keyed B+trees, full-volume bitmaps, CoW data and a metadata
+redo journal. The P20 Lite
 uses its existing 50.6 GiB userdata partition through an 8-bit ADMA2 eMMC driver.
 `scripts/test/durable-persistence.py` verifies a 3 MiB file across two QEMU boots
 and checks immutable read-arena lifetimes. `/tmp` remains volatile; packaged root
 handles remain read-only. Without durable backing, `FS_SYNC` reports
-not-implemented. Disk snapshots, hardware IRQ bind/ack, and physical Switch
-acceptance remain later milestones. See [FS_SPEC](docs/FS_SPEC.md) for the
-implemented protocol, journal extensions and bounded working sets.
+not-implemented. Persistent disk snapshots and physical Switch acceptance remain
+later milestones. Hardware IRQ bind/ack exists, although some drivers still poll.
+See [FS_SPEC](docs/FS_SPEC.md) for the implemented protocol, journal extensions
+and bounded working sets.

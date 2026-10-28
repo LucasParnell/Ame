@@ -56,6 +56,11 @@ void frame(Runtime& r) {
         if (s.attached) {
             event(s, INPUT_SOURCE_RESET);
         }
+        // HELLO opens a new host session and restarts its sequence numbering at
+        // 1. The stale-sequence guard above exempts HELLO, so without clearing
+        // the high-water mark here the trailing update below cannot lower it and
+        // every later key of the new session is rejected as already seen.
+        s.wire_sequence = 0;
         s.generation = mx_clock_ns();
         s.sequence = 0;
         event(s, INPUT_SOURCE_ATTACHED);
@@ -105,25 +110,37 @@ bool service(Runtime& r) {
             progress = true;
         }
         if (r.app_reply_pending && r.link.tx().try_push_frame(r.app_reply)) {
-            r.app_reply_pending = false; libk::zero(r.app_reply); progress = true;
+            r.app_reply_pending = false;
+            libk::zero(r.app_reply);
+            progress = true;
         }
         if (s.app_reset) {
-            MxFunctionChunk reset{s.usb_generation, 0, 0, 0,
-                static_cast<mx_u8_t>(s.configured ? MX_FUNCTION_CONFIGURED : 0), {}};
-            if (!r.apps.tx().try_push_msg(MX_FUNCTION_RESET, reset)) return progress;
-            s.app_reset = false; progress = true;
+            MxFunctionChunk reset{s.usb_generation,
+                                  0,
+                                  0,
+                                  0,
+                                  static_cast<mx_u8_t>(s.configured ? MX_FUNCTION_CONFIGURED : 0),
+                                  {}};
+            if (!r.apps.tx().try_push_msg(MX_FUNCTION_RESET, reset)) {
+                return progress;
+            }
+            s.app_reset = false;
+            progress = true;
         }
         if (s.app_pending) {
             const auto size = midix::debug::kHeader + libk::load_le<mx_u16_t>(s.parser.bytes + 10);
             const auto count = (size - s.app_offset < 32 ? size - s.app_offset : 32);
             MxFunctionChunk chunk{s.usb_generation, 0, static_cast<mx_u16_t>(count), 0, 0, {}};
             libk::copy_n(libk::as_bytes(chunk.data),
-                libk::as_bytes(s.parser.bytes + s.app_offset, count), count);
-            if (!r.apps.tx().try_push_msg(MX_FUNCTION_RX, chunk)) return progress;
+                         libk::as_bytes(s.parser.bytes + s.app_offset, count), count);
+            if (!r.apps.tx().try_push_msg(MX_FUNCTION_RX, chunk)) {
+                return progress;
+            }
             s.app_offset += count;
             if (s.app_offset == size) {
                 s.app_pending = false;
-                libk::zero(s.parser.bytes); s.parser.reset();
+                libk::zero(s.parser.bytes);
+                s.parser.reset();
             }
             return true;
         }
@@ -152,11 +169,14 @@ bool service(Runtime& r) {
         if (slot.type == MX_FUNCTION_RESET) {
             MxFunctionChunk reset{};
             if (!mochi::message_get(slot, &reset, MX_FUNCTION_RESET) || !reset.generation ||
-                reset.length || (reset.flags & ~MX_FUNCTION_CONFIGURED)) return progress;
+                reset.length || (reset.flags & ~MX_FUNCTION_CONFIGURED)) {
+                return progress;
+            }
             s.usb_generation = reset.generation;
             s.configured = (reset.flags & MX_FUNCTION_CONFIGURED) != 0;
             s.app_reset = r.apps.valid();
-            r.app_reply_pending = false; libk::zero(r.app_reply);
+            r.app_reply_pending = false;
+            libk::zero(r.app_reply);
             if (s.attached) {
                 event(s, INPUT_SOURCE_RESET);
             }
@@ -175,7 +195,8 @@ bool service(Runtime& r) {
     }
     while (s.position < s.chunk.length) {
         progress = true;
-        const auto byte = s.chunk.data[s.position]; s.chunk.data[s.position++] = 0;
+        const auto byte = s.chunk.data[s.position];
+        s.chunk.data[s.position++] = 0;
         if (s.parser.push(byte)) {
             frame(r);
             return progress;
@@ -204,7 +225,9 @@ extern "C" [[noreturn]] void _start() {
     r->source.generation = mx_clock_ns();
     if (mochi::boot::handle(boot, "apps.tx")) {
         r->apps = mochi::driver::link(boot, "apps", mochi::va::native_driver::kLinks + 0x40000);
-        if (!r->apps.valid()) mochi::boot::invalid_boot();
+        if (!r->apps.valid()) {
+            mochi::boot::invalid_boot();
+        }
     }
     mochi::boot::ready(boot);
     for (;;) {

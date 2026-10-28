@@ -24,8 +24,8 @@ CallOutcome call(Runtime& r, mx_u32_t link, mx_u32_t type, mx_u32_t response, mx
     CallOutcome result{false, false, MX_OK};
     const MxBoardRequest request{++r.sequence, value, 0};
     // A failed CC query must not hold host power through a multi-second wait.
-    const auto deadline = mx_clock_ns() +
-        (link == 0 || type == MX_ROLE_QUERY ? 250000000ull : 3000000000ull);
+    const auto deadline =
+        mx_clock_ns() + (link == 0 || type == MX_ROLE_QUERY ? 250000000ull : 3000000000ull);
     if (!r.links[link].tx().push_bounded(type, &request, sizeof(request), deadline)) {
         return result;
     }
@@ -114,11 +114,15 @@ Transition change(Runtime& r, MxUsbRole next, mx_u32_t cc = 0) {
         }
     }
     r.role = next;
-    if (next == MxUsbRole::Host) r.source.begin(mx_clock_ns());
+    if (next == MxUsbRole::Host) {
+        r.source.begin(mx_clock_ns());
+    }
     r.renew_at = mx_clock_ns() + 500000000ull;
-    mochi::log_raw_marker(next == MxUsbRole::Host ? "usb role: host; source=500mA\n"
-                          : next == MxUsbRole::Device ? "usb role: device; source off\n"
-                                                     : "usb role: detached; source off\n");
+    const auto* marker = next == MxUsbRole::Host     ? "usb role: host; source=500mA\n"
+                         : next == MxUsbRole::Device ? "usb role: device; source off\n"
+                                                     : "usb role: detached; source off\n";
+    sys_debug_puts(marker, libk::str::length(marker));
+    mochi::log_raw_marker(marker);
     result.ok = true;
     return result;
 }
@@ -149,7 +153,9 @@ extern "C" [[noreturn]] void _start() {
             r->query_fault_logged = false;
             // A failed boost/PHY/controller transition stays off until an
             // actual detach; do not repeatedly power-cycle a faulty partner.
-            if (!status.value && !(status.flags & MX_TYPEC_ATTACHED)) r->fault = false;
+            if (!status.value && !(status.flags & MX_TYPEC_ATTACHED)) {
+                r->fault = false;
+            }
         } else if (!r->query_fault_logged) {
             r->query_fault_logged = true;
             mochi::log_raw_marker("typec query failed\n");
@@ -162,16 +168,23 @@ extern "C" [[noreturn]] void _start() {
                 next = MxUsbRole::Detached;
                 r->policy.reset();
                 char line[160];
-                const int length = libk::snprintf(line, sizeof(line),
-                    "usb role: data connection lost; restart sink flags=%x epoch=%u expected=%u seen=%u query=%u\n",
-                    port.flags, port.value, r->source.generation, r->source.seen ? 1u : 0u,
-                    observed.ok ? 1u : 0u);
-                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) mochi::log_raw_marker(line);
+                const int length =
+                    libk::snprintf(line, sizeof(line),
+                                   "usb role: data connection lost; restart sink flags=%x epoch=%u "
+                                   "expected=%u seen=%u query=%u\n",
+                                   port.flags, port.value, r->source.generation,
+                                   r->source.seen ? 1u : 0u, observed.ok ? 1u : 0u);
+                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
+                    mochi::log_raw_marker(line);
+                }
             }
         }
-        if (r->fault) next = MxUsbRole::Detached;
+        if (r->fault) {
+            next = MxUsbRole::Detached;
+        }
         if (next != r->role) {
-            const auto transition = change(*r, next, status.flags & mochi::usb::typec::kOrientation);
+            const auto transition =
+                change(*r, next, status.flags & mochi::usb::typec::kOrientation);
             if (!transition.ok) {
                 (void)call(*r, 1, MX_POWER_SET, MX_POWER_REPLY, 0);
                 (void)call(*r, 3, MX_ROLE_SET, MX_ROLE_REPLY, 0);

@@ -16,7 +16,9 @@ constexpr u64 kLogoBase = 0x5d000000;
 constexpr u64 kLogoBytes = 0x3000000;
 #endif
 constexpr u64 kDssBytes = 0x80000;
-struct Channel { u32 index, offset; };
+struct Channel {
+    u32 index, offset;
+};
 // Nonzero RDMA entries in the matching EMUI 8 Hi6250 module table.
 constexpr Channel kChannels[] = {{0, 0x52000}, {1, 0x53000}, {4, 0x28000},
                                  {5, 0x40000}, {6, 0x50000}, {7, 0x51000}};
@@ -35,37 +37,73 @@ struct Pipeline {
 // enabled physical linear RGB path inside the preserved logo reservation.
 constexpr const char* rejection(const Pipeline& p) {
     const auto& r = p.dma;
-    if (!(r.channel & 1)) return "rdma.disabled";
-    if (r.channel & 4) return "rdma.compressed";
-    if (p.secure & 1) return "rdma.secure";
-    if (!(r.ldi & 1)) return "ldi.disabled";
-    if ((r.panel_width & 0x1fff) != 1079 || (r.panel_height & 0x1fff) != 2279) return "ldi.geometry";
-    if (r.control & (1u << 8)) return "rdma.iova";
-    if (r.control & ((1u << 1) | (7u << 9) | (1u << 12) | (1u << 17))) return "rdma.transform";
+    if (!(r.channel & 1)) {
+        return "rdma.disabled";
+    }
+    if (r.channel & 4) {
+        return "rdma.compressed";
+    }
+    if (p.secure & 1) {
+        return "rdma.secure";
+    }
+    if (!(r.ldi & 1)) {
+        return "ldi.disabled";
+    }
+    if ((r.panel_width & 0x1fff) != 1079 || (r.panel_height & 0x1fff) != 2279) {
+        return "ldi.geometry";
+    }
+    if (r.control & (1u << 8)) {
+        return "rdma.iova";
+    }
+    if (r.control & ((1u << 1) | (7u << 9) | (1u << 12) | (1u << 17))) {
+        return "rdma.transform";
+    }
     const u32 format = (r.control >> 3) & 31;
-    if (format != 0 && format != 5 && format != 6) return "rdma.format";
+    if (format != 0 && format != 5 && format != 6) {
+        return "rdma.format";
+    }
     const u32 bpp = format == 0 ? 2 : 4;
-    if (r.stride >> 16 || r.stride * 16 != 1080 * bpp) return "rdma.stride";
-    if (r.address & 15) return "rdma.alignment";
-    if (r.x0 || r.y0 || r.x1 != (1080 * bpp / 16 - 1) || r.y1 != 2279 ||
-        p.mask0 || p.mask1 || p.stretch_stride) return "rdma.rectangle";
+    if (r.stride >> 16 || r.stride * 16 != 1080 * bpp) {
+        return "rdma.stride";
+    }
+    if (r.address & 15) {
+        return "rdma.alignment";
+    }
+    if (r.x0 || r.y0 || r.x1 != (1080 * bpp / 16 - 1) || r.y1 != 2279 || p.mask0 || p.mask1 ||
+        p.stretch_stride) {
+        return "rdma.rectangle";
+    }
     const u64 bytes = u64{1080 * bpp} * 2280;
     if (r.address < kLogoBase || r.address - kLogoBase > kLogoBytes ||
-        bytes > kLogoBytes - (r.address - kLogoBase)) return "rdma.outside_reserved_logo";
-    if (!(p.dsi_power & 1) || (p.dsi_mode & 1) || !(p.dsi_phy & 1) ||
-        p.dsi_width != 1080 || p.dsi_height != 2280) return "dsi.inactive_or_geometry";
+        bytes > kLogoBytes - (r.address - kLogoBase)) {
+        return "rdma.outside_reserved_logo";
+    }
+    if (!(p.dsi_power & 1) || (p.dsi_mode & 1) || !(p.dsi_phy & 1) || p.dsi_width != 1080 ||
+        p.dsi_height != 2280) {
+        return "dsi.inactive_or_geometry";
+    }
     if (!(p.mctl_enable & 1) || (p.mctl_itf & 3) != 1 || (p.mctl_dbuf & 3) != 1 ||
-        (p.mctl_overlay & 15) != 1) return "mctl.disconnected";
+        (p.mctl_overlay & 15) != 1) {
+        return "mctl.disconnected";
+    }
     constexpr u32 size = (2279u << 16) | 1079;
     if (p.overlay_size != size || !(p.overlay_config & 1) || p.overlay_start ||
-        p.overlay_end != size) return "overlay.geometry_or_disabled";
-    if (p.dfc_size != ((1079u << 16) | 2279) || p.dfc_clip_h || p.dfc_clip_v || p.dfc_padding)
+        p.overlay_end != size) {
+        return "overlay.geometry_or_disabled";
+    }
+    if (p.dfc_size != ((1079u << 16) | 2279) || p.dfc_clip_h || p.dfc_clip_v || p.dfc_padding) {
         return "dfc.cropped_or_padded";
+    }
     for (u32 layer = 0; layer < 6; ++layer) {
-        if (((p.channel_select >> ((layer + 1) * 4)) & 15) != p.index) continue;
+        if (((p.channel_select >> ((layer + 1) * 4)) & 15) != p.index) {
+            continue;
+        }
         if ((p.layer_config[layer] & 0x101) != 1 || p.layer_position[layer] ||
             p.layer_end[layer] != size ||
-            (p.channel_overlay_enable & (0x100 | (1u << (layer + 1)))) != (0x100 | (1u << (layer + 1)))) continue;
+            (p.channel_overlay_enable & (0x100 | (1u << (layer + 1)))) !=
+                (0x100 | (1u << (layer + 1)))) {
+            continue;
+        }
         return nullptr;
     }
     return "overlay.no_routed_fullscreen_layer";
@@ -81,4 +119,10 @@ void console_status(const char* text);
 void console_flush();
 bool console_active();
 u64 console_characters();
-}
+bool scanout_prepare();
+int scanout_step(int slot, u64 address, u64 now);
+u32 scanout_status();
+// Emergency restore programs the preserved console, but cannot prove DMA
+// retirement without a later timing edge. Caller must retain buffer pins.
+void scanout_emergency();
+} // namespace anne::native_display

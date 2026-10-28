@@ -1,0 +1,21 @@
+#version 450
+layout(local_size_x=8,local_size_y=8) in;
+#ifdef ATOMIC_STORAGE
+layout(set=0,binding=2,r32ui) uniform uimage2D target;
+#elif defined(NORMALIZED_STORAGE)
+layout(set=0,binding=2,rgba8) uniform image2D target;
+#else
+layout(set=0,binding=2,rgba32f) uniform image2D target;
+#endif
+void main() {
+    ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+    if (all(greaterThanEqual(p,ivec2(28))) && all(lessThan(p,ivec2(36)))) {
+#ifdef ATOMIC_STORAGE
+        uint old=imageAtomicAdd(target,p,37u);
+        uint observed=imageAtomicCompSwap(target,p,old+37u,old+53u);
+        if (observed!=old+37u) imageStore(target,p,uvec4(0xffffffffu));
+#else
+        imageStore(target,p,imageLoad(target,p)+vec4(.05));
+#endif
+    }
+}

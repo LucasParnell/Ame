@@ -1,0 +1,98 @@
+--- a/src/panfrost/vulkan/jm/panvk_cmd_buffer.h
++++ b/src/panfrost/vulkan/jm/panvk_cmd_buffer.h
+@@ -89,14 +89,20 @@
+    struct panvk_image_view *dst_iview;
+ };
+ 
++#if PAN_ARCH == 5
++struct panvk_layer_views {
++   const struct pan_image_view *bases[MAX_RTS + 2];
++   struct pan_image_view views[MAX_RTS + 2];
++};
++#endif
++
+ struct panvk_rendering_state {
+    VkRenderingFlags flags;
+    uint32_t layer_count;
+ #if PAN_ARCH == 5
+    /* Midgard uses one FBD and the full tiler heap per sequential layer batch. */
+    uint32_t logical_layer_count, logical_layer_index;
+-   const struct pan_image_view *layer_bases[MAX_RTS + 2];
+-   struct pan_image_view layer_views[MAX_RTS + 2];
++   struct panvk_layer_views *layers;
+ #endif
+ 
+    enum vk_rp_attachment_flags bound_attachments;
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+@@ -1318,23 +1318,23 @@
+    struct pan_fb_info *fb = &render->fb.info;
+    render->logical_layer_index = layer;
+    for (unsigned i = 0; i < MAX_RTS + 2; i++) {
+-      const struct pan_image_view *base = render->layer_bases[i];
++      const struct pan_image_view *base = render->layers->bases[i];
+       if (!base)
+          continue;
+       if (layer > base->last_layer - base->first_layer)
+          return VK_ERROR_INITIALIZATION_FAILED;
+-      render->layer_views[i] = *base;
+-      render->layer_views[i].first_layer += layer;
+-      render->layer_views[i].last_layer = render->layer_views[i].first_layer;
++      render->layers->views[i] = *base;
++      render->layers->views[i].first_layer += layer;
++      render->layers->views[i].last_layer = render->layers->views[i].first_layer;
+       if (i < MAX_RTS) {
+-         fb->rts[i].view = &render->layer_views[i];
++         fb->rts[i].view = &render->layers->views[i];
+          /* CRC validity is per image slice. Disable reuse across slices rather
+           * than sharing one attachment-valid bit between independent layers. */
+          render->fb.crc_valid[i] = false;
+       } else if (i == MAX_RTS) {
+-         fb->zs.view.zs = &render->layer_views[i];
++         fb->zs.view.zs = &render->layers->views[i];
+       } else {
+-         fb->zs.view.s = &render->layer_views[i];
++         fb->zs.view.s = &render->layers->views[i];
+       }
+    }
+    return panvk_v5_cmd_open_batch(cmd) ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+@@ -1783,8 +1783,13 @@
+    cmdbuf->state.gfx.render.logical_layer_count = pRenderingInfo->layerCount;
+    cmdbuf->state.gfx.render.logical_layer_index = 0;
+    cmdbuf->state.gfx.render.layer_count = 1;
+-   memset(cmdbuf->state.gfx.render.layer_bases, 0,
+-          sizeof(cmdbuf->state.gfx.render.layer_bases));
++   /* Empty command buffers must not reserve this per-rendering CPU storage.
++    * Its lifetime follows the existing descriptor arena and reset boundary. */
++   cmdbuf->state.gfx.render.layers = panvk_cmd_alloc_dev_mem(
++      cmdbuf, desc, sizeof(struct panvk_layer_views), 8).cpu;
++   if (!cmdbuf->state.gfx.render.layers)
++      return;
++   memset(cmdbuf->state.gfx.render.layers, 0, sizeof(struct panvk_layer_views));
+ #endif
+    *fbinfo = (struct pan_fb_info){
+       .tile_buf_budget = panfrost_query_optimal_tib_size(phys_dev->model),
+@@ -2080,16 +2085,20 @@
+ {
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+ 
++   if (vk_command_buffer_has_error(&cmdbuf->vk))
++      return;
+    panvk_cmd_begin_rendering_init_state(cmdbuf, pRenderingInfo);
++   if (vk_command_buffer_has_error(&cmdbuf->vk))
++      return;
+ 
+    bool resuming = cmdbuf->state.gfx.render.flags & VK_RENDERING_RESUMING_BIT;
+ #if PAN_ARCH == 5
+    if (!resuming) {
+       struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
+       for (unsigned i = 0; i < render->fb.info.rt_count; i++)
+-         render->layer_bases[i] = render->fb.info.rts[i].view;
+-      render->layer_bases[MAX_RTS] = render->fb.info.zs.view.zs;
+-      render->layer_bases[MAX_RTS + 1] = render->fb.info.zs.view.s;
++         render->layers->bases[i] = render->fb.info.rts[i].view;
++      render->layers->bases[MAX_RTS] = render->fb.info.zs.view.zs;
++      render->layers->bases[MAX_RTS + 1] = render->fb.info.zs.view.s;
+       VkResult result = panvk_v5_select_layer(cmdbuf, 0);
+       if (result != VK_SUCCESS) {
+          vk_command_buffer_set_error(&cmdbuf->vk, result);

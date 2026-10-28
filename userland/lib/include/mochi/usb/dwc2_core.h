@@ -74,7 +74,9 @@ inline bool device_turnaround(const Registers& registers, mx_u32_t core_id, MxUs
     return true;
 }
 
-enum class ResetState : mx_u8_t { Idle, WaitingAhb, WaitingReset, Settling, WaitingFlush, Ready, Fault };
+enum class ResetState : mx_u8_t {
+    Idle, WaitingAhb, WaitingReset, Settling, WaitingFlush, FlushSettling, Ready, Fault
+};
 struct Reset {
     ResetState state = ResetState::Idle;
     mx_u64_t deadline_ns = 0;
@@ -114,6 +116,9 @@ struct Reset {
                 state = ResetState::Fault;
             else state = ResetState::WaitingFlush;
         } else if (state == ResetState::WaitingFlush && !(value & (kRxFlush | kTxFlush))) {
+            if (!libk::checked_add(now_ns, 1000, &settle_until_ns)) state = ResetState::Fault;
+            else state = ResetState::FlushSettling;
+        } else if (state == ResetState::FlushSettling && now_ns >= settle_until_ns) {
             libk::dma::order_mmio();
             state = ResetState::Ready;
         }

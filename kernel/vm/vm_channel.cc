@@ -7,10 +7,11 @@ namespace vm {
 
 namespace {
 template <class Endpoint> void release_creator(Endpoint* target) {
-    if (!target) return;
+    if (!target) {
+        return;
+    }
     object::release(target->lifetime);
 }
-
 
 u32 g_next_channel_id = 1;
 
@@ -22,7 +23,9 @@ u64 g_channel_boot_generation = 0;
 
 u64 next_boot_generation() {
     u64 g = __atomic_add_fetch(&g_channel_boot_generation, 1ull, __ATOMIC_RELAXED);
-    if (g == 0) g = __atomic_add_fetch(&g_channel_boot_generation, 1ull, __ATOMIC_RELAXED);
+    if (g == 0) {
+        g = __atomic_add_fetch(&g_channel_boot_generation, 1ull, __ATOMIC_RELAXED);
+    }
     return g;
 }
 
@@ -41,15 +44,21 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
     SysError rc = E_OK;
     auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
     if (!v) {
-        if (out_error) *out_error = rc;
+        if (out_error) {
+            *out_error = rc;
+        }
         return kNullCap;
     }
     if (flags != 0 || order < 4 || order > 10) {
-        if (out_error) *out_error = E_INVALID;
+        if (out_error) {
+            *out_error = E_INVALID;
+        }
         return kNullCap;
     }
     if (v->channel_count >= kMaxVmChannels || g_next_channel_id == 0) {
-        if (out_error) *out_error = E_OVERFLOW;
+        if (out_error) {
+            *out_error = E_OVERFLOW;
+        }
         note_error();
         return kNullCap;
     }
@@ -59,17 +68,27 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
     Doorbell* host_db = ipc::doorbell_create_object(caller.pid);
     Doorbell* guest_db = ipc::doorbell_create_object(caller.pid);
     if (!h2g || !g2h || !host_db || !guest_db) {
-        release_creator(h2g); release_creator(g2h); release_creator(host_db); release_creator(guest_db);
-        if (out_error) *out_error = E_NOMEM;
+        release_creator(h2g);
+        release_creator(g2h);
+        release_creator(host_db);
+        release_creator(guest_db);
+        if (out_error) {
+            *out_error = E_NOMEM;
+        }
         note_error();
         return kNullCap;
     }
 
-    VmChannel* channel = static_cast<VmChannel*>(
-        mm::slab_alloc(sizeof(VmChannel), alignof(VmChannel)));
+    VmChannel* channel =
+        static_cast<VmChannel*>(mm::slab_alloc(sizeof(VmChannel), alignof(VmChannel)));
     if (!channel) {
-        release_creator(h2g); release_creator(g2h); release_creator(host_db); release_creator(guest_db);
-        if (out_error) *out_error = E_NOMEM;
+        release_creator(h2g);
+        release_creator(g2h);
+        release_creator(host_db);
+        release_creator(guest_db);
+        if (out_error) {
+            *out_error = E_NOMEM;
+        }
         note_error();
         return kNullCap;
     }
@@ -88,53 +107,68 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
     channel->boot_generation = next_boot_generation();
     v->channel_generation = channel->boot_generation;
 
-    channel->owner_lifetime = v->lifetime; object::retain(channel->owner_lifetime);
+    channel->owner_lifetime = v->lifetime;
+    object::retain(channel->owner_lifetime);
     channel->lifetime = object::create(channel, dispose_channel);
-    if (!channel->lifetime) { dispose_channel(channel); if (out_error) *out_error = E_NOMEM; return kNullCap; }
-    const CapHandle cap_h = cap::alloc(*caller.cap_table, CAP_VM_CHANNEL, channel,
-                                       RIGHT_VM_CHANNEL_SEND |
-                                           RIGHT_VM_CHANNEL_RECV |
-                                           RIGHT_VM_CHANNEL_NOTIFY |
-                                           RIGHT_VM_CHANNEL_INSPECT |
-                                           RIGHT_DUP);
+    if (!channel->lifetime) {
+        dispose_channel(channel);
+        if (out_error) {
+            *out_error = E_NOMEM;
+        }
+        return kNullCap;
+    }
+    const CapHandle cap_h =
+        cap::alloc(*caller.cap_table, CAP_VM_CHANNEL, channel,
+                   RIGHT_VM_CHANNEL_SEND | RIGHT_VM_CHANNEL_RECV | RIGHT_VM_CHANNEL_NOTIFY |
+                       RIGHT_VM_CHANNEL_INSPECT | RIGHT_DUP);
     if (cap_h == kNullCap) {
         object::release(channel->lifetime);
-        if (out_error) *out_error = E_OVERFLOW;
+        if (out_error) {
+            *out_error = E_OVERFLOW;
+        }
         note_error();
         return kNullCap;
     }
 
     v->channels[v->channel_count++] = channel;
     metric_inc(VM_DEBUG_CHANNELS_CREATED);
-    if (out_error) *out_error = E_OK;
+    if (out_error) {
+        *out_error = E_OK;
+    }
     return cap_h;
 }
 
-CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_kind,
-                           u32 rights, SysError* out_error) {
+CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_kind, u32 rights,
+                           SysError* out_error) {
     u32 needed = RIGHT_VM_CHANNEL_INSPECT;
-    if (endpoint_kind == VM_CHANNEL_HOST_TO_GUEST_RING || endpoint_kind == VM_CHANNEL_HOST_TO_GUEST_DOORBELL) {
+    if (endpoint_kind == VM_CHANNEL_HOST_TO_GUEST_RING ||
+        endpoint_kind == VM_CHANNEL_HOST_TO_GUEST_DOORBELL) {
         needed |= RIGHT_VM_CHANNEL_SEND;
-    } else if (endpoint_kind == VM_CHANNEL_GUEST_TO_HOST_RING || endpoint_kind == VM_CHANNEL_GUEST_TO_HOST_DOORBELL) {
+    } else if (endpoint_kind == VM_CHANNEL_GUEST_TO_HOST_RING ||
+               endpoint_kind == VM_CHANNEL_GUEST_TO_HOST_DOORBELL) {
         needed |= RIGHT_VM_CHANNEL_RECV;
     }
     if ((endpoint_kind == VM_CHANNEL_HOST_TO_GUEST_DOORBELL ||
-                endpoint_kind == VM_CHANNEL_GUEST_TO_HOST_DOORBELL) &&
-               (rights & RIGHT_NOTIFY)) {
+         endpoint_kind == VM_CHANNEL_GUEST_TO_HOST_DOORBELL) &&
+        (rights & RIGHT_NOTIFY)) {
         needed |= RIGHT_VM_CHANNEL_NOTIFY;
     }
 
     SysError rc = E_OK;
     auto channel = channel_from_cap(caller, channel_cap, needed, &rc);
     if (!channel) {
-        if (out_error) *out_error = rc;
+        if (out_error) {
+            *out_error = rc;
+        }
         return kNullCap;
     }
     // A stale generation hands out nothing: the endpoint would name an object
     // the appliance has already invalidated.
     if (Vm* owner = find_vm_by_id(channel->owner_vm_id);
         !owner || !channel_generation_current(*owner, *channel)) {
-        if (out_error) *out_error = E_NOTFOUND;
+        if (out_error) {
+            *out_error = E_NOTFOUND;
+        }
         note_error();
         return kNullCap;
     }
@@ -142,20 +176,32 @@ CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_
     CapHandle endpoint = kNullCap;
     switch (endpoint_kind) {
     case VM_CHANNEL_HOST_TO_GUEST_RING:
-        if (!ring_rights_valid(rights)) rc = E_INVALID;
-        else endpoint = ipc::ring_cap_alloc(caller.pid, channel->host_to_guest, rights);
+        if (!ring_rights_valid(rights)) {
+            rc = E_INVALID;
+        } else {
+            endpoint = ipc::ring_cap_alloc(caller.pid, channel->host_to_guest, rights);
+        }
         break;
     case VM_CHANNEL_GUEST_TO_HOST_RING:
-        if (!ring_rights_valid(rights)) rc = E_INVALID;
-        else endpoint = ipc::ring_cap_alloc(caller.pid, channel->guest_to_host, rights);
+        if (!ring_rights_valid(rights)) {
+            rc = E_INVALID;
+        } else {
+            endpoint = ipc::ring_cap_alloc(caller.pid, channel->guest_to_host, rights);
+        }
         break;
     case VM_CHANNEL_HOST_TO_GUEST_DOORBELL:
-        if (!doorbell_rights_valid(rights)) rc = E_INVALID;
-        else endpoint = ipc::doorbell_cap_alloc(caller.pid, channel->host_doorbell, rights);
+        if (!doorbell_rights_valid(rights)) {
+            rc = E_INVALID;
+        } else {
+            endpoint = ipc::doorbell_cap_alloc(caller.pid, channel->host_doorbell, rights);
+        }
         break;
     case VM_CHANNEL_GUEST_TO_HOST_DOORBELL:
-        if (!doorbell_rights_valid(rights)) rc = E_INVALID;
-        else endpoint = ipc::doorbell_cap_alloc(caller.pid, channel->guest_doorbell, rights);
+        if (!doorbell_rights_valid(rights)) {
+            rc = E_INVALID;
+        } else {
+            endpoint = ipc::doorbell_cap_alloc(caller.pid, channel->guest_doorbell, rights);
+        }
         break;
     default:
         rc = E_INVALID;
@@ -163,26 +209,35 @@ CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_
     }
 
     if (rc != E_OK) {
-        if (out_error) *out_error = rc;
+        if (out_error) {
+            *out_error = rc;
+        }
         note_error();
         return kNullCap;
     }
     if (endpoint == kNullCap) {
-        if (out_error) *out_error = E_OVERFLOW;
+        if (out_error) {
+            *out_error = E_OVERFLOW;
+        }
         note_error();
         return kNullCap;
     }
 
-    if (out_error) *out_error = E_OK;
+    if (out_error) {
+        *out_error = E_OK;
+    }
     return endpoint;
 }
 
 SysError inspect_channel(Process& caller, CapHandle channel_cap, VmChannelInfo* out) {
-    if (!out) return E_INVALID;
+    if (!out) {
+        return E_INVALID;
+    }
     SysError rc = E_OK;
-    auto channel = channel_from_cap(caller, channel_cap,
-                                          RIGHT_VM_CHANNEL_INSPECT, &rc);
-    if (!channel) return rc;
+    auto channel = channel_from_cap(caller, channel_cap, RIGHT_VM_CHANNEL_INSPECT, &rc);
+    if (!channel) {
+        return rc;
+    }
 
     VmChannelInfo info{};
     info.channel_id = channel->channel_id;
@@ -192,10 +247,8 @@ SysError inspect_channel(Process& caller, CapHandle channel_cap, VmChannelInfo* 
     info.messages_host_to_guest = channel->messages_host_to_guest;
     info.messages_guest_to_host = channel->messages_guest_to_host;
     info.endpoint_present_mask =
-        (channel->host_to_guest ? 1ull : 0ull) |
-        (channel->guest_to_host ? 2ull : 0ull) |
-        (channel->host_doorbell ? 4ull : 0ull) |
-        (channel->guest_doorbell ? 8ull : 0ull);
+        (channel->host_to_guest ? 1ull : 0ull) | (channel->guest_to_host ? 2ull : 0ull) |
+        (channel->host_doorbell ? 4ull : 0ull) | (channel->guest_doorbell ? 8ull : 0ull);
     *out = info;
     return E_OK;
 }
@@ -203,9 +256,13 @@ SysError inspect_channel(Process& caller, CapHandle channel_cap, VmChannelInfo* 
 void dispose_channel(void* target) {
     auto* channel = static_cast<VmChannel*>(target);
     auto* owner = channel->owner_lifetime;
-    release_creator(channel->host_to_guest); release_creator(channel->guest_to_host);
-    release_creator(channel->host_doorbell); release_creator(channel->guest_doorbell);
-    if (channel->descriptor_page) mm::free_page(channel->descriptor_page);
+    release_creator(channel->host_to_guest);
+    release_creator(channel->guest_to_host);
+    release_creator(channel->host_doorbell);
+    release_creator(channel->guest_doorbell);
+    if (channel->descriptor_page) {
+        mm::free_page(channel->descriptor_page);
+    }
     mm::slab_free(channel, sizeof(VmChannel), alignof(VmChannel));
     object::release(owner);
 }
@@ -213,62 +270,102 @@ void dispose_channel(void* target) {
 // All channel mapping/HVC/notify operations run under CallGuard. No raw
 // channel/vCPU pointer is installed in a doorbell or asynchronous callback.
 // VM teardown destroys stage 2 before releasing these pages and endpoints.
-SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
-                     u64 ipa, u64 reserved_size, u32 guest_irq) {
+SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap, u64 ipa,
+                     u64 reserved_size, u32 guest_irq) {
     SysError rc = E_OK;
     auto channel = channel_from_cap(caller, channel_cap,
-        RIGHT_VM_CHANNEL_SEND | RIGHT_VM_CHANNEL_RECV |
-        RIGHT_VM_CHANNEL_NOTIFY | RIGHT_VM_CHANNEL_INSPECT, &rc);
-    if (!channel) return rc;
+                                    RIGHT_VM_CHANNEL_SEND | RIGHT_VM_CHANNEL_RECV |
+                                        RIGHT_VM_CHANNEL_NOTIFY | RIGHT_VM_CHANNEL_INSPECT,
+                                    &rc);
+    if (!channel) {
+        return rc;
+    }
     auto cpu = vcpu_from_cap(caller, vcpu_cap, RIGHT_VCPU_CONTROL, &rc);
-    if (!cpu) return rc;
-    if (cpu->owner_vm_id != channel->owner_vm_id) return E_PERM;
+    if (!cpu) {
+        return rc;
+    }
+    if (cpu->owner_vm_id != channel->owner_vm_id) {
+        return E_PERM;
+    }
     Vm* owner = find_vm_by_id(channel->owner_vm_id);
-    if (!owner || owner->state == VM_DEAD) return E_DEAD;
+    if (!owner || owner->state == VM_DEAD) {
+        return E_DEAD;
+    }
     // Stale generation: the peer is holding a descriptor from a previous
     // appliance boot. Reject before mutating anything.
-    if (!channel_generation_current(*owner, *channel)) return E_NOTFOUND;
-    if (channel->target || owner->stage2.active) return E_BUSY;
-    if (!ipa || (ipa & (PAGE_SIZE - 1)) || (reserved_size & (PAGE_SIZE - 1)) ||
-        guest_irq < 32 || guest_irq >= kVgicMaxIrqs) return E_INVALID;
-    if (device_irq_vector_used(*cpu, guest_irq)) return E_BUSY;
+    if (!channel_generation_current(*owner, *channel)) {
+        return E_NOTFOUND;
+    }
+    if (channel->target || owner->stage2.active) {
+        return E_BUSY;
+    }
+    if (!ipa || (ipa & (PAGE_SIZE - 1)) || (reserved_size & (PAGE_SIZE - 1)) || guest_irq < 32 ||
+        guest_irq >= kVgicMaxIrqs) {
+        return E_INVALID;
+    }
+    if (device_irq_vector_used(*cpu, guest_irq)) {
+        return E_BUSY;
+    }
     for (u32 i = 0; i < owner->channel_count; ++i) {
         const auto* other = owner->channels[i];
-        if (other && other->target == cpu.get() && other->guest_irq == guest_irq) return E_BUSY;
+        if (other && other->target == cpu.get() && other->guest_irq == guest_irq) {
+            return E_BUSY;
+        }
     }
-    const u64 ring_bytes = (sizeof(RingHeader) + (1ull << channel->order) * sizeof(RingSlot) +
-                            PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    const u64 ring_bytes =
+        (sizeof(RingHeader) + (1ull << channel->order) * sizeof(RingSlot) + PAGE_SIZE - 1) &
+        ~(PAGE_SIZE - 1);
     const u64 bytes = PAGE_SIZE + 2 * ring_bytes;
     if (reserved_size < bytes || ipa >= (1ull << owner->stage2.ipa_bits) ||
-        reserved_size > (1ull << owner->stage2.ipa_bits) - ipa) return E_INVALID;
+        reserved_size > (1ull << owner->stage2.ipa_bits) - ipa) {
+        return E_INVALID;
+    }
     rc = stage2_validate_no_overlap(&owner->stage2, ipa, reserved_size);
-    if (rc != E_OK) return rc;
+    if (rc != E_OK) {
+        return rc;
+    }
     if (!stage2_has_capacity(&owner->stage2, (bytes + DANGO_SHM_GUEST_SIZE) / PAGE_SIZE)) {
         return E_OVERFLOW;
     }
     const PhysAddr page = mm::alloc_page();
-    if (!page) return E_NOMEM;
+    if (!page) {
+        return E_NOMEM;
+    }
     libk::memset(reinterpret_cast<void*>(page), 0, PAGE_SIZE);
     auto& layout = *reinterpret_cast<dango_channel_layout*>(page);
-    layout.desc = {DANGO_CH_MAGIC, DANGO_CH_VERSION, 0, channel->order, DANGO_CH_ARM_SUPPORTED,
-                   channel->boot_generation, ipa + PAGE_SIZE, ipa + PAGE_SIZE + ring_bytes,
-                   0, 0, guest_irq, 0};
+    layout.desc = {DANGO_CH_MAGIC,
+                   DANGO_CH_VERSION,
+                   0,
+                   channel->order,
+                   DANGO_CH_ARM_SUPPORTED,
+                   channel->boot_generation,
+                   ipa + PAGE_SIZE,
+                   ipa + PAGE_SIZE + ring_bytes,
+                   0,
+                   0,
+                   guest_irq,
+                   0};
     layout.channel_id = channel->channel_id;
     layout.ring_bytes = static_cast<u32>(ring_bytes);
     layout.mapping_bytes = static_cast<u32>(2 * ring_bytes);
     u64 off = 0;
     for (; off < bytes; off += PAGE_SIZE) {
         PhysAddr pa = page;
-        if (off >= PAGE_SIZE + ring_bytes)
+        if (off >= PAGE_SIZE + ring_bytes) {
             pa = channel->guest_to_host->phys_base + off - PAGE_SIZE - ring_bytes;
-        else if (off >= PAGE_SIZE)
+        } else if (off >= PAGE_SIZE) {
             pa = channel->host_to_guest->phys_base + off - PAGE_SIZE;
-        rc = stage2_map_page(&owner->stage2, ipa + off, pa,
-                            RIGHT_READ | (off ? RIGHT_WRITE : 0));
-        if (rc != E_OK) break;
+        }
+        rc = stage2_map_page(&owner->stage2, ipa + off, pa, RIGHT_READ | (off ? RIGHT_WRITE : 0));
+        if (rc != E_OK) {
+            break;
+        }
     }
     if (rc != E_OK) {
-        while (off) { off -= PAGE_SIZE; (void)stage2_unmap_page(&owner->stage2, ipa + off); }
+        while (off) {
+            off -= PAGE_SIZE;
+            (void)stage2_unmap_page(&owner->stage2, ipa + off);
+        }
         mm::free_page(page);
         return rc;
     }
@@ -305,7 +402,9 @@ SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
         for (; shm_off < DANGO_SHM_GUEST_SIZE; shm_off += PAGE_SIZE) {
             rc = stage2_map_page(&owner->stage2, DANGO_SHM_GUEST_BASE + shm_off, shm_page,
                                  RIGHT_READ);
-            if (rc != E_OK) break;
+            if (rc != E_OK) {
+                break;
+            }
         }
         if (rc != E_OK) {
             while (shm_off) {
@@ -330,6 +429,45 @@ SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
     return E_OK;
 }
 
+// Publish this VM's attached shared arenas into the descriptor page's region
+// table. The guest reads this page read-only; it is the only way a region id
+// reaches the guest, and DANGO_SHM_EXPORT_DMABUF needs one.
+//
+// Only live, guest-mapped arenas owned by this VM are listed. The
+// DMA_SHARED_GPU flag reflects Anko's own registration state and nothing else:
+// it is the same `dma_class` that shared_arena_register_dma() is the sole writer
+// of, so the guest cannot be told a region is device-reachable when it is not.
+void publish_shared_regions(Vm& owner) {
+    if (!owner.shm_page) {
+        return;
+    }
+    auto* desc = reinterpret_cast<dango_shm_desc*>(owner.shm_page);
+    if (desc->magic != DANGO_SHM_DESC_MAGIC) {
+        return;
+    }
+    u32 count = 0;
+    for (u32 i = 0; i < owner.shared_arena_count && count < DANGO_SHM_MAX_REGIONS; ++i) {
+        const auto* shared = owner.shared_arenas[i];
+        if (!shared || shared->dead || !shared->mapped_stage2 || shared->shared_id == 0) {
+            continue;
+        }
+        auto& region = desc->regions[count];
+        region.id = shared->shared_id;
+        region.guest_pa = shared->guest_pa_base;
+        region.size = shared->size;
+        region.flags = shared->dma_class == iommu::VmDmaClass::SharedGpu
+                           ? DANGO_SHM_REGION_FLAG_DMA_SHARED_GPU
+                           : DANGO_SHM_REGION_FLAG_NONE;
+        region.reserved0 = 0;
+        ++count;
+    }
+    // Clear the tail so a shrunk table cannot leave a stale id visible.
+    for (u32 i = count; i < DANGO_SHM_MAX_REGIONS; ++i) {
+        libk::memset(&desc->regions[i], 0, sizeof(desc->regions[i]));
+    }
+    desc->count = count;
+}
+
 // Publish the VM's shared staging window (guest IPA + size) into the channel
 // descriptor. Staging pages are host-writable and guest-mappable but never
 // DMA-authorizable; the window is validated against free stage-2 IPA space so
@@ -338,19 +476,33 @@ SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
 // installed the descriptor page.
 SysError stage_channel(Process& caller, CapHandle channel_cap, u64 ipa, u64 size) {
     SysError rc = E_OK;
-    auto channel = channel_from_cap(caller, channel_cap,
+    auto channel = channel_from_cap(
+        caller, channel_cap,
         RIGHT_VM_CHANNEL_INSPECT | RIGHT_VM_CHANNEL_SEND | RIGHT_VM_CHANNEL_RECV, &rc);
-    if (!channel) return rc;
+    if (!channel) {
+        return rc;
+    }
     // No descriptor page yet: map_channel() has not run. Fail safe, do nothing.
-    if (!channel->descriptor_page) return E_INVALID;
+    if (!channel->descriptor_page) {
+        return E_INVALID;
+    }
     Vm* owner = find_vm_by_id(channel->owner_vm_id);
-    if (!owner || owner->state == VM_DEAD) return E_DEAD;
-    if (!channel_generation_current(*owner, *channel)) return E_NOTFOUND;
-    if (ipa == 0 || size == 0) return E_INVALID;
-    if ((ipa & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0) return E_INVALID;
-    if (ipa != kStagingWindowBase || size != kStagingWindowSize) return E_INVALID;
-    if (ipa >= (1ull << owner->stage2.ipa_bits) ||
-        size > (1ull << owner->stage2.ipa_bits) - ipa) {
+    if (!owner || owner->state == VM_DEAD) {
+        return E_DEAD;
+    }
+    if (!channel_generation_current(*owner, *channel)) {
+        return E_NOTFOUND;
+    }
+    if (ipa == 0 || size == 0) {
+        return E_INVALID;
+    }
+    if ((ipa & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0) {
+        return E_INVALID;
+    }
+    if (ipa != kStagingWindowBase || size > kStagingWindowSize) {
+        return E_INVALID;
+    }
+    if (ipa >= (1ull << owner->stage2.ipa_bits) || size > (1ull << owner->stage2.ipa_bits) - ipa) {
         return E_INVALID;
     }
 
@@ -358,33 +510,73 @@ SysError stage_channel(Process& caller, CapHandle channel_cap, u64 ipa, u64 size
     VmMemory* staging = nullptr;
     for (u32 i = 0; i < owner->memory_count; ++i) {
         VmMemory* mem = owner->memory_objects[i];
-        if (mem && !mem->dead && mem->shared_staging) { staging = mem; break; }
+        if (mem && !mem->dead && mem->shared_staging) {
+            staging = mem;
+            break;
+        }
     }
-    if (!staging || staging->size != size) return E_INVALID;
-
-    rc = stage2_validate_no_overlap(&owner->stage2, ipa, size);
-    if (rc != E_OK) return rc;
+    // A native render client may supply an existing CPU-only shared arena.
+    // It is already mapped, so validate that exact owned attachment rather
+    // than accepting an arbitrary pre-existing stage-2 range.
+    u64 covered = 0;
+    while (covered < size) {
+        u64 span = 0;
+        for (u32 i = 0; i < owner->shared_arena_count; ++i) {
+            const auto* shared = owner->shared_arenas[i];
+            if (shared && !shared->dead && shared->mapped_stage2 &&
+                shared->guest_pa_base == ipa + covered && shared->size <= size - covered &&
+                shared->dma_class == iommu::VmDmaClass::None && !shared->dma_perms &&
+                shared->rights == (RIGHT_READ | RIGHT_WRITE)) {
+                span = shared->size;
+            }
+        }
+        if (!span) {
+            break;
+        }
+        covered += span;
+    }
+    const bool shared_staging = covered == size;
+    if (!shared_staging) {
+        if (!staging || staging->size != size) {
+            return E_INVALID;
+        }
+        rc = stage2_validate_no_overlap(&owner->stage2, ipa, size);
+        if (rc != E_OK) {
+            return rc;
+        }
+    }
 
     auto& layout = *reinterpret_cast<dango_channel_layout*>(channel->descriptor_page);
     layout.desc.shared_staging_pa = ipa;
     layout.desc.shared_staging_size = size;
     channel->staging_base = ipa;
     channel->staging_size = size;
+    publish_shared_regions(*owner);
     return E_OK;
 }
 
 SysError notify_channel(Process& caller, CapHandle channel_cap) {
     SysError rc = E_OK;
     auto channel = channel_from_cap(caller, channel_cap, RIGHT_VM_CHANNEL_NOTIFY, &rc);
-    if (!channel) return rc;
+    if (!channel) {
+        return rc;
+    }
     Vm* owner = find_vm_by_id(channel->owner_vm_id);
-    if (!owner || owner->state == VM_DEAD) return E_DEAD;
-    if (!channel_generation_current(*owner, *channel)) return E_NOTFOUND;
-    if (!channel->target) return E_INVALID;
+    if (!owner || owner->state == VM_DEAD) {
+        return E_DEAD;
+    }
+    if (!channel_generation_current(*owner, *channel)) {
+        return E_NOTFOUND;
+    }
+    if (!channel->target) {
+        return E_INVALID;
+    }
     // Back-pressure, never a silent drop or a spin: a full host->guest ring
     // means the guest has not drained, so there is nothing to publish into and
     // the caller gets a distinct status it can retry on.
-    if (channel->host_to_guest && channel_ring_full(*channel->host_to_guest)) return E_BUSY;
+    if (channel->host_to_guest && channel_ring_full(*channel->host_to_guest)) {
+        return E_BUSY;
+    }
     channel_publish(*channel);
     return E_OK;
 }
@@ -395,15 +587,18 @@ SysError notify_channel(Process& caller, CapHandle channel_cap) {
 // reach a freed vCPU and no stale vGIC pending bit survives the teardown.
 void channel_detach_vcpu(Vcpu& cpu) {
     Vm* owner = find_vm_by_id(cpu.owner_vm_id);
-    if (!owner) return;
+    if (!owner) {
+        return;
+    }
     for (u32 i = 0; i < owner->channel_count; ++i) {
         VmChannel* channel = owner->channels[i];
-        if (!channel || channel->target != &cpu) continue;
+        if (!channel || channel->target != &cpu) {
+            continue;
+        }
         vgic_pending_clear(cpu, channel->guest_irq);
         channel->armed = false;
         channel->target = nullptr;
     }
 }
-
 
 } // namespace vm

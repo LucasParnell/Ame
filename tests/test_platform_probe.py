@@ -210,6 +210,47 @@ class PlatformProbe(unittest.TestCase):
                         '/uart@c000"; };')
         self.assertEqual(self.decode(data)[3], 0xc000)
 
+    def build_anne_probe(self, diagnostic=False):
+        probe = self.path / ('anne-diag-probe' if diagnostic else 'anne-probe')
+        subprocess.run([
+            'clang++', '-std=c++23', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
+            '-fsanitize=address,undefined', '-ffunction-sections', '-Wl,--gc-sections',
+            '-DANKO_BOARD_HUAWEI_ANNE',
+            *(['-DANKO_ANNE_DIAG_TEST=1'] if diagnostic else []),
+            '-I' + str(ROOT / 'kernel/include'),
+            '-I' + str(ROOT / 'shared/include'), '-idirafter', str(ROOT / 'lib/include'),
+            str(ROOT / 'tests/platform_probe.cc'), str(ROOT / 'kernel/platform/probe.cc'),
+            str(ROOT / 'kernel/init/fdt.cc'), str(ROOT / 'lib/libk/string.cc'),
+            '-o', str(probe)], check=True, capture_output=True, text=True)
+        return probe
+
+    def test_anne_ram_identity_window_stops_before_native_images(self):
+        probe = self.build_anne_probe()
+        data = self.dtb('memory@400000 { device_type="memory"; reg=<0 0x400000 0 0xbfe00000>; };')
+        path = self.path / 'anne-memory.dtb'
+        path.write_bytes(data)
+        fields = subprocess.check_output([str(probe), str(path)], text=True).split()
+        self.assertEqual(fields[0], '1')
+        base, size = int(fields[1], 16), int(fields[2], 16)
+        self.assertEqual(base, 0x400000)
+        self.assertEqual(base + size, 0x10000000)
+        self.assertGreater(size, 128 * 1024 * 1024)
+
+    def test_anne_qemu_diagnostics_preserve_discovered_ram(self):
+        # Diagnostic presets define both ANE macros on qemu-virt. Rejecting
+        # this RAM bank discards the DT result and leaves fallback ECAM mapped
+        # over the initial user stack at 0x3ffec000.
+        probe = self.build_anne_probe(diagnostic=True)
+        path = self.path / 'anne-qemu-memory.dtb'
+        path.write_bytes(self.dtb(
+            'memory@40000000 { device_type="memory"; reg=<0 0x40000000 0 0x8000000>; };'
+            'uart@9000000 { compatible="arm,pl011"; reg=<0 0x9000000 0 0x1000>; };'
+            'chosen { stdout-path="/uart@9000000"; };'))
+        fields = subprocess.check_output([str(probe), str(path)], text=True).split()
+        self.assertEqual(fields[0], '1')
+        self.assertEqual([int(value, 16) for value in fields[1:4]],
+                         [0x40000000, 0x8000000, 0x9000000])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -2,6 +2,7 @@
 // Standard USB requests and EP0 phases. Class request interpretation remains
 // in the function process; descriptors and endpoint allocation are composition.
 #include "state.h"
+#include "midix/abi/diagnostics.h"
 namespace mochi::usb::gadget {
 inline void function_setup(Runtime& r) {
     r.function_request = {r.setup.id, r.function_generation, r.setup.setup, MX_OK, 0, {}};
@@ -17,14 +18,100 @@ inline void function_setup(Runtime& r) {
     }
 }
 inline void setup(Runtime& r, const MxDeviceEvent& event) {
+    const auto previous_phase = r.phase;
     r.setup = event;
     r.generation = event.generation;
     r.speed = static_cast<MxUsbSpeed>(event.speed);
     r.phase = ControlPhase::Idle;
     r.ep0_active = false;
     r.pending_function = false;
+    r.observe_pending = false;
+    r.observe_history = false;
+    r.observe_trial = false;
     r.address_pending = false;
     const auto& s = event.setup;
+    // Fixed retained-log tail for diagnosing a USB service that restarted.
+    // Metadata freezes an at-most-8-KiB window; page reads never accept an
+    // address or extend beyond it. Each response fits one EP0 packet.
+    if (s.request_type == 0xc0 && s.request == 0x5f && s.length && s.length <= 64) {
+        if (!s.value && !s.index && s.length == 16) {
+            MxDiagSystem info{};
+            const auto got=sys_debug_read(MX_DIAG_SYSTEM,0,&info,sizeof(info));
+            if (got != sizeof(info) || info.boot_log_size > info.boot_log_capacity ||
+                info.boot_log_size > 0xffffffffu) { stall(r);return; }
+            r.log_tail_length=info.boot_log_size < 8192 ? info.boot_log_size : 8192;
+            r.log_tail_start=info.boot_log_size-r.log_tail_length;
+            const mx_u32_t words[]={0x31474c42u,r.log_tail_start,r.log_tail_length,
+                                   static_cast<mx_u32_t>(info.boot_log_size)};
+            libk::copy_n(libk::slice(r.payload,512,sizeof(words)),
+                        libk::as_bytes(words,sizeof(words)),sizeof(words));
+            reply_data(r,sizeof(words));return;
+        }
+        const mx_u32_t offset=mx_u32_t{s.index}*64;
+        if (s.value==1 && offset < r.log_tail_length) {
+            const auto left=r.log_tail_length-offset;
+            const auto count=s.length < left ? s.length : left;
+            const auto got=sys_debug_read(MX_DIAG_BOOT_LOG,r.log_tail_start+offset,
+                                         r.payload.data+512,count);
+            if (got==count) {reply_data(r,count);return;}
+        }
+        stall(r);return;
+    }
+    if (s.request_type == 0xc0 && s.request == 0x5e && !s.value && !s.index &&
+        s.length == 48) {
+        const auto& last=r.last_out_control;
+        const mx_u32_t words[]={0x31534341u,
+            last.setup.request_type | (mx_u32_t{last.setup.request}<<8) |
+                (mx_u32_t{last.setup.length}<<16),
+            last.setup.index | (mx_u32_t{last.setup.value}<<16), last.length,
+            static_cast<mx_u32_t>(r.last_out_reply_status),r.last_out_reply_length,
+            static_cast<mx_u32_t>(last.id),static_cast<mx_u32_t>(last.id>>32),
+            libk::load_le<mx_u32_t>(last.data),libk::load_le<mx_u32_t>(last.data+4),
+            libk::load_le<mx_u32_t>(last.data+8),libk::load_le<mx_u32_t>(last.data+12)};
+        libk::copy_n(libk::slice(r.payload,512,sizeof(words)),
+                    libk::as_bytes(words,sizeof(words)),sizeof(words));
+        reply_data(r,sizeof(words));
+        return;
+    }
+    // An explicit one-shot trial can be armed after normal enumeration. It
+    // exposes two fixed receive sequences, never caller-chosen registers.
+    if (s.request_type == 0xc0 && s.request == 0x5d && s.value <= 2 &&
+        !s.index && s.length == sizeof(MxDeviceSnapshot) && r.configuration) {
+        r.observe_endpoint=0;
+        r.observe_trial=true;
+        r.trial_mode=s.value;
+        r.observe_pending=true;
+        r.phase=ControlPhase::Observe;
+        return;
+    }
+    // Development diagnostics over EP0 stay usable when a byte endpoint is
+    // stalled. Return bounded state only, never arbitrary memory/registers.
+    if (s.request_type == 0xc0 && s.request == 0x5a && !s.value && !s.index && s.length) {
+        const auto& f=r.functions[0];
+        const mx_u32_t words[]={0x31475355u,static_cast<mx_u32_t>(previous_phase),
+            r.configuration,static_cast<mx_u32_t>(r.speed),
+            static_cast<mx_u32_t>(f.rx_active | (f.rx_pending << 1) |
+                (f.tx_active << 2) | (f.tx_pending << 3) | (f.reset << 4)),
+            f.received,f.forwarded,f.tx_bytes,
+            r.links[0].tx().depth(),r.links[0].rx().depth(),
+            r.links[1].tx().depth(),r.links[1].rx().depth(),
+            r.acm_control.tx().depth(),r.acm_control.rx().depth(),
+            (static_cast<mx_u32_t>(r.function_request.setup.request) << 16) |
+                r.function_request.setup.length, r.function_request.length};
+        libk::copy_n(libk::slice(r.payload,512,sizeof(words)),
+                    libk::as_bytes(words,sizeof(words)),sizeof(words));
+        reply_data(r,sizeof(words));
+        return;
+    }
+    if (s.request_type == 0xc0 && !s.value && s.length &&
+        ((s.request == 0x5b && !(s.index & ~0x87u)) ||
+         (s.request == 0x5c && !s.index))) {
+        r.observe_endpoint=s.index;
+        r.observe_history=s.request==0x5c;
+        r.observe_pending=true;
+        r.phase=ControlPhase::Observe;
+        return;
+    }
     // Descriptor discovery and HID SET_IDLE are handled without spawning FIDO.
     if (s.request_type == 0x81 && s.request == 6 && s.index == 3 &&
         (s.value == 0x2200 || s.value == 0x2100)) {
@@ -127,6 +214,9 @@ inline void completion(Runtime& r, const MxDeviceEvent& done) {
             r.function_request.length = done.length;
             libk::copy_n(libk::as_bytes(r.function_request.data),
                          libk::slice(r.payload, 0, done.length), done.length);
+            r.last_out_control=r.function_request;
+            r.last_out_reply_status=MX_ERR_BUSY;
+            r.last_out_reply_length=0;
             r.pending_function = true;
             r.phase = ControlPhase::Function;
         } else if (r.phase == ControlPhase::StatusIn) {

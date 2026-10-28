@@ -1,0 +1,34 @@
+--- a/src/panfrost/vulkan/panvk_physical_device.c
++++ b/src/panfrost/vulkan/panvk_physical_device.c
+@@ -555,10 +555,11 @@
+       /* We could also split into serveral jobs but this has many limitations.
+        * As such we limit to the max threads per workgroup supported by the GPU.
+        */
+-      .maxComputeWorkGroupInvocations = device->kmod.props.max_threads_per_wg,
+-      .maxComputeWorkGroupSize = {device->kmod.props.max_threads_per_wg,
+-                                  device->kmod.props.max_threads_per_wg,
+-                                  device->kmod.props.max_threads_per_wg},
++      .maxComputeWorkGroupInvocations = arch == 5 ? MIN2(128, device->kmod.props.max_threads_per_wg) : device->kmod.props.max_threads_per_wg,
++      .maxComputeWorkGroupSize = {
++         arch == 5 ? MIN2(128, device->kmod.props.max_threads_per_wg) : device->kmod.props.max_threads_per_wg,
++         arch == 5 ? MIN2(128, device->kmod.props.max_threads_per_wg) : device->kmod.props.max_threads_per_wg,
++         arch == 5 ? MIN2(128, device->kmod.props.max_threads_per_wg) : device->kmod.props.max_threads_per_wg},
+       /* 8-bit subpixel precision. */
+       .subPixelPrecisionBits = 8,
+       .subTexelPrecisionBits = 8,
+--- a/src/panfrost/vulkan/panvk_meta.h
++++ b/src/panfrost/vulkan/panvk_meta.h
+@@ -119,7 +119,13 @@
+    if (mod == DRM_FORMAT_MOD_ARM_16X16_BLOCK_U_INTERLEAVED ||
+        drm_is_afbc(mod)) {
+       props.tile_size.width = 16;
++      /* This is a compute workgroup hint, not a physical layout override.
++       * Midgard's compiler ABI supports at most 128 contiguous threads. */
++#if defined(PAN_ARCH) && PAN_ARCH == 5
++      props.tile_size.height = 8;
++#else
+       props.tile_size.height = 16;
++#endif
+       props.tile_size.depth = 1;
+    } else {
+       /* When linear, pretend we have a 1D-tile so we end up with a <64,1,1>

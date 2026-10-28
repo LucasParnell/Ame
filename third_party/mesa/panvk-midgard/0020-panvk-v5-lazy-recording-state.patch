@@ -1,0 +1,1814 @@
+--- a/src/panfrost/vulkan/csf/panvk_cmd_buffer.h
++++ b/src/panfrost/vulkan/csf/panvk_cmd_buffer.h
+@@ -425,6 +425,8 @@
+    } state;
+ };
+ 
++#define panvk_cmd_state(cmdbuf) ((cmdbuf)->state)
++
+ VK_DEFINE_HANDLE_CASTS(panvk_cmd_buffer, vk.base, VkCommandBuffer,
+                        VK_OBJECT_TYPE_COMMAND_BUFFER)
+ 
+--- a/src/panfrost/vulkan/jm/panvk_cmd_buffer.h
++++ b/src/panfrost/vulkan/jm/panvk_cmd_buffer.h
+@@ -195,6 +195,12 @@
+ #endif
+ };
+ 
++struct panvk_cmd_state {
++   struct panvk_cmd_graphics_state gfx;
++   struct panvk_cmd_compute_state compute;
++   struct panvk_push_constant_state push_constants;
++};
++
+ struct panvk_cmd_buffer {
+    struct vk_command_buffer vk;
+ 
+@@ -205,12 +211,19 @@
+    struct list_head push_sets;
+    struct panvk_batch *cur_batch;
+ 
+-   struct {
+-      struct panvk_cmd_graphics_state gfx;
+-      struct panvk_cmd_compute_state compute;
+-      struct panvk_push_constant_state push_constants;
+-   } state;
+-};
++#if PAN_ARCH == 5
++   /* No recording state is needed until BeginCommandBuffer. */
++   struct panvk_cmd_state *state;
++#else
++   struct panvk_cmd_state state;
++#endif
++};
++
++#if PAN_ARCH == 5
++#define panvk_cmd_state(cmdbuf) (*(cmdbuf)->state)
++#else
++#define panvk_cmd_state(cmdbuf) ((cmdbuf)->state)
++#endif
+ 
+ VK_DEFINE_HANDLE_CASTS(panvk_cmd_buffer, vk.base, VkCommandBuffer,
+                        VK_OBJECT_TYPE_COMMAND_BUFFER)
+@@ -239,10 +252,10 @@
+ {
+    switch (bindpoint) {
+    case VK_PIPELINE_BIND_POINT_GRAPHICS:
+-      return &cmdbuf->state.gfx.desc_state;
++      return &panvk_cmd_state(cmdbuf).gfx.desc_state;
+ 
+    case VK_PIPELINE_BIND_POINT_COMPUTE:
+-      return &cmdbuf->state.compute.desc_state;
++      return &panvk_cmd_state(cmdbuf).compute.desc_state;
+ 
+    default:
+       assert(!"Unsupported bind point");
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+@@ -54,7 +54,7 @@
+ static VkResult
+ panvk_cmd_prepare_fragment_job(struct panvk_cmd_buffer *cmdbuf, mali_ptr fbd)
+ {
+-   const struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   const struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+    struct panfrost_ptr job_ptr = panvk_cmd_alloc_desc(cmdbuf, FRAGMENT_JOB);
+ 
+@@ -82,7 +82,7 @@
+    if (!batch)
+       return;
+ 
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+ 
+    assert(batch);
+ 
+@@ -170,7 +170,7 @@
+             break;
+ 
+          fbd |= GENX(pan_emit_fbd)(
+-            &cmdbuf->state.gfx.render.fb.info, i, &batch->tlsinfo,
++            &panvk_cmd_state(cmdbuf).gfx.render.fb.info, i, &batch->tlsinfo,
+             &batch->tiler.ctx,
+             batch->fb.desc.cpu + (batch->fb.desc_stride * i));
+ 
+@@ -196,9 +196,9 @@
+    if (batch->fb.desc.gpu)
+       return VK_SUCCESS;
+ 
+-   const struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   const struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    bool has_zs_ext = fbinfo->zs.view.zs || fbinfo->zs.view.s;
+-   batch->fb.layer_count = cmdbuf->state.gfx.render.layer_count;
++   batch->fb.layer_count = panvk_cmd_state(cmdbuf).gfx.render.layer_count;
+    unsigned fbd_size = pan_size(FRAMEBUFFER);
+ 
+    if (has_zs_ext)
+@@ -208,8 +208,8 @@
+    fbd_size = ALIGN_POT(fbd_size, pan_alignment(RENDER_TARGET)) +
+               (MAX2(fbinfo->rt_count, 1) * pan_size(RENDER_TARGET));
+ 
+-   batch->fb.bo_count = cmdbuf->state.gfx.render.fb.bo_count;
+-   memcpy(batch->fb.bos, cmdbuf->state.gfx.render.fb.bos,
++   batch->fb.bo_count = panvk_cmd_state(cmdbuf).gfx.render.fb.bo_count;
++   memcpy(batch->fb.bos, panvk_cmd_state(cmdbuf).gfx.render.fb.bos,
+           batch->fb.bo_count * sizeof(batch->fb.bos[0]));
+ 
+    batch->fb.desc =
+@@ -218,8 +218,8 @@
+    batch->fb.desc_stride = fbd_size;
+ 
+    #if PAN_ARCH >= 6
+-   memset(&cmdbuf->state.gfx.render.fb.info.bifrost.pre_post.dcds, 0,
+-          sizeof(cmdbuf->state.gfx.render.fb.info.bifrost.pre_post.dcds));
++   memset(&panvk_cmd_state(cmdbuf).gfx.render.fb.info.bifrost.pre_post.dcds, 0,
++          sizeof(panvk_cmd_state(cmdbuf).gfx.render.fb.info.bifrost.pre_post.dcds));
+ #endif
+ 
+    return batch->fb.desc.gpu ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+@@ -282,8 +282,8 @@
+    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+    struct panvk_physical_device *pdev = to_panvk_physical_device(dev->vk.physical);
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+-   const struct pan_fb_info *fb = &cmdbuf->state.gfx.render.fb.info;
+-   if (layer_idx || cmdbuf->state.gfx.render.layer_count != 1) {
++   const struct pan_fb_info *fb = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
++   if (layer_idx || panvk_cmd_state(cmdbuf).gfx.render.layer_count != 1) {
+       vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+       return VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+@@ -335,8 +335,8 @@
+       goto out_set_layer_ctx;
+    }
+ 
+-   const struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
+-   uint32_t layer_count = cmdbuf->state.gfx.render.layer_count;
++   const struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
++   uint32_t layer_count = panvk_cmd_state(cmdbuf).gfx.render.layer_count;
+    batch->tiler.heap_desc = panvk_cmd_alloc_desc(cmdbuf, TILER_HEAP);
+    batch->tiler.ctx_descs =
+       panvk_cmd_alloc_desc_array(cmdbuf, layer_count, TILER_CONTEXT);
+@@ -448,7 +448,16 @@
+    panvk_pool_reset(&cmdbuf->varying_pool);
+    panvk_cmd_buffer_obj_list_reset(cmdbuf, push_sets);
+ 
+-   memset(&cmdbuf->state, 0, sizeof(cmdbuf->state));
++#if PAN_ARCH == 5
++   if (flags & VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT) {
++      struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
++      vk_free(&dev->vk.alloc, cmdbuf->state);
++      cmdbuf->state = NULL;
++      cmdbuf->vk.dynamic_graphics_state.vi = NULL;
++      cmdbuf->vk.dynamic_graphics_state.ms.sample_locations = NULL;
++   } else if (cmdbuf->state)
++#endif
++      memset(&panvk_cmd_state(cmdbuf), 0, sizeof(panvk_cmd_state(cmdbuf)));
+ }
+ 
+ static void
+@@ -471,6 +480,9 @@
+    panvk_pool_cleanup(&cmdbuf->varying_pool);
+    panvk_cmd_buffer_obj_list_cleanup(cmdbuf, push_sets);
+    vk_command_buffer_finish(&cmdbuf->vk);
++#if PAN_ARCH == 5
++   vk_free(&dev->vk.alloc, cmdbuf->state);
++#endif
+    vk_free(&dev->vk.alloc, cmdbuf);
+ }
+ 
+@@ -497,9 +509,11 @@
+    }
+ 
+    panvk_cmd_buffer_obj_list_init(cmdbuf, push_sets);
+-   cmdbuf->vk.dynamic_graphics_state.vi = &cmdbuf->state.gfx.dynamic.vi;
++#if PAN_ARCH != 5
++   cmdbuf->vk.dynamic_graphics_state.vi = &panvk_cmd_state(cmdbuf).gfx.dynamic.vi;
+    cmdbuf->vk.dynamic_graphics_state.ms.sample_locations =
+-      &cmdbuf->state.gfx.dynamic.sl;
++      &panvk_cmd_state(cmdbuf).gfx.dynamic.sl;
++#endif
+ 
+    struct panvk_pool_properties desc_pool_props = {
+       .create_flags = 0,
+@@ -557,5 +571,19 @@
+ 
+    vk_command_buffer_begin(&cmdbuf->vk, pBeginInfo);
+ 
++#if PAN_ARCH == 5
++   if (!cmdbuf->state) {
++      struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
++      cmdbuf->state = vk_zalloc(&dev->vk.alloc, sizeof(*cmdbuf->state), 8,
++                                VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++      if (!cmdbuf->state) {
++         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++         return VK_ERROR_OUT_OF_HOST_MEMORY;
++      }
++      cmdbuf->vk.dynamic_graphics_state.vi = &cmdbuf->state->gfx.dynamic.vi;
++      cmdbuf->vk.dynamic_graphics_state.ms.sample_locations =
++         &cmdbuf->state->gfx.dynamic.sl;
++   }
++#endif
+    return VK_SUCCESS;
+ }
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_dispatch.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_dispatch.c
+@@ -44,7 +44,7 @@
+                                 uint32_t groupCountY, uint32_t groupCountZ, mali_ptr indirect)
+ {
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+-   const struct panvk_shader *shader = cmdbuf->state.compute.shader;
++   const struct panvk_shader *shader = panvk_cmd_state(cmdbuf).compute.shader;
+    VkResult result;
+ 
+    if (groupCountX == 0 || groupCountY == 0 || groupCountZ == 0)
+@@ -66,9 +66,9 @@
+    if (!batch) return;
+ 
+    struct panvk_descriptor_state *desc_state =
+-      &cmdbuf->state.compute.desc_state;
++      &panvk_cmd_state(cmdbuf).compute.desc_state;
+    struct panvk_shader_desc_state *cs_desc_state =
+-      &cmdbuf->state.compute.cs.desc;
++      &panvk_cmd_state(cmdbuf).compute.cs.desc;
+ 
+    result = panvk_per_arch(cmd_alloc_tls_desc)(cmdbuf, false);
+    if (result != VK_SUCCESS) return;
+@@ -79,7 +79,7 @@
+    if (result != VK_SUCCESS)
+       return;
+ 
+-   struct panvk_compute_sysvals *sysvals = &cmdbuf->state.compute.sysvals;
++   struct panvk_compute_sysvals *sysvals = &panvk_cmd_state(cmdbuf).compute.sysvals;
+    sysvals->base.x = baseGroupX;
+    sysvals->base.y = baseGroupY;
+    sysvals->base.z = baseGroupZ;
+@@ -102,17 +102,17 @@
+          sysvals->desc.sets[i] = desc_state->sets[i]->descs.dev;
+    }
+ 
+-   cmdbuf->state.compute.push_uniforms = 0;
+-
+-   if (!cmdbuf->state.compute.push_uniforms) {
+-      cmdbuf->state.compute.push_uniforms = panvk_per_arch(
+-         cmd_prepare_push_uniforms)(cmdbuf, &cmdbuf->state.compute.sysvals,
+-                                    sizeof(cmdbuf->state.compute.sysvals));
+-      if (!cmdbuf->state.compute.push_uniforms)
++   panvk_cmd_state(cmdbuf).compute.push_uniforms = 0;
++
++   if (!panvk_cmd_state(cmdbuf).compute.push_uniforms) {
++      panvk_cmd_state(cmdbuf).compute.push_uniforms = panvk_per_arch(
++         cmd_prepare_push_uniforms)(cmdbuf, &panvk_cmd_state(cmdbuf).compute.sysvals,
++                                    sizeof(panvk_cmd_state(cmdbuf).compute.sysvals));
++      if (!panvk_cmd_state(cmdbuf).compute.push_uniforms)
+          return;
+    }
+ 
+-   dispatch.push_uniforms = cmdbuf->state.compute.push_uniforms;
++   dispatch.push_uniforms = panvk_cmd_state(cmdbuf).compute.push_uniforms;
+ 
+    result = panvk_per_arch(cmd_prepare_shader_desc_tables)(
+       cmdbuf, desc_state, shader, cs_desc_state);
+@@ -120,7 +120,7 @@
+ 
+    struct panfrost_ptr copy_desc_job;
+    result = panvk_per_arch(meta_get_copy_desc_job)(
+-      cmdbuf, shader, &cmdbuf->state.compute.desc_state, cs_desc_state, 0,
++      cmdbuf, shader, &panvk_cmd_state(cmdbuf).compute.desc_state, cs_desc_state, 0,
+       &copy_desc_job);
+    if (result != VK_SUCCESS)
+       return;
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+@@ -103,15 +103,15 @@
+ panvk_cmd_prepare_draw_sysvals(struct panvk_cmd_buffer *cmdbuf,
+                                struct panvk_draw_info *draw)
+ {
+-   const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
+-   const struct panvk_shader *fs = cmdbuf->state.gfx.fs.shader;
+-
+-   struct panvk_descriptor_state *desc_state = &cmdbuf->state.gfx.desc_state;
+-   struct panvk_shader_desc_state *vs_desc_state = &cmdbuf->state.gfx.vs.desc;
+-   struct panvk_shader_desc_state *fs_desc_state = &cmdbuf->state.gfx.fs.desc;
+-   struct panvk_graphics_sysvals *sysvals = &cmdbuf->state.gfx.sysvals;
++   const struct panvk_shader *vs = panvk_cmd_state(cmdbuf).gfx.vs.shader;
++   const struct panvk_shader *fs = panvk_cmd_state(cmdbuf).gfx.fs.shader;
++
++   struct panvk_descriptor_state *desc_state = &panvk_cmd_state(cmdbuf).gfx.desc_state;
++   struct panvk_shader_desc_state *vs_desc_state = &panvk_cmd_state(cmdbuf).gfx.vs.desc;
++   struct panvk_shader_desc_state *fs_desc_state = &panvk_cmd_state(cmdbuf).gfx.fs.desc;
++   struct panvk_graphics_sysvals *sysvals = &panvk_cmd_state(cmdbuf).gfx.sysvals;
+    struct vk_color_blend_state *cb = &cmdbuf->vk.dynamic_graphics_state.cb;
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+ 
+    unsigned base_vertex = draw->index_size ? draw->vertex_offset : 0;
+    if (sysvals->vs.first_vertex != draw->offset_start ||
+@@ -124,14 +124,14 @@
+       sysvals->vs.base_instance = draw->first_instance;
+       sysvals->layer_id = draw->layer_id;
+       sysvals->fs.multisampled = fbinfo->nr_samples > 1;
+-      cmdbuf->state.gfx.push_uniforms = 0;
++      panvk_cmd_state(cmdbuf).gfx.push_uniforms = 0;
+    }
+ 
+    if (is_dirty(cmdbuf, CB_BLEND_CONSTANTS)) {
+       for (unsigned i = 0; i < ARRAY_SIZE(cb->blend_constants); i++)
+          sysvals->blend.constants[i] =
+             CLAMP(cb->blend_constants[i], 0.0f, 1.0f);
+-      cmdbuf->state.gfx.push_uniforms = 0;
++      panvk_cmd_state(cmdbuf).gfx.push_uniforms = 0;
+    }
+ 
+    if (is_dirty(cmdbuf, VP_VIEWPORTS)) {
+@@ -160,7 +160,7 @@
+       sysvals->viewport.offset.x = (0.5f * viewport->width) + viewport->x;
+       sysvals->viewport.offset.y = (0.5f * viewport->height) + viewport->y;
+       sysvals->viewport.offset.z = viewport->minDepth;
+-      cmdbuf->state.gfx.push_uniforms = 0;
++      panvk_cmd_state(cmdbuf).gfx.push_uniforms = 0;
+    }
+ 
+    VkResult result = panvk_per_arch(cmd_prepare_dyn_ssbos)(cmdbuf, desc_state,
+@@ -190,14 +190,14 @@
+ static bool
+ has_depth_att(struct panvk_cmd_buffer *cmdbuf)
+ {
+-   return (cmdbuf->state.gfx.render.bound_attachments &
++   return (panvk_cmd_state(cmdbuf).gfx.render.bound_attachments &
+            MESA_VK_RP_ATTACHMENT_DEPTH_BIT) != 0;
+ }
+ 
+ static bool
+ has_stencil_att(struct panvk_cmd_buffer *cmdbuf)
+ {
+-   return (cmdbuf->state.gfx.render.bound_attachments &
++   return (panvk_cmd_state(cmdbuf).gfx.render.bound_attachments &
+            MESA_VK_RP_ATTACHMENT_STENCIL_BIT) != 0;
+ }
+ 
+@@ -293,7 +293,7 @@
+ fs_required(struct panvk_cmd_buffer *cmdbuf)
+ {
+    const struct pan_shader_info *fs_info =
+-      cmdbuf->state.gfx.fs.shader ? &cmdbuf->state.gfx.fs.shader->info : NULL;
++      panvk_cmd_state(cmdbuf).gfx.fs.shader ? &panvk_cmd_state(cmdbuf).gfx.fs.shader->info : NULL;
+    const struct vk_dynamic_graphics_state *dyns =
+       &cmdbuf->vk.dynamic_graphics_state;
+    const struct vk_color_blend_state *cb = &dyns->cb;
+@@ -352,10 +352,10 @@
+       is_dirty(cmdbuf, MS_RASTERIZATION_SAMPLES) ||
+       is_dirty(cmdbuf, MS_SAMPLE_MASK) ||
+       is_dirty(cmdbuf, MS_ALPHA_TO_COVERAGE_ENABLE) ||
+-      is_dirty(cmdbuf, MS_ALPHA_TO_ONE_ENABLE) || !cmdbuf->state.gfx.fs.rsd;
++      is_dirty(cmdbuf, MS_ALPHA_TO_ONE_ENABLE) || !panvk_cmd_state(cmdbuf).gfx.fs.rsd;
+ 
+    if (!dirty) {
+-      draw->fs.rsd = cmdbuf->state.gfx.fs.rsd;
++      draw->fs.rsd = panvk_cmd_state(cmdbuf).gfx.fs.rsd;
+       return VK_SUCCESS;
+    }
+ 
+@@ -365,7 +365,7 @@
+    const struct vk_rasterization_state *rs = &dyns->rs;
+    const struct vk_color_blend_state *cb = &dyns->cb;
+    const struct vk_depth_stencil_state *ds = &dyns->ds;
+-   const struct panvk_shader *fs = cmdbuf->state.gfx.fs.shader;
++   const struct panvk_shader *fs = panvk_cmd_state(cmdbuf).gfx.fs.shader;
+    const struct pan_shader_info *fs_info = fs ? &fs->info : NULL;
+    unsigned bd_count = MAX2(cb->attachment_count, 1);
+    bool test_s = has_stencil_att(cmdbuf) && ds->stencil.test_enable;
+@@ -387,8 +387,8 @@
+ 
+    if (fs_info != NULL) {
+       VkResult blend_result = panvk_per_arch(blend_emit_descs)(
+-         dev, dyns, cmdbuf->state.gfx.render.color_attachments.fmts,
+-         cmdbuf->state.gfx.render.color_attachments.samples, fs_info, fs_code,
++         dev, dyns, panvk_cmd_state(cmdbuf).gfx.render.color_attachments.fmts,
++         panvk_cmd_state(cmdbuf).gfx.render.color_attachments.samples, fs_info, fs_code,
+          bds, &binfo);
+       if (blend_result != VK_SUCCESS) {
+          vk_command_buffer_set_error(&cmdbuf->vk, blend_result);
+@@ -420,7 +420,7 @@
+          }
+ 
+          uint8_t rt_written = fs_info->outputs_written >> FRAG_RESULT_DATA0;
+-         uint8_t rt_mask = cmdbuf->state.gfx.render.bound_attachments &
++         uint8_t rt_mask = panvk_cmd_state(cmdbuf).gfx.render.bound_attachments &
+                            MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS;
+          cfg.properties.allow_forward_pixel_to_kill =
+             fs_info->fs.can_fpk && !(rt_mask & ~rt_written) &&
+@@ -440,7 +440,7 @@
+          cfg.properties.force_early_z = fs_info->fs.can_early_z && !alpha_to_coverage;
+          cfg.properties.work_register_count = MAX2(fs_info->work_reg_count, binfo.work_reg_count);
+          cfg.legacy_blend_shader = binfo.legacy_shader;
+-         bool force_ez_with_discard = !test_z && !test_s && !cmdbuf->state.gfx.occlusion_query;
++         bool force_ez_with_discard = !test_z && !test_s && !panvk_cmd_state(cmdbuf).gfx.occlusion_query;
+          cfg.properties.shader_reads_tilebuffer = fs_info->fs.outputs_read || binfo.any_dest_read ||
+             (force_ez_with_discard && fs_info->fs.can_discard);
+          cfg.properties.shader_contains_discard = !force_ez_with_discard && fs_info->fs.can_discard;
+@@ -516,8 +516,8 @@
+       }
+    }
+ 
+-   cmdbuf->state.gfx.fs.rsd = ptr.gpu;
+-   draw->fs.rsd = cmdbuf->state.gfx.fs.rsd;
++   panvk_cmd_state(cmdbuf).gfx.fs.rsd = ptr.gpu;
++   draw->fs.rsd = panvk_cmd_state(cmdbuf).gfx.fs.rsd;
+    return VK_SUCCESS;
+ }
+ 
+@@ -571,8 +571,8 @@
+ panvk_draw_prepare_varyings(struct panvk_cmd_buffer *cmdbuf,
+                             struct panvk_draw_info *draw)
+ {
+-   const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
+-   const struct panvk_shader_link *link = &cmdbuf->state.gfx.link;
++   const struct panvk_shader *vs = panvk_cmd_state(cmdbuf).gfx.vs.shader;
++   const struct panvk_shader_link *link = &panvk_cmd_state(cmdbuf).gfx.link;
+    struct panfrost_ptr bufs = panvk_cmd_alloc_desc_array(
+       cmdbuf, PANVK_VARY_BUF_MAX + 1, ATTRIBUTE_BUFFER);
+    if (!bufs.gpu)
+@@ -739,7 +739,7 @@
+ panvk_draw_prepare_vs_attribs(struct panvk_cmd_buffer *cmdbuf,
+                               struct panvk_draw_info *draw)
+ {
+-   const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
++   const struct panvk_shader *vs = panvk_cmd_state(cmdbuf).gfx.vs.shader;
+    const struct vk_vertex_input_state *vi =
+       cmdbuf->vk.dynamic_graphics_state.vi;
+    unsigned num_imgs = vs->desc_info.others.count[PANVK_BIFROST_DESC_TABLE_IMG];
+@@ -753,9 +753,9 @@
+    bool dirty =
+       is_dirty(cmdbuf, VI) || is_dirty(cmdbuf, VI_BINDINGS_VALID) ||
+       is_dirty(cmdbuf, VI_BINDING_STRIDES) ||
+-      (num_imgs && !cmdbuf->state.gfx.vs.desc.img_attrib_table) ||
+-      (cmdbuf->state.gfx.vb.count && !cmdbuf->state.gfx.vs.attrib_bufs) ||
+-      (attrib_count && !cmdbuf->state.gfx.vs.attribs);
++      (num_imgs && !panvk_cmd_state(cmdbuf).gfx.vs.desc.img_attrib_table) ||
++      (panvk_cmd_state(cmdbuf).gfx.vb.count && !panvk_cmd_state(cmdbuf).gfx.vs.attrib_bufs) ||
++      (attrib_count && !panvk_cmd_state(cmdbuf).gfx.vs.attribs);
+ 
+ #if PAN_ARCH == 5
+    dirty = true; /* Vertex/instance ID descriptors depend on draw dimensions. */
+@@ -780,7 +780,7 @@
+    for (unsigned i = 0; i < num_vbs; i++) {
+       if (vi->bindings_valid & BITFIELD_BIT(i)) {
+          struct vk_vertex_binding_state binding = vi->bindings[i];
+-         const struct panvk_attrib_buf *buffer = &cmdbuf->state.gfx.vb.bufs[i];
++         const struct panvk_attrib_buf *buffer = &panvk_cmd_state(cmdbuf).gfx.vb.bufs[i];
+ #if PAN_ARCH == 5
+          if (draw->gather_mask & BITFIELD_BIT(i)) {
+             binding.stride = draw->gathered_strides[i];
+@@ -796,7 +796,7 @@
+    for (unsigned i = 0; i < num_vs_attribs; i++) {
+       if (vi->attributes_valid & BITFIELD_BIT(i)) {
+          unsigned buf_idx = vi->attributes[i].binding;
+-         const struct panvk_attrib_buf *buffer = &cmdbuf->state.gfx.vb.bufs[buf_idx];
++         const struct panvk_attrib_buf *buffer = &panvk_cmd_state(cmdbuf).gfx.vb.bufs[buf_idx];
+ #if PAN_ARCH == 5
+          if (draw->gather_mask & BITFIELD_BIT(buf_idx)) buffer = &draw->gathered_vbs[buf_idx];
+ #endif
+@@ -829,18 +829,18 @@
+    memset(bufs.cpu + (pan_size(ATTRIBUTE_BUFFER) * attrib_buf_count), 0,
+           pan_size(ATTRIBUTE_BUFFER));
+ 
+-   cmdbuf->state.gfx.vs.attrib_bufs = bufs.gpu;
+-   cmdbuf->state.gfx.vs.attribs = attribs.gpu;
++   panvk_cmd_state(cmdbuf).gfx.vs.attrib_bufs = bufs.gpu;
++   panvk_cmd_state(cmdbuf).gfx.vs.attribs = attribs.gpu;
+ 
+    if (num_imgs) {
+-      cmdbuf->state.gfx.vs.desc.img_attrib_table =
++      panvk_cmd_state(cmdbuf).gfx.vs.desc.img_attrib_table =
+          attribs.gpu + (MAX_VS_ATTRIBS * pan_size(ATTRIBUTE));
+-      cmdbuf->state.gfx.vs.desc.tables[PANVK_BIFROST_DESC_TABLE_IMG] =
++      panvk_cmd_state(cmdbuf).gfx.vs.desc.tables[PANVK_BIFROST_DESC_TABLE_IMG] =
+          bufs.gpu + (num_vbs * pan_size(ATTRIBUTE_BUFFER) * 2);
+ #if PAN_ARCH == 5
+-      cmdbuf->state.gfx.vs.desc.img_attrib_host =
++      panvk_cmd_state(cmdbuf).gfx.vs.desc.img_attrib_host =
+          attribs.cpu + (MAX_VS_ATTRIBS * pan_size(ATTRIBUTE));
+-      cmdbuf->state.gfx.vs.desc.table_hosts[PANVK_BIFROST_DESC_TABLE_IMG] =
++      panvk_cmd_state(cmdbuf).gfx.vs.desc.table_hosts[PANVK_BIFROST_DESC_TABLE_IMG] =
+          bufs.cpu + (num_vbs * pan_size(ATTRIBUTE_BUFFER) * 2);
+ #endif
+    }
+@@ -853,8 +853,8 @@
+                               struct panvk_draw_info *draw)
+ {
+    panvk_draw_prepare_vs_attribs(cmdbuf, draw);
+-   draw->vs.attributes = cmdbuf->state.gfx.vs.attribs;
+-   draw->vs.attribute_bufs = cmdbuf->state.gfx.vs.attrib_bufs;
++   draw->vs.attributes = panvk_cmd_state(cmdbuf).gfx.vs.attribs;
++   draw->vs.attribute_bufs = panvk_cmd_state(cmdbuf).gfx.vs.attrib_bufs;
+ }
+ 
+ static void
+@@ -911,7 +911,7 @@
+     * scissor disabled.
+     * As a result, we define an empty one.
+     */
+-   if (!cmdbuf->state.gfx.vpd || is_dirty(cmdbuf, VP_VIEWPORTS) ||
++   if (!panvk_cmd_state(cmdbuf).gfx.vpd || is_dirty(cmdbuf, VP_VIEWPORTS) ||
+        is_dirty(cmdbuf, VP_SCISSORS)) {
+       struct panfrost_ptr vp = panvk_cmd_alloc_desc(cmdbuf, VIEWPORT);
+       if (!vp.gpu)
+@@ -922,10 +922,10 @@
+ 
+       if (vps->viewport_count > 0)
+          panvk_emit_viewport(vps, vp.cpu);
+-      cmdbuf->state.gfx.vpd = vp.gpu;
+-   }
+-
+-   draw->viewport = cmdbuf->state.gfx.vpd;
++      panvk_cmd_state(cmdbuf).gfx.vpd = vp.gpu;
++   }
++
++   draw->viewport = panvk_cmd_state(cmdbuf).gfx.vpd;
+    return VK_SUCCESS;
+ }
+ 
+@@ -933,9 +933,9 @@
+ panvk_emit_vertex_dcd(struct panvk_cmd_buffer *cmdbuf,
+                       const struct panvk_draw_info *draw, void *dcd)
+ {
+-   const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
++   const struct panvk_shader *vs = panvk_cmd_state(cmdbuf).gfx.vs.shader;
+    const struct panvk_shader_desc_state *vs_desc_state =
+-      &cmdbuf->state.gfx.vs.desc;
++      &panvk_cmd_state(cmdbuf).gfx.vs.desc;
+ 
+ #if PAN_ARCH == 5
+    panvk_midgard_bind_push_ubo(vs, vs_desc_state, draw->push_uniforms);
+@@ -1018,7 +1018,7 @@
+ panvk_emit_tiler_primitive(struct panvk_cmd_buffer *cmdbuf,
+                            const struct panvk_draw_info *draw, void *prim)
+ {
+-   const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
++   const struct panvk_shader *vs = panvk_cmd_state(cmdbuf).gfx.vs.shader;
+    const struct vk_dynamic_graphics_state *dyns =
+       &cmdbuf->vk.dynamic_graphics_state;
+    const struct vk_input_assembly_state *ia = &dyns->ia;
+@@ -1078,7 +1078,7 @@
+                                 const struct panvk_draw_info *draw,
+                                 void *primsz)
+ {
+-   const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
++   const struct panvk_shader *vs = panvk_cmd_state(cmdbuf).gfx.vs.shader;
+    const struct vk_input_assembly_state *ia =
+       &cmdbuf->vk.dynamic_graphics_state.ia;
+    bool writes_point_size =
+@@ -1098,15 +1098,15 @@
+ panvk_emit_tiler_dcd(struct panvk_cmd_buffer *cmdbuf,
+                      const struct panvk_draw_info *draw, void *dcd)
+ {
+-   struct panvk_shader_desc_state *fs_desc_state = &cmdbuf->state.gfx.fs.desc;
++   struct panvk_shader_desc_state *fs_desc_state = &panvk_cmd_state(cmdbuf).gfx.fs.desc;
+    const struct vk_rasterization_state *rs =
+       &cmdbuf->vk.dynamic_graphics_state.rs;
+    const struct vk_input_assembly_state *ia =
+       &cmdbuf->vk.dynamic_graphics_state.ia;
+ 
+ #if PAN_ARCH == 5
+-   if (cmdbuf->state.gfx.fs.shader)
+-      panvk_midgard_bind_push_ubo(cmdbuf->state.gfx.fs.shader, fs_desc_state, draw->push_uniforms);
++   if (panvk_cmd_state(cmdbuf).gfx.fs.shader)
++      panvk_midgard_bind_push_ubo(panvk_cmd_state(cmdbuf).gfx.fs.shader, fs_desc_state, draw->push_uniforms);
+ #endif
+    pan_pack(dcd, DRAW, cfg) {
+       cfg.front_face_ccw = rs->front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE;
+@@ -1140,9 +1140,9 @@
+       cfg.samplers = fs_desc_state->tables[PANVK_BIFROST_DESC_TABLE_SAMPLER];
+ 
+ #if PAN_ARCH == 5
+-      if (cmdbuf->state.gfx.occlusion_query) {
++      if (panvk_cmd_state(cmdbuf).gfx.occlusion_query) {
+          cfg.occlusion_query = MALI_OCCLUSION_MODE_PREDICATE;
+-         cfg.occlusion = cmdbuf->state.gfx.occlusion_query;
++         cfg.occlusion = panvk_cmd_state(cmdbuf).gfx.occlusion_query;
+       }
+ #endif
+    }
+@@ -1153,11 +1153,11 @@
+                              struct panvk_draw_info *draw)
+ {
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+-   const struct panvk_shader *fs = cmdbuf->state.gfx.fs.shader;
+-   struct panvk_shader_desc_state *fs_desc_state = &cmdbuf->state.gfx.fs.desc;
++   const struct panvk_shader *fs = panvk_cmd_state(cmdbuf).gfx.fs.shader;
++   struct panvk_shader_desc_state *fs_desc_state = &panvk_cmd_state(cmdbuf).gfx.fs.desc;
+    struct panfrost_ptr ptr;
+    VkResult result = panvk_per_arch(meta_get_copy_desc_job)(
+-      cmdbuf, fs, &cmdbuf->state.gfx.desc_state, fs_desc_state, 0, &ptr);
++      cmdbuf, fs, &panvk_cmd_state(cmdbuf).gfx.desc_state, fs_desc_state, 0, &ptr);
+ 
+    if (result != VK_SUCCESS)
+       return result;
+@@ -1244,15 +1244,15 @@
+                                     struct panvk_draw_info *draw)
+ {
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+-   const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
++   const struct panvk_shader *vs = panvk_cmd_state(cmdbuf).gfx.vs.shader;
+    const struct panvk_shader_desc_state *vs_desc_state =
+-      &cmdbuf->state.gfx.vs.desc;
++      &panvk_cmd_state(cmdbuf).gfx.vs.desc;
+    const struct vk_vertex_input_state *vi =
+       cmdbuf->vk.dynamic_graphics_state.vi;
+    unsigned num_vbs = util_last_bit(vi->bindings_valid);
+    struct panfrost_ptr ptr;
+    VkResult result = panvk_per_arch(meta_get_copy_desc_job)(
+-      cmdbuf, vs, &cmdbuf->state.gfx.desc_state, vs_desc_state,
++      cmdbuf, vs, &panvk_cmd_state(cmdbuf).gfx.desc_state, vs_desc_state,
+       num_vbs * pan_size(ATTRIBUTE_BUFFER) * 2, &ptr);
+    if (result != VK_SUCCESS)
+       return result;
+@@ -1268,12 +1268,12 @@
+ panvk_draw_prepare_fs_copy_desc_job(struct panvk_cmd_buffer *cmdbuf,
+                                     struct panvk_draw_info *draw)
+ {
+-   const struct panvk_shader *fs = cmdbuf->state.gfx.fs.shader;
+-   struct panvk_shader_desc_state *fs_desc_state = &cmdbuf->state.gfx.fs.desc;
++   const struct panvk_shader *fs = panvk_cmd_state(cmdbuf).gfx.fs.shader;
++   struct panvk_shader_desc_state *fs_desc_state = &panvk_cmd_state(cmdbuf).gfx.fs.desc;
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+    struct panfrost_ptr ptr;
+    VkResult result = panvk_per_arch(meta_get_copy_desc_job)(
+-      cmdbuf, fs, &cmdbuf->state.gfx.desc_state, fs_desc_state, 0, &ptr);
++      cmdbuf, fs, &panvk_cmd_state(cmdbuf).gfx.desc_state, fs_desc_state, 0, &ptr);
+ 
+    if (result != VK_SUCCESS)
+       return result;
+@@ -1288,24 +1288,24 @@
+ void
+ panvk_per_arch(cmd_preload_fb_after_batch_split)(struct panvk_cmd_buffer *cmdbuf)
+ {
+-   for (unsigned i = 0; i < cmdbuf->state.gfx.render.fb.info.rt_count; i++) {
+-      if (cmdbuf->state.gfx.render.fb.info.rts[i].view) {
+-         cmdbuf->state.gfx.render.fb.info.rts[i].clear = false;
+-         cmdbuf->state.gfx.render.fb.info.rts[i].preload = true;
+-      }
+-   }
+-
+-   if (cmdbuf->state.gfx.render.fb.info.zs.view.zs) {
+-      cmdbuf->state.gfx.render.fb.info.zs.clear.z = false;
+-      cmdbuf->state.gfx.render.fb.info.zs.preload.z = true;
+-   }
+-
+-   if (cmdbuf->state.gfx.render.fb.info.zs.view.s ||
+-       (cmdbuf->state.gfx.render.fb.info.zs.view.zs &&
++   for (unsigned i = 0; i < panvk_cmd_state(cmdbuf).gfx.render.fb.info.rt_count; i++) {
++      if (panvk_cmd_state(cmdbuf).gfx.render.fb.info.rts[i].view) {
++         panvk_cmd_state(cmdbuf).gfx.render.fb.info.rts[i].clear = false;
++         panvk_cmd_state(cmdbuf).gfx.render.fb.info.rts[i].preload = true;
++      }
++   }
++
++   if (panvk_cmd_state(cmdbuf).gfx.render.fb.info.zs.view.zs) {
++      panvk_cmd_state(cmdbuf).gfx.render.fb.info.zs.clear.z = false;
++      panvk_cmd_state(cmdbuf).gfx.render.fb.info.zs.preload.z = true;
++   }
++
++   if (panvk_cmd_state(cmdbuf).gfx.render.fb.info.zs.view.s ||
++       (panvk_cmd_state(cmdbuf).gfx.render.fb.info.zs.view.zs &&
+         util_format_is_depth_and_stencil(
+-           cmdbuf->state.gfx.render.fb.info.zs.view.zs->format))) {
+-      cmdbuf->state.gfx.render.fb.info.zs.clear.s = false;
+-      cmdbuf->state.gfx.render.fb.info.zs.preload.s = true;
++           panvk_cmd_state(cmdbuf).gfx.render.fb.info.zs.view.zs->format))) {
++      panvk_cmd_state(cmdbuf).gfx.render.fb.info.zs.clear.s = false;
++      panvk_cmd_state(cmdbuf).gfx.render.fb.info.zs.preload.s = true;
+    }
+ }
+ 
+@@ -1314,7 +1314,7 @@
+ panvk_v5_select_layer(struct panvk_cmd_buffer *cmd, uint32_t layer)
+ {
+    panvk_v5_cmd_close_batch(cmd);
+-   struct panvk_rendering_state *render = &cmd->state.gfx.render;
++   struct panvk_rendering_state *render = &panvk_cmd_state(cmd).gfx.render;
+    struct pan_fb_info *fb = &render->fb.info;
+    render->logical_layer_index = layer;
+    for (unsigned i = 0; i < MAX_RTS + 2; i++) {
+@@ -1344,7 +1344,7 @@
+ static VkResult
+ panvk_cmd_prepare_draw_link_shaders(struct panvk_cmd_buffer *cmd)
+ {
+-   struct panvk_cmd_graphics_state *gfx = &cmd->state.gfx;
++   struct panvk_cmd_graphics_state *gfx = &panvk_cmd_state(cmd).gfx;
+ 
+    if (gfx->linked)
+       return VK_SUCCESS;
+@@ -1364,12 +1364,12 @@
+ panvk_cmd_draw_layer(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
+ {
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+-   const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
+-   const struct panvk_shader *fs = cmdbuf->state.gfx.fs.shader;
+-   struct panvk_shader_desc_state *vs_desc_state = &cmdbuf->state.gfx.vs.desc;
+-   struct panvk_shader_desc_state *fs_desc_state = &cmdbuf->state.gfx.fs.desc;
+-   struct panvk_descriptor_state *desc_state = &cmdbuf->state.gfx.desc_state;
+-   uint32_t layer_count = cmdbuf->state.gfx.render.layer_count;
++   const struct panvk_shader *vs = panvk_cmd_state(cmdbuf).gfx.vs.shader;
++   const struct panvk_shader *fs = panvk_cmd_state(cmdbuf).gfx.fs.shader;
++   struct panvk_shader_desc_state *vs_desc_state = &panvk_cmd_state(cmdbuf).gfx.vs.desc;
++   struct panvk_shader_desc_state *fs_desc_state = &panvk_cmd_state(cmdbuf).gfx.fs.desc;
++   struct panvk_descriptor_state *desc_state = &panvk_cmd_state(cmdbuf).gfx.desc_state;
++   uint32_t layer_count = panvk_cmd_state(cmdbuf).gfx.render.layer_count;
+    const struct vk_rasterization_state *rs =
+       &cmdbuf->vk.dynamic_graphics_state.rs;
+    UNUSED bool idvs = vs->info.vs.idvs;
+@@ -1423,7 +1423,7 @@
+       return;
+ 
+    result = panvk_per_arch(cmd_prepare_shader_desc_tables)(
+-      cmdbuf, &cmdbuf->state.gfx.desc_state, vs, vs_desc_state);
++      cmdbuf, &panvk_cmd_state(cmdbuf).gfx.desc_state, vs, vs_desc_state);
+    if (result != VK_SUCCESS)
+       return;
+ 
+@@ -1440,13 +1440,13 @@
+ #endif
+ 
+    bool vs_writes_pos =
+-      cmdbuf->state.gfx.link.buf_strides[PANVK_VARY_BUF_POSITION] > 0;
++      panvk_cmd_state(cmdbuf).gfx.link.buf_strides[PANVK_VARY_BUF_POSITION] > 0;
+    bool needs_tiling = !rs->rasterizer_discard_enable && vs_writes_pos;
+ 
+    /* No need to setup the FS desc tables if the FS is not executed. */
+    if (needs_tiling && fs_required(cmdbuf)) {
+       result = panvk_per_arch(cmd_prepare_shader_desc_tables)(
+-         cmdbuf, &cmdbuf->state.gfx.desc_state, fs, fs_desc_state);
++         cmdbuf, &panvk_cmd_state(cmdbuf).gfx.desc_state, fs, fs_desc_state);
+       if (result != VK_SUCCESS)
+          return;
+ 
+@@ -1485,7 +1485,7 @@
+ 
+    for (uint32_t i = 0; i < layer_count; i++) {
+ #if PAN_ARCH == 5
+-      draw->layer_id = cmdbuf->state.gfx.render.logical_layer_index;
++      draw->layer_id = panvk_cmd_state(cmdbuf).gfx.render.logical_layer_index;
+ #else
+       draw->layer_id = i;
+ #endif
+@@ -1497,13 +1497,13 @@
+       if (result != VK_SUCCESS)
+          return;
+ 
+-      cmdbuf->state.gfx.push_uniforms = panvk_per_arch(
+-         cmd_prepare_push_uniforms)(cmdbuf, &cmdbuf->state.gfx.sysvals,
+-                                    sizeof(cmdbuf->state.gfx.sysvals));
+-      if (!cmdbuf->state.gfx.push_uniforms)
++      panvk_cmd_state(cmdbuf).gfx.push_uniforms = panvk_per_arch(
++         cmd_prepare_push_uniforms)(cmdbuf, &panvk_cmd_state(cmdbuf).gfx.sysvals,
++                                    sizeof(panvk_cmd_state(cmdbuf).gfx.sysvals));
++      if (!panvk_cmd_state(cmdbuf).gfx.push_uniforms)
+          return;
+ 
+-      draw->push_uniforms = cmdbuf->state.gfx.push_uniforms;
++      draw->push_uniforms = panvk_cmd_state(cmdbuf).gfx.push_uniforms;
+       result = panvk_draw_prepare_tiler_context(cmdbuf, draw);
+       if (result != VK_SUCCESS)
+          return;
+@@ -1539,14 +1539,14 @@
+ 
+    /* Clear the dirty flags all at once */
+    vk_dynamic_graphics_state_clear_dirty(&cmdbuf->vk.dynamic_graphics_state);
+-   cmdbuf->state.gfx.dirty = 0;
++   panvk_cmd_state(cmdbuf).gfx.dirty = 0;
+ }
+ 
+ static void
+ panvk_cmd_draw(struct panvk_cmd_buffer *cmd, struct panvk_draw_info *draw)
+ {
+ #if PAN_ARCH == 5
+-   uint32_t layers = cmd->state.gfx.render.logical_layer_count;
++   uint32_t layers = panvk_cmd_state(cmd).gfx.render.logical_layer_count;
+    if (layers > 1) {
+       /* A tiler heap cannot be reused by another layer before the preceding
+        * fragment job has consumed it. Queue batches provide that ordering and
+@@ -1577,7 +1577,7 @@
+    if (instance_count == 1)
+       return vertex_count;
+ 
+-   UNUSED bool idvs = cmdbuf->state.gfx.vs.shader->info.vs.idvs;
++   UNUSED bool idvs = panvk_cmd_state(cmdbuf).gfx.vs.shader->info.vs.idvs;
+ 
+    /* Index-Driven Vertex Shading requires different instances to
+     * have different cache lines for position results. Each vertex
+@@ -1623,11 +1623,11 @@
+    struct panvk_instance *instance =
+       to_panvk_instance(dev->vk.physical->instance);
+    void *ptr =
+-      cmdbuf->state.gfx.ib.buffer->host_ptr + cmdbuf->state.gfx.ib.offset;
+-
+-   assert(cmdbuf->state.gfx.ib.buffer);
+-   assert(cmdbuf->state.gfx.ib.buffer->bo);
+-   assert(cmdbuf->state.gfx.ib.buffer->host_ptr);
++      panvk_cmd_state(cmdbuf).gfx.ib.buffer->host_ptr + panvk_cmd_state(cmdbuf).gfx.ib.offset;
++
++   assert(panvk_cmd_state(cmdbuf).gfx.ib.buffer);
++   assert(panvk_cmd_state(cmdbuf).gfx.ib.buffer->bo);
++   assert(panvk_cmd_state(cmdbuf).gfx.ib.buffer->host_ptr);
+ 
+    if (!(instance->debug_flags & PANVK_DEBUG_NO_KNOWN_WARN)) {
+       fprintf(
+@@ -1641,7 +1641,7 @@
+    /* TODO: Read full cacheline of data to mitigate the uncached
+     * mapping slowness.
+     */
+-   switch (cmdbuf->state.gfx.ib.index_size * 8) {
++   switch (panvk_cmd_state(cmdbuf).gfx.ib.index_size * 8) {
+ #define MINMAX_SEARCH_CASE(sz)                                                 \
+    case sz: {                                                                  \
+       uint##sz##_t *indices = ptr;                                             \
+@@ -1678,15 +1678,15 @@
+       .deindexed = true,
+       .first_index = firstIndex,
+       .index_count = indexCount,
+-      .index_size = cmdbuf->state.gfx.ib.index_size,
++      .index_size = panvk_cmd_state(cmdbuf).gfx.ib.index_size,
+       .vertex_offset = vertexOffset,
+       .first_instance = firstInstance,
+       .instance_count = instanceCount,
+       .vertex_range = indexCount,
+       .vertex_count = indexCount,
+       .padded_vertex_count = padded_vertex_count(cmdbuf, indexCount, instanceCount),
+-      .indices = panvk_buffer_gpu_ptr(cmdbuf->state.gfx.ib.buffer, cmdbuf->state.gfx.ib.offset) +
+-                 (uint64_t)firstIndex * cmdbuf->state.gfx.ib.index_size,
++      .indices = panvk_buffer_gpu_ptr(panvk_cmd_state(cmdbuf).gfx.ib.buffer, panvk_cmd_state(cmdbuf).gfx.ib.offset) +
++                 (uint64_t)firstIndex * panvk_cmd_state(cmdbuf).gfx.ib.index_size,
+    };
+    panvk_cmd_draw(cmdbuf, &draw);
+    return;
+@@ -1701,7 +1701,7 @@
+ 
+    unsigned vertex_range = max_vertex - min_vertex + 1;
+    struct panvk_draw_info draw = {
+-      .index_size = cmdbuf->state.gfx.ib.index_size,
++      .index_size = panvk_cmd_state(cmdbuf).gfx.ib.index_size,
+       .first_index = firstIndex,
+       .index_count = indexCount,
+       .vertex_offset = vertexOffset,
+@@ -1712,9 +1712,9 @@
+       .padded_vertex_count =
+          padded_vertex_count(cmdbuf, vertex_range, instanceCount),
+       .offset_start = min_vertex + vertexOffset,
+-      .indices = panvk_buffer_gpu_ptr(cmdbuf->state.gfx.ib.buffer,
+-                                      cmdbuf->state.gfx.ib.offset) +
+-                 (firstIndex * cmdbuf->state.gfx.ib.index_size),
++      .indices = panvk_buffer_gpu_ptr(panvk_cmd_state(cmdbuf).gfx.ib.buffer,
++                                      panvk_cmd_state(cmdbuf).gfx.ib.offset) +
++                 (firstIndex * panvk_cmd_state(cmdbuf).gfx.ib.index_size),
+    };
+ 
+    panvk_cmd_draw(cmdbuf, &draw);
+@@ -1756,40 +1756,40 @@
+    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+    struct panvk_physical_device *phys_dev =
+       to_panvk_physical_device(dev->vk.physical);
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    uint32_t att_width = 0, att_height = 0;
+ 
+-   cmdbuf->state.gfx.render.flags = pRenderingInfo->flags;
++   panvk_cmd_state(cmdbuf).gfx.render.flags = pRenderingInfo->flags;
+ 
+    /* Resuming from a suspended pass, the state should be unchanged. */
+-   if (cmdbuf->state.gfx.render.flags & VK_RENDERING_RESUMING_BIT)
++   if (panvk_cmd_state(cmdbuf).gfx.render.flags & VK_RENDERING_RESUMING_BIT)
+       return;
+ 
+-   cmdbuf->state.gfx.render.fb.bo_count = 0;
+-   memset(cmdbuf->state.gfx.render.fb.bos, 0,
+-          sizeof(cmdbuf->state.gfx.render.fb.bos));
+-   memset(cmdbuf->state.gfx.render.fb.crc_valid, 0,
+-          sizeof(cmdbuf->state.gfx.render.fb.crc_valid));
+-   memset(&cmdbuf->state.gfx.render.color_attachments, 0,
+-          sizeof(cmdbuf->state.gfx.render.color_attachments));
+-   memset(&cmdbuf->state.gfx.render.z_attachment, 0,
+-          sizeof(cmdbuf->state.gfx.render.z_attachment));
+-   memset(&cmdbuf->state.gfx.render.s_attachment, 0,
+-          sizeof(cmdbuf->state.gfx.render.s_attachment));
+-   cmdbuf->state.gfx.render.bound_attachments = 0;
+-
+-   cmdbuf->state.gfx.render.layer_count = pRenderingInfo->layerCount;
+-#if PAN_ARCH == 5
+-   cmdbuf->state.gfx.render.logical_layer_count = pRenderingInfo->layerCount;
+-   cmdbuf->state.gfx.render.logical_layer_index = 0;
+-   cmdbuf->state.gfx.render.layer_count = 1;
++   panvk_cmd_state(cmdbuf).gfx.render.fb.bo_count = 0;
++   memset(panvk_cmd_state(cmdbuf).gfx.render.fb.bos, 0,
++          sizeof(panvk_cmd_state(cmdbuf).gfx.render.fb.bos));
++   memset(panvk_cmd_state(cmdbuf).gfx.render.fb.crc_valid, 0,
++          sizeof(panvk_cmd_state(cmdbuf).gfx.render.fb.crc_valid));
++   memset(&panvk_cmd_state(cmdbuf).gfx.render.color_attachments, 0,
++          sizeof(panvk_cmd_state(cmdbuf).gfx.render.color_attachments));
++   memset(&panvk_cmd_state(cmdbuf).gfx.render.z_attachment, 0,
++          sizeof(panvk_cmd_state(cmdbuf).gfx.render.z_attachment));
++   memset(&panvk_cmd_state(cmdbuf).gfx.render.s_attachment, 0,
++          sizeof(panvk_cmd_state(cmdbuf).gfx.render.s_attachment));
++   panvk_cmd_state(cmdbuf).gfx.render.bound_attachments = 0;
++
++   panvk_cmd_state(cmdbuf).gfx.render.layer_count = pRenderingInfo->layerCount;
++#if PAN_ARCH == 5
++   panvk_cmd_state(cmdbuf).gfx.render.logical_layer_count = pRenderingInfo->layerCount;
++   panvk_cmd_state(cmdbuf).gfx.render.logical_layer_index = 0;
++   panvk_cmd_state(cmdbuf).gfx.render.layer_count = 1;
+    /* Empty command buffers must not reserve this per-rendering CPU storage.
+     * Its lifetime follows the existing descriptor arena and reset boundary. */
+-   cmdbuf->state.gfx.render.layers = panvk_cmd_alloc_dev_mem(
++   panvk_cmd_state(cmdbuf).gfx.render.layers = panvk_cmd_alloc_dev_mem(
+       cmdbuf, desc, sizeof(struct panvk_layer_views), 8).cpu;
+-   if (!cmdbuf->state.gfx.render.layers)
++   if (!panvk_cmd_state(cmdbuf).gfx.render.layers)
+       return;
+-   memset(cmdbuf->state.gfx.render.layers, 0, sizeof(struct panvk_layer_views));
++   memset(panvk_cmd_state(cmdbuf).gfx.render.layers, 0, sizeof(struct panvk_layer_views));
+ #endif
+    *fbinfo = (struct pan_fb_info){
+       .tile_buf_budget = panfrost_query_optimal_tib_size(phys_dev->model),
+@@ -1811,18 +1811,18 @@
+          container_of(iview->vk.image, struct panvk_image, vk);
+       const VkExtent3D iview_size = iview->vk.extent;
+ 
+-      cmdbuf->state.gfx.render.bound_attachments |=
++      panvk_cmd_state(cmdbuf).gfx.render.bound_attachments |=
+          MESA_VK_RP_ATTACHMENT_COLOR_BIT(i);
+-      cmdbuf->state.gfx.render.color_attachments.iviews[i] = iview;
+-      cmdbuf->state.gfx.render.color_attachments.fmts[i] = iview->vk.format;
+-      cmdbuf->state.gfx.render.color_attachments.samples[i] = img->vk.samples;
++      panvk_cmd_state(cmdbuf).gfx.render.color_attachments.iviews[i] = iview;
++      panvk_cmd_state(cmdbuf).gfx.render.color_attachments.fmts[i] = iview->vk.format;
++      panvk_cmd_state(cmdbuf).gfx.render.color_attachments.samples[i] = img->vk.samples;
+       att_width = MAX2(iview_size.width, att_width);
+       att_height = MAX2(iview_size.height, att_height);
+ 
+-      cmdbuf->state.gfx.render.fb.bos[cmdbuf->state.gfx.render.fb.bo_count++] =
++      panvk_cmd_state(cmdbuf).gfx.render.fb.bos[panvk_cmd_state(cmdbuf).gfx.render.fb.bo_count++] =
+          img->bo;
+       fbinfo->rts[i].view = &iview->pview;
+-      fbinfo->rts[i].crc_valid = &cmdbuf->state.gfx.render.fb.crc_valid[i];
++      fbinfo->rts[i].crc_valid = &panvk_cmd_state(cmdbuf).gfx.render.fb.crc_valid[i];
+       fbinfo->nr_samples =
+          MAX2(fbinfo->nr_samples, pan_image_view_get_nr_samples(&iview->pview));
+ 
+@@ -1840,7 +1840,7 @@
+ 
+       if (att->resolveMode != VK_RESOLVE_MODE_NONE) {
+          struct panvk_resolve_attachment *resolve_info =
+-            &cmdbuf->state.gfx.render.color_attachments.resolve[i];
++            &panvk_cmd_state(cmdbuf).gfx.render.color_attachments.resolve[i];
+          VK_FROM_HANDLE(panvk_image_view, resolve_iview, att->resolveImageView);
+ 
+          resolve_info->mode = att->resolveMode;
+@@ -1855,20 +1855,20 @@
+       struct panvk_image *img =
+          container_of(iview->vk.image, struct panvk_image, vk);
+       const VkExtent3D iview_size = iview->vk.extent;
+-      cmdbuf->state.gfx.render.z_attachment.fmt = iview->vk.format;
++      panvk_cmd_state(cmdbuf).gfx.render.z_attachment.fmt = iview->vk.format;
+ 
+       if (iview->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT) {
+-         cmdbuf->state.gfx.render.bound_attachments |=
++         panvk_cmd_state(cmdbuf).gfx.render.bound_attachments |=
+             MESA_VK_RP_ATTACHMENT_DEPTH_BIT;
+          att_width = MAX2(iview_size.width, att_width);
+          att_height = MAX2(iview_size.height, att_height);
+ 
+-         cmdbuf->state.gfx.render.fb
+-            .bos[cmdbuf->state.gfx.render.fb.bo_count++] = img->bo;
++         panvk_cmd_state(cmdbuf).gfx.render.fb
++            .bos[panvk_cmd_state(cmdbuf).gfx.render.fb.bo_count++] = img->bo;
+          fbinfo->zs.view.zs = &iview->pview;
+          fbinfo->nr_samples = MAX2(
+             fbinfo->nr_samples, pan_image_view_get_nr_samples(&iview->pview));
+-         cmdbuf->state.gfx.render.z_attachment.iview = iview;
++         panvk_cmd_state(cmdbuf).gfx.render.z_attachment.iview = iview;
+ 
+          if (vk_format_has_stencil(img->vk.format))
+             fbinfo->zs.preload.s = true;
+@@ -1882,7 +1882,7 @@
+ 
+          if (att->resolveMode != VK_RESOLVE_MODE_NONE) {
+             struct panvk_resolve_attachment *resolve_info =
+-               &cmdbuf->state.gfx.render.z_attachment.resolve;
++               &panvk_cmd_state(cmdbuf).gfx.render.z_attachment.resolve;
+             VK_FROM_HANDLE(panvk_image_view, resolve_iview,
+                            att->resolveImageView);
+ 
+@@ -1899,16 +1899,16 @@
+       struct panvk_image *img =
+          container_of(iview->vk.image, struct panvk_image, vk);
+       const VkExtent3D iview_size = iview->vk.extent;
+-      cmdbuf->state.gfx.render.s_attachment.fmt = iview->vk.format;
++      panvk_cmd_state(cmdbuf).gfx.render.s_attachment.fmt = iview->vk.format;
+ 
+       if (iview->vk.aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
+-         cmdbuf->state.gfx.render.bound_attachments |=
++         panvk_cmd_state(cmdbuf).gfx.render.bound_attachments |=
+             MESA_VK_RP_ATTACHMENT_STENCIL_BIT;
+          att_width = MAX2(iview_size.width, att_width);
+          att_height = MAX2(iview_size.height, att_height);
+ 
+-         cmdbuf->state.gfx.render.fb
+-            .bos[cmdbuf->state.gfx.render.fb.bo_count++] = img->bo;
++         panvk_cmd_state(cmdbuf).gfx.render.fb
++            .bos[panvk_cmd_state(cmdbuf).gfx.render.fb.bo_count++] = img->bo;
+ 
+          if (drm_is_afbc(img->pimage.layout.modifier)) {
+             assert(fbinfo->zs.view.zs == &iview->pview || !fbinfo->zs.view.zs);
+@@ -1922,7 +1922,7 @@
+             &iview->pview != fbinfo->zs.view.zs ? &iview->pview : NULL;
+          fbinfo->nr_samples = MAX2(
+             fbinfo->nr_samples, pan_image_view_get_nr_samples(&iview->pview));
+-         cmdbuf->state.gfx.render.s_attachment.iview = iview;
++         panvk_cmd_state(cmdbuf).gfx.render.s_attachment.iview = iview;
+ 
+          if (vk_format_has_depth(img->vk.format)) {
+             assert(fbinfo->zs.view.zs == NULL ||
+@@ -1945,7 +1945,7 @@
+ 
+          if (att->resolveMode != VK_RESOLVE_MODE_NONE) {
+             struct panvk_resolve_attachment *resolve_info =
+-               &cmdbuf->state.gfx.render.s_attachment.resolve;
++               &panvk_cmd_state(cmdbuf).gfx.render.s_attachment.resolve;
+             VK_FROM_HANDLE(panvk_image_view, resolve_iview,
+                            att->resolveImageView);
+ 
+@@ -1969,9 +1969,9 @@
+ 
+       if (needs_depth && needs_stencil &&
+           fbinfo->zs.view.zs->format != new_fmt) {
+-         cmdbuf->state.gfx.render.zs_pview = *fbinfo->zs.view.zs;
+-         cmdbuf->state.gfx.render.zs_pview.format = new_fmt;
+-         fbinfo->zs.view.zs = &cmdbuf->state.gfx.render.zs_pview;
++         panvk_cmd_state(cmdbuf).gfx.render.zs_pview = *fbinfo->zs.view.zs;
++         panvk_cmd_state(cmdbuf).gfx.render.zs_pview.format = new_fmt;
++         fbinfo->zs.view.zs = &panvk_cmd_state(cmdbuf).gfx.render.zs_pview;
+       }
+    }
+ 
+@@ -1982,7 +1982,7 @@
+    fbinfo->extent.maxy = pRenderingInfo->renderArea.offset.y +
+                          pRenderingInfo->renderArea.extent.height - 1;
+ 
+-   if (cmdbuf->state.gfx.render.bound_attachments) {
++   if (panvk_cmd_state(cmdbuf).gfx.render.bound_attachments) {
+       fbinfo->width = att_width;
+       fbinfo->height = att_height;
+    } else {
+@@ -1993,14 +1993,14 @@
+    assert(fbinfo->width && fbinfo->height);
+ 
+    /* We need to re-emit the FS RSD when the color attachments change. */
+-   cmdbuf->state.gfx.fs.rsd = 0;
++   panvk_cmd_state(cmdbuf).gfx.fs.rsd = 0;
+ }
+ 
+ static void
+ preload_render_area_border(struct panvk_cmd_buffer *cmdbuf,
+                            const VkRenderingInfo *render_info)
+ {
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    bool render_area_is_32x32_aligned =
+       ((fbinfo->extent.minx | fbinfo->extent.miny) % 32) == 0 &&
+       (fbinfo->extent.maxx + 1 == fbinfo->width ||
+@@ -2016,7 +2016,7 @@
+     * outside the render area, but we need to compensate with attachment clears
+     * for attachments that were initially cleared.
+     */
+-   uint32_t bound_atts = cmdbuf->state.gfx.render.bound_attachments;
++   uint32_t bound_atts = panvk_cmd_state(cmdbuf).gfx.render.bound_attachments;
+    VkClearAttachment clear_atts[MAX_RTS + 2];
+    uint32_t clear_att_count = 0;
+ 
+@@ -2091,10 +2091,10 @@
+    if (vk_command_buffer_has_error(&cmdbuf->vk))
+       return;
+ 
+-   bool resuming = cmdbuf->state.gfx.render.flags & VK_RENDERING_RESUMING_BIT;
++   bool resuming = panvk_cmd_state(cmdbuf).gfx.render.flags & VK_RENDERING_RESUMING_BIT;
+ #if PAN_ARCH == 5
+    if (!resuming) {
+-      struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
++      struct panvk_rendering_state *render = &panvk_cmd_state(cmdbuf).gfx.render;
+       for (unsigned i = 0; i < render->fb.info.rt_count; i++)
+          render->layers->bases[i] = render->fb.info.rts[i].view;
+       render->layers->bases[MAX_RTS] = render->fb.info.zs.view.zs;
+@@ -2125,11 +2125,11 @@
+    if (!resuming)
+       preload_render_area_border(cmdbuf, pRenderingInfo);
+ #if PAN_ARCH == 5
+-   if (!resuming && cmdbuf->state.gfx.render.logical_layer_count > 1) {
++   if (!resuming && panvk_cmd_state(cmdbuf).gfx.render.logical_layer_count > 1) {
+       /* Consume initial LOAD/CLEAR operations for every slice, including layers
+        * that never receive a primitive. Later per-layer batches always LOAD. */
+       for (uint32_t layer = 0;
+-           layer < cmdbuf->state.gfx.render.logical_layer_count; layer++) {
++           layer < panvk_cmd_state(cmdbuf).gfx.render.logical_layer_count; layer++) {
+          VkResult result = panvk_v5_select_layer(cmdbuf, layer);
+          if (result == VK_SUCCESS)
+             result = panvk_v5_cmd_alloc_fb_desc(cmdbuf);
+@@ -2150,18 +2150,18 @@
+ static void
+ resolve_attachments(struct panvk_cmd_buffer *cmdbuf)
+ {
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    bool needs_resolve = false;
+ 
+-   unsigned bound_atts = cmdbuf->state.gfx.render.bound_attachments;
++   unsigned bound_atts = panvk_cmd_state(cmdbuf).gfx.render.bound_attachments;
+    unsigned color_att_count =
+       util_last_bit(bound_atts & MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS);
+    VkRenderingAttachmentInfo color_atts[MAX_RTS];
+    for (uint32_t i = 0; i < color_att_count; i++) {
+       const struct panvk_resolve_attachment *resolve_info =
+-         &cmdbuf->state.gfx.render.color_attachments.resolve[i];
++         &panvk_cmd_state(cmdbuf).gfx.render.color_attachments.resolve[i];
+       struct panvk_image_view *src_iview =
+-         cmdbuf->state.gfx.render.color_attachments.iviews[i];
++         panvk_cmd_state(cmdbuf).gfx.render.color_attachments.iviews[i];
+ 
+       color_atts[i] = (VkRenderingAttachmentInfo){
+          .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+@@ -2178,9 +2178,9 @@
+    }
+ 
+    const struct panvk_resolve_attachment *resolve_info =
+-      &cmdbuf->state.gfx.render.z_attachment.resolve;
++      &panvk_cmd_state(cmdbuf).gfx.render.z_attachment.resolve;
+    struct panvk_image_view *src_iview =
+-      cmdbuf->state.gfx.render.z_attachment.iview;
++      panvk_cmd_state(cmdbuf).gfx.render.z_attachment.iview;
+    VkRenderingAttachmentInfo z_att = {
+       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+       .imageView = panvk_image_view_to_handle(src_iview),
+@@ -2193,8 +2193,8 @@
+    if (resolve_info->mode != VK_RESOLVE_MODE_NONE)
+       needs_resolve = true;
+ 
+-   resolve_info = &cmdbuf->state.gfx.render.s_attachment.resolve;
+-   src_iview = cmdbuf->state.gfx.render.s_attachment.iview;
++   resolve_info = &panvk_cmd_state(cmdbuf).gfx.render.s_attachment.resolve;
++   src_iview = panvk_cmd_state(cmdbuf).gfx.render.s_attachment.iview;
+ 
+    VkRenderingAttachmentInfo s_att = {
+       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+@@ -2220,9 +2220,9 @@
+          .extent.height = fbinfo->extent.maxy - fbinfo->extent.miny + 1,
+       },
+ #if PAN_ARCH == 5
+-      .layerCount = cmdbuf->state.gfx.render.logical_layer_count,
++      .layerCount = panvk_cmd_state(cmdbuf).gfx.render.logical_layer_count,
+ #else
+-      .layerCount = cmdbuf->state.gfx.render.layer_count,
++      .layerCount = panvk_cmd_state(cmdbuf).gfx.render.layer_count,
+ #endif
+       .viewMask = 0,
+       .colorAttachmentCount = color_att_count,
+@@ -2244,8 +2244,8 @@
+ {
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+ 
+-   if (!(cmdbuf->state.gfx.render.flags & VK_RENDERING_SUSPENDING_BIT)) {
+-      struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   if (!(panvk_cmd_state(cmdbuf).gfx.render.flags & VK_RENDERING_SUSPENDING_BIT)) {
++      struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+       bool clear = fbinfo->zs.clear.z | fbinfo->zs.clear.s;
+       for (unsigned i = 0; i < fbinfo->rt_count; i++)
+          clear |= fbinfo->rts[i].clear;
+@@ -2273,15 +2273,15 @@
+    for (uint32_t i = 0; i < bindingCount; i++) {
+       VK_FROM_HANDLE(panvk_buffer, buffer, pBuffers[i]);
+ 
+-      cmdbuf->state.gfx.vb.bufs[firstBinding + i].address =
++      panvk_cmd_state(cmdbuf).gfx.vb.bufs[firstBinding + i].address =
+          panvk_buffer_gpu_ptr(buffer, pOffsets[i]);
+-      cmdbuf->state.gfx.vb.bufs[firstBinding + i].size =
++      panvk_cmd_state(cmdbuf).gfx.vb.bufs[firstBinding + i].size =
+          panvk_buffer_range(buffer, pOffsets[i], VK_WHOLE_SIZE);
+    }
+ 
+-   cmdbuf->state.gfx.vb.count =
+-      MAX2(cmdbuf->state.gfx.vb.count, firstBinding + bindingCount);
+-   cmdbuf->state.gfx.vs.attrib_bufs = 0;
++   panvk_cmd_state(cmdbuf).gfx.vb.count =
++      MAX2(panvk_cmd_state(cmdbuf).gfx.vb.count, firstBinding + bindingCount);
++   panvk_cmd_state(cmdbuf).gfx.vs.attrib_bufs = 0;
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+@@ -2292,7 +2292,7 @@
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+    VK_FROM_HANDLE(panvk_buffer, buf, buffer);
+ 
+-   cmdbuf->state.gfx.ib.buffer = buf;
+-   cmdbuf->state.gfx.ib.offset = offset;
+-   cmdbuf->state.gfx.ib.index_size = vk_index_type_to_bytes(indexType);
+-}
++   panvk_cmd_state(cmdbuf).gfx.ib.buffer = buf;
++   panvk_cmd_state(cmdbuf).gfx.ib.offset = offset;
++   panvk_cmd_state(cmdbuf).gfx.ib.index_size = vk_index_type_to_bytes(indexType);
++}
+--- a/src/panfrost/vulkan/midgard/panvk_v5_cmd_fb_preload.c
++++ b/src/panfrost/vulkan/midgard/panvk_v5_cmd_fb_preload.c
+@@ -103,7 +103,7 @@
+ static VkResult
+ emit_preload(struct panvk_cmd_buffer *cmdbuf, uint32_t mask, bool zs)
+ {
+-   struct pan_fb_info *fb = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fb = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+    struct preload_key key = {
+@@ -282,13 +282,13 @@
+ VkResult
+ panvk_v5_cmd_fb_preload(struct panvk_cmd_buffer *cmdbuf)
+ {
+-   const struct pan_fb_info *fb = &cmdbuf->state.gfx.render.fb.info;
++   const struct pan_fb_info *fb = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    uint32_t mask = 0;
+    for (unsigned rt = 0; rt < fb->rt_count; rt++)
+       if (fb->rts[rt].preload) mask |= BITFIELD_BIT(rt);
+    bool zs = fb->zs.preload.z || fb->zs.preload.s;
+    if (!mask && !zs) return VK_SUCCESS;
+-   if (cmdbuf->state.gfx.render.layer_count != 1) return VK_ERROR_FEATURE_NOT_PRESENT;
++   if (panvk_cmd_state(cmdbuf).gfx.render.layer_count != 1) return VK_ERROR_FEATURE_NOT_PRESENT;
+    VkResult result = panvk_v5_cmd_alloc_tls_desc(cmdbuf, true);
+    if (result != VK_SUCCESS) return result;
+    /* Injection prepends jobs. Insert color first so depth/stencil executes
+--- a/src/panfrost/vulkan/midgard/panvk_v5_index.h
++++ b/src/panfrost/vulkan/midgard/panvk_v5_index.h
+@@ -153,7 +153,7 @@
+       unsigned binding = att->binding;
+       if (!(draw->gather_mask & BITFIELD_BIT(binding))) continue;
+       struct panvk_index_record *rec = &inputs.records[inputs.record_count++];
+-      const struct panvk_attrib_buf *source = &cmd->state.gfx.vb.bufs[binding];
++      const struct panvk_attrib_buf *source = &panvk_cmd_state(cmd).gfx.vb.bufs[binding];
+       rec->source = source->address + att->offset;
+       rec->source_size = source->size > att->offset ? source->size - att->offset : 0;
+       rec->destination = draw->gathered_vbs[binding].address + att->offset;
+--- a/src/panfrost/vulkan/midgard/panvk_v5_query.c
++++ b/src/panfrost/vulkan/midgard/panvk_v5_query.c
+@@ -114,7 +114,7 @@
+    VkResult result = query_shader(dev, op, flags, &shader);
+    if (result != VK_SUCCESS) {vk_command_buffer_set_error(&cmd->vk, result); return;}
+    panvk_v5_cmd_close_batch(cmd);
+-   if (cmd->state.gfx.render.layer_count) panvk_v5_cmd_preload_fb_after_batch_split(cmd);
++   if (panvk_cmd_state(cmd).gfx.render.layer_count) panvk_v5_cmd_preload_fb_after_batch_split(cmd);
+    struct panvk_batch *batch = panvk_v5_cmd_open_batch(cmd);
+    if (!batch) return;
+    result = panvk_v5_cmd_alloc_tls_desc(cmd, false);
+@@ -208,16 +208,16 @@
+ {
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmd, command);
+    VK_FROM_HANDLE(panvk_query_pool, pool, handle);
+-   cmd->state.gfx.occlusion_query = pool->storage->addr.dev + (uint64_t)query * pool->stride;
+-   cmd->state.gfx.fs.rsd = 0;
++   panvk_cmd_state(cmd).gfx.occlusion_query = pool->storage->addr.dev + (uint64_t)query * pool->stride;
++   panvk_cmd_state(cmd).gfx.fs.rsd = 0;
+ }
+ VKAPI_ATTR void VKAPI_CALL
+ panvk_v5_CmdEndQuery(VkCommandBuffer command, VkQueryPool handle, uint32_t query)
+ {
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmd, command);
+    VK_FROM_HANDLE(panvk_query_pool, pool, handle);
+-   cmd->state.gfx.occlusion_query = 0;
+-   cmd->state.gfx.fs.rsd = 0;
++   panvk_cmd_state(cmd).gfx.occlusion_query = 0;
++   panvk_cmd_state(cmd).gfx.fs.rsd = 0;
+    const struct query_inputs inputs = {.source = pool->storage->addr.dev + (uint64_t)(query + 1) * pool->stride - 8,
+       .count = 1, .source_stride = pool->stride};
+    query_job(cmd, QUERY_AVAILABLE, 0, &inputs);
+--- a/src/panfrost/vulkan/panvk_cmd_draw.h
++++ b/src/panfrost/vulkan/panvk_cmd_draw.h
+@@ -22,8 +22,8 @@
+       to_panvk_physical_device(cmdbuf->vk.base.device->physical);
+    struct panfrost_tiler_features tiler_features =
+       panfrost_query_tiler_features(&phys_dev->kmod.props);
+-   uint32_t max_fb_wh = MAX2(cmdbuf->state.gfx.render.fb.info.width,
+-                             cmdbuf->state.gfx.render.fb.info.height);
++   uint32_t max_fb_wh = MAX2(panvk_cmd_state(cmdbuf).gfx.render.fb.info.width,
++                             panvk_cmd_state(cmdbuf).gfx.render.fb.info.height);
+    uint32_t last_hierarchy_bit = util_last_bit(DIV_ROUND_UP(max_fb_wh, 16));
+    uint32_t hierarchy_mask = BITFIELD_MASK(tiler_features.max_levels);
+ 
+--- a/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
+@@ -364,19 +364,19 @@
+ 
+    /* TODO: Invalidate only if the shader tables are disturbed */
+    if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
+-      cmd_desc_state_bind_sets(&cmdbuf->state.gfx.desc_state,
++      cmd_desc_state_bind_sets(&panvk_cmd_state(cmdbuf).gfx.desc_state,
+                                pBindDescriptorSetsInfo);
+ 
+-      memset(&cmdbuf->state.gfx.vs.desc, 0, sizeof(cmdbuf->state.gfx.vs.desc));
+-      memset(&cmdbuf->state.gfx.fs.desc, 0, sizeof(cmdbuf->state.gfx.fs.desc));
++      memset(&panvk_cmd_state(cmdbuf).gfx.vs.desc, 0, sizeof(panvk_cmd_state(cmdbuf).gfx.vs.desc));
++      memset(&panvk_cmd_state(cmdbuf).gfx.fs.desc, 0, sizeof(panvk_cmd_state(cmdbuf).gfx.fs.desc));
+    }
+ 
+    if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
+-      cmd_desc_state_bind_sets(&cmdbuf->state.compute.desc_state,
++      cmd_desc_state_bind_sets(&panvk_cmd_state(cmdbuf).compute.desc_state,
+                                pBindDescriptorSetsInfo);
+ 
+-      memset(&cmdbuf->state.compute.cs.desc, 0,
+-             sizeof(cmdbuf->state.compute.cs.desc));
++      memset(&panvk_cmd_state(cmdbuf).compute.cs.desc, 0,
++             sizeof(panvk_cmd_state(cmdbuf).compute.cs.desc));
+    }
+ }
+ 
+@@ -414,19 +414,19 @@
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+ 
+    if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) {
+-      push_desc_set_write(cmdbuf, &cmdbuf->state.gfx.desc_state,
++      push_desc_set_write(cmdbuf, &panvk_cmd_state(cmdbuf).gfx.desc_state,
+                           pPushDescriptorSetInfo);
+ 
+-      memset(&cmdbuf->state.gfx.vs.desc, 0, sizeof(cmdbuf->state.gfx.vs.desc));
+-      memset(&cmdbuf->state.gfx.fs.desc, 0, sizeof(cmdbuf->state.gfx.fs.desc));
++      memset(&panvk_cmd_state(cmdbuf).gfx.vs.desc, 0, sizeof(panvk_cmd_state(cmdbuf).gfx.vs.desc));
++      memset(&panvk_cmd_state(cmdbuf).gfx.fs.desc, 0, sizeof(panvk_cmd_state(cmdbuf).gfx.fs.desc));
+    }
+ 
+    if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
+-      push_desc_set_write(cmdbuf, &cmdbuf->state.compute.desc_state,
++      push_desc_set_write(cmdbuf, &panvk_cmd_state(cmdbuf).compute.desc_state,
+                           pPushDescriptorSetInfo);
+ 
+-      memset(&cmdbuf->state.compute.cs.desc, 0,
+-             sizeof(cmdbuf->state.compute.cs.desc));
++      memset(&panvk_cmd_state(cmdbuf).compute.cs.desc, 0,
++             sizeof(panvk_cmd_state(cmdbuf).compute.cs.desc));
+    }
+ }
+ 
+@@ -460,10 +460,10 @@
+    push_set->layout = NULL;
+ 
+    if (template->bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
+-      memset(&cmdbuf->state.gfx.vs.desc, 0, sizeof(cmdbuf->state.gfx.vs.desc));
+-      memset(&cmdbuf->state.gfx.fs.desc, 0, sizeof(cmdbuf->state.gfx.fs.desc));
++      memset(&panvk_cmd_state(cmdbuf).gfx.vs.desc, 0, sizeof(panvk_cmd_state(cmdbuf).gfx.vs.desc));
++      memset(&panvk_cmd_state(cmdbuf).gfx.fs.desc, 0, sizeof(panvk_cmd_state(cmdbuf).gfx.fs.desc));
+    } else {
+-      memset(&cmdbuf->state.compute.cs.desc, 0,
+-             sizeof(cmdbuf->state.compute.cs.desc));
+-   }
+-}
++      memset(&panvk_cmd_state(cmdbuf).compute.cs.desc, 0,
++             sizeof(panvk_cmd_state(cmdbuf).compute.cs.desc));
++   }
++}
+--- a/src/panfrost/vulkan/panvk_vX_cmd_fb_preload.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_fb_preload.c
+@@ -214,13 +214,13 @@
+ static VkResult
+ alloc_pre_post_dcds(struct panvk_cmd_buffer *cmdbuf)
+ {
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+ 
+    if (fbinfo->bifrost.pre_post.dcds.gpu)
+       return VK_SUCCESS;
+ 
+    uint32_t dcd_count =
+-      3 * (PAN_ARCH <= 7 ? cmdbuf->state.gfx.render.layer_count : 1);
++      3 * (PAN_ARCH <= 7 ? panvk_cmd_state(cmdbuf).gfx.render.layer_count : 1);
+ 
+    fbinfo->bifrost.pre_post.dcds = panvk_cmd_alloc_desc_array(cmdbuf, dcd_count, DRAW);
+    if (!fbinfo->bifrost.pre_post.dcds.cpu)
+@@ -250,12 +250,12 @@
+               const struct panvk_fb_preload_shader_key *key,
+               struct mali_texture_packed *textures)
+ {
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+ 
+    if (key->aspects == VK_IMAGE_ASPECT_COLOR_BIT) {
+       for (unsigned i = 0; i < fbinfo->rt_count; i++) {
+          struct panvk_image_view *iview =
+-            cmdbuf->state.gfx.render.color_attachments.iviews[i];
++            panvk_cmd_state(cmdbuf).gfx.render.color_attachments.iviews[i];
+ 
+          if (iview)
+             textures[i] = iview->descs.tex;
+@@ -268,8 +268,8 @@
+    uint32_t idx = 0;
+    if (key->aspects & VK_IMAGE_ASPECT_DEPTH_BIT) {
+       struct panvk_image_view *iview =
+-         cmdbuf->state.gfx.render.z_attachment.iview
+-            ?: cmdbuf->state.gfx.render.s_attachment.iview;
++         panvk_cmd_state(cmdbuf).gfx.render.z_attachment.iview
++            ?: panvk_cmd_state(cmdbuf).gfx.render.s_attachment.iview;
+ 
+       textures[idx++] = vk_format_has_depth(iview->vk.view_format)
+                            ? iview->descs.tex
+@@ -278,8 +278,8 @@
+ 
+    if (key->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
+       struct panvk_image_view *iview =
+-         cmdbuf->state.gfx.render.s_attachment.iview
+-            ?: cmdbuf->state.gfx.render.z_attachment.iview;
++         panvk_cmd_state(cmdbuf).gfx.render.s_attachment.iview
++            ?: panvk_cmd_state(cmdbuf).gfx.render.z_attachment.iview;
+ 
+       textures[idx++] = vk_format_has_depth(iview->vk.view_format)
+                            ? iview->descs.other_aspect_tex
+@@ -292,7 +292,7 @@
+          const struct panvk_fb_preload_shader_key *key,
+          struct mali_blend_packed *bds)
+ {
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    uint32_t bd_count = MAX2(fbinfo->rt_count, 1);
+ 
+    for (unsigned i = 0; i < bd_count; i++) {
+@@ -335,7 +335,7 @@
+              const struct panvk_fb_preload_shader_key *key)
+ {
+    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    struct panvk_internal_shader *shader = NULL;
+ 
+    VkResult result = get_preload_shader(dev, key, &shader);
+@@ -469,11 +469,11 @@
+    if (key->needs_layer_id) {
+       struct panfrost_ptr layer_ids = panvk_cmd_alloc_dev_mem(
+          cmdbuf, desc,
+-         cmdbuf->state.gfx.render.layer_count * sizeof(uint64_t),
++         panvk_cmd_state(cmdbuf).gfx.render.layer_count * sizeof(uint64_t),
+          sizeof(uint64_t));
+       uint32_t *layer_id = layer_ids.cpu;
+ 
+-      for (uint32_t l = 0; l < cmdbuf->state.gfx.render.layer_count; l++) {
++      for (uint32_t l = 0; l < panvk_cmd_state(cmdbuf).gfx.render.layer_count; l++) {
+          struct mali_draw_packed dcd_layer;
+ 
+          /* Push uniform pointer has to be 8-byte aligned, so we have to skip
+@@ -531,7 +531,7 @@
+              struct panvk_fb_preload_shader_key *key)
+ {
+    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    struct panvk_internal_shader *shader = NULL;
+ 
+    VkResult result = get_preload_shader(dev, key, &shader);
+@@ -629,7 +629,7 @@
+ 
+          cfg.blend = bds.gpu;
+          cfg.blend_count = bd_count;
+-         cfg.render_target_mask = cmdbuf->state.gfx.render.bound_attachments &
++         cfg.render_target_mask = panvk_cmd_state(cmdbuf).gfx.render.bound_attachments &
+                                   MESA_VK_RP_ATTACHMENT_ANY_COLOR_BITS;
+       } else {
+          /* ZS_EMIT requires late update/kill */
+@@ -649,7 +649,7 @@
+       cfg.clean_fragment_write = true;
+       cfg.shader.resources = res_table.gpu | 1;
+       cfg.shader.shader = panvk_priv_mem_dev_addr(shader->spd);
+-      cfg.shader.thread_storage = cmdbuf->state.gfx.tsd;
++      cfg.shader.thread_storage = panvk_cmd_state(cmdbuf).gfx.tsd;
+    }
+ 
+    if (key->aspects == VK_IMAGE_ASPECT_COLOR_BIT) {
+@@ -675,7 +675,7 @@
+ static VkResult
+ cmd_preload_zs_attachments(struct panvk_cmd_buffer *cmdbuf)
+ {
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+ 
+    if (!fbinfo->zs.preload.s && !fbinfo->zs.preload.z)
+       return VK_SUCCESS;
+@@ -683,22 +683,22 @@
+    struct panvk_fb_preload_shader_key key = {
+       .type = PANVK_META_OBJECT_KEY_FB_PRELOAD_SHADER,
+       .samples = fbinfo->nr_samples,
+-      .needs_layer_id = cmdbuf->state.gfx.render.layer_count > 1,
++      .needs_layer_id = panvk_cmd_state(cmdbuf).gfx.render.layer_count > 1,
+    };
+ 
+    if (fbinfo->zs.preload.z) {
+       key.aspects = VK_IMAGE_ASPECT_DEPTH_BIT;
+       key.view_type =
+-         cmdbuf->state.gfx.render.z_attachment.iview
+-            ? cmdbuf->state.gfx.render.z_attachment.iview->vk.view_type
+-            : cmdbuf->state.gfx.render.s_attachment.iview->vk.view_type;
++         panvk_cmd_state(cmdbuf).gfx.render.z_attachment.iview
++            ? panvk_cmd_state(cmdbuf).gfx.render.z_attachment.iview->vk.view_type
++            : panvk_cmd_state(cmdbuf).gfx.render.s_attachment.iview->vk.view_type;
+    }
+ 
+    if (fbinfo->zs.preload.s) {
+       VkImageViewType view_type =
+-         cmdbuf->state.gfx.render.s_attachment.iview
+-            ? cmdbuf->state.gfx.render.s_attachment.iview->vk.view_type
+-            : cmdbuf->state.gfx.render.z_attachment.iview->vk.view_type;
++         panvk_cmd_state(cmdbuf).gfx.render.s_attachment.iview
++            ? panvk_cmd_state(cmdbuf).gfx.render.s_attachment.iview->vk.view_type
++            : panvk_cmd_state(cmdbuf).gfx.render.z_attachment.iview->vk.view_type;
+ 
+       key.aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+       if (!fbinfo->zs.preload.z)
+@@ -713,11 +713,11 @@
+ static VkResult
+ cmd_preload_color_attachments(struct panvk_cmd_buffer *cmdbuf)
+ {
+-   struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    struct panvk_fb_preload_shader_key key = {
+       .type = PANVK_META_OBJECT_KEY_FB_PRELOAD_SHADER,
+       .samples = fbinfo->nr_samples,
+-      .needs_layer_id = cmdbuf->state.gfx.render.layer_count > 1,
++      .needs_layer_id = panvk_cmd_state(cmdbuf).gfx.render.layer_count > 1,
+       .aspects = VK_IMAGE_ASPECT_COLOR_BIT,
+    };
+    bool needs_preload = false;
+@@ -728,7 +728,7 @@
+ 
+       enum pipe_format pfmt = fbinfo->rts[i].view->format;
+       struct panvk_image_view *iview =
+-         cmdbuf->state.gfx.render.color_attachments.iviews[i];
++         panvk_cmd_state(cmdbuf).gfx.render.color_attachments.iviews[i];
+ 
+       key.color[i].type = util_format_is_pure_uint(pfmt)   ? nir_type_uint32
+                           : util_format_is_pure_sint(pfmt) ? nir_type_int32
+--- a/src/panfrost/vulkan/panvk_vX_cmd_meta.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_meta.c
+@@ -29,9 +29,9 @@
+    struct panvk_cmd_meta_compute_save_ctx *save_ctx)
+ {
+    const struct panvk_descriptor_set *set0 =
+-      cmdbuf->state.compute.desc_state.sets[0];
++      panvk_cmd_state(cmdbuf).compute.desc_state.sets[0];
+    struct panvk_descriptor_set *push_set0 =
+-      cmdbuf->state.compute.desc_state.push_sets[0];
++      panvk_cmd_state(cmdbuf).compute.desc_state.push_sets[0];
+ 
+    save_ctx->set0 = set0;
+    if (push_set0 && push_set0 == set0) {
+@@ -41,9 +41,9 @@
+              push_set0->desc_count * PANVK_DESCRIPTOR_SIZE);
+    }
+ 
+-   save_ctx->push_constants = cmdbuf->state.push_constants;
+-   save_ctx->cs.shader = cmdbuf->state.compute.shader;
+-   save_ctx->cs.desc = cmdbuf->state.compute.cs.desc;
++   save_ctx->push_constants = panvk_cmd_state(cmdbuf).push_constants;
++   save_ctx->cs.shader = panvk_cmd_state(cmdbuf).compute.shader;
++   save_ctx->cs.desc = panvk_cmd_state(cmdbuf).compute.cs.desc;
+ }
+ 
+ void
+@@ -52,9 +52,9 @@
+    const struct panvk_cmd_meta_compute_save_ctx *save_ctx)
+ {
+    struct panvk_descriptor_set *push_set0 =
+-      cmdbuf->state.compute.desc_state.push_sets[0];
+-
+-   cmdbuf->state.compute.desc_state.sets[0] = save_ctx->set0;
++      panvk_cmd_state(cmdbuf).compute.desc_state.push_sets[0];
++
++   panvk_cmd_state(cmdbuf).compute.desc_state.sets[0] = save_ctx->set0;
+    if (save_ctx->push_set0.desc_count) {
+       memcpy(push_set0->descs.host, save_ctx->push_set0.desc_storage,
+              save_ctx->push_set0.desc_count * PANVK_DESCRIPTOR_SIZE);
+@@ -62,18 +62,18 @@
+       push_set0->desc_count = save_ctx->push_set0.desc_count;
+    }
+ 
+-   if (memcmp(cmdbuf->state.push_constants.data, save_ctx->push_constants.data,
+-              sizeof(cmdbuf->state.push_constants.data))) {
+-      cmdbuf->state.push_constants = save_ctx->push_constants;
+-      cmdbuf->state.compute.push_uniforms = 0;
+-      cmdbuf->state.gfx.push_uniforms = 0;
+-   }
+-
+-   cmdbuf->state.compute.shader = save_ctx->cs.shader;
+-   cmdbuf->state.compute.cs.desc = save_ctx->cs.desc;
++   if (memcmp(panvk_cmd_state(cmdbuf).push_constants.data, save_ctx->push_constants.data,
++              sizeof(panvk_cmd_state(cmdbuf).push_constants.data))) {
++      panvk_cmd_state(cmdbuf).push_constants = save_ctx->push_constants;
++      panvk_cmd_state(cmdbuf).compute.push_uniforms = 0;
++      panvk_cmd_state(cmdbuf).gfx.push_uniforms = 0;
++   }
++
++   panvk_cmd_state(cmdbuf).compute.shader = save_ctx->cs.shader;
++   panvk_cmd_state(cmdbuf).compute.cs.desc = save_ctx->cs.desc;
+ 
+ #if PAN_ARCH >= 9
+-   cmdbuf->state.compute.cs.desc.res_table = 0;
++   panvk_cmd_state(cmdbuf).compute.cs.desc.res_table = 0;
+ #endif
+ }
+ 
+@@ -83,13 +83,13 @@
+    struct panvk_cmd_meta_graphics_save_ctx *save_ctx)
+ {
+    const struct panvk_descriptor_set *set0 =
+-      cmdbuf->state.gfx.desc_state.sets[0];
++      panvk_cmd_state(cmdbuf).gfx.desc_state.sets[0];
+    struct panvk_descriptor_set *push_set0 =
+-      cmdbuf->state.gfx.desc_state.push_sets[0];
++      panvk_cmd_state(cmdbuf).gfx.desc_state.push_sets[0];
+ 
+ #if PAN_ARCH == 5
+-   save_ctx->occlusion_query = cmdbuf->state.gfx.occlusion_query;
+-   cmdbuf->state.gfx.occlusion_query = 0;
++   save_ctx->occlusion_query = panvk_cmd_state(cmdbuf).gfx.occlusion_query;
++   panvk_cmd_state(cmdbuf).gfx.occlusion_query = 0;
+ #endif
+    save_ctx->set0 = set0;
+    if (push_set0 && push_set0 == set0) {
+@@ -99,16 +99,16 @@
+              push_set0->desc_count * PANVK_DESCRIPTOR_SIZE);
+    }
+ 
+-   save_ctx->push_constants = cmdbuf->state.push_constants;
+-   save_ctx->fs.shader = cmdbuf->state.gfx.fs.shader;
+-   save_ctx->fs.desc = cmdbuf->state.gfx.fs.desc;
+-   save_ctx->vs.shader = cmdbuf->state.gfx.vs.shader;
+-   save_ctx->vs.desc = cmdbuf->state.gfx.vs.desc;
+-   save_ctx->vb0 = cmdbuf->state.gfx.vb.bufs[0];
++   save_ctx->push_constants = panvk_cmd_state(cmdbuf).push_constants;
++   save_ctx->fs.shader = panvk_cmd_state(cmdbuf).gfx.fs.shader;
++   save_ctx->fs.desc = panvk_cmd_state(cmdbuf).gfx.fs.desc;
++   save_ctx->vs.shader = panvk_cmd_state(cmdbuf).gfx.vs.shader;
++   save_ctx->vs.desc = panvk_cmd_state(cmdbuf).gfx.vs.desc;
++   save_ctx->vb0 = panvk_cmd_state(cmdbuf).gfx.vb.bufs[0];
+ 
+    save_ctx->dyn_state.all = cmdbuf->vk.dynamic_graphics_state;
+-   save_ctx->dyn_state.vi = cmdbuf->state.gfx.dynamic.vi;
+-   save_ctx->dyn_state.sl = cmdbuf->state.gfx.dynamic.sl;
++   save_ctx->dyn_state.vi = panvk_cmd_state(cmdbuf).gfx.dynamic.vi;
++   save_ctx->dyn_state.sl = panvk_cmd_state(cmdbuf).gfx.dynamic.sl;
+ }
+ 
+ void
+@@ -117,12 +117,12 @@
+    const struct panvk_cmd_meta_graphics_save_ctx *save_ctx)
+ {
+    struct panvk_descriptor_set *push_set0 =
+-      cmdbuf->state.gfx.desc_state.push_sets[0];
++      panvk_cmd_state(cmdbuf).gfx.desc_state.push_sets[0];
+ 
+ #if PAN_ARCH == 5
+-   cmdbuf->state.gfx.occlusion_query = save_ctx->occlusion_query;
++   panvk_cmd_state(cmdbuf).gfx.occlusion_query = save_ctx->occlusion_query;
+ #endif
+-   cmdbuf->state.gfx.desc_state.sets[0] = save_ctx->set0;
++   panvk_cmd_state(cmdbuf).gfx.desc_state.sets[0] = save_ctx->set0;
+    if (save_ctx->push_set0.desc_count) {
+       memcpy(push_set0->descs.host, save_ctx->push_set0.desc_storage,
+              save_ctx->push_set0.desc_count * PANVK_DESCRIPTOR_SIZE);
+@@ -130,31 +130,31 @@
+       push_set0->desc_count = save_ctx->push_set0.desc_count;
+    }
+ 
+-   if (memcmp(cmdbuf->state.push_constants.data, save_ctx->push_constants.data,
+-              sizeof(cmdbuf->state.push_constants.data))) {
+-      cmdbuf->state.push_constants = save_ctx->push_constants;
+-      cmdbuf->state.compute.push_uniforms = 0;
+-      cmdbuf->state.gfx.push_uniforms = 0;
+-   }
+-
+-   cmdbuf->state.gfx.fs.shader = save_ctx->fs.shader;
+-   cmdbuf->state.gfx.fs.desc = save_ctx->fs.desc;
+-   cmdbuf->state.gfx.vs.shader = save_ctx->vs.shader;
+-   cmdbuf->state.gfx.vs.desc = save_ctx->vs.desc;
+-   cmdbuf->state.gfx.vb.bufs[0] = save_ctx->vb0;
++   if (memcmp(panvk_cmd_state(cmdbuf).push_constants.data, save_ctx->push_constants.data,
++              sizeof(panvk_cmd_state(cmdbuf).push_constants.data))) {
++      panvk_cmd_state(cmdbuf).push_constants = save_ctx->push_constants;
++      panvk_cmd_state(cmdbuf).compute.push_uniforms = 0;
++      panvk_cmd_state(cmdbuf).gfx.push_uniforms = 0;
++   }
++
++   panvk_cmd_state(cmdbuf).gfx.fs.shader = save_ctx->fs.shader;
++   panvk_cmd_state(cmdbuf).gfx.fs.desc = save_ctx->fs.desc;
++   panvk_cmd_state(cmdbuf).gfx.vs.shader = save_ctx->vs.shader;
++   panvk_cmd_state(cmdbuf).gfx.vs.desc = save_ctx->vs.desc;
++   panvk_cmd_state(cmdbuf).gfx.vb.bufs[0] = save_ctx->vb0;
+ 
+ #if PAN_ARCH <= 7
+-   cmdbuf->state.gfx.vs.attribs = 0;
+-   cmdbuf->state.gfx.vs.attrib_bufs = 0;
+-   cmdbuf->state.gfx.fs.rsd = 0;
++   panvk_cmd_state(cmdbuf).gfx.vs.attribs = 0;
++   panvk_cmd_state(cmdbuf).gfx.vs.attrib_bufs = 0;
++   panvk_cmd_state(cmdbuf).gfx.fs.rsd = 0;
+ #else
+-   cmdbuf->state.gfx.fs.desc.res_table = 0;
+-   cmdbuf->state.gfx.vs.desc.res_table = 0;
++   panvk_cmd_state(cmdbuf).gfx.fs.desc.res_table = 0;
++   panvk_cmd_state(cmdbuf).gfx.vs.desc.res_table = 0;
+ #endif
+ 
+    cmdbuf->vk.dynamic_graphics_state = save_ctx->dyn_state.all;
+-   cmdbuf->state.gfx.dynamic.vi = save_ctx->dyn_state.vi;
+-   cmdbuf->state.gfx.dynamic.sl = save_ctx->dyn_state.sl;
++   panvk_cmd_state(cmdbuf).gfx.dynamic.vi = save_ctx->dyn_state.vi;
++   panvk_cmd_state(cmdbuf).gfx.dynamic.sl = save_ctx->dyn_state.sl;
+    memcpy(cmdbuf->vk.dynamic_graphics_state.dirty,
+           cmdbuf->vk.dynamic_graphics_state.set,
+           sizeof(cmdbuf->vk.dynamic_graphics_state.set));
+@@ -194,20 +194,20 @@
+                                     const VkClearRect *pRects)
+ {
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+-   const struct pan_fb_info *fbinfo = &cmdbuf->state.gfx.render.fb.info;
++   const struct pan_fb_info *fbinfo = &panvk_cmd_state(cmdbuf).gfx.render.fb.info;
+    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+    struct panvk_cmd_meta_graphics_save_ctx save = {0};
+    struct vk_meta_rendering_info render = {
+       .view_mask = 0,
+       .samples = fbinfo->nr_samples,
+       .color_attachment_count = fbinfo->rt_count,
+-      .depth_attachment_format = cmdbuf->state.gfx.render.z_attachment.fmt,
+-      .stencil_attachment_format = cmdbuf->state.gfx.render.s_attachment.fmt,
++      .depth_attachment_format = panvk_cmd_state(cmdbuf).gfx.render.z_attachment.fmt,
++      .stencil_attachment_format = panvk_cmd_state(cmdbuf).gfx.render.s_attachment.fmt,
+    };
+ 
+    for (uint32_t i = 0; i < render.color_attachment_count; i++) {
+        render.color_attachment_formats[i] =
+-          cmdbuf->state.gfx.render.color_attachments.fmts[i];
++          panvk_cmd_state(cmdbuf).gfx.render.color_attachments.fmts[i];
+        render.color_attachment_write_masks[i] =
+           VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+--- a/src/panfrost/vulkan/panvk_vX_cmd_push_constant.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_push_constant.c
+@@ -16,8 +16,8 @@
+ 
+    if (push_uniforms.gpu) {
+       /* The first half is used for push constants. */
+-      memcpy(push_uniforms.cpu, cmdbuf->state.push_constants.data,
+-             sizeof(cmdbuf->state.push_constants.data));
++      memcpy(push_uniforms.cpu, panvk_cmd_state(cmdbuf).push_constants.data,
++             sizeof(panvk_cmd_state(cmdbuf).push_constants.data));
+ 
+       /* The second half is used for sysvals. */
+       memcpy((uint8_t *)push_uniforms.cpu + 256, sysvals, sysvals_sz);
+@@ -34,11 +34,11 @@
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+ 
+    if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS)
+-      cmdbuf->state.gfx.push_uniforms = 0;
++      panvk_cmd_state(cmdbuf).gfx.push_uniforms = 0;
+ 
+    if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
+-      cmdbuf->state.compute.push_uniforms = 0;
++      panvk_cmd_state(cmdbuf).compute.push_uniforms = 0;
+ 
+-   memcpy(cmdbuf->state.push_constants.data + pPushConstantsInfo->offset,
++   memcpy(panvk_cmd_state(cmdbuf).push_constants.data + pPushConstantsInfo->offset,
+           pPushConstantsInfo->pValues, pPushConstantsInfo->size);
+ }
+--- a/src/panfrost/vulkan/panvk_vX_shader.c
++++ b/src/panfrost/vulkan/panvk_vX_shader.c
+@@ -1457,22 +1457,22 @@
+ {
+    switch (stage) {
+    case MESA_SHADER_COMPUTE:
+-      cmd->state.compute.shader = shader;
+-      memset(&cmd->state.compute.cs.desc, 0,
+-             sizeof(cmd->state.compute.cs.desc));
++      panvk_cmd_state(cmd).compute.shader = shader;
++      memset(&panvk_cmd_state(cmd).compute.cs.desc, 0,
++             sizeof(panvk_cmd_state(cmd).compute.cs.desc));
+       break;
+    case MESA_SHADER_VERTEX:
+-      cmd->state.gfx.vs.shader = shader;
+-      cmd->state.gfx.linked = false;
+-      memset(&cmd->state.gfx.vs.desc, 0, sizeof(cmd->state.gfx.vs.desc));
++      panvk_cmd_state(cmd).gfx.vs.shader = shader;
++      panvk_cmd_state(cmd).gfx.linked = false;
++      memset(&panvk_cmd_state(cmd).gfx.vs.desc, 0, sizeof(panvk_cmd_state(cmd).gfx.vs.desc));
+       break;
+    case MESA_SHADER_FRAGMENT:
+-      cmd->state.gfx.fs.shader = shader;
+-      cmd->state.gfx.linked = false;
++      panvk_cmd_state(cmd).gfx.fs.shader = shader;
++      panvk_cmd_state(cmd).gfx.linked = false;
+ #if PAN_ARCH <= 7
+-      cmd->state.gfx.fs.rsd = 0;
+-#endif
+-      memset(&cmd->state.gfx.fs.desc, 0, sizeof(cmd->state.gfx.fs.desc));
++      panvk_cmd_state(cmd).gfx.fs.rsd = 0;
++#endif
++      memset(&panvk_cmd_state(cmd).gfx.fs.desc, 0, sizeof(panvk_cmd_state(cmd).gfx.fs.desc));
+       break;
+    default:
+       assert(!"Unsupported stage");

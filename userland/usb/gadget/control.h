@@ -8,6 +8,17 @@ inline bool service(Runtime& r) {
     MxRingSlot slot{};
     for (mx_u32_t n = 0; n < driver::kBatchLimit && r.links[0].try_recv(&slot); ++n) {
         progress = true;
+        if (slot.type == MX_DEVICE_SNAPSHOT) {
+            MxDeviceSnapshot snapshot{};
+            if (mochi::message_get(slot,&snapshot,slot.type) &&
+                r.phase == ControlPhase::Observe && !r.observe_pending &&
+                snapshot.id == r.observe_id && snapshot.generation == r.generation) {
+                libk::copy_n(libk::slice(r.payload,512,sizeof(snapshot)),
+                            libk::as_bytes(&snapshot,sizeof(snapshot)),sizeof(snapshot));
+                reply_data(r,sizeof(snapshot));
+            }
+            continue;
+        }
         MxDeviceEvent event{};
         if (!mochi::message_get(slot, &event, slot.type)) {
             continue;
@@ -27,9 +38,37 @@ inline bool service(Runtime& r) {
             reset_functions(r);
         }
     }
-    if (r.pending_function && r.links[1].tx().try_push_msg(MX_FUNCTION_SETUP, r.function_request)) {
+    if (r.observe_pending && packet(r,r.observe_trial ? MX_DEVICE_EP0_TRIAL : MX_DEVICE_OBSERVE,
+            r.observe_endpoint,0,0,r.observe_trial ? r.trial_mode :
+            (r.observe_history ? MX_DEVICE_OBSERVE_CONTROL_HISTORY : 0),&r.observe_id)) {
+        r.observe_pending=false;
+        progress=true;
+    }
+    if (r.pending_function && r.acm_control.tx().try_push_msg(MX_FUNCTION_SETUP, r.function_request)) {
         r.pending_function = false;
         progress = true;
+    }
+    // EP0 replies must remain consumable while a host has stopped polling
+    // CDC bulk IN. Port-open class requests may precede its next data read.
+    for (mx_u32_t n = 0; n < driver::kBatchLimit && r.acm_control.try_recv(&slot); ++n) {
+        progress = true;
+        MxFunctionSetup answer{};
+        if (!mochi::message_get(slot, &answer, MX_FUNCTION_SETUP_REPLY) ||
+            r.phase != ControlPhase::Function || answer.id != r.setup.id ||
+            answer.generation != r.function_generation) continue;
+        if (answer.id == r.last_out_control.id && !(answer.setup.request_type & 128)) {
+            r.last_out_reply_status=answer.status;
+            r.last_out_reply_length=answer.length;
+        }
+        if (answer.status != MX_OK || answer.length > 16) {
+            stall(r);
+        } else if (r.setup.setup.request_type & 128) {
+            libk::copy_n(libk::slice(r.payload, 512, answer.length),
+                        libk::as_bytes(answer.data), answer.length);
+            reply_data(r, answer.length);
+        } else {
+            r.phase = ControlPhase::StatusIn;
+        }
     }
     if (r.configuration && r.configure_next < kFunctionEndpointCount) {
         progress |= configure(r);
@@ -76,10 +115,10 @@ inline bool service(Runtime& r) {
 }
 
 inline bool retry_pending(const Runtime& r) {
-    if (r.demand_pending || r.pending_function || (r.configuration && r.configure_next < kFunctionEndpointCount)) {
+    if (r.demand_pending || r.pending_function || r.observe_pending || (r.configuration && r.configure_next < kFunctionEndpointCount)) {
         return true;
     }
-    if (!r.ep0_active && r.phase != ControlPhase::Idle && r.phase != ControlPhase::Function) {
+    if (!r.ep0_active && r.phase != ControlPhase::Idle && r.phase != ControlPhase::Function && r.phase != ControlPhase::Observe) {
         return true;
     }
     for (mx_u32_t i = 0; i < 3; ++i) {

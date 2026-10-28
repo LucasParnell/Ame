@@ -23,7 +23,7 @@ const Builtin kBuiltins[] = {
     {"sync", cmd_sync, "flush durable filesystem writes"},
     {"fscheck", cmd_fscheck, "write/read a 3 MiB /data/storage-check.bin diagnostic"},
     {"bootinfo", cmd_bootinfo, "show BootInfo entries"},
-    {"diag", cmd_diag, "diagnostics: all, el2, el3, log, runtime [milliseconds]"},
+    {"diag", cmd_diag, "diagnostics: all, el2, el3, gpu, log, runtime [milliseconds]"},
     {"svc", cmd_svc, "service registry: list/tree/groups/deps/log/start/stop/restart"},
     {"cap", cmd_cap, "capability tools: ls/tree/inspect/revoke"},
     {"arena", cmd_arena, "arena tools: ls/show"},
@@ -34,7 +34,6 @@ const Builtin kBuiltins[] = {
     {"shutdown", cmd_shutdown, "power off the system"},
     {"reboot", cmd_reboot, "reset the system; fastboot/bootloader selects USB flashing"},
 };
-
 
 const uint32_t kBuiltinCount = sizeof(kBuiltins) / sizeof(kBuiltins[0]);
 
@@ -53,7 +52,7 @@ int cmd_help(int, char**) {
     putln("  cap ls | cap tree | cap inspect HANDLE | cap revoke HANDLE");
     putln("  arena ls | arena show NAME");
     putln("  ring stats | doorbell stats");
-    putln("  diag [all|el2|el3|el3-canary|log]");
+    putln("  diag [all|el2|el3|el3-canary|gpu|log]");
     putln("  diag runtime [100..30000 milliseconds]");
     putln("  shutdown | reboot [fastboot|bootloader]");
     putln("  vm list | vm start linux0 | vm console linux0");
@@ -73,23 +72,33 @@ int cmd_echo(int argc, char** argv) {
         start = 2;
     }
     for (uint32_t i = start; i < static_cast<uint32_t>(argc); ++i) {
-        if (i != start) put(" ");
+        if (i != start) {
+            put(" ");
+        }
         put(argv[i]);
     }
-    if (newline) put("\r\n");
+    if (newline) {
+        put("\r\n");
+    }
     return 0;
 }
 
 int cmd_printf(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
-        if (i != 1) put(" ");
+        if (i != 1) {
+            put(" ");
+        }
         const char* s = argv[i];
         for (uint32_t j = 0; s[j]; ++j) {
             if (s[j] == '\\' && s[j + 1]) {
                 ++j;
-                if (s[j] == 'n') put("\r\n");
-                else if (s[j] == 't') put("\t");
-                else put_bytes(&s[j], 1);
+                if (s[j] == 'n') {
+                    put("\r\n");
+                } else if (s[j] == 't') {
+                    put("\t");
+                } else {
+                    put_bytes(&s[j], 1);
+                }
             } else {
                 put_bytes(&s[j], 1);
             }
@@ -99,14 +108,18 @@ int cmd_printf(int argc, char** argv) {
 }
 
 int cmd_clear(int, char**) {
-    for (uint32_t i = 0; i < 64; ++i) put("\r\n");
+    for (uint32_t i = 0; i < 64; ++i) {
+        put("\r\n");
+    }
     return 0;
 }
 
 int cmd_set(int argc, char** argv) {
     if (argc == 1) {
         for (uint32_t i = 0; i < kVarMax; ++i) {
-            if (!g.vars[i].used) continue;
+            if (!g.vars[i].used) {
+                continue;
+            }
             put(g.vars[i].name);
             put("=");
             putln(g.vars[i].value);
@@ -124,11 +137,14 @@ int cmd_set(int argc, char** argv) {
 }
 
 int cmd_unset(int argc, char** argv) {
-    if (argc < 2) return 0;
+    if (argc < 2) {
+        return 0;
+    }
     for (int a = 1; a < argc; ++a) {
         EnvVar* v = find_var(argv[a]);
-        if (v) libk::zero(*v);
+        if (v) {
+            libk::zero(*v);
+        }
     }
     return 0;
 }
-

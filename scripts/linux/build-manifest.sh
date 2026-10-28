@@ -44,6 +44,11 @@ if (( initramfs_load + initramfs_size > dtb_load )); then
     exit 1
 fi
 
+# A matching manifest size cannot repair a stale /chosen initrd bound.
+if [[ "${PROFILE}" == panfrost ]]; then
+    python3 "${AME}/scripts/linux/update-initrd-dtb.py" "${OUT}" --check
+fi
+
 # Modern arm64 Images report text_offset=0 and require 2 MiB-aligned placement;
 # the tiny Dango diagnostic trampoline keeps the first 2 MiB of guest RAM, so
 # Linux loads at the next 2 MiB boundary. Older Images carry a non-zero
@@ -68,6 +73,8 @@ name = "${NAME}"
 profile = "${PROFILE}"
 guest = "${GUEST}"
 arch = "aarch64"
+mali_hardware = "${DANGO_PANFROST_HARDWARE:-0}"
+renderer = "${DANGO_PANFROST_RENDERER:-none}"
 
 kernel = "Image"
 dtb = "dango-linux.dtb"

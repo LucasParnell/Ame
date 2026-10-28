@@ -107,7 +107,9 @@ static void geometry_and_reset() {
     assert(reset.advance(io, 1001) == ResetState::Settling);
     assert(reset.advance(io, 1002) == ResetState::WaitingFlush);
     m.words[kReset / 4] = kAhbIdle;
-    assert(reset.advance(io, 1003) == ResetState::Ready);
+    assert(reset.advance(io, 1003) == ResetState::FlushSettling);
+    assert(reset.advance(io, 2002) == ResetState::FlushSettling);
+    assert(reset.advance(io, 2003) == ResetState::Ready);
     assert(prepare_host_pio(io, geometry, layout));
     assert(!(m.words[kAhbConfig / 4] & kDmaEnable));
     assert(reset.begin(io, 100) && reset.advance(io, 100) == ResetState::Fault);

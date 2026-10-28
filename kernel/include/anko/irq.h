@@ -27,27 +27,31 @@ void spi_enable(u32 irq_id);
 void spi_disable(u32 irq_id);
 void spi_set_pending(u32 irq_id);
 void spi_clear_pending(u32 irq_id);
-u32  iar_id();  // acknowledged interrupt id from the CPU interface, or 1023
+u32 iar_id(); // acknowledged interrupt id from the CPU interface, or 1023
 void eoi(u32 irq_id);
 } // namespace drivers::gic
 
 namespace irq {
 
-// One binding slot per interrupt id in a power-of-two range. 256 covers every
-// SPI both supported GICv2 distributors expose (QEMU virt, Tegra T210).
-constexpr u32 kIrqSlots = 256; // power of two
-constexpr u32 kFirstSpi = 32;  // SGIs (0-15) and PPIs (16-31) are kernel-owned
+// Cover all GICv2 INTIDs, including Hi6250 GPU SPIs 290..292.
+// INTIDs 1020..1023 are reserved and never bindable.
+constexpr u32 kIrqSlots = 1024; // power of two
+constexpr u32 kFirstSpi = 32;   // SGIs (0-15) and PPIs (16-31) are kernel-owned
 
 // GIC SPI INTID for SPI `number` (0-based): the distributor's first SPI line.
-constexpr u32 spi_intid(u32 number) { return kFirstSpi + number; }
+constexpr u32 spi_intid(u32 number) {
+    return kFirstSpi + number;
+}
 
 // Mask an untrusted interrupt id into the table's range *before* any table
 // access, then reject anything the mask aliased (sentinel, PPI/SGI, or an id
 // beyond the distributor). Masking is independent of the range check so the
 // speculative path never leaves the array.
-constexpr u32 irq_index(u32 irq_id) { return irq_id & (kIrqSlots - 1); }
+constexpr u32 irq_index(u32 irq_id) {
+    return irq_id & (kIrqSlots - 1);
+}
 constexpr bool irq_bindable(u32 irq_id) {
-    return irq_id >= kFirstSpi && irq_id < kIrqSlots;
+    return irq_id >= kFirstSpi && irq_id < 1020;
 }
 
 // Bind `line` to `doorbell`. `owner` is the caller's process identity, used to

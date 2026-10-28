@@ -47,6 +47,16 @@ simd_guest_no_fp:
     hvc #0
     b simd_guest_no_fp
 
+.global timer_guest_disable
+timer_guest_disable:
+    msr cntp_ctl_el0, xzr
+    hvc #0
+    b timer_guest_disable
+
+.global timer_guest_busy
+timer_guest_busy:
+    b timer_guest_busy
+
 .section .bss
 .balign 16
     .skip 16384

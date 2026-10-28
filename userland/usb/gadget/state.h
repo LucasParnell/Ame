@@ -7,7 +7,7 @@
 #include "descriptors.h"
 #include "midix/abi/protocols/fido2.h"
 namespace mochi::usb::gadget {
-enum class ControlPhase : mx_u8_t { Idle, In, OutClass, Function, StatusIn, StatusOut, Stall };
+enum class ControlPhase : mx_u8_t { Idle, In, OutClass, Function, StatusIn, StatusOut, Stall, Observe };
 struct Function {
     mx_u64_t rx_id, tx_id;
     mx_u32_t received, forwarded, tx_bytes;
@@ -15,12 +15,20 @@ struct Function {
 };
 struct Runtime {
     mochi::SpscEndpoint links[4];
+    mochi::SpscEndpoint acm_control;
     mochi::Ring fido2_demand;
     libk::bytes payload;
     MxDeviceEvent setup;
     MxFunctionSetup function_request;
+    MxFunctionSetup last_out_control;
+    mx_i32_t last_out_reply_status;
+    mx_u32_t last_out_reply_length;
+    mx_u32_t log_tail_start, log_tail_length;
     Function functions[3];
-    mx_u64_t generation, function_generation, next_id;
+    mx_u64_t generation, function_generation, next_id, observe_id;
+    bool observe_pending, observe_history, observe_trial;
+    mx_u8_t observe_endpoint;
+    mx_u8_t trial_mode;
     mx_u32_t length, sent, configuration, configure_next;
     mx_u8_t pending_address;
     bool address_pending, ep0_active, zlp, pending_function;

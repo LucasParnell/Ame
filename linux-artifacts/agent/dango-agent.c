@@ -37,10 +37,13 @@ static int mount_fs(const char* name, const char* target) {
 }
 
 static int gpu_probe(void) {
-    if (!mount_fs("devtmpfs", "/dev") || !mount_fs("proc", "/proc") ||
-        !mount_fs("sysfs", "/sys")) return 0;
+    if (!mount_fs("devtmpfs", "/dev") || !mount_fs("proc", "/proc") || !mount_fs("sysfs", "/sys")) {
+        return 0;
+    }
     long fd = mx_openat(MX_AT_FDCWD, DANGO_DEV_DRM_CARD0, MX_O_RDWR, 0);
-    if (fd < 0) return 0;
+    if (fd < 0) {
+        return 0;
+    }
     char name[32] = {0};
     struct drm_version version = {0, 0, 0, sizeof(name), name, 0, 0, 0, 0};
     long rc = mx_ioctl((int)fd, DRM_IOCTL_VERSION, &version);
@@ -48,34 +51,51 @@ static int gpu_probe(void) {
     long cap_rc = mx_ioctl((int)fd, DRM_IOCTL_GET_CAP, &cap);
     (void)mx_close((int)fd);
     if (rc || version.name_len != DANGO_GPU_DRIVER_LEN ||
-        !mx_memeq(name, DANGO_GPU_DRIVER, DANGO_GPU_DRIVER_LEN) || cap_rc || cap.value != 1)
+        !mx_memeq(name, DANGO_GPU_DRIVER, DANGO_GPU_DRIVER_LEN) || cap_rc || cap.value != 1) {
         return 0;
+    }
     mx_puts("dango: DRM card0 driver=" DANGO_GPU_DRIVER " dumb_buffer=1\n");
 
     // The kernel's boot-time virtqueue requests require real completions.
     // Independently check Linux accounted at least one virtio ISR invocation.
     fd = mx_openat(MX_AT_FDCWD, DANGO_DEV_PROC_INTERRUPTS, MX_O_RDONLY, 0);
-    if (fd < 0) return 0;
+    if (fd < 0) {
+        return 0;
+    }
     char interrupts[4096];
     long n = mx_read((int)fd, interrupts, sizeof(interrupts));
     (void)mx_close((int)fd);
     // A short or buffer-filling read is not an error: scan exactly the bytes
     // returned, line by line. Only a negative read result is a failure.
-    if (n < 0) return 0;
+    if (n < 0) {
+        return 0;
+    }
     const long tag_len = (long)(sizeof(k_virtio_isr_tag) - 1);
     for (long begin = 0; begin < n;) {
         long end = begin;
-        while (end < n && interrupts[end] != '\n') ++end;
+        while (end < n && interrupts[end] != '\n') {
+            ++end;
+        }
         int virtio = 0;
-        for (long i = begin; i + tag_len <= end; ++i)
-            if (mx_memeq(interrupts + i, k_virtio_isr_tag, (unsigned long)tag_len)) virtio = 1;
+        for (long i = begin; i + tag_len <= end; ++i) {
+            if (mx_memeq(interrupts + i, k_virtio_isr_tag, (unsigned long)tag_len)) {
+                virtio = 1;
+            }
+        }
         long pos = begin;
-        while (pos < end && interrupts[pos] != ':') ++pos;
-        if (pos < end) ++pos;
-        while (pos < end && interrupts[pos] == ' ') ++pos;
+        while (pos < end && interrupts[pos] != ':') {
+            ++pos;
+        }
+        if (pos < end) {
+            ++pos;
+        }
+        while (pos < end && interrupts[pos] == ' ') {
+            ++pos;
+        }
         unsigned long count = 0;
-        while (pos < end && interrupts[pos] >= '0' && interrupts[pos] <= '9')
+        while (pos < end && interrupts[pos] >= '0' && interrupts[pos] <= '9') {
             count = count * 10 + (unsigned long)(interrupts[pos++] - '0');
+        }
         if (virtio && count) {
             mx_puts("dango: Linux virtio ISR observed\n");
             return 1;
@@ -98,9 +118,8 @@ int dango_gpud_resume(void);
 void _start(void) {
     ensure_stdio_console();
 
-    const char msg[] =
-        "dango-agent: started\n"
-        "dango: linux guest responded\n";
+    const char msg[] = "dango-agent: started\n"
+                       "dango: linux guest responded\n";
 
     if (mx_write(1, msg, sizeof(msg) - 1) < 0) {
         (void)mx_write(2, msg, sizeof(msg) - 1);
@@ -133,6 +152,27 @@ void _start(void) {
 #endif
     } else {
         mx_puts("dango: gpu probe FAILED\n");
+    }
+#endif
+
+#ifdef DANGO_PANFROST_PROBE
+    // The render-only Mali driver has no KMS/dumb-buffer interface. Mount the
+    // device filesystem for the generic transport even before GPU assignment.
+    if (mx_mount("devtmpfs", "/dev", "devtmpfs") != 0 || mx_mount("proc", "/proc", "proc") != 0 ||
+        mx_mount("sysfs", "/sys", "sysfs") != 0) {
+        mx_puts("dango: appliance mounts FAILED\n");
+    }
+    long render = mx_openat(MX_AT_FDCWD, "/dev/dri/renderD128", MX_O_RDWR, 0);
+    if (render < 0) {
+        mx_puts("dango: Panfrost built in; GPU unassigned\n");
+    } else {
+        char name[32] = {0};
+        struct drm_version version = {0, 0, 0, sizeof(name), name, 0, 0, 0, 0};
+        long rc = mx_ioctl((int)render, DRM_IOCTL_VERSION, &version);
+        mx_puts(rc == 0 && version.name_len == 8 && mx_memeq(name, "panfrost", 8)
+                    ? "dango: Panfrost render node ready\n"
+                    : "dango: Panfrost render probe FAILED\n");
+        (void)mx_close((int)render);
     }
 #endif
 

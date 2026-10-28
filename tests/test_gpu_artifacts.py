@@ -27,6 +27,9 @@ class GpuArtifacts(unittest.TestCase):
             (root / 'manifest.toml').write_text(
                 'profile="gpu"\nkernel_size=4\ninitramfs_size=4\ndtb_size=4\n')
             profile.check(root, 'gpu')
+            profile.check(root, 'gpu', 'minimal')
+            with self.assertRaises(ValueError):
+                profile.check(root, 'gpu', 'lavapipe')
             with self.assertRaises(ValueError):
                 profile.check(root, 'hello')
             (root / 'Image').write_bytes(b'old')

@@ -1,8 +1,9 @@
 # IOMMU ownership, routing and ARM SMMUv3 verification
 
-Spec ref: `AME-GPU-DRIVER-APPLIANCE` §8.1 (isolation rule), §8.2 (IOVA model),
-§8.7 (SMMUv3 backend), §8.8 (publication), §8.10 (faults), §8.12 (revoke),
-§8.14 (verification).
+Companion to [Ame memory and DMA ownership](architecture.md#memory-and-dma-ownership).
+This guide covers the generic/native/assigned DMA contract and SMMUv3 backend;
+the [Anne GPU audit](../boards/huawei-anne/gpu-isolation.md) documents the separate
+Mali shadow-MMU boundary.
 
 ## Layout
 

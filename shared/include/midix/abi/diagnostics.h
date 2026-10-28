@@ -6,7 +6,7 @@
 
 constexpr mx_u32_t MX_DIAG_VERSION = 1;
 constexpr mx_u64_t MX_DIAG_READ_MAX = 1024;
-constexpr mx_u64_t MX_DIAG_EL3_MAX_INDEX = 30;
+constexpr mx_u64_t MX_DIAG_EL3_MAX_INDEX = 33;
 
 enum MxDiagRequest : mx_u64_t {
     MX_DIAG_SYSTEM = 0,   // index=0, MxDiagSystem; returns sizeof(MxDiagSystem)
@@ -16,9 +16,10 @@ enum MxDiagRequest : mx_u64_t {
     // registration canary; index 2 = read-only window reconnaissance; index 3 =
     // legacy completion probe (index 3) now returns NOT_IMPLEMENTED: Linux
     // requires a completed storage operation and defines no callback guard.
-    MX_DIAG_EL3 = 3,      // indices 0..MAX_INDEX; 29/30 = notification-backed RPMB lifecycle
-    MX_DIAG_HEALTH = 5,   // index=0, MxDiagHealth; read-only console telemetry
-    MX_DIAG_RUNTIME = 4,  // index=first PID (1..limit), MxDiagRuntimeBatch
+    MX_DIAG_EL3 = 3,     // indices 0..MAX_INDEX; 29/30 = RPMB lifecycle, 31 = GPU routing snapshot
+    MX_DIAG_HEALTH = 5,  // index=0, MxDiagHealth; read-only console telemetry
+    MX_DIAG_VM_PROGRESS = 6, // index=logical CPU, bounded last vCPU/MMIO checkpoint
+    MX_DIAG_RUNTIME = 4, // index=first PID (1..limit), MxDiagRuntimeBatch
 };
 
 enum MxDiagBoard : mx_u32_t {
@@ -66,6 +67,31 @@ struct MxDiagCpu {
 };
 static_assert(sizeof(MxDiagCpu) == 72);
 
+enum MxVmProgressStage : mx_u64_t {
+    MX_VM_PROGRESS_NONE = 0,
+    MX_VM_PROGRESS_RUN = 1,
+    MX_VM_PROGRESS_CACHE_CLEAN = 2,
+    MX_VM_PROGRESS_GUEST_ENTER = 3,
+    MX_VM_PROGRESS_GUEST_EXIT = 4,
+    MX_VM_PROGRESS_CACHE_INVALIDATED = 5,
+    MX_VM_PROGRESS_IRQ = 6,
+    MX_VM_PROGRESS_MMIO = 7,
+    MX_VM_PROGRESS_MMIO_DONE = 8,
+    MX_VM_PROGRESS_MALI_LOCK = 9,
+    MX_VM_PROGRESS_MALI_LOCKED = 10,
+    MX_VM_PROGRESS_MALI_READ = 11,
+    MX_VM_PROGRESS_MALI_READ_DONE = 12,
+    MX_VM_PROGRESS_MALI_WRITE = 13,
+    MX_VM_PROGRESS_MALI_WRITE_DONE = 14,
+    MX_VM_PROGRESS_SHADOW = 15,
+    MX_VM_PROGRESS_SHADOW_DONE = 16,
+};
+struct MxDiagVmProgress {
+    mx_u32_t version, cpu;
+    mx_u64_t sequence, stage, sampled_ns, detail0, detail1;
+};
+static_assert(sizeof(MxDiagVmProgress) == 48);
+
 constexpr mx_u32_t MX_DIAG_PROCESS_LIMIT = 64, MX_DIAG_RUNTIME_ROWS = 8;
 // Fixed-size, pointer-free rows. Identity includes the PID generation so a
 // consumer cannot charge a replacement process for the previous one's time.
@@ -107,7 +133,7 @@ struct MxDiagEl3 {
     mx_u64_t bl31_base;
     mx_u64_t bl31_size;
     mx_u64_t callback_offset_from_request; // Legacy ABI field; zero on Hi6250.
-    mx_u64_t callback_address; // Linux defines no callback in rpmb_request.
+    mx_u64_t callback_address;             // Linux defines no callback in rpmb_request.
     mx_u64_t call_count[4];
     mx_u64_t uid[4];
     mx_u64_t service_version[4];
@@ -118,23 +144,38 @@ struct MxDiagEl3 {
 static_assert(sizeof(MxDiagEl3) == 168);
 
 enum MxDiagRpmbAction : mx_u32_t {
-    MX_RPMB_STATUS, MX_RPMB_ARM, MX_RPMB_COUNTER, MX_RPMB_COMPLETE, MX_RPMB_RELEASE,
+    MX_RPMB_STATUS,
+    MX_RPMB_ARM,
+    MX_RPMB_COUNTER,
+    MX_RPMB_COMPLETE,
+    MX_RPMB_RELEASE,
     MX_RPMB_ARM_EMMC,
     MX_RPMB_PROVISION_KEY,
     MX_RPMB_KEY_STATUS,
 };
 enum MxDiagRpmbResult : mx_u32_t {
-    MX_RPMB_OK, MX_RPMB_BUSY, MX_RPMB_NO_REQUEST, MX_RPMB_REGISTRATION_FAILED,
-    MX_RPMB_AMBIGUOUS_REQUEST, MX_RPMB_STALE_REQUEST, MX_RPMB_ALREADY_CALLED,
-    MX_RPMB_COMPLETION_FAILED, MX_RPMB_BAD_ACTION,
+    MX_RPMB_OK,
+    MX_RPMB_BUSY,
+    MX_RPMB_NO_REQUEST,
+    MX_RPMB_REGISTRATION_FAILED,
+    MX_RPMB_AMBIGUOUS_REQUEST,
+    MX_RPMB_STALE_REQUEST,
+    MX_RPMB_ALREADY_CALLED,
+    MX_RPMB_COMPLETION_FAILED,
+    MX_RPMB_BAD_ACTION,
     MX_RPMB_STORAGE_UNAVAILABLE,
     MX_RPMB_PROVISION_FAILED,
-    MX_RPMB_ALREADY_PROVISIONED, MX_RPMB_PROVISION_UNCERTAIN,
+    MX_RPMB_ALREADY_PROVISIONED,
+    MX_RPMB_PROVISION_UNCERTAIN,
     MX_RPMB_KEY_QUERY_FAILED,
 };
 enum MxRpmbProvisionStage : mx_u64_t {
-    MX_RPMB_PROVISION_IDLE, MX_RPMB_PROVISION_PREFLIGHT, MX_RPMB_PROVISION_GET_FRAME,
-    MX_RPMB_PROVISION_WAIT_FRAME, MX_RPMB_PROVISION_PROGRAM, MX_RPMB_PROVISION_VERIFY,
+    MX_RPMB_PROVISION_IDLE,
+    MX_RPMB_PROVISION_PREFLIGHT,
+    MX_RPMB_PROVISION_GET_FRAME,
+    MX_RPMB_PROVISION_WAIT_FRAME,
+    MX_RPMB_PROVISION_PROGRAM,
+    MX_RPMB_PROVISION_VERIFY,
     MX_RPMB_PROVISION_DONE,
 };
 // Index 29. Only action is input; all other fields are kernel observations.
@@ -184,7 +225,7 @@ static_assert(sizeof(MxDiagEl3Recon) == 264);
 // returns NOT_IMPLEMENTED without touching the request window or calling BL31.
 struct MxDiagEl3Done {
     mx_u32_t version;
-    mx_u32_t aborted; // 0 = call made; 1 = registration failed; 2 = guard refused
+    mx_u32_t aborted;    // 0 = call made; 1 = registration failed; 2 = guard refused
     mx_u64_t registered; // REQUEST_ADDR raw x0
     mx_u64_t slot_pre;
     mx_u64_t status_pre;
@@ -305,7 +346,10 @@ struct MxDiagEl3Cc {
     mx_u32_t version;
     mx_u32_t aborted;
     mx_u64_t x1;
-    mx_u64_t r0; mx_u64_t r1; mx_u64_t r2; mx_u64_t r3;
+    mx_u64_t r0;
+    mx_u64_t r1;
+    mx_u64_t r2;
+    mx_u64_t r3;
     mx_u64_t crumb_stage;
 };
 static_assert(sizeof(MxDiagEl3Cc) == 56);
@@ -314,9 +358,16 @@ static_assert(sizeof(MxDiagEl3Cc) == 56);
 struct MxDiagEl3Cc2 {
     mx_u32_t version;
     mx_u32_t aborted;
-    mx_u64_t a; mx_u64_t b;
-    mx_u64_t ra0; mx_u64_t ra1; mx_u64_t ra2; mx_u64_t ra3;
-    mx_u64_t rb0; mx_u64_t rb1; mx_u64_t rb2; mx_u64_t rb3;
+    mx_u64_t a;
+    mx_u64_t b;
+    mx_u64_t ra0;
+    mx_u64_t ra1;
+    mx_u64_t ra2;
+    mx_u64_t ra3;
+    mx_u64_t rb0;
+    mx_u64_t rb1;
+    mx_u64_t rb2;
+    mx_u64_t rb3;
     mx_u64_t crumb_stage;
 };
 static_assert(sizeof(MxDiagEl3Cc2) == 96);
@@ -373,13 +424,13 @@ static_assert(sizeof(MxDiagEl3Teeos) == 48);
 // catch for exactly one load; a denied address reports instead of resetting.
 struct MxDiagEl3Rprobe {
     mx_u32_t version;
-    mx_u32_t ok;        // 1 = read completed, 0 = fault was caught
-    mx_u64_t addr;      // in
-    mx_u64_t value;     // out when ok
-    mx_u64_t esr;       // out when !ok — fault status
-    mx_u64_t far;       // out when !ok — faulting address
-    mx_u64_t elr;       // out when !ok — faulting PC
-    mx_u64_t faults;    // out — faults observed during the read
+    mx_u32_t ok;     // 1 = read completed, 0 = fault was caught
+    mx_u64_t addr;   // in
+    mx_u64_t value;  // out when ok
+    mx_u64_t esr;    // out when !ok — fault status
+    mx_u64_t far;    // out when !ok — faulting address
+    mx_u64_t elr;    // out when !ok — faulting PC
+    mx_u64_t faults; // out — faults observed during the read
 };
 static_assert(sizeof(MxDiagEl3Rprobe) == 56);
 
@@ -389,13 +440,13 @@ constexpr mx_u64_t MX_DIAG_EL3_RSCAN_MAX = 0x40000;
 struct MxDiagEl3Rscan {
     mx_u32_t version;
     mx_u32_t aborted;
-    mx_u64_t base;          // in
-    mx_u64_t length;        // in (<= RSCAN_MAX, multiple of 8)
-    mx_u64_t readable;      // out — 8-byte words read successfully
-    mx_u64_t faults;        // out — words that raised a handled fault
-    mx_u64_t seg_count;     // out — readable byte ranges recorded (<= 8)
-    mx_u64_t first_count;   // out — first non-zero readable words recorded (<= 8)
-    mx_u64_t esr_last;      // out — ESR of the last fault caught
+    mx_u64_t base;               // in
+    mx_u64_t length;             // in (<= RSCAN_MAX, multiple of 8)
+    mx_u64_t readable;           // out — 8-byte words read successfully
+    mx_u64_t faults;             // out — words that raised a handled fault
+    mx_u64_t seg_count;          // out — readable byte ranges recorded (<= 8)
+    mx_u64_t first_count;        // out — first non-zero readable words recorded (<= 8)
+    mx_u64_t esr_last;           // out — ESR of the last fault caught
     mx_u64_t segments[8][2];     // [start, end) byte ranges
     mx_u64_t first_values[8][2]; // [addr, value]
 };
@@ -521,3 +572,40 @@ struct MxDiagEl3Scan2 {
     mx_u64_t crumb_stage;
 };
 static_assert(sizeof(MxDiagEl3Scan2) == 944);
+
+// Read-only, fixed register snapshot for Hi6250 GPU translation research.
+// MX_DIAG_EL3 index 31. No addresses or register writes are supplied by users.
+struct MxDiagGpuIommu {
+    mx_u32_t version, valid; // validity bit per register, in the order below
+    mx_u32_t gpu_id, mem_features, mmu_features, as_present;
+    mx_u32_t pctrl_ctrl8, pctrl_ctrl25;
+    mx_u64_t faults;
+};
+static_assert(sizeof(MxDiagGpuIommu) == 40);
+
+// Fixed Hi6250 DMSS snapshot, MX_DIAG_EL3 index 32. These are observations,
+// not evidence that GPU traffic traverses a particular ASI or an SMMU.
+constexpr mx_u32_t MX_DIAG_DMSS_PORTS = 7;
+constexpr mx_u32_t MX_DIAG_DMSS_WORDS = 8;
+struct MxDiagGpuDmss {
+    mx_u32_t version, valid;
+    mx_u32_t global_version, global_info, pctrl_ctrl8, reserved;
+    mx_u64_t faults, first_esr, first_far;
+    struct Port {
+        mx_u32_t valid;
+        // RTL_INF3, STAT_MASK, STAT_CYCLE, FLUX_FILTER0/1, FLUX_WR/RD,
+        // SEC_INT_STATUS. No clear-on-read or write-only registers included.
+        mx_u32_t words[MX_DIAG_DMSS_WORDS];
+    } ports[MX_DIAG_DMSS_PORTS];
+};
+static_assert(sizeof(MxDiagGpuDmss) == 304);
+
+// Index 33: architected SMMUv2 ID registers at the vendor IVP candidate.
+// This identifies accessibility/features only; it does not establish a GPU route.
+struct MxDiagSmmuId {
+    mx_u32_t version, valid;
+    mx_u64_t base;
+    mx_u32_t id[3], reserved;
+    mx_u64_t faults, first_esr, first_far;
+};
+static_assert(sizeof(MxDiagSmmuId) == 56);

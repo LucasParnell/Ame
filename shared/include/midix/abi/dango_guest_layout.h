@@ -3,7 +3,7 @@
  * time so the kernel bounds, the guest DTS and the artifact manifest cannot
  * disagree about where guest RAM ends and where the fixed device windows start.
  *
- * Two layouts exist (docs/GPU_APPLIANCE_GUEST_MEMORY.md):
+ * Two layouts exist (docs/linux-appliances.md#gpu_appliance_guest_memory):
  *
  *   minimal   the freestanding appliance guest: 128 MiB RAM. Default, and the
  *             only layout the tree boots today.

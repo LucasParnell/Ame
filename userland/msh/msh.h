@@ -37,30 +37,30 @@
 #include "midix/abi/protocols/terminal.h"
 #include "mochi/va_layout.h"
 using mochi::va::msh::kVaBootInfo;
-using mochi::va::msh::kVaLogRing;
-using mochi::va::msh::kVaTermInput;
-using mochi::va::msh::kVaTermOutput;
 using mochi::va::msh::kVaFsCmdRing;
 using mochi::va::msh::kVaFsReplyRing;
+using mochi::va::msh::kVaLogRing;
 using mochi::va::msh::kVaSvcCmdRing;
-using mochi::va::msh::kVaSvcReplyRing;
 using mochi::va::msh::kVaSvcRegistry;
+using mochi::va::msh::kVaSvcReplyRing;
+using mochi::va::msh::kVaTermInput;
+using mochi::va::msh::kVaTermOutput;
 
-inline constexpr uint32_t kDefaultOrder      = MX_DEFAULT_RING_ORDER;
-inline constexpr uint32_t kLineMax           = 256;
-inline constexpr uint32_t kTokenMax          = 32;
-inline constexpr uint32_t kArgMax            = 16;
-inline constexpr uint32_t kVarMax            = 32;
-inline constexpr uint32_t kVarNameMax        = 24;
-inline constexpr uint32_t kVarValueMax       = 128;
-inline constexpr uint32_t kHistoryMax        = 16;
-inline constexpr uint32_t kPromptMax         = 96;
-inline constexpr uint32_t kCompletionMax     = 24;
+inline constexpr uint32_t kDefaultOrder = MX_DEFAULT_RING_ORDER;
+inline constexpr uint32_t kLineMax = 256;
+inline constexpr uint32_t kTokenMax = 32;
+inline constexpr uint32_t kArgMax = 16;
+inline constexpr uint32_t kVarMax = 32;
+inline constexpr uint32_t kVarNameMax = 24;
+inline constexpr uint32_t kVarValueMax = 128;
+inline constexpr uint32_t kHistoryMax = 16;
+inline constexpr uint32_t kPromptMax = 96;
+inline constexpr uint32_t kCompletionMax = 24;
 // Path handling limits (fs_internal.h's inline-name width and the component
 // depth cap) and the well-known root handle.
-inline constexpr uint32_t kPathNameMax  = 36;
+inline constexpr uint32_t kPathNameMax = 36;
 inline constexpr uint32_t kPathDepthMax = 12;
-inline constexpr uint32_t kPathMax      = 128;
+inline constexpr uint32_t kPathMax = 128;
 inline constexpr fs_handle_t kRootHandle = 1;
 
 struct Token {
@@ -184,3 +184,7 @@ int cmd_vm(int argc, char** argv);
 // Power requests (msh_power.cc).
 int cmd_shutdown(int argc, char** argv);
 int cmd_reboot(int argc, char** argv);
+
+int cmd_diag_gpu(bool reset = false, bool upload = false);
+int cmd_diag_gpu_vulkan();
+int cmd_diag_gpu_cts(const char* pattern,bool log_only=false);

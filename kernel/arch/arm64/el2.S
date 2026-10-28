@@ -226,7 +226,9 @@ el2_lower_sync:
     dsb     ish
     isb
 
-    mov     x0, #3
+    // EL1PCTEN=1 permits the counter; EL1PCEN=0 traps the guest's
+    // physical timer accesses. CNTP remains the host preemption clock.
+    mov     x0, #1
     msr     CNTHCTL_EL2, x0
     msr     CNTVOFF_EL2, xzr
     msr     CPTR_EL2, xzr
@@ -312,14 +314,6 @@ el2_lower_sync:
     str     x0, [x21, #CTX_HOST_CNTP_CVAL]
 
     ldr     x3, [x21, #CTX_TIMER_HW_MASK]
-
-    ldr     x0, [x21, #CTX_GUEST_CNTP_CTL]
-    tbz     x3, #0, 1f
-    orr     x0, x0, #2
-1:
-    msr     CNTP_CTL_EL0, x0
-    ldr     x0, [x21, #CTX_GUEST_CNTP_CVAL]
-    msr     CNTP_CVAL_EL0, x0
 
     ldr     x0, [x21, #CTX_GUEST_CNTV_CTL]
     tbz     x3, #1, 2f
@@ -457,26 +451,6 @@ el2_guest_exit_common:
 
     ldr     x3, [x22, #CTX_TIMER_HW_MASK]
 
-    mrs     x0, CNTP_CTL_EL0
-    mrs     x1, CNTP_CVAL_EL0
-    ldr     x2, [x22, #CTX_GUEST_CNTP_CTL]
-    ldr     x4, [x22, #CTX_GUEST_CNTP_CVAL]
-    tbz     x3, #0, 1f
-    orr     x5, x2, #2
-    cmp     x0, x5
-    b.ne    0f
-    cmp     x1, x4
-    b.ne    0f
-    mov     x0, x2
-    mov     x1, x4
-    b       1f
-0:
-    tbnz    x2, #1, 1f
-    bic     x0, x0, #2
-1:
-    str     x0, [x22, #CTX_GUEST_CNTP_CTL]
-    str     x1, [x22, #CTX_GUEST_CNTP_CVAL]
-
     mrs     x0, CNTV_CTL_EL0
     mrs     x1, CNTV_CVAL_EL0
     ldr     x2, [x22, #CTX_GUEST_CNTV_CTL]
@@ -497,6 +471,9 @@ el2_guest_exit_common:
     str     x0, [x22, #CTX_GUEST_CNTV_CTL]
     str     x1, [x22, #CTX_GUEST_CNTV_CVAL]
 
+    // The returning EL1 host must regain physical timer access.
+    mov     x0, #3
+    msr     CNTHCTL_EL2, x0
     ldr     x0, [x22, #CTX_HOST_CNTP_CTL]
     msr     CNTP_CTL_EL0, x0
     ldr     x0, [x22, #CTX_HOST_CNTP_CVAL]

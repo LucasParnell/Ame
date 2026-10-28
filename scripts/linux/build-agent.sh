@@ -36,6 +36,11 @@ if [[ "${DANGO_LINUX_PROFILE:-hello}" == gpu ]]; then
     SRCS+=("${AME}/linux-artifacts/gpud/gpud_drm.c")
 fi
 
+if [[ "${DANGO_LINUX_PROFILE:-hello}" == panfrost ]]; then
+    CFLAGS+=(-DDANGO_CHANNEL_TEST=1 -DDANGO_PANFROST_PROBE=1 -Wl,--build-id=none -Wl,-s)
+    SRCS+=("${AME}/linux-artifacts/channel_test/channel_test.c")
+fi
+
 DST="${OUT}/dango-agent"
 
 if [[ -n "${CROSS_COMPILE:-}" ]] && command -v "${CROSS_COMPILE}gcc" >/dev/null 2>&1; then

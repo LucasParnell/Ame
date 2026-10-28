@@ -1,33 +1,46 @@
 #include "anko/vm.h"
+#include "anko/mali.h"
 #include "anko/log.h"
 #include "anko/interrupt_mask.h"
 #include "anko/el2_boot.h"
+#include "anko/el2_cache.h"
 #include "libk/string.h"
 #include "libk/printf.h"
 
-namespace drivers::timer { u64 tick_count(); }
+namespace drivers::timer {
+u64 tick_count();
+}
+extern "C" u64 g_el2_run_state[MX_HOST_MAX_CPUS];
+extern "C" char g_el2_stacks[];
 
 namespace vm {
 static u32 g_call_lock;
 CallGuard::CallGuard(bool active) : active_(active), irq_(0) {
-    if (!active_) return;
-    asm volatile("mrs %0, DAIF; msr DAIFSet, #2" : "=r"(irq_) :: "memory");
-    while (__atomic_exchange_n(&g_call_lock, 1u, __ATOMIC_ACQUIRE)) asm volatile("yield" ::: "memory");
+    if (!active_) {
+        return;
+    }
+    asm volatile("mrs %0, DAIF; msr DAIFSet, #2" : "=r"(irq_)::"memory");
+    while (__atomic_exchange_n(&g_call_lock, 1u, __ATOMIC_ACQUIRE)) {
+        asm volatile("yield" ::: "memory");
+    }
 }
 CallGuard::~CallGuard() {
-    if (!active_) return;
+    if (!active_) {
+        return;
+    }
     __atomic_store_n(&g_call_lock, 0u, __ATOMIC_RELEASE);
-    asm volatile("msr DAIF, %0" :: "r"(kernel::host_interrupt_state(irq_)) : "memory");
+    asm volatile("msr DAIF, %0" ::"r"(kernel::host_interrupt_state(irq_)) : "memory");
 }
 static void dispose_vm(void* target) {
     auto* v = static_cast<Vm*>(target);
     // The shared-arena descriptor page outlives every channel on the VM, so it
     // is released here rather than in dispose_channel (stage2_destroy has
     // already dropped the mappings that referenced it by this point).
-    if (v->shm_page) mm::free_page(v->shm_page);
+    if (v->shm_page) {
+        mm::free_page(v->shm_page);
+    }
     mm::slab_free(target, sizeof(Vm), alignof(Vm));
 }
-
 
 namespace {
 
@@ -87,7 +100,9 @@ bool is_vm_live(const Vm* v) {
 
 u32 find_free_vm_slot() {
     for (u32 i = 0; i < kMaxVms; ++i) {
-        if (!is_vm_live(g_vms[i])) return i;
+        if (!is_vm_live(g_vms[i])) {
+            return i;
+        }
     }
     return kMaxVms;
 }
@@ -95,6 +110,10 @@ u32 find_free_vm_slot() {
 } // namespace
 
 void init() {
+    // Publish the BSS clear before uncached EL2 accesses. Do this before SMP
+    // startup, while no secondary monitor can be using its private stack.
+    el2_cache::clean(reinterpret_cast<PhysAddr>(g_el2_run_state), sizeof(g_el2_run_state), true);
+    el2_cache::clean(reinterpret_cast<PhysAddr>(g_el2_stacks), MX_HOST_MAX_CPUS * 16384, true);
     u64 current_el = 0;
     asm volatile("mrs %0, CurrentEL" : "=r"(current_el));
     g_el_current = (current_el >> 2) & 0x3ull;
@@ -106,11 +125,12 @@ void init() {
     u64 pfr, midr;
     asm volatile("mrs %0, ID_AA64PFR0_EL1" : "=r"(pfr));
     asm volatile("mrs %0, MIDR_EL1" : "=r"(midr));
-    ANKO_LOGF_INFO("kernel/vm", "EL2 hardware=%llu boot_entry=%llu monitor=%llu midr=%llx pfr0=%llx",
-        static_cast<unsigned long long>((pfr >> 8) & 0xf),
-        static_cast<unsigned long long>(entry_level(0)),
-        static_cast<unsigned long long>(g_el2_available),
-        static_cast<unsigned long long>(midr), static_cast<unsigned long long>(pfr));
+    ANKO_LOGF_INFO("kernel/vm",
+                   "EL2 hardware=%llu boot_entry=%llu monitor=%llu midr=%llx pfr0=%llx",
+                   static_cast<unsigned long long>((pfr >> 8) & 0xf),
+                   static_cast<unsigned long long>(entry_level(0)),
+                   static_cast<unsigned long long>(g_el2_available),
+                   static_cast<unsigned long long>(midr), static_cast<unsigned long long>(pfr));
     device_irq_init();
 }
 
@@ -120,39 +140,72 @@ VmRoot* root_object() {
 
 u64 debug_counter(u64 id) {
     switch (id) {
-    case VM_DEBUG_CREATE_CALLS: return counter_load(g_vm_create_calls);
-    case VM_DEBUG_CREATED: return counter_load(g_vm_created);
-    case VM_DEBUG_DESTROYED: return counter_load(g_vm_destroyed);
-    case VM_DEBUG_MEMORY_CREATED: return counter_load(g_vm_memory_created);
-    case VM_DEBUG_MEMORY_MAPPED: return counter_load(g_vm_memory_mapped);
-    case VM_DEBUG_MEMORY_UNMAPPED: return counter_load(g_vm_memory_unmapped);
-    case VM_DEBUG_STAGE2_TABLES_CREATED: return counter_load(g_vm_stage2_tables_created);
-    case VM_DEBUG_STAGE2_PAGES_MAPPED: return counter_load(g_vm_stage2_pages_mapped);
-    case VM_DEBUG_VCPU_CREATED: return counter_load(g_vcpu_created);
-    case VM_DEBUG_VCPU_CONFIGURED: return counter_load(g_vcpu_configured);
-    case VM_DEBUG_VCPU_RUN_ATTEMPTS: return counter_load(g_vcpu_run_attempts);
-    case VM_DEBUG_VCPU_RUN_NOTIMPL: return counter_load(g_vcpu_run_notimpl);
-    case VM_DEBUG_CHANNELS_CREATED: return counter_load(g_vm_channels_created);
-    case VM_DEBUG_ERRORS: return counter_load(g_vm_errors);
-    case VM_DEBUG_EL_CURRENT: return counter_load(g_el_current);
-    case VM_DEBUG_EL2_AVAILABLE: return counter_load(g_el2_available);
-    case VM_DEBUG_VHE_AVAILABLE: return counter_load(g_vhe_available);
-    case VM_DEBUG_GUEST_BOOT_STUB: return counter_load(g_guest_boot_stub);
-    case VM_DEBUG_GUEST_AGENT_START: return counter_load(g_guest_agent_start);
-    case VM_DEBUG_GUEST_LINUX_HELLO: return counter_load(g_guest_linux_hello);
-    case VM_DEBUG_VCPU_WFX_EXITS: return counter_load(g_vcpu_wfx_exits);
-    case VM_DEBUG_VCPU_IRQ_EXITS: return counter_load(g_vcpu_irq_exits);
-    case VM_DEBUG_VCPU_UNSUPPORTED_EXITS: return counter_load(g_vcpu_unsupported_exits);
-    case VM_DEBUG_VM_DEVICE_CREATED: return counter_load(g_vm_device_created);
-    case VM_DEBUG_VM_DEVICE_ACTIVE: return counter_load(g_vm_device_active);
-    case VM_DEBUG_VM_DEVICE_DESTROYED: return counter_load(g_vm_device_destroyed);
-    case VM_DEBUG_VM_DEVICE_BAR_MAPPED: return counter_load(g_vm_device_bar_mapped);
-    case VM_DEBUG_VM_DEVICE_IRQ_ROUTES: return counter_load(g_vm_device_irq_routes);
-    case VM_DEBUG_VM_DEVICE_IRQ_INJECTED: return counter_load(g_vm_device_irq_injected);
-    case VM_DEBUG_VM_DEVICE_MEDIATED_DENY: return counter_load(g_vm_device_mediated_deny);
-    case VM_DEBUG_VM_DEVICE_BME_ENABLE: return counter_load(g_vm_device_bme_enable);
-    case VM_DEBUG_VM_DEVICE_QUARANTINE: return counter_load(g_vm_device_quarantine);
-    default: return 0;
+    case VM_DEBUG_CREATE_CALLS:
+        return counter_load(g_vm_create_calls);
+    case VM_DEBUG_CREATED:
+        return counter_load(g_vm_created);
+    case VM_DEBUG_DESTROYED:
+        return counter_load(g_vm_destroyed);
+    case VM_DEBUG_MEMORY_CREATED:
+        return counter_load(g_vm_memory_created);
+    case VM_DEBUG_MEMORY_MAPPED:
+        return counter_load(g_vm_memory_mapped);
+    case VM_DEBUG_MEMORY_UNMAPPED:
+        return counter_load(g_vm_memory_unmapped);
+    case VM_DEBUG_STAGE2_TABLES_CREATED:
+        return counter_load(g_vm_stage2_tables_created);
+    case VM_DEBUG_STAGE2_PAGES_MAPPED:
+        return counter_load(g_vm_stage2_pages_mapped);
+    case VM_DEBUG_VCPU_CREATED:
+        return counter_load(g_vcpu_created);
+    case VM_DEBUG_VCPU_CONFIGURED:
+        return counter_load(g_vcpu_configured);
+    case VM_DEBUG_VCPU_RUN_ATTEMPTS:
+        return counter_load(g_vcpu_run_attempts);
+    case VM_DEBUG_VCPU_RUN_NOTIMPL:
+        return counter_load(g_vcpu_run_notimpl);
+    case VM_DEBUG_CHANNELS_CREATED:
+        return counter_load(g_vm_channels_created);
+    case VM_DEBUG_ERRORS:
+        return counter_load(g_vm_errors);
+    case VM_DEBUG_EL_CURRENT:
+        return counter_load(g_el_current);
+    case VM_DEBUG_EL2_AVAILABLE:
+        return counter_load(g_el2_available);
+    case VM_DEBUG_VHE_AVAILABLE:
+        return counter_load(g_vhe_available);
+    case VM_DEBUG_GUEST_BOOT_STUB:
+        return counter_load(g_guest_boot_stub);
+    case VM_DEBUG_GUEST_AGENT_START:
+        return counter_load(g_guest_agent_start);
+    case VM_DEBUG_GUEST_LINUX_HELLO:
+        return counter_load(g_guest_linux_hello);
+    case VM_DEBUG_VCPU_WFX_EXITS:
+        return counter_load(g_vcpu_wfx_exits);
+    case VM_DEBUG_VCPU_IRQ_EXITS:
+        return counter_load(g_vcpu_irq_exits);
+    case VM_DEBUG_VCPU_UNSUPPORTED_EXITS:
+        return counter_load(g_vcpu_unsupported_exits);
+    case VM_DEBUG_VM_DEVICE_CREATED:
+        return counter_load(g_vm_device_created);
+    case VM_DEBUG_VM_DEVICE_ACTIVE:
+        return counter_load(g_vm_device_active);
+    case VM_DEBUG_VM_DEVICE_DESTROYED:
+        return counter_load(g_vm_device_destroyed);
+    case VM_DEBUG_VM_DEVICE_BAR_MAPPED:
+        return counter_load(g_vm_device_bar_mapped);
+    case VM_DEBUG_VM_DEVICE_IRQ_ROUTES:
+        return counter_load(g_vm_device_irq_routes);
+    case VM_DEBUG_VM_DEVICE_IRQ_INJECTED:
+        return counter_load(g_vm_device_irq_injected);
+    case VM_DEBUG_VM_DEVICE_MEDIATED_DENY:
+        return counter_load(g_vm_device_mediated_deny);
+    case VM_DEBUG_VM_DEVICE_BME_ENABLE:
+        return counter_load(g_vm_device_bme_enable);
+    case VM_DEBUG_VM_DEVICE_QUARANTINE:
+        return counter_load(g_vm_device_quarantine);
+    default:
+        return 0;
     }
 }
 
@@ -161,12 +214,18 @@ void note_error() {
 }
 
 void poll_blocked_vcpu_timers() {
-    if (__atomic_exchange_n(&g_call_lock, 1u, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_exchange_n(&g_call_lock, 1u, __ATOMIC_ACQUIRE)) {
+        return;
+    }
     for (u32 i = 0; i < kMaxVms; ++i) {
         Vm* v = g_vms[i];
-        if (!is_vm_live(v)) continue;
+        if (!is_vm_live(v)) {
+            continue;
+        }
         for (u32 j = 0; j < v->vcpu_count; ++j) {
-            if (v->vcpus[j]) poll_vcpu_timer(*v->vcpus[j]);
+            if (v->vcpus[j]) {
+                poll_vcpu_timer(*v->vcpus[j]);
+            }
         }
     }
     __atomic_store_n(&g_call_lock, 0u, __ATOMIC_RELEASE);
@@ -174,107 +233,186 @@ void poll_blocked_vcpu_timers() {
 
 void metric_inc(VmDebugCounter id) {
     switch (id) {
-    case VM_DEBUG_CREATE_CALLS: counter_inc(g_vm_create_calls); break;
-    case VM_DEBUG_CREATED: counter_inc(g_vm_created); break;
-    case VM_DEBUG_DESTROYED: counter_inc(g_vm_destroyed); break;
-    case VM_DEBUG_MEMORY_CREATED: counter_inc(g_vm_memory_created); break;
-    case VM_DEBUG_MEMORY_MAPPED: counter_inc(g_vm_memory_mapped); break;
-    case VM_DEBUG_MEMORY_UNMAPPED: counter_inc(g_vm_memory_unmapped); break;
-    case VM_DEBUG_STAGE2_TABLES_CREATED: counter_inc(g_vm_stage2_tables_created); break;
-    case VM_DEBUG_STAGE2_PAGES_MAPPED: counter_inc(g_vm_stage2_pages_mapped); break;
-    case VM_DEBUG_VCPU_CREATED: counter_inc(g_vcpu_created); break;
-    case VM_DEBUG_VCPU_CONFIGURED: counter_inc(g_vcpu_configured); break;
-    case VM_DEBUG_VCPU_RUN_ATTEMPTS: counter_inc(g_vcpu_run_attempts); break;
-    case VM_DEBUG_VCPU_RUN_NOTIMPL: counter_inc(g_vcpu_run_notimpl); break;
-    case VM_DEBUG_CHANNELS_CREATED: counter_inc(g_vm_channels_created); break;
-    case VM_DEBUG_ERRORS: counter_inc(g_vm_errors); break;
-    case VM_DEBUG_GUEST_BOOT_STUB: counter_inc(g_guest_boot_stub); break;
-    case VM_DEBUG_GUEST_AGENT_START: counter_inc(g_guest_agent_start); break;
-    case VM_DEBUG_GUEST_LINUX_HELLO: counter_inc(g_guest_linux_hello); break;
-    case VM_DEBUG_VCPU_WFX_EXITS: counter_inc(g_vcpu_wfx_exits); break;
-    case VM_DEBUG_VCPU_IRQ_EXITS: counter_inc(g_vcpu_irq_exits); break;
-    case VM_DEBUG_VCPU_UNSUPPORTED_EXITS: counter_inc(g_vcpu_unsupported_exits); break;
-    case VM_DEBUG_VM_DEVICE_CREATED: counter_inc(g_vm_device_created); break;
-    case VM_DEBUG_VM_DEVICE_ACTIVE: counter_inc(g_vm_device_active); break;
-    case VM_DEBUG_VM_DEVICE_DESTROYED: counter_inc(g_vm_device_destroyed); break;
-    case VM_DEBUG_VM_DEVICE_BAR_MAPPED: counter_inc(g_vm_device_bar_mapped); break;
-    case VM_DEBUG_VM_DEVICE_IRQ_ROUTES: counter_inc(g_vm_device_irq_routes); break;
-    case VM_DEBUG_VM_DEVICE_IRQ_INJECTED: counter_inc(g_vm_device_irq_injected); break;
-    case VM_DEBUG_VM_DEVICE_MEDIATED_DENY: counter_inc(g_vm_device_mediated_deny); break;
-    case VM_DEBUG_VM_DEVICE_BME_ENABLE: counter_inc(g_vm_device_bme_enable); break;
-    case VM_DEBUG_VM_DEVICE_QUARANTINE: counter_inc(g_vm_device_quarantine); break;
-    default: break;
+    case VM_DEBUG_CREATE_CALLS:
+        counter_inc(g_vm_create_calls);
+        break;
+    case VM_DEBUG_CREATED:
+        counter_inc(g_vm_created);
+        break;
+    case VM_DEBUG_DESTROYED:
+        counter_inc(g_vm_destroyed);
+        break;
+    case VM_DEBUG_MEMORY_CREATED:
+        counter_inc(g_vm_memory_created);
+        break;
+    case VM_DEBUG_MEMORY_MAPPED:
+        counter_inc(g_vm_memory_mapped);
+        break;
+    case VM_DEBUG_MEMORY_UNMAPPED:
+        counter_inc(g_vm_memory_unmapped);
+        break;
+    case VM_DEBUG_STAGE2_TABLES_CREATED:
+        counter_inc(g_vm_stage2_tables_created);
+        break;
+    case VM_DEBUG_STAGE2_PAGES_MAPPED:
+        counter_inc(g_vm_stage2_pages_mapped);
+        break;
+    case VM_DEBUG_VCPU_CREATED:
+        counter_inc(g_vcpu_created);
+        break;
+    case VM_DEBUG_VCPU_CONFIGURED:
+        counter_inc(g_vcpu_configured);
+        break;
+    case VM_DEBUG_VCPU_RUN_ATTEMPTS:
+        counter_inc(g_vcpu_run_attempts);
+        break;
+    case VM_DEBUG_VCPU_RUN_NOTIMPL:
+        counter_inc(g_vcpu_run_notimpl);
+        break;
+    case VM_DEBUG_CHANNELS_CREATED:
+        counter_inc(g_vm_channels_created);
+        break;
+    case VM_DEBUG_ERRORS:
+        counter_inc(g_vm_errors);
+        break;
+    case VM_DEBUG_GUEST_BOOT_STUB:
+        counter_inc(g_guest_boot_stub);
+        break;
+    case VM_DEBUG_GUEST_AGENT_START:
+        counter_inc(g_guest_agent_start);
+        break;
+    case VM_DEBUG_GUEST_LINUX_HELLO:
+        counter_inc(g_guest_linux_hello);
+        break;
+    case VM_DEBUG_VCPU_WFX_EXITS:
+        counter_inc(g_vcpu_wfx_exits);
+        break;
+    case VM_DEBUG_VCPU_IRQ_EXITS:
+        counter_inc(g_vcpu_irq_exits);
+        break;
+    case VM_DEBUG_VCPU_UNSUPPORTED_EXITS:
+        counter_inc(g_vcpu_unsupported_exits);
+        break;
+    case VM_DEBUG_VM_DEVICE_CREATED:
+        counter_inc(g_vm_device_created);
+        break;
+    case VM_DEBUG_VM_DEVICE_ACTIVE:
+        counter_inc(g_vm_device_active);
+        break;
+    case VM_DEBUG_VM_DEVICE_DESTROYED:
+        counter_inc(g_vm_device_destroyed);
+        break;
+    case VM_DEBUG_VM_DEVICE_BAR_MAPPED:
+        counter_inc(g_vm_device_bar_mapped);
+        break;
+    case VM_DEBUG_VM_DEVICE_IRQ_ROUTES:
+        counter_inc(g_vm_device_irq_routes);
+        break;
+    case VM_DEBUG_VM_DEVICE_IRQ_INJECTED:
+        counter_inc(g_vm_device_irq_injected);
+        break;
+    case VM_DEBUG_VM_DEVICE_MEDIATED_DENY:
+        counter_inc(g_vm_device_mediated_deny);
+        break;
+    case VM_DEBUG_VM_DEVICE_BME_ENABLE:
+        counter_inc(g_vm_device_bme_enable);
+        break;
+    case VM_DEBUG_VM_DEVICE_QUARANTINE:
+        counter_inc(g_vm_device_quarantine);
+        break;
+    default:
+        break;
     }
 }
 
-cap::Ref require_cap(Process& caller, CapHandle handle, CapType type,
-                      u32 need_rights, SysError* out_error) {
+cap::Ref require_cap(Process& caller, CapHandle handle, CapType type, u32 need_rights,
+                     SysError* out_error) {
     if (!caller.cap_table) {
-        if (out_error) *out_error = E_NOTFOUND;
+        if (out_error) {
+            *out_error = E_NOTFOUND;
+        }
         note_error();
         return nullptr;
     }
 
     cap::Ref e = cap::lookup_any(*caller.cap_table, handle);
     if (!e) {
-        if (out_error) *out_error = E_NOTFOUND;
+        if (out_error) {
+            *out_error = E_NOTFOUND;
+        }
         note_error();
         return nullptr;
     }
     if (e->type_tag != type) {
-        if (out_error) *out_error = E_BADTYPE;
+        if (out_error) {
+            *out_error = E_BADTYPE;
+        }
         note_error();
         return nullptr;
     }
     if (!has_rights(e, need_rights)) {
-        if (out_error) *out_error = E_PERM;
+        if (out_error) {
+            *out_error = E_PERM;
+        }
         note_error();
         return nullptr;
     }
-    if (out_error) *out_error = E_OK;
+    if (out_error) {
+        *out_error = E_OK;
+    }
     return e;
 }
 
-cap::Borrow<Vm> vm_from_cap(Process& caller, CapHandle vm_cap, u32 need_rights, SysError* out_error) {
+cap::Borrow<Vm> vm_from_cap(Process& caller, CapHandle vm_cap, u32 need_rights,
+                            SysError* out_error) {
     cap::Ref e = require_cap(caller, vm_cap, CAP_VM, need_rights, out_error);
     auto* v = e ? static_cast<Vm*>(e->target) : nullptr;
     if (!is_vm_live(v)) {
-        if (out_error) *out_error = E_DEAD;
+        if (out_error) {
+            *out_error = E_DEAD;
+        }
         note_error();
         return nullptr;
     }
     return cap::Borrow<Vm>(e);
 }
 
-cap::Borrow<Vcpu> vcpu_from_cap(Process& caller, CapHandle vcpu_cap, u32 need_rights, SysError* out_error) {
+cap::Borrow<Vcpu> vcpu_from_cap(Process& caller, CapHandle vcpu_cap, u32 need_rights,
+                                SysError* out_error) {
     cap::Ref e = require_cap(caller, vcpu_cap, CAP_VCPU, need_rights, out_error);
     auto* vcpu = e ? static_cast<Vcpu*>(e->target) : nullptr;
     if (!vcpu || vcpu->state == VCPU_DEAD) {
-        if (out_error) *out_error = E_DEAD;
+        if (out_error) {
+            *out_error = E_DEAD;
+        }
         note_error();
         return nullptr;
     }
     return cap::Borrow<Vcpu>(e);
 }
 
-cap::Borrow<VmMemory> memory_from_cap(Process& caller, CapHandle memory_cap,
-                          u32 need_rights, SysError* out_error) {
+cap::Borrow<VmMemory> memory_from_cap(Process& caller, CapHandle memory_cap, u32 need_rights,
+                                      SysError* out_error) {
     cap::Ref e = require_cap(caller, memory_cap, CAP_VM_MEMORY, need_rights, out_error);
     auto* mem = e ? static_cast<VmMemory*>(e->target) : nullptr;
     if (!mem || mem->dead) {
-        if (out_error) *out_error = E_DEAD;
+        if (out_error) {
+            *out_error = E_DEAD;
+        }
         note_error();
         return nullptr;
     }
     return cap::Borrow<VmMemory>(e);
 }
 
-cap::Borrow<VmChannel> channel_from_cap(Process& caller, CapHandle channel_cap,
-                            u32 need_rights, SysError* out_error) {
+cap::Borrow<VmChannel> channel_from_cap(Process& caller, CapHandle channel_cap, u32 need_rights,
+                                        SysError* out_error) {
     cap::Ref e = require_cap(caller, channel_cap, CAP_VM_CHANNEL, need_rights, out_error);
     auto* channel = e ? static_cast<VmChannel*>(e->target) : nullptr;
     if (!channel || channel->dead) {
-        if (out_error) *out_error = E_DEAD;
+        if (out_error) {
+            *out_error = E_DEAD;
+        }
         note_error();
         return nullptr;
     }
@@ -282,21 +420,29 @@ cap::Borrow<VmChannel> channel_from_cap(Process& caller, CapHandle channel_cap,
 }
 
 Vm* find_vm_by_id(u32 vm_id) {
-    if (vm_id == 0) return nullptr;
+    if (vm_id == 0) {
+        return nullptr;
+    }
     for (u32 i = 0; i < kMaxVms; ++i) {
-        if (g_vms[i] && g_vms[i]->vm_id == vm_id) return g_vms[i];
+        if (g_vms[i] && g_vms[i]->vm_id == vm_id) {
+            return g_vms[i];
+        }
     }
     return nullptr;
 }
 
 Vm* owner_for_vcpu(Vcpu* vcpu) {
-    if (!vcpu || vcpu->state == VCPU_DEAD) return nullptr;
+    if (!vcpu || vcpu->state == VCPU_DEAD) {
+        return nullptr;
+    }
 
     if (vcpu->owner_vm_id != 0) {
         Vm* by_id = find_vm_by_id(vcpu->owner_vm_id);
         if (by_id && is_vm_live(by_id)) {
             for (u32 i = 0; i < by_id->vcpu_count; ++i) {
-                if (by_id->vcpus[i] == vcpu) return by_id;
+                if (by_id->vcpus[i] == vcpu) {
+                    return by_id;
+                }
             }
         }
     }
@@ -307,7 +453,9 @@ Vm* owner_for_vcpu(Vcpu* vcpu) {
     // metadata in the hot path.
     for (u32 i = 0; i < kMaxVms; ++i) {
         Vm* candidate = g_vms[i];
-        if (!is_vm_live(candidate)) continue;
+        if (!is_vm_live(candidate)) {
+            continue;
+        }
         for (u32 j = 0; j < candidate->vcpu_count; ++j) {
             if (candidate->vcpus[j] == vcpu) {
                 vcpu->owner_vm_id = candidate->vm_id;
@@ -320,7 +468,9 @@ Vm* owner_for_vcpu(Vcpu* vcpu) {
 }
 
 void refresh_vm_state(Vm* v) {
-    if (!v || v->state == VM_DEAD) return;
+    if (!v || v->state == VM_DEAD) {
+        return;
+    }
 
     bool has_mapped_memory = false;
     for (u32 i = 0; i < v->memory_count; ++i) {
@@ -335,17 +485,24 @@ void refresh_vm_state(Vm* v) {
     bool has_ready_vcpu = false;
     for (u32 i = 0; i < v->vcpu_count; ++i) {
         Vcpu* vcpu = v->vcpus[i];
-        if (!vcpu || vcpu->state == VCPU_DEAD) continue;
+        if (!vcpu || vcpu->state == VCPU_DEAD) {
+            continue;
+        }
         has_vcpu = true;
         if (vcpu->state == VCPU_READY || vcpu->state == VCPU_CONFIGURED) {
             has_ready_vcpu = true;
         }
     }
 
-    if (!has_mapped_memory) v->state = VM_CREATED;
-    else if (!has_vcpu) v->state = VM_MEMORY_READY;
-    else if (!has_ready_vcpu) v->state = VM_VCPU_READY;
-    else v->state = VM_READY;
+    if (!has_mapped_memory) {
+        v->state = VM_CREATED;
+    } else if (!has_vcpu) {
+        v->state = VM_MEMORY_READY;
+    } else if (!has_ready_vcpu) {
+        v->state = VM_VCPU_READY;
+    } else {
+        v->state = VM_READY;
+    }
 }
 
 CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* out_error) {
@@ -354,12 +511,16 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
     SysError cap_error = E_OK;
     cap::Ref root = require_cap(caller, root_cap, CAP_VM_ROOT, RIGHT_VM_CREATE, &cap_error);
     if (!root) {
-        if (out_error) *out_error = cap_error;
+        if (out_error) {
+            *out_error = cap_error;
+        }
         return kNullCap;
     }
     if (root->target != &g_root) {
         ANKO_LOG_ERROR("kernel/vm", "sys_vm_create root target mismatch");
-        if (out_error) *out_error = E_NOTFOUND;
+        if (out_error) {
+            *out_error = E_NOTFOUND;
+        }
         note_error();
         return kNullCap;
     }
@@ -367,7 +528,9 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
     const u32 slot = find_free_vm_slot();
     if (slot >= kMaxVms) {
         ANKO_LOG_ERROR("kernel/vm", "sys_vm_create no free vm slot");
-        if (out_error) *out_error = E_OVERFLOW;
+        if (out_error) {
+            *out_error = E_OVERFLOW;
+        }
         note_error();
         return kNullCap;
     }
@@ -375,7 +538,9 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
     Vm* v = static_cast<Vm*>(mm::slab_alloc(sizeof(Vm), alignof(Vm)));
     if (!v) {
         ANKO_LOG_ERROR("kernel/vm", "sys_vm_create heap alloc failed");
-        if (out_error) *out_error = E_NOMEM;
+        if (out_error) {
+            *out_error = E_NOMEM;
+        }
         note_error();
         return kNullCap;
     }
@@ -394,39 +559,60 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
                         static_cast<int>(s2));
         v->state = VM_DEAD;
         mm::slab_free(v, sizeof(Vm), alignof(Vm));
-        if (out_error) *out_error = s2;
+        if (out_error) {
+            *out_error = s2;
+        }
         note_error();
         return kNullCap;
     }
 
     v->lifetime = object::create(v, dispose_vm);
     if (!v->lifetime) {
-        stage2_destroy(&v->stage2); dispose_vm(v);
-        if (out_error) *out_error = E_NOMEM;
+        stage2_destroy(&v->stage2);
+        dispose_vm(v);
+        if (out_error) {
+            *out_error = E_NOMEM;
+        }
         return kNullCap;
     }
     const CapHandle cap_h = cap::alloc(*caller.cap_table, CAP_VM, v,
-                                       RIGHT_VM_CONTROL | RIGHT_VM_MAP |
-                                           RIGHT_VM_INSPECT | RIGHT_VM_DESTROY |
-                                           RIGHT_DUP);
+                                       RIGHT_VM_CONTROL | RIGHT_VM_MAP | RIGHT_VM_INSPECT |
+                                           RIGHT_VM_DESTROY | RIGHT_DUP);
     if (cap_h == kNullCap) {
         ANKO_LOG_ERROR("kernel/vm", "sys_vm_create cap alloc failed");
         v->state = VM_DEAD;
         stage2_destroy(&v->stage2);
         object::release(v->lifetime);
-        if (out_error) *out_error = E_OVERFLOW;
+        if (out_error) {
+            *out_error = E_OVERFLOW;
+        }
         note_error();
         return kNullCap;
     }
 
+    __atomic_store_n(&caller.created_vm, true, __ATOMIC_RELEASE);
     g_vms[slot] = v;
     metric_inc(VM_DEBUG_CREATED);
-    if (out_error) *out_error = E_OK;
+    if (out_error) {
+        *out_error = E_OK;
+    }
     return cap_h;
 }
 
 static void retire_vm(Vm* v) {
-    if (!is_vm_live(v)) return;
+    if (!is_vm_live(v)) {
+        return;
+    }
+    // An assigned GPU must give up the VM before anything it can still DMA from
+    // is destroyed: reset the device, drain its shadow tables, then power off.
+    // A refused reset leaves the VM live and fully reproducible so a later
+    // destroy can retry; recycling DMA backing on a software flag alone is not
+    // an option. This runs before the state change below, so a failed release
+    // leaves the VM observable through inspect rather than half-dead.
+    if (!mali::release(*v)) {
+        ANKO_LOG_ERROR("kernel/vm", "GPU reset incomplete; VM retained");
+        return;
+    }
     v->state = VM_DEAD;
     // Device assignments bound to this VM must be revoked (DMA-safe, §8.12)
     // before the stage-2 tables and RAM pages backing their BAR mappings and
@@ -435,18 +621,29 @@ static void retire_vm(Vm* v) {
     // CallGuard excludes guest entry. Invalidate translations before pages.
     stage2_destroy(&v->stage2);
     for (u32 i = 0; i < v->memory_count; ++i) {
-        auto* mem = v->memory_objects[i]; if (!mem) continue;
-        sched::sweep_process_caps(mem); object::release(mem->lifetime);
+        auto* mem = v->memory_objects[i];
+        if (!mem) {
+            continue;
+        }
+        sched::sweep_process_caps(mem);
+        object::release(mem->lifetime);
         v->memory_objects[i] = nullptr;
     }
     for (u32 i = 0; i < v->vcpu_count; ++i) {
-        auto* cpu = v->vcpus[i]; if (!cpu) continue;
+        auto* cpu = v->vcpus[i];
+        if (!cpu) {
+            continue;
+        }
         cpu->state = VCPU_DEAD;
-        sched::sweep_process_caps(cpu); object::release(cpu->lifetime);
+        sched::sweep_process_caps(cpu);
+        object::release(cpu->lifetime);
         v->vcpus[i] = nullptr;
     }
     for (u32 i = 0; i < v->channel_count; ++i) {
-        auto* channel = v->channels[i]; if (!channel) continue;
+        auto* channel = v->channels[i];
+        if (!channel) {
+            continue;
+        }
         channel->dead = true;
         sched::sweep_process_caps(channel);
         // Ring and doorbell endpoints are capabilities whose target is the
@@ -457,35 +654,54 @@ static void retire_vm(Vm* v) {
         {
             void* const endpoints[] = {channel->host_to_guest, channel->guest_to_host,
                                        channel->host_doorbell, channel->guest_doorbell};
-            for (void* endpoint : endpoints) sched::sweep_process_caps(endpoint);
+            for (void* endpoint : endpoints) {
+                sched::sweep_process_caps(endpoint);
+            }
         }
         object::release(channel->lifetime);
         v->channels[i] = nullptr;
     }
-    for (auto& slot : g_vms) if (slot == v) slot = nullptr;
-    sched::sweep_process_caps(v); metric_inc(VM_DEBUG_DESTROYED);
+    for (auto& slot : g_vms) {
+        if (slot == v) {
+            slot = nullptr;
+        }
+    }
+    sched::sweep_process_caps(v);
+    metric_inc(VM_DEBUG_DESTROYED);
     object::release(v->lifetime);
 }
 
 void destroy_owned_process(u64 identity) {
     CallGuard guard(true);
     device_owner_died(identity);
-    for (auto* v : g_vms) if (v && v->owner_identity == identity) retire_vm(v);
+    for (auto* v : g_vms) {
+        if (v && v->owner_identity == identity) {
+            retire_vm(v);
+        }
+    }
 }
 
 SysError destroy_vm(Process& caller, CapHandle vm_cap) {
     SysError rc = E_OK;
     auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_DESTROY, &rc);
-    if (!v) return rc;
+    if (!v) {
+        return rc;
+    }
     retire_vm(v);
-    return E_OK;
+    // retire_vm refuses to tear down a GPU owner whose reset timed out. The VM
+    // is still live in that case, which is precisely what E_BUSY reports.
+    return is_vm_live(v) ? E_BUSY : E_OK;
 }
 
 SysError inspect_vm(Process& caller, CapHandle vm_cap, VmInfo* out) {
-    if (!out) return E_INVALID;
+    if (!out) {
+        return E_INVALID;
+    }
     SysError rc = E_OK;
     auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_INSPECT, &rc);
-    if (!v) return rc;
+    if (!v) {
+        return rc;
+    }
 
     VmInfo info{};
     info.vm_id = v->vm_id;

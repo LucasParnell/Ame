@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Flash the verified PanVK v2 package and run the Vulkan + GLES hardware gate.
+"""Flash a verified PanVK package and run the Vulkan + GLES hardware gate.
 
 Waits for the handset to appear in Huawei BootROM download mode or as a verified
 RAM LK, flashes the pinned image with a kernel backup and full readback
@@ -34,7 +34,8 @@ RAM_LK = (0x18d1, 0xd00d)
 VULKAN = re.compile(
     rb'GPU: Vulkan status=(-?\d+) frames=(\d+) checksum=([0-9a-fA-F]+) display_restored=(\d+)')
 GLES = re.compile(rb'GPU: Mali-T830 frames=(\d+)[^\r\n]*display restored')
-FAULTS = ('GPU quarantined', 'Unhandled fault', 'JOB_INVALID', 'DATA_INVALID',
+FAULTS = ('GPU quarantined', 'Unhandled fault', 'Unhandled Page fault',
+          'JOB_BUS_FAULT', 'TRANSLATION_FAULT', 'JOB_INVALID', 'DATA_INVALID',
           'MMU fault', 'GPU fault', 'USERFAULT', 'signal=11', 'signal=6')
 
 
@@ -103,6 +104,36 @@ def open_console(timeout=180):
     raise RuntimeError('Ame USB serial did not enumerate after boot')
 
 
+def reboot_to_bootrom():
+    """Reboot the connected Ame handset; ANE's damaged xloader enters BootROM.
+
+    This is opt-in. It writes no firmware and is used only after package/hash
+    verification. The normal watcher still verifies the RAM loader afterward.
+    """
+    ports = [p for p in Path('/dev/serial/by-id').glob('usb-Ame_*') if p.exists()]
+    if not ports:
+        print('No Ame console; waiting for the existing bootloader state.', flush=True)
+        return
+    if len(ports) != 1:
+        raise RuntimeError('Multiple Ame consoles; refusing ambiguous reboot')
+    sys.path.insert(0, str(ROOT / 'scripts/anne'))
+    from serial_console import Serial
+    link = Serial(str(ports[0]))
+    try:
+        link.write(b'\x15reboot\r', time.monotonic() + 3)
+        print('Sent reboot to Ame; waiting for BootROM enumeration.', flush=True)
+        end = time.monotonic() + 5
+        while time.monotonic() < end:
+            try:
+                link.read(min(end, time.monotonic() + 1))
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+    finally:
+        link.close()
+
+
 class Session:
     """Minimal console driver: send one command, capture its output."""
 
@@ -130,15 +161,16 @@ class Session:
         return data.decode(errors='replace')
 
 
-def run_gate(output, timeout):
+def run_gate(output, timeout, require_load=False):
     """Drive the Vulkan and GLES diagnostics on a booted handset."""
     output.mkdir(parents=True, exist_ok=True)
     report = {'phone_gpu_execution': False, 'phone_display_restoration': False,
               'gles_after_vulkan': False}
-    link = open_console(timeout)
+    link = None
     with (output / 'hardware-test-console.log').open('wb') as log:
-        shell = Session(link, log)
         try:
+            link = open_console(timeout)
+            shell = Session(link, log)
             shell.run('diag el2', 6)
             report['before_log'] = shell.run('diag log', 6)
             vulkan = shell.run('diag gpu vulkan', 60, VULKAN)
@@ -155,6 +187,7 @@ def run_gate(output, timeout):
             report['after_log'] = shell.run('diag log', 7)
             combined = report['after_log'] + vulkan
             report['fault_markers'] = [m for m in FAULTS if m in combined]
+            report['phone_load_preservation'] = ('panvk: T830 LOAD preservation verified' in combined)
             # Always run GLES, even after a Vulkan fault. Skipping it hid whether
             # the working baseline survived, which is the regression that matters
             # most while the Vulkan path is still being brought up.
@@ -163,17 +196,23 @@ def run_gate(output, timeout):
             gles_match = GLES.search(gles.encode())
             report['gles_frames'] = int(gles_match.group(1)) if gles_match else None
             report['gles_after_vulkan'] = bool(gles_match and int(gles_match.group(1)) > 0)
+            report['after_gles_log'] = shell.run('diag log', 7)
+            combined += gles + report['after_gles_log']
+            report['fault_markers'] = [m for m in FAULTS if m in combined]
             if not gles_match and not report.get('error'):
                 report['gles_probe'] = 'no GLES completion line after Vulkan'
             report['passed'] = bool(report['phone_gpu_execution']
                                     and report['phone_display_restoration']
                                     and report['gles_after_vulkan']
-                                    and not report['fault_markers'])
+                                    and not report['fault_markers']
+                                    and (not require_load or (report['phone_load_preservation']
+                                         and report.get('frames', 0) > 1)))
         except Exception as error:  # noqa: BLE001 - the report is the product here
             report['error'] = str(error)
             report['passed'] = False
         finally:
-            link.close()
+            if link is not None:
+                link.close()
     (output / 'phone-test.json').write_text(json.dumps(report, indent=2) + '\n')
     return report
 
@@ -190,8 +229,12 @@ def main():
                         help='give up waiting for BootROM after this long; 0 waits forever')
     parser.add_argument('--output', type=Path,
                         default=ROOT / 'out/mesa-panvk-midgard/phone-v2')
+    parser.add_argument('--reboot', action='store_true',
+                        help='send reboot to Ame before waiting for BootROM (opt-in)')
     parser.add_argument('--test-only', action='store_true',
                         help='skip flashing and test the already-booted handset')
+    parser.add_argument('--require-load', action='store_true',
+                        help='also require the LOAD pixel probe and multiple Vulkan animation frames')
     parser.add_argument('--console-timeout', type=int, default=180)
     args = parser.parse_args()
 
@@ -208,6 +251,8 @@ def main():
         return 0
 
     if not args.test_only:
+        if args.reboot:
+            reboot_to_bootrom()
         try:
             serial = wait_for_loader(flash, blobs, manifest, args.wait_seconds)
         except TimeoutError as error:
@@ -218,7 +263,7 @@ def main():
                         '--running', '--backup', '--serial', serial], check=True)
         print('Flash and readback verified. Waiting for the Ame console.', flush=True)
 
-    report = run_gate(args.output, args.console_timeout)
+    report = run_gate(args.output, args.console_timeout, args.require_load)
     summary = {k: v for k, v in report.items() if not k.endswith('_log')}
     print('\nHardware gate result: ' + json.dumps(summary, indent=2), flush=True)
     print(f'Report: {args.output / "phone-test.json"}', flush=True)

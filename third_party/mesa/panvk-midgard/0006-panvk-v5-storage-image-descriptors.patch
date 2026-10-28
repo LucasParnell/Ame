@@ -1,0 +1,105 @@
+Midgard storage image descriptor materialization, CPU table aliases,
+and vertex/instance ID attribute separation. Hardware validation pending.
+
+diff --git a/src/panfrost/vulkan/midgard/panvk_v5_meta_desc_copy.c b/src/panfrost/vulkan/midgard/panvk_v5_meta_desc_copy.c
+--- a/src/panfrost/vulkan/midgard/panvk_v5_meta_desc_copy.c
++++ b/src/panfrost/vulkan/midgard/panvk_v5_meta_desc_copy.c
+@@ -14,18 +14,37 @@
+    for (unsigned table = 0; table < PANVK_BIFROST_DESC_TABLE_COUNT; table++) {
+       unsigned count = shader->desc_info.others.count[table];
+       if (!count) continue;
+-      if (table == PANVK_BIFROST_DESC_TABLE_IMG) {
+-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+-         return VK_ERROR_FEATURE_NOT_PRESENT;
+-      }
+       unsigned size = table == PANVK_BIFROST_DESC_TABLE_UBO ||
+                       table == PANVK_BIFROST_DESC_TABLE_TEXTURE ? 8 : PANVK_DESCRIPTOR_SIZE;
+       for (unsigned i = 0; i < count; i++) {
+          uint32_t handle = map[map_offset + i];
+          unsigned set_idx = COPY_DESC_HANDLE_EXTRACT_TABLE(handle);
+          unsigned index = COPY_DESC_HANDLE_EXTRACT_INDEX(handle);
+-         const struct panvk_descriptor_set *set = state->sets[set_idx];
++         const struct panvk_descriptor_set *set =
++            set_idx < MAX_SETS ? state->sets[set_idx] : NULL;
+          void *output = dst->table_hosts[table] + i * size;
++         if (table == PANVK_BIFROST_DESC_TABLE_IMG) {
++            void *attribute = dst->img_attrib_host + i * pan_size(ATTRIBUTE);
++            if (!set || index >= set->desc_count) {
++               memset(output, 0, size);
++               memset(attribute, 0, pan_size(ATTRIBUTE));
++               continue;
++            }
++            /* Storage descriptors pack format in the high stride bits. The
++             * hardware buffer gets only stride; the attribute gets format.
++             * attrib_offset is a byte offset into the combined VS buffer table.
++             */
++            memcpy(output, set->descs.host + index * PANVK_DESCRIPTOR_SIZE, size);
++            uint32_t *words = output;
++            unsigned format = words[2] >> 10;
++            words[2] &= BITFIELD_MASK(10);
++            pan_pack(attribute, ATTRIBUTE, cfg) {
++               cfg.buffer_index = i * 2 + attrib_offset / pan_size(ATTRIBUTE_BUFFER);
++               cfg.format = format;
++               cfg.offset_enable = true;
++            }
++            continue;
++         }
+          if (!set || index >= set->desc_count)
+             memset(output, 0, size);
+          else
+diff --git a/src/panfrost/vulkan/panvk_cmd_desc_state.h b/src/panfrost/vulkan/panvk_cmd_desc_state.h
+--- a/src/panfrost/vulkan/panvk_cmd_desc_state.h
++++ b/src/panfrost/vulkan/panvk_cmd_desc_state.h
+@@ -34,6 +34,7 @@
+    mali_ptr dyn_ssbos;
+ #if PAN_ARCH == 5
+    void *table_hosts[PANVK_BIFROST_DESC_TABLE_COUNT];
++   void *img_attrib_host;
+ #endif
+ #else
+    struct {
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c b/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
+--- a/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_desc_state.c
+@@ -229,6 +229,9 @@
+             return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+ 
+          shader_desc_state->img_attrib_table = ptr.gpu;
++#if PAN_ARCH == 5
++         shader_desc_state->img_attrib_host = ptr.cpu;
++#endif
+       }
+    }
+ 
+diff --git a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+@@ -809,6 +809,12 @@
+          attribs.gpu + (MAX_VS_ATTRIBS * pan_size(ATTRIBUTE));
+       cmdbuf->state.gfx.vs.desc.tables[PANVK_BIFROST_DESC_TABLE_IMG] =
+          bufs.gpu + (num_vbs * pan_size(ATTRIBUTE_BUFFER) * 2);
++#if PAN_ARCH == 5
++      cmdbuf->state.gfx.vs.desc.img_attrib_host =
++         attribs.cpu + (MAX_VS_ATTRIBS * pan_size(ATTRIBUTE));
++      cmdbuf->state.gfx.vs.desc.table_hosts[PANVK_BIFROST_DESC_TABLE_IMG] =
++         bufs.cpu + (num_vbs * pan_size(ATTRIBUTE_BUFFER) * 2);
++#endif
+    }
+ 
+    return VK_SUCCESS;
+diff --git a/src/panfrost/vulkan/panvk_shader.h b/src/panfrost/vulkan/panvk_shader.h
+--- a/src/panfrost/vulkan/panvk_shader.h
++++ b/src/panfrost/vulkan/panvk_shader.h
+@@ -24,7 +24,12 @@
+ 
+ extern const struct vk_device_shader_ops panvk_per_arch(device_shader_ops);
+ 
++#if PAN_ARCH == 5
++/* Midgard reserves attributes 16 and 17 for vertex/instance IDs. */
++#define MAX_VS_ATTRIBS PAN_MAX_ATTRIBUTE
++#else
+ #define MAX_VS_ATTRIBS 16
++#endif
+ 
+ struct nir_shader;
+ struct pan_blend_state;

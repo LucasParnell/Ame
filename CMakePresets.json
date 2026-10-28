@@ -147,6 +147,15 @@
         "ANKO_GUEST_LAYOUT": "minimal",
         "DANGO_LINUX_ARTIFACT_DIR": "${sourceDir}/build/dango-linux-hello"
       }
+    },
+    {
+      "name": "dango-panfrost-qemu-dev",
+      "inherits": "dango-hello-qemu-dev",
+      "binaryDir": "${sourceDir}/out/dango-panfrost-qemu-dev",
+      "cacheVariables": {
+        "DANGO_LINUX_PROFILE": "panfrost",
+        "DANGO_LINUX_ARTIFACT_DIR": "${sourceDir}/out/dango-linux-panfrost"
+      }
     }
   ],
   "buildPresets": [
@@ -205,6 +214,10 @@
     {
       "name": "dango-hello-qemu-dev",
       "configurePreset": "dango-hello-qemu-dev"
+    },
+    {
+      "name": "dango-panfrost-qemu-dev",
+      "configurePreset": "dango-panfrost-qemu-dev"
     }
   ],
   "testPresets": [

@@ -1,0 +1,209 @@
+--- a/src/panfrost/vulkan/jm/panvk_cmd_buffer.h
++++ b/src/panfrost/vulkan/jm/panvk_cmd_buffer.h
+@@ -92,6 +92,12 @@
+ struct panvk_rendering_state {
+    VkRenderingFlags flags;
+    uint32_t layer_count;
++#if PAN_ARCH == 5
++   /* Midgard uses one FBD and the full tiler heap per sequential layer batch. */
++   uint32_t logical_layer_count, logical_layer_index;
++   const struct pan_image_view *layer_bases[MAX_RTS + 2];
++   struct pan_image_view layer_views[MAX_RTS + 2];
++#endif
+ 
+    enum vk_rp_attachment_flags bound_attachments;
+    struct {
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+@@ -1309,6 +1309,38 @@
+    }
+ }
+ 
++#if PAN_ARCH == 5
++static VkResult
++panvk_v5_select_layer(struct panvk_cmd_buffer *cmd, uint32_t layer)
++{
++   panvk_v5_cmd_close_batch(cmd);
++   struct panvk_rendering_state *render = &cmd->state.gfx.render;
++   struct pan_fb_info *fb = &render->fb.info;
++   render->logical_layer_index = layer;
++   for (unsigned i = 0; i < MAX_RTS + 2; i++) {
++      const struct pan_image_view *base = render->layer_bases[i];
++      if (!base)
++         continue;
++      if (layer > base->last_layer - base->first_layer)
++         return VK_ERROR_INITIALIZATION_FAILED;
++      render->layer_views[i] = *base;
++      render->layer_views[i].first_layer += layer;
++      render->layer_views[i].last_layer = render->layer_views[i].first_layer;
++      if (i < MAX_RTS) {
++         fb->rts[i].view = &render->layer_views[i];
++         /* CRC validity is per image slice. Disable reuse across slices rather
++          * than sharing one attachment-valid bit between independent layers. */
++         render->fb.crc_valid[i] = false;
++      } else if (i == MAX_RTS) {
++         fb->zs.view.zs = &render->layer_views[i];
++      } else {
++         fb->zs.view.s = &render->layer_views[i];
++      }
++   }
++   return panvk_v5_cmd_open_batch(cmd) ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
++}
++#endif
++
+ static VkResult
+ panvk_cmd_prepare_draw_link_shaders(struct panvk_cmd_buffer *cmd)
+ {
+@@ -1329,7 +1361,7 @@
+ }
+ 
+ static void
+-panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
++panvk_cmd_draw_layer(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
+ {
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+    const struct panvk_shader *vs = cmdbuf->state.gfx.vs.shader;
+@@ -1452,7 +1484,11 @@
+                                   batch->tlsinfo.tls.size);
+ 
+    for (uint32_t i = 0; i < layer_count; i++) {
++#if PAN_ARCH == 5
++      draw->layer_id = cmdbuf->state.gfx.render.logical_layer_index;
++#else
+       draw->layer_id = i;
++#endif
+       result = panvk_draw_prepare_varyings(cmdbuf, draw);
+       if (result != VK_SUCCESS)
+          return;
+@@ -1505,6 +1541,34 @@
+    vk_dynamic_graphics_state_clear_dirty(&cmdbuf->vk.dynamic_graphics_state);
+    cmdbuf->state.gfx.dirty = 0;
+ }
++
++static void
++panvk_cmd_draw(struct panvk_cmd_buffer *cmd, struct panvk_draw_info *draw)
++{
++#if PAN_ARCH == 5
++   uint32_t layers = cmd->state.gfx.render.logical_layer_count;
++   if (layers > 1) {
++      /* A tiler heap cannot be reused by another layer before the preceding
++       * fragment job has consumed it. Queue batches provide that ordering and
++       * give every layer its own FBD/TLS, polygon list and LOAD wallpaper. */
++      for (uint32_t layer = 0; layer < layers; layer++) {
++         VkResult result = panvk_v5_select_layer(cmd, layer);
++         if (result != VK_SUCCESS) {
++            vk_command_buffer_set_error(&cmd->vk, result);
++            return;
++         }
++         struct panvk_draw_info per_layer = *draw;
++         panvk_cmd_draw_layer(cmd, &per_layer);
++         panvk_v5_cmd_close_batch(cmd);
++      }
++      return;
++   }
++#endif
++   if (!cmd->cur_batch && !panvk_per_arch(cmd_open_batch)(cmd))
++      return;
++   panvk_cmd_draw_layer(cmd, draw);
++}
++
+ 
+ static unsigned
+ padded_vertex_count(struct panvk_cmd_buffer *cmdbuf, uint32_t vertex_count,
+@@ -1715,6 +1779,13 @@
+    cmdbuf->state.gfx.render.bound_attachments = 0;
+ 
+    cmdbuf->state.gfx.render.layer_count = pRenderingInfo->layerCount;
++#if PAN_ARCH == 5
++   cmdbuf->state.gfx.render.logical_layer_count = pRenderingInfo->layerCount;
++   cmdbuf->state.gfx.render.logical_layer_index = 0;
++   cmdbuf->state.gfx.render.layer_count = 1;
++   memset(cmdbuf->state.gfx.render.layer_bases, 0,
++          sizeof(cmdbuf->state.gfx.render.layer_bases));
++#endif
+    *fbinfo = (struct pan_fb_info){
+       .tile_buf_budget = panfrost_query_optimal_tib_size(phys_dev->model),
+       .nr_samples = 1,
+@@ -2012,6 +2083,20 @@
+    panvk_cmd_begin_rendering_init_state(cmdbuf, pRenderingInfo);
+ 
+    bool resuming = cmdbuf->state.gfx.render.flags & VK_RENDERING_RESUMING_BIT;
++#if PAN_ARCH == 5
++   if (!resuming) {
++      struct panvk_rendering_state *render = &cmdbuf->state.gfx.render;
++      for (unsigned i = 0; i < render->fb.info.rt_count; i++)
++         render->layer_bases[i] = render->fb.info.rts[i].view;
++      render->layer_bases[MAX_RTS] = render->fb.info.zs.view.zs;
++      render->layer_bases[MAX_RTS + 1] = render->fb.info.zs.view.s;
++      VkResult result = panvk_v5_select_layer(cmdbuf, 0);
++      if (result != VK_SUCCESS) {
++         vk_command_buffer_set_error(&cmdbuf->vk, result);
++         return;
++      }
++   }
++#endif
+ 
+    /* If we're not resuming, cur_batch should be NULL.
+     * However, this currently isn't true because of how events are implemented.
+@@ -2030,6 +2115,27 @@
+ 
+    if (!resuming)
+       preload_render_area_border(cmdbuf, pRenderingInfo);
++#if PAN_ARCH == 5
++   if (!resuming && cmdbuf->state.gfx.render.logical_layer_count > 1) {
++      /* Consume initial LOAD/CLEAR operations for every slice, including layers
++       * that never receive a primitive. Later per-layer batches always LOAD. */
++      for (uint32_t layer = 0;
++           layer < cmdbuf->state.gfx.render.logical_layer_count; layer++) {
++         VkResult result = panvk_v5_select_layer(cmdbuf, layer);
++         if (result == VK_SUCCESS)
++            result = panvk_v5_cmd_alloc_fb_desc(cmdbuf);
++         if (result != VK_SUCCESS) {
++            vk_command_buffer_set_error(&cmdbuf->vk, result);
++            return;
++         }
++         panvk_v5_cmd_close_batch(cmdbuf);
++      }
++      panvk_v5_cmd_preload_fb_after_batch_split(cmdbuf);
++      VkResult result = panvk_v5_select_layer(cmdbuf, 0);
++      if (result != VK_SUCCESS)
++         vk_command_buffer_set_error(&cmdbuf->vk, result);
++   }
++#endif
+ }
+ 
+ static void
+@@ -2104,7 +2210,11 @@
+          .extent.width = fbinfo->extent.maxx - fbinfo->extent.minx + 1,
+          .extent.height = fbinfo->extent.maxy - fbinfo->extent.miny + 1,
+       },
++#if PAN_ARCH == 5
++      .layerCount = cmdbuf->state.gfx.render.logical_layer_count,
++#else
+       .layerCount = cmdbuf->state.gfx.render.layer_count,
++#endif
+       .viewMask = 0,
+       .colorAttachmentCount = color_att_count,
+       .pColorAttachments = color_atts,
+--- a/src/panfrost/vulkan/panvk_vX_shader.c
++++ b/src/panfrost/vulkan/panvk_vX_shader.c
+@@ -207,8 +207,18 @@
+          temp_layer_var = var;
+    }
+ 
+-   if (!has_layer_var)
++   if (!has_layer_var) {
++#if PAN_ARCH == 5
++      /* Vulkan primitives without an explicit Layer output target layer zero,
++       * even when the framebuffer contains multiple array slices. */
++      temp_layer_var = nir_variable_create(nir, nir_var_shader_temp,
++                                           glsl_int_type(), "panvk_default_layer");
++      nir_builder b = nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
++      nir_store_var(&b, temp_layer_var, nir_imm_int(&b, 0), 1);
++#else
+       return false;
++#endif
++   }
+ 
+    assert(temp_layer_var);
+ 

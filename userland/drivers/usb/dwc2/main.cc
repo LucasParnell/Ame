@@ -39,9 +39,7 @@ bool transition(Runtime& r) {
         if (r.role == MxUsbRole::Host && !r.host.quiesce()) {
             return true;
         }
-        if (r.role == MxUsbRole::Device) {
-            r.device.quiesce();
-        }
+        if (r.role == MxUsbRole::Device && !r.device.quiesce()) return true;
         if (r.role == MxUsbRole::Detached && r.desired == MxUsbRole::Detached) {
             r.stage = TransitionStep::Complete;
         } else {

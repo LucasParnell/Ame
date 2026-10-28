@@ -17,7 +17,7 @@ struct Runtime {
     mx_u64_t generation;
     mx_u64_t dropped_output;
     mx_u32_t tx_sequence;
-    bool configured, rx_held, lifecycle_pending;
+    bool configured, host_started, rx_held, lifecycle_pending;
 };
 inline bool accept_host(Runtime& r) {
     bool progress = false;
@@ -31,7 +31,18 @@ inline bool accept_host(Runtime& r) {
         r.lifecycle_pending = false;
         progress = true;
     }
-    if (!r.rx_held) {
+    // A retained row blocks reading more input, but it must never hide a RESET:
+    // the reset is the only thing that can clear a latch held by a blocked
+    // downstream ring, so consuming it is the way out of that state. Setting
+    // `read_stalled` skips the read and falls through to the forward below,
+    // which is what actually drains the retained row.
+    bool read_stalled = false;
+    if (r.rx_held) {
+        if (!r.stream.rx().peek_is(MX_FUNCTION_RESET)) {
+            read_stalled = true;
+        }
+    }
+    if (!read_stalled) {
         MxRingSlot slot{};
         if (!r.stream.try_recv(&slot)) {
             return progress;
@@ -41,8 +52,22 @@ inline bool accept_host(Runtime& r) {
             MxFunctionChunk reset{};
             if (message_get(slot, &reset, slot.type) && reset.generation &&
                 !(reset.flags & ~MX_FUNCTION_CONFIGURED) && !reset.length) {
+                const bool same_session = r.configured && (reset.flags & MX_FUNCTION_CONFIGURED) &&
+                                          reset.generation == r.generation && r.host_started;
                 r.generation = reset.generation;
                 r.configured = reset.flags & MX_FUNCTION_CONFIGURED;
+                // A reset that keeps the same generation and stays configured is
+                // the host re-opening a port it already owns (every tty
+                // reconnect does this). Clearing host_started there would make
+                // output wait for an inbound byte that may never come, and
+                // deliver_shell discards -- not queues -- whatever arrives in
+                // the meantime. Preserve the started state; only a genuinely
+                // new or deconfigured session needs the host to re-announce.
+                if (!same_session) {
+                    r.host_started = false;
+                }
+                // The retained row belongs to the generation being replaced.
+                r.rx_held = false;
                 r.tx_bytes.reset(); // never re-label a retained output suffix
                 r.tx_sequence = 0;
                 r.lifecycle_pending = true;
@@ -55,6 +80,11 @@ inline bool accept_host(Runtime& r) {
             return progress;
         }
         r.rx_held = true;
+        // Configuration alone does not mean a terminal is ready. A host tty
+        // can initially echo received bytes before its application sets raw
+        // mode, feeding our prompt back into msh as commands. Let the host
+        // initiate the conversation after configuring its terminal settings.
+        r.host_started = true;
     }
     if (r.input.try_write(MX_TERM_SESSION_INPUT_BYTES, r.generation,
                           libk::as_bytes(r.rx.data, r.rx.length)) == r.rx.length) {
@@ -75,7 +105,12 @@ inline bool deliver_shell(Runtime& r) {
         if (!terminal::session_bytes(r.tx, MX_TERM_SESSION_OUTPUT_BYTES, &generation, &bytes)) {
             return progress;
         }
-        if (!r.configured || generation != r.generation) {
+        if (!r.configured || !r.host_started || generation != r.generation) {
+            // Silent by design, but the byte count is retained: a generation
+            // mismatch here is indistinguishable from "no output" at the far
+            // end of the cable, and that ambiguity already cost one debugging
+            // cycle. It stays a plain counter so the host probe links without
+            // dragging in formatting.
             r.dropped_output += bytes.size;
             return progress;
         }

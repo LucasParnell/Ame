@@ -1,13 +1,21 @@
 /* SPDX-License-Identifier: MIT */
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
+#ifdef AME_NATIVE_VULKAN
+#include "native_renderer_shim.h"
+#else
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#endif
 #include "renderer.h"
+#ifdef AME_NATIVE_VULKAN
+#include "midix/render/vulkan_triangle_spirv.h"
+#else
 #include "shaders.h"
+#endif
 #include "midix/abi/protocols/gpu_diag.h"
 
 #define FUNCTIONS(X) \
@@ -25,7 +33,7 @@
  X(CreateGraphicsPipelines) X(DestroyPipeline) X(CreateCommandPool) X(DestroyCommandPool) \
  X(AllocateCommandBuffers) X(ResetCommandPool) X(BeginCommandBuffer) X(EndCommandBuffer) \
  X(CmdPipelineBarrier) X(CmdBeginRenderPass) X(CmdEndRenderPass) \
- X(CmdBindPipeline) X(CmdBindVertexBuffers) X(CmdPushConstants) X(CmdDraw) \
+ X(CmdSetScissor) X(CmdBindPipeline) X(CmdBindVertexBuffers) X(CmdPushConstants) X(CmdDraw) \
  X(CreateFence) X(DestroyFence) X(ResetFences) X(WaitForFences) X(QueueSubmit) X(DeviceWaitIdle)
 
 struct panvk_triangle {
@@ -43,7 +51,7 @@ struct panvk_triangle {
     VkDeviceMemory vertex_memory, image_memory;
     VkImage image;
     VkImageView view;
-    VkRenderPass pass;
+    VkRenderPass pass, load_pass;
     VkFramebuffer framebuffer;
     VkPipelineLayout layout;
     VkPipeline pipeline;
@@ -83,12 +91,17 @@ fail:
 struct panvk_triangle *panvk_triangle_create(const char *library, int hardware) {
     struct panvk_triangle *t=calloc(1,sizeof(*t));
     if (!t) return NULL;
+#ifdef AME_NATIVE_VULKAN
+    (void)library;
+    t->GetInstanceProcAddr=(PFN_vkGetInstanceProcAddr)ame_native_vk_proc;
+#else
     t->library=dlopen(library,RTLD_NOW|RTLD_LOCAL);
     if (!t->library) { fprintf(stderr,"panvk triangle: %s\n",dlerror()); goto fail; }
     t->GetInstanceProcAddr=(PFN_vkGetInstanceProcAddr)dlsym(t->library,"vk_icdGetInstanceProcAddr");
     if (!t->GetInstanceProcAddr)
         t->GetInstanceProcAddr=(PFN_vkGetInstanceProcAddr)dlsym(t->library,"vkGetInstanceProcAddr");
     if (!t->GetInstanceProcAddr) goto fail;
+#endif
     t->CreateInstance=(PFN_vkCreateInstance)t->GetInstanceProcAddr(NULL,"vkCreateInstance");
     if (!t->CreateInstance) goto fail;
     VkApplicationInfo app={.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -175,6 +188,8 @@ struct panvk_triangle *panvk_triangle_create(const char *library, int hardware) 
     VkRenderPassCreateInfo pass={.sType=VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         .attachmentCount=1,.pAttachments=&attachment,.subpassCount=1,.pSubpasses=&subpass};
     CHECK(t->CreateRenderPass(t->device,&pass,NULL,&t->pass));
+    attachment.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;
+    CHECK(t->CreateRenderPass(t->device,&pass,NULL,&t->load_pass));
     VkFramebufferCreateInfo fb={.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
         .renderPass=t->pass,.attachmentCount=1,.pAttachments=&t->view,
         .width=WIDTH,.height=HEIGHT,.layers=1};
@@ -215,10 +230,13 @@ struct panvk_triangle *panvk_triangle_create(const char *library, int hardware) 
     VkPipelineColorBlendAttachmentState blend={.colorWriteMask=0xf};
     VkPipelineColorBlendStateCreateInfo cb={.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .attachmentCount=1,.pAttachments=&blend};
+    VkDynamicState dynamic_scissor=VK_DYNAMIC_STATE_SCISSOR;
+    VkPipelineDynamicStateCreateInfo dynamic={.sType=VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount=1,.pDynamicStates=&dynamic_scissor};
     VkGraphicsPipelineCreateInfo pipeline={.sType=VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount=2,.pStages=stages,.pVertexInputState=&vi,.pInputAssemblyState=&ia,
         .pViewportState=&vp,.pRasterizationState=&rs,.pMultisampleState=&ms,
-        .pColorBlendState=&cb,.layout=t->layout,.renderPass=t->pass};
+        .pColorBlendState=&cb,.pDynamicState=&dynamic,.layout=t->layout,.renderPass=t->pass};
     VkResult pipeline_result=t->CreateGraphicsPipelines(t->device,VK_NULL_HANDLE,1,&pipeline,NULL,&t->pipeline);
     for (unsigned i=0;i<2;i++) t->DestroyShaderModule(t->device,modules[i],NULL);
     if (pipeline_result!=VK_SUCCESS) {
@@ -237,7 +255,7 @@ fail:
     return NULL;
 }
 
-int panvk_triangle_record(struct panvk_triangle *t,float angle) {
+static int record(struct panvk_triangle *t,float angle,int load) {
     if (!t || !isfinite(angle)) return -1;
     CHECK(t->ResetCommandPool(t->device,t->pool,0));
     CHECK(t->ResetFences(t->device,1,&t->fence));
@@ -259,11 +277,32 @@ int panvk_triangle_record(struct panvk_triangle *t,float angle) {
         .clearValueCount=1,.pClearValues=&clear};
     t->CmdBeginRenderPass(t->command,&pass,VK_SUBPASS_CONTENTS_INLINE);
     t->CmdBindPipeline(t->command,VK_PIPELINE_BIND_POINT_GRAPHICS,t->pipeline);
+    VkRect2D scissor={{0,0},{WIDTH,HEIGHT}};
+    t->CmdSetScissor(t->command,0,1,&scissor);
     VkDeviceSize offset=0;
     t->CmdBindVertexBuffers(t->command,0,1,&t->vertices,&offset);
     t->CmdPushConstants(t->command,t->layout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(angle),&angle);
     t->CmdDraw(t->command,3,1,0,0);
     t->CmdEndRenderPass(t->command);
+    if (load) {
+        // A second pass must retain the first triangle outside this patch.
+        // Use a full render area so untouched pixels in every tile are loaded.
+        barrier.srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask=VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.oldLayout=barrier.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        t->CmdPipelineBarrier(t->command,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,0,0,NULL,0,NULL,1,&barrier);
+        pass.renderPass=t->load_pass;
+        t->CmdBeginRenderPass(t->command,&pass,VK_SUBPASS_CONTENTS_INLINE);
+        t->CmdBindPipeline(t->command,VK_PIPELINE_BIND_POINT_GRAPHICS,t->pipeline);
+        scissor=(VkRect2D){{224,224},{64,64}};
+        t->CmdSetScissor(t->command,0,1,&scissor);
+        t->CmdBindVertexBuffers(t->command,0,1,&t->vertices,&offset);
+        float changed_angle=1.0f;
+        t->CmdPushConstants(t->command,t->layout,VK_SHADER_STAGE_VERTEX_BIT,0,sizeof(changed_angle),&changed_angle);
+        t->CmdDraw(t->command,3,1,0,0);
+        t->CmdEndRenderPass(t->command);
+    }
     barrier.srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
     barrier.oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -276,8 +315,14 @@ fail:
     return -1;
 }
 
-int panvk_triangle_frame(struct panvk_triangle *t,float angle,uint32_t *argb,uint32_t *checksum) {
-    if (!argb || !checksum || panvk_triangle_record(t,angle)) return -1;
+int panvk_triangle_record(struct panvk_triangle *t,float angle) {
+    return record(t,angle,0);
+}
+int panvk_triangle_record_load(struct panvk_triangle *t) {
+    return record(t,0,1);
+}
+static int frame(struct panvk_triangle *t,float angle,uint32_t *argb,uint32_t *checksum,int load) {
+    if (!argb || !checksum || record(t,angle,load)) return -1;
     VkSubmitInfo submit={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.commandBufferCount=1,.pCommandBuffers=&t->command};
     CHECK(t->QueueSubmit(t->queue,1,&submit,t->fence));
     CHECK(t->WaitForFences(t->device,1,&t->fence,VK_TRUE,UINT64_C(5000000000)));
@@ -300,6 +345,34 @@ fail:
     return -1;
 }
 
+int panvk_triangle_frame(struct panvk_triangle *t,float angle,uint32_t *argb,uint32_t *checksum) {
+    return frame(t,angle,argb,checksum,0);
+}
+int panvk_triangle_verify_load(struct panvk_triangle *t,uint32_t *argb,uint32_t *checksum) {
+    uint32_t *before=malloc(WIDTH*HEIGHT*sizeof(*before));
+    if (!before) return -1;
+    int ok=!frame(t,0,before,checksum,0) && !frame(t,0,argb,checksum,1);
+    unsigned changed=0;
+    for (unsigned y=0;ok && y<HEIGHT;y++) {
+        for (unsigned x=0;x<WIDTH;x++) {
+            unsigned i=y*WIDTH+x;
+            if (x>=224 && x<288 && y>=224 && y<288)
+                changed+=before[i]!=argb[i];
+            else if (before[i]!=argb[i]) {
+                fprintf(stderr,"panvk triangle: LOAD lost pixel at %u,%u\n",x,y);
+                ok=0;
+                break;
+            }
+        }
+    }
+    free(before);
+    if (!ok || !changed) {
+        fprintf(stderr,"panvk triangle: LOAD preservation or second draw FAILED\n");
+        return -1;
+    }
+    return 0;
+}
+
 int panvk_triangle_verify_pixels(const uint32_t *pixels) {
     uint32_t r=pixels[180*512+150], g=pixels[180*512+362], b=pixels[380*512+256];
     uint32_t bg=pixels[16*512+16];
@@ -320,6 +393,7 @@ void panvk_triangle_destroy(struct panvk_triangle *t) {
         if (t->pipeline) t->DestroyPipeline(t->device,t->pipeline,NULL);
         if (t->layout) t->DestroyPipelineLayout(t->device,t->layout,NULL);
         if (t->framebuffer) t->DestroyFramebuffer(t->device,t->framebuffer,NULL);
+        if (t->load_pass) t->DestroyRenderPass(t->device,t->load_pass,NULL);
         if (t->pass) t->DestroyRenderPass(t->device,t->pass,NULL);
         if (t->view) t->DestroyImageView(t->device,t->view,NULL);
         if (t->image) t->DestroyImage(t->device,t->image,NULL);
@@ -331,6 +405,23 @@ void panvk_triangle_destroy(struct panvk_triangle *t) {
         t->DestroyDevice(t->device,NULL);
     }
     if (t->instance && t->DestroyInstance) t->DestroyInstance(t->instance,NULL);
+#ifndef AME_NATIVE_VULKAN
     if (t->library) dlclose(t->library);
+#endif
     free(t);
 }
+
+#ifdef AME_NATIVE_VULKAN
+int panvk_triangle_present_frame(struct panvk_triangle *t,float angle,uint32_t *checksum) {
+    if(!t || !checksum || record(t,angle,0))return -1;
+    VkSubmitInfo submit={.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO,.commandBufferCount=1,.pCommandBuffers=&t->command};
+    CHECK(t->QueueSubmit(t->queue,1,&submit,t->fence));
+    CHECK(t->WaitForFences(t->device,1,&t->fence,VK_TRUE,UINT64_C(5000000000)));
+    CHECK(ame_native_vk_present(t->device,t->queue,t->image,VK_FALSE,checksum));
+    t->rendered=1;return 0;
+fail:return -1;
+}
+int panvk_triangle_present_finish(void) {
+    return ame_native_vk_present(VK_NULL_HANDLE,VK_NULL_HANDLE,VK_NULL_HANDLE,VK_TRUE,NULL)==VK_SUCCESS ? 0 : -1;
+}
+#endif

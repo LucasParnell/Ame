@@ -1,0 +1,287 @@
+--- a/src/panfrost/vulkan/jm/panvk_vX_queue.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_queue.c
+@@ -242,7 +242,8 @@
+ }
+ 
+ static VkResult
+-panvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
++panvk_queue_submit_inner(struct vk_queue *vk_queue, struct vk_queue_submit *submit,
++                         const struct panvk_bo_snapshot *resident)
+ {
+    struct panvk_queue *queue = container_of(vk_queue, struct panvk_queue, vk);
+    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+@@ -270,7 +271,7 @@
+                            panvk_pool_num_bos(&cmdbuf->tls_pool) +
+                            batch->fb.bo_count + (batch->blit.src ? 1 : 0) +
+                            (batch->blit.dst ? 1 : 0) +
+-                           (batch->vtc_jc.first_tiler ? 1 : 0) + 1;
++                           (batch->vtc_jc.first_tiler ? 1 : 0) + 1 + resident->count;
+          unsigned bo_idx = 0;
+          uint32_t bos[nr_bos];
+ 
+@@ -296,7 +297,14 @@
+             bos[bo_idx++] = pan_kmod_bo_handle(dev->tiler_heap->bo);
+ 
+          bos[bo_idx++] = pan_kmod_bo_handle(dev->sample_positions->bo);
+-         assert(bo_idx == nr_bos);
++         for (uint32_t i = 0; i < resident->count; i++) {
++            /* The heap is sparse and needed only by tiler jobs. Its explicit
++             * per-batch entry above preserves that allocation-on-fault rule. */
++            if (resident->bos[i] != dev->tiler_heap->bo)
++               bos[bo_idx++] = pan_kmod_bo_handle(resident->bos[i]);
++         }
++         assert(bo_idx <= nr_bos);
++         nr_bos = bo_idx;
+ 
+          /* Merge identical BO entries. */
+          for (unsigned x = 0; x < nr_bos; x++) {
+@@ -338,6 +346,25 @@
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++panvk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
++{
++   struct panvk_device *dev = to_panvk_device(vk_queue->base.device);
++   struct panvk_bo_snapshot resident = {0};
++#if PAN_ARCH == 5
++   /* V5 currently exposes one queue and no external-memory/sync extensions.
++    * Conservatively pin all live BOs until per-batch resource tracking is
++    * available; narrower tracking is needed before relaxing those limits. */
++   VkResult result = panvk_device_snapshot_bos(dev, &resident);
++   if (result != VK_SUCCESS)
++      return result;
++#endif
++   VkResult submitted = panvk_queue_submit_inner(vk_queue, submit, &resident);
++   panvk_device_finish_bo_snapshot(dev, &resident);
++   return submitted;
++}
++
++
+ VkResult
+ panvk_per_arch(queue_init)(struct panvk_device *device,
+                            struct panvk_queue *queue, int idx,
+--- a/src/panfrost/vulkan/panvk_device.h
++++ b/src/panfrost/vulkan/panvk_device.h
+@@ -16,6 +16,7 @@
+ #include "panvk_macros.h"
+ #include "panvk_mempool.h"
+ #include "panvk_meta.h"
++#include "panvk_residency.h"
+ #include "panvk_physical_device.h"
+ 
+ #include "kmod/pan_kmod.h"
+@@ -38,6 +39,9 @@
+       struct pan_kmod_dev *dev;
+       struct pan_kmod_allocator allocator;
+    } kmod;
++
++   struct list_head resident_bos;
++   uint32_t resident_bo_count;
+ 
+    struct panvk_priv_bo *tiler_heap;
+    struct panvk_priv_bo *sample_positions;
+--- a/src/panfrost/vulkan/panvk_device_memory.c
++++ b/src/panfrost/vulkan/panvk_device_memory.c
+@@ -130,6 +130,7 @@
+                             NULL);
+    }
+ 
++   panvk_device_add_resident_bo(device, &mem->residency, mem->bo);
+    *pMem = panvk_device_memory_to_handle(mem);
+ 
+    return VK_SUCCESS;
+@@ -158,6 +159,8 @@
+ 
+    if (mem == NULL)
+       return;
++
++   panvk_device_remove_resident_bo(device, &mem->residency);
+ 
+    if (device->debug.decode_ctx) {
+       pandecode_inject_free(device->debug.decode_ctx, mem->addr.dev,
+--- a/src/panfrost/vulkan/panvk_device_memory.h
++++ b/src/panfrost/vulkan/panvk_device_memory.h
+@@ -9,12 +9,14 @@
+ #include <stdint.h>
+ 
+ #include "vk_device_memory.h"
++#include "panvk_residency.h"
+ 
+ struct panvk_priv_bo;
+ 
+ struct panvk_device_memory {
+    struct vk_device_memory vk;
+    struct pan_kmod_bo *bo;
++   struct panvk_resident_bo residency;
+    struct {
+       uint64_t dev;
+       void *host;
+--- a/src/panfrost/vulkan/panvk_priv_bo.c
++++ b/src/panfrost/vulkan/panvk_priv_bo.c
+@@ -85,6 +85,7 @@
+ 
+    p_atomic_set(&priv_bo->refcnt, 1);
+ 
++   panvk_device_add_resident_bo(dev, &priv_bo->residency, bo);
+    *out = priv_bo;
+    return VK_SUCCESS;
+ 
+@@ -113,6 +114,7 @@
+ panvk_priv_bo_destroy(struct panvk_priv_bo *priv_bo)
+ {
+    struct panvk_device *dev = priv_bo->dev;
++   panvk_device_remove_resident_bo(dev, &priv_bo->residency);
+ 
+    if (dev->debug.decode_ctx) {
+       pandecode_inject_free(dev->debug.decode_ctx, priv_bo->addr.dev,
+@@ -153,3 +155,70 @@
+ 
+    panvk_priv_bo_destroy(priv_bo);
+ }
++
++/* JM submission must pin shader, descriptor, storage, query and vertex/index
++ * BOs as well as framebuffer attachments. Keep a conservative device snapshot
++ * until submit has transferred references to the kernel. */
++void
++panvk_device_add_resident_bo(struct panvk_device *dev,
++   struct panvk_resident_bo *entry, struct pan_kmod_bo *bo)
++{
++   simple_mtx_lock(&dev->as.lock);
++   entry->bo = bo;
++   list_addtail(&entry->node, &dev->resident_bos);
++   dev->resident_bo_count++;
++   simple_mtx_unlock(&dev->as.lock);
++}
++void
++panvk_device_remove_resident_bo(struct panvk_device *dev,
++   struct panvk_resident_bo *entry)
++{
++   simple_mtx_lock(&dev->as.lock);
++   if (entry->bo) {
++      list_del(&entry->node);
++      entry->bo = NULL;
++      dev->resident_bo_count--;
++   }
++   simple_mtx_unlock(&dev->as.lock);
++}
++VkResult
++panvk_device_snapshot_bos(struct panvk_device *dev,
++   struct panvk_bo_snapshot *snapshot)
++{
++   *snapshot = (struct panvk_bo_snapshot){0};
++   for (;;) {
++      simple_mtx_lock(&dev->as.lock);
++      uint32_t count = dev->resident_bo_count;
++      simple_mtx_unlock(&dev->as.lock);
++      if (count > UINT32_MAX - 64)
++         return VK_ERROR_OUT_OF_HOST_MEMORY;
++      uint32_t capacity = count + 64;
++      struct pan_kmod_bo **bos = vk_alloc(&dev->vk.alloc,
++         (size_t)capacity * sizeof(*bos), 8, VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
++      if (!bos)
++         return VK_ERROR_OUT_OF_HOST_MEMORY;
++      simple_mtx_lock(&dev->as.lock);
++      if (dev->resident_bo_count > capacity) {
++         simple_mtx_unlock(&dev->as.lock);
++         vk_free(&dev->vk.alloc, bos);
++         continue;
++      }
++      uint32_t index = 0;
++      list_for_each_entry(struct panvk_resident_bo, entry,
++                          &dev->resident_bos, node)
++         bos[index++] = pan_kmod_bo_get(entry->bo);
++      simple_mtx_unlock(&dev->as.lock);
++      snapshot->bos = bos;
++      snapshot->count = index;
++      return VK_SUCCESS;
++   }
++}
++void
++panvk_device_finish_bo_snapshot(struct panvk_device *dev,
++   struct panvk_bo_snapshot *snapshot)
++{
++   for (uint32_t i = 0; i < snapshot->count; i++)
++      pan_kmod_bo_put(snapshot->bos[i]);
++   vk_free(&dev->vk.alloc, snapshot->bos);
++   *snapshot = (struct panvk_bo_snapshot){0};
++}
+--- a/src/panfrost/vulkan/panvk_priv_bo.h
++++ b/src/panfrost/vulkan/panvk_priv_bo.h
+@@ -7,6 +7,7 @@
+ #define PANVK_PRIV_BO_H
+ 
+ #include <vulkan/vulkan_core.h>
++#include "panvk_residency.h"
+ 
+ #include "util/list.h"
+ #include "util/u_atomic.h"
+@@ -18,6 +19,7 @@
+ /* Used for internal object allocation. */
+ struct panvk_priv_bo {
+    struct list_head node;
++   struct panvk_resident_bo residency;
+    uint64_t refcnt;
+    struct panvk_device *dev;
+    struct pan_kmod_bo *bo;
+--- /dev/null
++++ b/src/panfrost/vulkan/panvk_residency.h
+@@ -0,0 +1,27 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef PANVK_RESIDENCY_H
++#define PANVK_RESIDENCY_H
++#include <stdint.h>
++#include <vulkan/vulkan_core.h>
++#include "util/list.h"
++struct panvk_device;
++struct pan_kmod_bo;
++/* Embedded in both VkDeviceMemory and internal allocations. The device's
++ * address-space lock protects this list; BO references protect snapshots. */
++struct panvk_resident_bo {
++   struct list_head node;
++   struct pan_kmod_bo *bo;
++};
++struct panvk_bo_snapshot {
++   struct pan_kmod_bo **bos;
++   uint32_t count;
++};
++void panvk_device_add_resident_bo(struct panvk_device *dev,
++   struct panvk_resident_bo *entry, struct pan_kmod_bo *bo);
++void panvk_device_remove_resident_bo(struct panvk_device *dev,
++   struct panvk_resident_bo *entry);
++VkResult panvk_device_snapshot_bos(struct panvk_device *dev,
++   struct panvk_bo_snapshot *snapshot);
++void panvk_device_finish_bo_snapshot(struct panvk_device *dev,
++   struct panvk_bo_snapshot *snapshot);
++#endif
+--- a/src/panfrost/vulkan/panvk_vX_device.c
++++ b/src/panfrost/vulkan/panvk_vX_device.c
+@@ -240,6 +240,7 @@
+    uint32_t vm_flags = PAN_ARCH <= 7 ? PAN_KMOD_VM_FLAG_AUTO_VA : 0;
+ 
+    simple_mtx_init(&device->as.lock, mtx_plain);
++   list_inithead(&device->resident_bos);
+    util_vma_heap_init(&device->as.heap, user_va_start,
+                       user_va_end - user_va_start);
+ 
+@@ -249,7 +250,7 @@
+ 
+    if (!device->kmod.vm) {
+       result = panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+-      goto err_destroy_kdev;
++      goto err_finish_as;
+    }
+ 
+    panvk_device_init_mempools(device);
+@@ -321,10 +322,10 @@
+    panvk_priv_bo_unref(device->tiler_heap);
+    panvk_device_cleanup_mempools(device);
+    pan_kmod_vm_destroy(device->kmod.vm);
++err_finish_as:
+    util_vma_heap_finish(&device->as.heap);
+    simple_mtx_destroy(&device->as.lock);
+ 
+-err_destroy_kdev:
+    pan_kmod_dev_destroy(device->kmod.dev);
+ 
+ err_finish_dev:

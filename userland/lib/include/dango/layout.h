@@ -7,11 +7,11 @@
 namespace dango {
 
 constexpr uint64_t kPageSize = 4096;
-constexpr uint64_t kRamBase = 0x4000'0000ull;
-constexpr uint64_t kRamSize = 128ull * 1024ull * 1024ull;
-constexpr uint64_t kKernelLoad = 0x4020'0000ull;
-constexpr uint64_t kInitramfsLoad = 0x4600'0000ull;
-constexpr uint64_t kDtbBase = 0x4700'0000ull;
+constexpr uint64_t kRamBase = DANGO_RAM_BASE;
+constexpr uint64_t kRamSize = DANGO_RAM_SIZE;
+constexpr uint64_t kKernelLoad = DANGO_KERNEL_LOAD;
+constexpr uint64_t kInitramfsLoad = DANGO_INITRAMFS_LOAD;
+constexpr uint64_t kDtbBase = DANGO_DTB_LOAD;
 constexpr uint64_t kDtbSize = 0x0001'0000ull;
 constexpr uint64_t kMmioBase = 0x0800'0000ull;
 constexpr uint64_t kMmioSize = 0x0110'0000ull;

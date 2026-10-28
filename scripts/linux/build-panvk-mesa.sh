@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Isolated, pinned experimental Midgard ICD. Does not replace installed GLES.
 set -euo pipefail
+# Keep the dependency build under the same job limit as the ICD build.
+export DANGO_MESA_JOBS="${DANGO_MESA_JOBS:-1}"
 AME="$(cd "$(dirname "$0")/../.." && pwd)"
 BASE="${DANGO_MESA_BUILD:-${AME}/out/mesa-panfrost}"
 OUT="${DANGO_PANVK_BUILD:-${AME}/out/mesa-panvk-midgard}"
@@ -8,7 +10,28 @@ mkdir -p "${OUT}"
 OUT="$(realpath "${OUT}")"
 PREFIX="${DANGO_PANVK_PREFIX:-${OUT}/install}"
 PATCHES=("${AME}/third_party/mesa/panvk-midgard/0001-panvk-midgard-bringup.patch"
-         "${AME}/third_party/mesa/panvk-midgard/0002-panvk-v5-tagged-framebuffer-pointer.patch")
+         "${AME}/third_party/mesa/panvk-midgard/0002-panvk-v5-tagged-framebuffer-pointer.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0003-panvk-v5-color-preload.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0004-panvk-v5-depth-stencil-msaa-preload.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0005-panvk-v5-blend-compiler-compute.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0006-panvk-v5-storage-image-descriptors.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0007-panvk-jm-fault-only-tracing.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0008-panvk-v5-gpu-index-expansion.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0009-panvk-v5-polygon-list-alignment.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0010-panvk-v5-gpu-indirect-dispatch.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0011-panvk-v5-minmax-blend-destination.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0012-panvk-v5-occlusion-queries.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0013-panvk-v5-submit-bo-residency.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0014-panvk-v5-sequential-layered-rendering.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0015-panvk-v5-disabled-point-line-limits.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0016-panvk-v5-robust-indexed-gather.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0017-panvk-v5-lazy-command-descriptor-slabs.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0018-panvk-v5-compute-workgroup-abi-limits.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0019-panvk-v5-lazy-layer-view-storage.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0020-panvk-v5-lazy-recording-state.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0021-panvk-v5-drop-cpu-index-mappings.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0022-panvk-jm-command-batch-allocation-errors.patch"
+         "${AME}/third_party/mesa/panvk-midgard/0023-midgard-lower-wide-integer-comparisons.patch")
 if [[ ! -f "${BASE}/install/lib/pkgconfig/libdrm.pc" || ! -f "${BASE}/cross.ini" ]]; then
     "${AME}/scripts/linux/build-panfrost-mesa.sh"
 fi
@@ -58,7 +81,13 @@ if '#define once_flag mesa_once_flag' not in s:
         raise RuntimeError('C11 thread compatibility patch no longer matches')
     p.write_text(s.replace(needle, needle + '\n#define once_flag mesa_once_flag\n'
         '#define call_once mesa_call_once\n#undef ONCE_FLAG_INIT'))
-files = sorted((source / 'src/panfrost/vulkan').rglob('*'))
+files = set((source / 'src/panfrost/vulkan').rglob('*'))
+# Compiler and shared Midgard helpers can also be changed by this series.
+for patch in patches:
+    for line in patch.read_text().splitlines():
+        if line.startswith('+++ b/'):
+            files.add(source / line[6:])
+files = sorted(files)
 (out / 'source-manifest.json').write_text(json.dumps({
     'mesa_version': '24.3.4',
     'mesa_archive_sha256': 'e641ae27191d387599219694560d221b7feaa91c900bcec46bf444218ed66025',
@@ -87,7 +116,7 @@ if [[ ! -f "${OUT}/build/build.ninja" ]]; then
         -Dshader-cache=enabled -Dlibunwind=disabled -Dlmsensors=disabled \
         -Dbuild-tests=false -Dtools=drm-shim
 fi
-ninja -C "${OUT}/build" -j"${DANGO_MESA_JOBS:-$(nproc)}" \
+ninja -C "${OUT}/build" -j"${DANGO_MESA_JOBS}" \
     src/panfrost/vulkan/libvulkan_panfrost.so \
     src/panfrost/drm-shim/libpanfrost_noop_drm_shim.so
 install -Dm755 "${OUT}/build/src/panfrost/vulkan/libvulkan_panfrost.so" \

@@ -1,0 +1,96 @@
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+@@ -388,12 +388,18 @@
+ panvk_per_arch(cmd_open_batch)(struct panvk_cmd_buffer *cmdbuf)
+ {
+    assert(!cmdbuf->cur_batch);
++   if (vk_command_buffer_has_error(&cmdbuf->vk))
++      return NULL;
++
+    cmdbuf->cur_batch =
+       vk_zalloc(&cmdbuf->vk.pool->alloc, sizeof(*cmdbuf->cur_batch), 8,
+                 VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
++   if (!cmdbuf->cur_batch) {
++      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
++      return NULL;
++   }
+    util_dynarray_init(&cmdbuf->cur_batch->jobs, NULL);
+    util_dynarray_init(&cmdbuf->cur_batch->event_ops, NULL);
+-   assert(cmdbuf->cur_batch);
+    return cmdbuf->cur_batch;
+ }
+ 
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+@@ -1387,6 +1387,8 @@
+       panvk_per_arch(cmd_close_batch)(cmdbuf);
+       panvk_per_arch(cmd_preload_fb_after_batch_split)(cmdbuf);
+       batch = panvk_per_arch(cmd_open_batch)(cmdbuf);
++      if (!batch)
++         return;
+    }
+ 
+    result = panvk_cmd_prepare_draw_link_shaders(cmdbuf);
+@@ -2119,8 +2121,8 @@
+    if (resuming && !cmdbuf->cur_batch)
+       panvk_per_arch(cmd_preload_fb_after_batch_split)(cmdbuf);
+ 
+-   if (!cmdbuf->cur_batch)
+-      panvk_per_arch(cmd_open_batch)(cmdbuf);
++   if (!cmdbuf->cur_batch && !panvk_per_arch(cmd_open_batch)(cmdbuf))
++      return;
+ 
+    if (!resuming)
+       preload_render_area_border(cmdbuf, pRenderingInfo);
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_event.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_event.c
+@@ -20,6 +20,9 @@
+                               struct panvk_event *event,
+                               enum panvk_cmd_event_op_type type)
+ {
++   if (vk_command_buffer_has_error(&cmdbuf->vk))
++      return;
++
+    struct panvk_cmd_event_op op = {
+       .type = type,
+       .event = event,
+@@ -29,7 +32,8 @@
+       /* No open batch, let's create a new one so this operation happens in
+        * the right order.
+        */
+-      panvk_per_arch(cmd_open_batch)(cmdbuf);
++      if (!panvk_per_arch(cmd_open_batch)(cmdbuf))
++         return;
+       util_dynarray_append(&cmdbuf->cur_batch->event_ops,
+                            struct panvk_cmd_event_op, op);
+       panvk_per_arch(cmd_close_batch)(cmdbuf);
+@@ -49,6 +53,9 @@
+ panvk_add_wait_event_operation(struct panvk_cmd_buffer *cmdbuf,
+                                struct panvk_event *event)
+ {
++   if (vk_command_buffer_has_error(&cmdbuf->vk))
++      return;
++
+    struct panvk_cmd_event_op op = {
+       .type = PANVK_EVENT_OP_WAIT,
+       .event = event,
+@@ -56,7 +63,8 @@
+ 
+    if (cmdbuf->cur_batch == NULL) {
+       /* No open batch, let's create a new one and have it wait for this event. */
+-      panvk_per_arch(cmd_open_batch)(cmdbuf);
++      if (!panvk_per_arch(cmd_open_batch)(cmdbuf))
++         return;
+       util_dynarray_append(&cmdbuf->cur_batch->event_ops,
+                            struct panvk_cmd_event_op, op);
+    } else {
+@@ -67,7 +75,8 @@
+           cmdbuf->cur_batch->vtc_jc.first_job) {
+          panvk_per_arch(cmd_close_batch)(cmdbuf);
+          panvk_per_arch(cmd_preload_fb_after_batch_split)(cmdbuf);
+-         panvk_per_arch(cmd_open_batch)(cmdbuf);
++         if (!panvk_per_arch(cmd_open_batch)(cmdbuf))
++            return;
+       }
+       util_dynarray_append(&cmdbuf->cur_batch->event_ops,
+                            struct panvk_cmd_event_op, op);

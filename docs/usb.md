@@ -21,9 +21,25 @@ AHB acknowledgement, retained SETUP data, another function's pending IN packet,
 role changes and recovery after the settle interval. A separate capacity
 regression exposes partial TX packet writes; SEND now waits for the complete
 packet to fit, consistent with the vendor and Linux PIO packet writers.
-These are verified code/contract defects. They have not yet been established as
-the cause of the phone's RX-status corruption. No device test or flash was run
-for these audit changes.
+These are verified code/contract defects. They were initially validated off
+device, then flashed as v44 at the user's request. They do not eliminate the
+phone's RX-status corruption; the physical result follows.
+
+The v44 installation has a saved v43 kernel backup and a verified full 24 MiB
+readback (image SHA-256
+`b0509c9a1931eff72d634ecbd93d93a56e4b00b73ff182e301f33116eb05e755`).
+It boots with RUN tag `anne-panvk-usb-code-audit-v44` and passes the selected
+graphics gate: 51 supported cases, two skips, 24 Vulkan animation frames,
+295 GLES frames and no captured GPU fault markers. Two interrupted-log/reopen
+challenges pass, then the third fails. EP0 diagnostics remain usable. The
+retained log records zero peek/pop after `0x00660000`, status-only `0x3a636d6d`,
+and `USB_EP0_FAIL rx_status_exceeds_packet_scratch raw=0x6f6c7075`, followed by
+USB service restarts. This is the same failure signature seen on v42, despite
+the corrected flush sequencing. No further firmware change was attempted in
+this run. Evidence:
+`out/mesa-panvk-midgard/{phone-usb-code-audit-v44,usb-reconnect-code-audit-v44}/`,
+`out/panvk-completion/usb-v44-after-reopen.log` and
+`out/anne-device-private/kernel-install-20261028T102327Z/result.json`.
 
 During the PanVK CTS runs, control/vendor USB requests remained responsive while
 the CDC shell stalled. A host-model regression reproduces a deadlock: the gadget
@@ -266,9 +282,9 @@ graphics gate (51 supported cases, two skips, 26 Vulkan frames and 296 GLES
 frames). Its next CDC open produced no shell identity output, and EP0 state
 reads timed out as well. The guard and its model-specific test have been removed
 from source. A zero peek was not established as an authoritative queue-empty
-indication; treating it as one was an unsupported assumption. The phone still
-has that experimental image until a later recovery; the source audit does not
-silently replace or validate the deployed image. Evidence:
+indication; treating it as one was an unsupported assumption. The phone retained
+that image at the end of the source audit; it was subsequently replaced by v44
+only after the user's explicit flash request. Evidence:
 `out/mesa-panvk-midgard/phone-usb-empty-status-v43-20261028/`,
 `out/mesa-panvk-midgard/usb-reconnect-empty-status-v43-20261028/report.json` and
 `out/mesa-panvk-midgard/usb-empty-status-v43-after-open-failure.json`.

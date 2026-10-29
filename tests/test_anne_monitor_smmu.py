@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class SecureSmmuProbe(unittest.TestCase):
     def test_firmware_patch_scope_and_input_rejection(self):
-        spec = importlib.util.spec_from_file_location('monitor_builder', ROOT / 'scripts/anne/build-monitor-probe.py')
+        spec = importlib.util.spec_from_file_location('monitor_builder', ROOT / 'scripts/anne/tools/build-monitor-probe.py')
         builder = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(builder)
         with tempfile.TemporaryDirectory() as work:
@@ -52,19 +52,19 @@ class SecureSmmuProbe(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('qemu-system-aarch64'), 'requires QEMU system emulator')
     def test_real_el3_recovery_and_unrelated_fault(self):
-        spec = importlib.util.spec_from_file_location('monitor_builder', ROOT / 'scripts/anne/build-monitor-probe.py')
+        spec = importlib.util.spec_from_file_location('monitor_builder', ROOT / 'scripts/anne/tools/build-monitor-probe.py')
         builder = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(builder)
         with tempfile.TemporaryDirectory() as work:
             work = Path(work)
             probe = work / 'probe.bin'
-            builder.assemble(ROOT / 'scripts/anne/monitor_smmu_probe.S', probe, 0x2000)
+            builder.assemble(ROOT / 'scripts/anne/tools/monitor_smmu_probe.S', probe, 0x2000)
             names = {}
             for line in subprocess.check_output(['llvm-nm', str(probe.with_suffix('.elf'))], text=True).splitlines():
                 fields = line.split()
                 if len(fields) == 3:
                     names[fields[2]] = int(fields[0], 16)
-            guard = builder.assemble(ROOT / 'scripts/anne/monitor_smmu_recover.S', work / 'guard.bin', 0x800,
+            guard = builder.assemble(ROOT / 'scripts/anne/tools/monitor_smmu_recover.S', work / 'guard.bin', 0x800,
                 f'probe_load = {names["smmu_probe_load"]}; probe_return = {names["smmu_probe_return"]}; stock_unhandled = 0x1800;')
             self.assertLessEqual(len(guard), 128)
             for unrelated in (False, True):

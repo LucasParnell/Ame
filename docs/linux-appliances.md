@@ -67,7 +67,7 @@ been validated on the phone; see [graphics](graphics.md#anne_vulkan_completion).
 
 Configure the native build with `MOCHI_SYSTEM_PROFILE=huawei-anne-gpu`,
 `DANGO_LINUX_PROFILE=panfrost` and `DANGO_LINUX_ARTIFACT_DIR` pointing to these
-artifacts. Flash through `scripts/anne/flash-el2.py` as described in
+artifacts. Flash through `scripts/anne/tools/flash-el2.py` as described in
 [`FLASH_EL2.md`](../boards/huawei-anne/operations.md#flash_el2).
 
 The native frontend is described in [Native EGL/GLES](graphics.md#native_graphics).

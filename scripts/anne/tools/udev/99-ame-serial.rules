@@ -1,7 +1,7 @@
 # Ame development USB access for a non-root console user.
 #
 # Two nodes matter:
-#   1. the CDC ACM serial port used by `screen` and scripts/anne/usb-input.py
+#   1. the CDC ACM serial port used by `screen` and scripts/anne/tools/usb-input.py
 #   2. the raw USB device node, needed by the vendor bulk interface (pyusb)
 #
 # Matched on VID/PID rather than ttyACM<N> or bus numbers: Ame re-enumerates
@@ -15,7 +15,7 @@
 # itself already carries ID_VENDOR_ID/ID_MODEL_ID from its parent, so plain
 # ATTR{} on those properties is both correct and cheaper.
 #
-# Install:  sudo install -m 0644 scripts/anne/udev/99-ame-serial.rules /etc/udev/rules.d/
+# Install:  sudo install -m 0644 scripts/anne/tools/udev/99-ame-serial.rules /etc/udev/rules.d/
 #           sudo udevadm control --reload-rules
 #           (then re-plug, or sudo udevadm trigger --action=add)
 #

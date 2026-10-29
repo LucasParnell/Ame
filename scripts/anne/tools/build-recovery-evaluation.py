@@ -16,8 +16,8 @@ import shutil
 import subprocess
 import tarfile
 
-ROOT = Path(__file__).resolve().parents[2]
-LOCK = ROOT / 'scripts/anne/evaluation-runtime.lock.json'
+ROOT = Path(__file__).resolve().parents[3]
+LOCK = ROOT / 'scripts/anne/tools/evaluation-runtime.lock.json'
 CDN = 'https://dl-cdn.alpinelinux.org/alpine'
 
 

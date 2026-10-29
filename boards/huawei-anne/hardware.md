@@ -102,7 +102,7 @@ so testing this route uses the backed-up `kernel` partition.
 ```sh
 cmake --preset anne-native-dev
 cmake --build --preset anne-native-dev --target anko provenance
-python3 scripts/anne/build-native-package.py --output out/anne-native-package-new
+python3 scripts/anne/tools/build-native-package.py --output out/anne-native-package-new
 ```
 
 The native target links Anko at the measured address, selects the captured
@@ -141,7 +141,7 @@ mkdir -p out/anne-native-build
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
   -out out/anne-native-build/dev-avb-key.pem
 chmod 600 out/anne-native-build/dev-avb-key.pem
-python3 scripts/anne/build-native-package.py --download-avbtool \
+python3 scripts/anne/tools/build-native-package.py --download-avbtool \
   --output out/anne-native-package-new
 ```
 
@@ -188,7 +188,7 @@ and [RDMA setup code](https://github.com/LineageOS/android_kernel_huawei_hi6250/
 
 ```sh
 cmake --build --preset anne-native-dev --target anne-entry-probe
-python3 scripts/anne/build-native-package.py --probe \
+python3 scripts/anne/tools/build-native-package.py --probe \
   --output out/anne-entry-probe-package-new
 ```
 
@@ -263,7 +263,7 @@ after the screen attempt and is not required for it.
 ```sh
 cmake --preset anne-native-dev
 cmake --build --preset anne-native-dev --target anko-minimal
-python3 scripts/anne/build-native-package.py --minimal \
+python3 scripts/anne/tools/build-native-package.py --minimal \
   --output out/anne-minimal-package-new
 ```
 
@@ -325,9 +325,9 @@ To reproduce after building the guest above:
 
 ```sh
 cmake --build --preset anne-qemu-dev --target provenance
-python3 scripts/anne/build-recovery-evaluation.py --download \
+python3 scripts/anne/tools/build-recovery-evaluation.py --download \
   --output out/anne-recovery-evaluation-new
-python3 scripts/anne/run-recovery-evaluation.py \
+python3 scripts/anne/tools/run-recovery-evaluation.py \
   --package out/anne-recovery-evaluation-new \
   --output out/anne-device-private/evaluation-new
 ```
@@ -406,7 +406,7 @@ used to replace the verified bootloader state.
 If the phone is in fastboot, first collect its Huawei information queries:
 
 ```sh
-python3 scripts/anne/inspect-fastboot.py
+python3 scripts/anne/tools/inspect-fastboot.py
 ```
 
 This uses read-only model/build/bootloader-status commands. It does not establish
@@ -433,7 +433,7 @@ Once a working TWRP recovery is confirmed, boot it and connect through USB. From
 the repository root:
 
 ```sh
-python3 scripts/anne/inspect-recovery.py collect
+python3 scripts/anne/tools/inspect-recovery.py collect
 ```
 
 The collector finds ADB on `PATH` or in `out/host-tools/platform-tools/adb`. Pass
@@ -456,7 +456,7 @@ sharing. The report never treats kernel kexec configuration as a tested handoff.
 Saved captures can be checked without a connected device:
 
 ```sh
-python3 scripts/anne/inspect-recovery.py summarize /path/to/inspection/report.json
+python3 scripts/anne/tools/inspect-recovery.py summarize /path/to/inspection/report.json
 ```
 
 The analyser checks capture paths, sizes, and SHA-256 hashes before deriving its
@@ -554,14 +554,14 @@ The saved review surface is `out/anne-console-validation/el1-console.png`.
 ```sh
 cmake --preset anne-console-capture-dev
 cmake --build --preset anne-console-capture-dev --target anko provenance
-python3 scripts/anne/build-native-package.py \
+python3 scripts/anne/tools/build-native-package.py \
   --build out/anne-console-capture-dev --output out/anne-console-capture-package-new
 ```
 
 To collect a future run after restoring stock and returning to TWRP:
 
 ```sh
-python3 scripts/anne/collect-native-log.py \
+python3 scripts/anne/tools/collect-native-log.py \
   --package out/anne-console-capture-package-v1 \
   --output out/anne-device-private/console-v1-test/results --dfx-fallback
 ```
@@ -571,7 +571,7 @@ bounded persistent_ram records only when their run tag matches the package,
 so older first-light traces cannot be decoded as this image. `--offline
 --dfx-fallback` re-decodes the saved backup without touching the phone.
 
-The read-only AArch64 Linux probe in `scripts/anne/fb-ioctl-probe.c` obtained
+The read-only AArch64 Linux probe in `scripts/anne/tools/fb-ioctl-probe.c` obtained
 `FBIOGET_FSCREENINFO` and `FBIOGET_VSCREENINFO` in installed TWRP. The shared
 stock kernel partition SHA-256 matched the backup before collection. It found:
 
@@ -641,7 +641,7 @@ Build and package into a fresh directory:
 ```sh
 cmake --preset anne-framebuffer-capture-dev
 cmake --build --preset anne-framebuffer-capture-dev --target anko provenance
-python3 scripts/anne/build-native-package.py \
+python3 scripts/anne/tools/build-native-package.py \
   --build out/anne-framebuffer-capture-dev \
   --output out/anne-framebuffer-capture-package-new
 ```
@@ -668,7 +668,7 @@ tick and handled-IPI counts on all eight cores.
 Collect only after restoring the stock shared kernel and returning to TWRP:
 
 ```sh
-python3 scripts/anne/collect-native-log.py \
+python3 scripts/anne/tools/collect-native-log.py \
   --package out/anne-framebuffer-capture-package-v1a \
   --output out/anne-device-private/framebuffer-v1-test/results
 ```
@@ -681,7 +681,7 @@ image: two copies of each of two complete executions. Each bounded trace is
 were excluded. Use explicit header offsets and the exact packaged ELF:
 
 ```sh
-python3 scripts/anne/extract-dfx-native-log.py \
+python3 scripts/anne/tools/extract-dfx-native-log.py \
   --input out/anne-device-private/framebuffer-v1-test/results/dfx-private.bin \
   --package out/anne-framebuffer-capture-package-v1a \
   --output out/anne-device-private/framebuffer-dfx-decoded-new \
@@ -772,7 +772,7 @@ runs its first worker no longer appears unused.
 ```sh
 cmake --preset anne-smp-native-dev
 cmake --build --preset anne-smp-native-dev --target anko provenance
-python3 scripts/anne/build-native-package.py --build out/anne-smp-native-dev \
+python3 scripts/anne/tools/build-native-package.py --build out/anne-smp-native-dev \
   --output out/anne-smp-capture-package
 ```
 

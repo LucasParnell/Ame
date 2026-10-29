@@ -7,7 +7,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location('anne_fastboot', ROOT / 'scripts/anne/inspect-fastboot.py')
+SPEC = importlib.util.spec_from_file_location('anne_fastboot', ROOT / 'scripts/anne/tools/inspect-fastboot.py')
 fastboot = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(fastboot)
 

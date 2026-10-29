@@ -82,7 +82,7 @@ to init's system capability. Unsupported platforms retain read-only telemetry.
 `diag power load [100..5000 milliseconds]` exercises a CPU burst and reports peak
 observed rates. `cmake --build <build> --target power_load_probe` builds a separate
 eight-core native workload at `userland/test.power_load.mxi`; upload it through
-`scripts/anne/app-stream.py` after `container start`. It never enters the normal
+`scripts/anne/tools/app-stream.py` after `container start`. It never enters the normal
 system bundle or writes phone storage.
 
 Primary references:

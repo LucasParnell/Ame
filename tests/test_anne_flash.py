@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 from types import SimpleNamespace
 
-SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts/anne'
+SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts/anne/tools'
 sys.path.insert(0, str(SCRIPTS))
 spec = importlib.util.spec_from_file_location('anne_flash', SCRIPTS / 'flash-el2.py')
 flash = importlib.util.module_from_spec(spec)
@@ -51,6 +51,17 @@ class FakeFactory:
 
 
 class AnneFlash(unittest.TestCase):
+    def test_expected_image_change_stops_before_usb(self):
+        with mock.patch.object(sys, 'argv', ['flash-el2', '--package', '/unused',
+                                             '--expect-sha256', '0' * 64]), \
+             mock.patch.object(flash, 'inputs', return_value=(b'changed image', {}, {})), \
+             mock.patch.object(flash, 'enter_lk') as enter, \
+             mock.patch.object(flash, 'Factory') as factory:
+            with self.assertRaisesRegex(RuntimeError, 'changed after selection'):
+                flash.main()
+        enter.assert_not_called()
+        factory.assert_not_called()
+
     def test_bootrom_waits_for_tty_creation_and_udev_permissions(self):
         port = SimpleNamespace(vid=0x12d1, pid=0x3609, device='/dev/ttyUSB0')
         discover = mock.Mock(side_effect=[[], [port], [port]])

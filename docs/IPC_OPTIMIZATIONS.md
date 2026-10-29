@@ -121,7 +121,7 @@ connection generations, shell logout/restart, one/four CPUs and both placements.
 
 Build the independent component app with `cmake --build BUILD --target ipc_components`.
 After `container start` in msh, stream `BUILD/userland/bench.ipc.components.mxi`
-using `scripts/anne/app-stream.py`; this creates no persistent file. Host diagnosis:
+using `scripts/anne/tools/app-stream.py`; this creates no persistent file. Host diagnosis:
 
 ```sh
 python3 scripts/test/benchmark-ipc-components.py --output out/ipc-components

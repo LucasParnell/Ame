@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/anne/panvk-gate.py'
+SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/anne/tools/panvk-gate.py'
 spec = importlib.util.spec_from_file_location('panvk_gate', SCRIPT)
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)

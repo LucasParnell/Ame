@@ -34,27 +34,22 @@ The helper pins firmware hashes and RAM patch addresses. It requires the
 handset's already cleared FBLOCK; it does not change FBLOCK or flash LK/TEE.
 No USB drive or p20re Python modules are required after copying those inputs.
 
-Build and package, choosing a fresh output directory:
+The normal workflows use one entry point:
 
 ```sh
-cmake --build out/anne-usb-native-release --target anko mochi_system provenance
-.venv/bin/python3 scripts/anne/build-native-package.py \
-  --build out/anne-usb-native-release --output out/anne-new-package \
-  --avb-key ~/.ame-keys/anne-avb-key.pem
-.venv/bin/python3 scripts/anne/flash-el2.py \
-  --package out/anne-new-package --check
+scripts/huawei build          # build native code, apps, GPU guest, and package
+scripts/huawei run            # run the last successful package from BootROM
+scripts/huawei build-run      # build everything, then run from BootROM
+scripts/huawei console        # attach to the native serial terminal
 ```
 
-With the ANE-LX1 in BootROM download mode (`12d1:3609`), flash and boot:
+`run` does not build. It waits for BootROM, discovers the RAM loader serial,
+and retains the verified firmware/partition checks described above. Use
+`run --package DIR` for an explicit older package, `--backup` to capture the
+kernel being replaced, or `--dry-run` to verify local package/firmware inputs
+without USB access. See [the Huawei workflow guide](../../scripts/anne/README.md)
+for build dependencies, keys, paths and GPU/native build options.
 
-```sh
-.venv/bin/python3 scripts/anne/flash-el2.py \
-  --package out/anne-new-package --serial HANDSET_FASTBOOT_SERIAL
-```
-
-`--no-boot` retains diagnostic LK after the verified flash. `--running` skips
-BootROM upload and still verifies the running LK patches and TEE staging.
-Backups are opt-in with `--backup`; normal flashes reuse the existing backup.
 Records, readback images, optional backups and hashes are saved under
 `out/anne-device-private/kernel-install-<UTC timestamp>/`. A readback mismatch
 stops before boot. Actual EL2 entry still needs the kernel's `diag el2` evidence.
@@ -101,7 +96,7 @@ Build and package:
 
 ```sh
 cmake --build --preset anne-native-dev --target anko
-python3 scripts/anne/build-native-package.py --output out/anne-boot-trace-package
+python3 scripts/anne/tools/build-native-package.py --output out/anne-boot-trace-package
 ```
 
 For a bounded phone capture, configure with
@@ -139,7 +134,7 @@ boot while it still contains Anko.
 Collect and decode after stock restoration:
 
 ```sh
-python3 scripts/anne/collect-native-log.py \
+python3 scripts/anne/tools/collect-native-log.py \
   --package out/anne-boot-trace-package \
   --output out/anne-device-private/boot-trace-results
 ```
@@ -258,14 +253,14 @@ faults; USB disconnect logs retain the observed and expected connection epochs.
 Connect with:
 
 ```sh
-.venv/bin/python3 scripts/anne/usb-input.py console
+.venv/bin/python3 scripts/anne/tools/usb-input.py console
 ```
 
 On Linux the CDC port must be reachable by your login. Install the rule shipped
 in this repository rather than editing device nodes by hand:
 
 ```sh
-sudo install -m 0644 scripts/anne/udev/99-ame-serial.rules /etc/udev/rules.d/
+sudo install -m 0644 scripts/anne/tools/udev/99-ame-serial.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
@@ -287,7 +282,7 @@ control), in addition to the local three-ESC unlock.
 For individual commands:
 
 ```sh
-.venv/bin/python3 scripts/anne/usb-input.py console --send 'help' --enter --read 3
+.venv/bin/python3 scripts/anne/tools/usb-input.py console --send 'help' --enter --read 3
 ```
 
 Terminal lifecycle records now reach msh through the same ordered, bounded
@@ -395,14 +390,14 @@ On the computer, with PyUSB and libusb installed:
 
 ```sh
 cmake --build out/anne-usb-native-dev --target anko mochi_system stream_test provenance
-python3 scripts/anne/app-stream.py out/anne-usb-native-dev/userland/app.stream-test.mxi
-python3 scripts/anne/app-stream.py path/to/test.mxi --run-ms 60000
+python3 scripts/anne/tools/app-stream.py out/anne-usb-native-dev/userland/app.stream-test.mxi
+python3 scripts/anne/tools/app-stream.py path/to/test.mxi --run-ms 60000
 ```
 
 This requires booting an Ame image containing these changes. Building the
 system does not install it on the phone. The sender claims vendor interface 2
 on VID `1209`, PID `0001`; CDC serial remains available for `msh`.
-Use `scripts/anne/usb-input.py console` from the computer, and `diag log` in
+Use `scripts/anne/tools/usb-input.py console` from the computer, and `diag log` in
 `msh` to read app output from the retained log.
 The existing bulk keyboard protocol continues to work alongside app uploads.
 
@@ -500,7 +495,7 @@ The phone was left running this Ame image with the container closed. Open it
 again with `container start`, then run:
 
 ```sh
-.venv/bin/python3 scripts/anne/app-stream.py \
+.venv/bin/python3 scripts/anne/tools/app-stream.py \
   out/anne-usb-native-release/userland/app.stream-test.mxi
 ```
 

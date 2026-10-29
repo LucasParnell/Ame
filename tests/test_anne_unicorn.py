@@ -13,14 +13,14 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 AVAILABLE = all(importlib.util.find_spec(name) for name in ('unicorn', 'capstone'))
 if AVAILABLE:
-    SPEC = importlib.util.spec_from_file_location('anne_unicorn', ROOT / 'scripts/anne/emulate-fastboot.py')
+    SPEC = importlib.util.spec_from_file_location('anne_unicorn', ROOT / 'scripts/anne/tools/emulate-fastboot.py')
     emulation = importlib.util.module_from_spec(SPEC)
     SPEC.loader.exec_module(emulation)
-    REPLAY_SPEC = importlib.util.spec_from_file_location('anne_replay', ROOT / 'scripts/anne/replay-fastboot.py')
+    REPLAY_SPEC = importlib.util.spec_from_file_location('anne_replay', ROOT / 'scripts/anne/tools/replay-fastboot.py')
     replay = importlib.util.module_from_spec(REPLAY_SPEC)
     REPLAY_SPEC.loader.exec_module(replay)
     BMP_SPEC = importlib.util.spec_from_file_location(
-        'anne_oeminfo_bmp', ROOT / 'scripts/anne/analyse-oeminfo-bmp.py')
+        'anne_oeminfo_bmp', ROOT / 'scripts/anne/tools/analyse-oeminfo-bmp.py')
     bmp_analysis = importlib.util.module_from_spec(BMP_SPEC)
     BMP_SPEC.loader.exec_module(bmp_analysis)
 

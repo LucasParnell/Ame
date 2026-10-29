@@ -82,7 +82,7 @@ immutable untrusted input still need copied snapshots or stronger isolation.
 
 Build `ipc_loan_app` to produce `userland/bench.ipc.loan.mxi`. This image is
 excluded from normal system bundles. After `container start`, stream it with
-`scripts/anne/app-stream.py`, then collect `diag log` through CDC. Parse it with:
+`scripts/anne/tools/app-stream.py`, then collect `diag log` through CDC. Parse it with:
 
 ```sh
 python3 scripts/test/benchmark-ipc-loans.py capture.log --output out/loan-results \

@@ -247,7 +247,7 @@ still be built explicitly with `cmake --build BUILD --target ipc_bench_app`.
 
 From msh, run `/data/apps/bench.ipc`, or `cd /data/apps` followed by
 `./bench.ipc`. The USB container also accepts `userland/bench.ipc.mxi` through
-`scripts/anne/app-stream.py` after `container start`. Both launchers supply the
+`scripts/anne/tools/app-stream.py` after `container start`. Both launchers supply the
 same image snapshot and scoped supervisor contract. The benchmark spawns its
 two workers, relays their separate output rings, waits for both exits, and
 returns to the launcher. Worker failure kills its peer and returns an error.

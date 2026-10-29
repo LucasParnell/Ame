@@ -12,7 +12,7 @@ from pathlib import Path
 import struct
 import subprocess
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 STOCK_SHA256 = "ad00caaa84c53d3ce478e562a6a1116ab720b2f0fce565c518928476b55cc268"
 
 

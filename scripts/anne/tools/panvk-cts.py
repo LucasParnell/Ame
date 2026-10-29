@@ -7,15 +7,15 @@ A grouped CTS artifact is development evidence, never a conformance result.
 """
 from pathlib import Path
 import argparse,importlib.util,json,re,time
-ROOT=Path(__file__).resolve().parents[2]
+ROOT=Path(__file__).resolve().parents[3]
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--case',required=True)
 p.add_argument('--output',type=Path,required=True)
 p.add_argument('--timeout',type=int,default=210)
-p.add_argument('--expected-run-tag',default='anne-panvk-cts-core-v15')
+p.add_argument('--expected-run-tag',help='optionally require this installed image run tag')
 a=p.parse_args()
 if not re.fullmatch(r'dEQP-VK\.[A-Za-z0-9_.*-]+',a.case):raise ValueError('invalid CTS pattern')
-spec=importlib.util.spec_from_file_location('panvk_gate',ROOT/'scripts/anne/panvk-gate.py')
+spec=importlib.util.spec_from_file_location('panvk_gate',ROOT/'scripts/anne/tools/panvk-gate.py')
 gate=importlib.util.module_from_spec(spec);spec.loader.exec_module(gate)
 a.output.mkdir(parents=True,exist_ok=True)
 link=gate.open_console(15)

@@ -12,8 +12,8 @@ import select
 import termios
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'scripts/anne'))
-SPEC = importlib.util.spec_from_file_location('anne_usb_sender', ROOT / 'scripts/anne/usb-input.py')
+sys.path.insert(0, str(ROOT / 'scripts/anne/tools'))
+SPEC = importlib.util.spec_from_file_location('anne_usb_sender', ROOT / 'scripts/anne/tools/usb-input.py')
 sender = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sender)
 import serial_console
@@ -52,7 +52,12 @@ class AnneUsbSender(unittest.TestCase):
             link.close()
             expected = original[:]
             expected[3] &= ~(termios.ECHO | termios.ECHONL)
-            self.assertEqual(termios.tcgetattr(slave), expected)
+            observed = termios.tcgetattr(slave)
+            # Darwin may set PENDIN when restoring canonical mode; that flag
+            # tracks pending kernel reinput rather than a saved terminal setting.
+            observed[3] &= ~getattr(termios, 'PENDIN', 0)
+            expected[3] &= ~getattr(termios, 'PENDIN', 0)
+            self.assertEqual(observed, expected)
             os.write(master, b'msh:/$ \r\n')
             self.assertFalse(select.select([master], [], [], .05)[0])
         finally:

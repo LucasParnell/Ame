@@ -1903,7 +1903,7 @@ Install the optional [Unicorn Engine](https://www.unicorn-engine.org/docs/tutori
 and Capstone dependencies into the project's virtual environment:
 
 ```sh
-.venv/bin/python -m pip install -r scripts/anne/requirements-unicorn.txt
+.venv/bin/python -m pip install -r scripts/anne/tools/requirements-unicorn.txt
 ```
 
 `emulate-fastboot.py` loads a **raw little-endian AArch64 image**. Its default is
@@ -1920,9 +1920,9 @@ USERLOCK=1, FRP=1, reproducing the inputs discussed in
 [FASTBOOT_EL2.md](boot.md#fastboot_el2):
 
 ```sh
-.venv/bin/python scripts/anne/emulate-fastboot.py \
+.venv/bin/python scripts/anne/tools/emulate-fastboot.py \
   --profile permission --command flash:kernel --trace
-.venv/bin/python scripts/anne/emulate-fastboot.py \
+.venv/bin/python scripts/anne/tools/emulate-fastboot.py \
   --profile permission --command flash:fastboot --trace
 ```
 
@@ -1937,7 +1937,7 @@ For a different function, provide the entry, initial registers, extra RAM,
 and optional in-memory data. For example, observe the known SPSR instruction:
 
 ```sh
-.venv/bin/python scripts/anne/emulate-fastboot.py \
+.venv/bin/python scripts/anne/tools/emulate-fastboot.py \
   --entry 0x10b634 --until 0x10b638 --trace
 ```
 

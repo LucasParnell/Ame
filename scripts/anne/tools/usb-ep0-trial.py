@@ -17,7 +17,7 @@ import time
 import usb.core
 import usb.util
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def arm(device, mode):
@@ -30,7 +30,7 @@ def arm(device, mode):
 
 
 def capture(output):
-    result = subprocess.run([sys.executable, str(ROOT / 'scripts/anne/usb-state.py'),
+    result = subprocess.run([sys.executable, str(ROOT / 'scripts/anne/tools/usb-state.py'),
                              '--output', str(output / 'after-set-line.json')],
                             capture_output=True, text=True, timeout=20)
     (output / 'snapshot.log').write_text(result.stdout + result.stderr)

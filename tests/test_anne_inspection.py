@@ -11,7 +11,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location('anne_inspection', ROOT / 'scripts/anne/inspect-recovery.py')
+SPEC = importlib.util.spec_from_file_location('anne_inspection', ROOT / 'scripts/anne/tools/inspect-recovery.py')
 inspection = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(inspection)
 
@@ -192,7 +192,7 @@ class AnneInspection(unittest.TestCase):
     def test_offline_cli_checks_saved_evidence_without_adb(self):
         with tempfile.TemporaryDirectory() as work:
             output = inspection.collect(FakeAdb(), Path(work) / 'capture')
-            result = subprocess.run([sys.executable, str(ROOT / 'scripts/anne/inspect-recovery.py'),
+            result = subprocess.run([sys.executable, str(ROOT / 'scripts/anne/tools/inspect-recovery.py'),
                                      'summarize', str(output / 'report.json')],
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -200,7 +200,7 @@ class AnneInspection(unittest.TestCase):
             self.assertIn('configured-not-tested', result.stdout)
 
     def test_cli_missing_adb_and_duplicate_report_keys_fail_cleanly(self):
-        result = subprocess.run([sys.executable, str(ROOT / 'scripts/anne/inspect-recovery.py'),
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/anne/tools/inspect-recovery.py'),
                                  'collect', '--adb', '/does/not/exist/adb'],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
@@ -208,7 +208,7 @@ class AnneInspection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work:
             path = Path(work) / 'report.json'
             path.write_text('{"schema":1,"schema":1}')
-            result = subprocess.run([sys.executable, str(ROOT / 'scripts/anne/inspect-recovery.py'),
+            result = subprocess.run([sys.executable, str(ROOT / 'scripts/anne/tools/inspect-recovery.py'),
                                      'summarize', str(path)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 1)
             self.assertIn('duplicate report key', result.stderr)
@@ -241,7 +241,7 @@ else:
 ''')
             fake.chmod(0o755)
             output = root / 'capture'
-            result = subprocess.run([sys.executable, str(ROOT / 'scripts/anne/inspect-recovery.py'),
+            result = subprocess.run([sys.executable, str(ROOT / 'scripts/anne/tools/inspect-recovery.py'),
                                      'collect', '--adb', str(fake), '--output', str(output)],
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)

@@ -46,7 +46,7 @@ def encode(sequence: int, kind: int, payload: bytes = b"") -> bytes:
 
 from usb_bulk import Bulk
 
-# Ame's own USB identity (see scripts/anne/usb_bulk.py and the board profile).
+# Ame's own USB identity (see scripts/anne/tools/usb_bulk.py and the board profile).
 AME_VID, AME_PID = 0x1209, 0x0001
 
 

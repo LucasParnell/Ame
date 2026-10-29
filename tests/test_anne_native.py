@@ -9,7 +9,7 @@ import unittest
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location('anne_native_package', ROOT / 'scripts/anne/build-native-package.py')
+SPEC = importlib.util.spec_from_file_location('anne_native_package', ROOT / 'scripts/anne/tools/build-native-package.py')
 package = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(package)
 

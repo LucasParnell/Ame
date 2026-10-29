@@ -1,32 +1,14 @@
-#!/usr/bin/env python3
-"""Flash a verified PanVK package and run the Vulkan + GLES hardware gate.
-
-Waits for the handset to appear in Huawei BootROM download mode or as a verified
-RAM LK, flashes the pinned image with a kernel backup and full readback
-verification, then drives `diag gpu vulkan` followed by `diag gpu` over the Ame
-CDC console. Writes a JSON report and exits 0 only when Vulkan executed GPU
-work, restored the display, and GLES still rendered afterwards.
-
-The wait has no fixed deadline by default: entering BootROM needs a physical
-button sequence, and a 300-second window is what ended the previous attempt.
-"""
+"""Internal BootROM discovery and GPU diagnostic helpers for scripts/huawei."""
 from __future__ import annotations
 
-import argparse
-import hashlib
 import importlib.util
 import json
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-FLASH = ROOT / 'scripts/anne/flash-el2.py'
-PACKAGE = ROOT / 'out/anne-panvk-experimental-v2'
-FIRMWARE = ROOT / 'out/anne-device-private/el2-firmware'
-APPROVED = '87c7d9be3c05a303771b7d513429e17a18ed4f717e5fed96df25bd5010815f7e'
+ROOT = Path(__file__).resolve().parents[3]
 
 BOOTROM = (0x12d1, 0x3609)
 RAM_LK = (0x18d1, 0xd00d)
@@ -37,13 +19,6 @@ GLES = re.compile(rb'GPU: Mali-T830 frames=(\d+)[^\r\n]*display restored')
 FAULTS = ('GPU quarantined', 'Unhandled fault', 'Unhandled Page fault',
           'JOB_BUS_FAULT', 'TRANSLATION_FAULT', 'JOB_INVALID', 'DATA_INVALID',
           'MMU fault', 'GPU fault', 'USERFAULT', 'signal=11', 'signal=6')
-
-
-def load_flash():
-    spec = importlib.util.spec_from_file_location('flash_el2', FLASH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def find(kind):
@@ -65,7 +40,7 @@ def wait_for_loader(flash, blobs, manifest, wait_seconds, poll=1.0):
     while True:
         lk = find(RAM_LK)
         rom = find(BOOTROM)
-        if len(lk) > 1 or len(rom) > 1:
+        if len(lk) + len(rom) > 1:
             raise RuntimeError('More than one matching handset; refusing ambiguous selection')
         if lk:
             serial = lk[0].serial_number
@@ -92,46 +67,22 @@ def wait_for_loader(flash, blobs, manifest, wait_seconds, poll=1.0):
 
 
 def open_console(timeout=180):
-    """Wait for the Ame CDC console and take exclusive ownership of it."""
-    sys.path.insert(0, str(ROOT / 'scripts/anne'))
+    """Wait for exactly one Ame CDC port on Linux or macOS."""
+    spec = importlib.util.spec_from_file_location('anne_usb_sender',
+                                                  Path(__file__).with_name('usb-input.py'))
+    sender = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(Path(__file__).parent))
+    spec.loader.exec_module(sender)
     from serial_console import Serial
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        ports = [p for p in Path('/dev/serial/by-id').glob('usb-Ame_*') if p.exists()]
-        if len(ports) == 1:
-            return Serial(str(ports[0]))
+        ports = sender.ame_serial_candidates()
+        if len(ports) > 1:
+            raise RuntimeError('Multiple Ame consoles; select the intended serial port')
+        if ports:
+            return Serial(ports[0])
         time.sleep(0.5)
     raise RuntimeError('Ame USB serial did not enumerate after boot')
-
-
-def reboot_to_bootrom():
-    """Reboot the connected Ame handset; ANE's damaged xloader enters BootROM.
-
-    This is opt-in. It writes no firmware and is used only after package/hash
-    verification. The normal watcher still verifies the RAM loader afterward.
-    """
-    ports = [p for p in Path('/dev/serial/by-id').glob('usb-Ame_*') if p.exists()]
-    if not ports:
-        print('No Ame console; waiting for the existing bootloader state.', flush=True)
-        return
-    if len(ports) != 1:
-        raise RuntimeError('Multiple Ame consoles; refusing ambiguous reboot')
-    sys.path.insert(0, str(ROOT / 'scripts/anne'))
-    from serial_console import Serial
-    link = Serial(str(ports[0]))
-    try:
-        link.write(b'\x15reboot\r', time.monotonic() + 3)
-        print('Sent reboot to Ame; waiting for BootROM enumeration.', flush=True)
-        end = time.monotonic() + 5
-        while time.monotonic() < end:
-            try:
-                link.read(min(end, time.monotonic() + 1))
-            except TimeoutError:
-                continue
-            except OSError:
-                break
-    finally:
-        link.close()
 
 
 class Session:
@@ -215,60 +166,3 @@ def run_gate(output, timeout, require_load=False):
                 link.close()
     (output / 'phone-test.json').write_text(json.dumps(report, indent=2) + '\n')
     return report
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check', action='store_true',
-                        help='verify package and firmware hashes without USB access')
-    parser.add_argument('--package', type=Path, default=PACKAGE,
-                        help='package directory to flash (default: the approved v2 image)')
-    parser.add_argument('--approve', default=APPROVED,
-                        help='expected image SHA-256; pin a new build explicitly')
-    parser.add_argument('--wait-seconds', type=int, default=0,
-                        help='give up waiting for BootROM after this long; 0 waits forever')
-    parser.add_argument('--output', type=Path,
-                        default=ROOT / 'out/mesa-panvk-midgard/phone-v2')
-    parser.add_argument('--reboot', action='store_true',
-                        help='send reboot to Ame before waiting for BootROM (opt-in)')
-    parser.add_argument('--test-only', action='store_true',
-                        help='skip flashing and test the already-booted handset')
-    parser.add_argument('--require-load', action='store_true',
-                        help='also require the LOAD pixel probe and multiple Vulkan animation frames')
-    parser.add_argument('--console-timeout', type=int, default=180)
-    args = parser.parse_args()
-
-    flash = load_flash()
-    image, manifest, blobs = flash.inputs(args.package, FIRMWARE)
-    digest = hashlib.sha256(image).hexdigest()
-    if digest != args.approve:
-        print(f'Package {args.package} hashes to {digest}, which is not the approved '
-              f'{args.approve}.', flush=True)
-        print(f'Pass --approve {digest} to pin this build.', flush=True)
-        return 2
-    print(f'Verified package and firmware hashes. Kernel SHA256: {digest}', flush=True)
-    if args.check:
-        return 0
-
-    if not args.test_only:
-        if args.reboot:
-            reboot_to_bootrom()
-        try:
-            serial = wait_for_loader(flash, blobs, manifest, args.wait_seconds)
-        except TimeoutError as error:
-            print(str(error), flush=True)
-            return 2
-        print('RAM LK verified. Flashing with kernel backup and full readback check.', flush=True)
-        subprocess.run([sys.executable, str(FLASH), '--package', str(args.package),
-                        '--running', '--backup', '--serial', serial], check=True)
-        print('Flash and readback verified. Waiting for the Ame console.', flush=True)
-
-    report = run_gate(args.output, args.console_timeout, args.require_load)
-    summary = {k: v for k, v in report.items() if not k.endswith('_log')}
-    print('\nHardware gate result: ' + json.dumps(summary, indent=2), flush=True)
-    print(f'Report: {args.output / "phone-test.json"}', flush=True)
-    return 0 if report.get('passed') else 1
-
-
-if __name__ == '__main__':
-    sys.exit(main())

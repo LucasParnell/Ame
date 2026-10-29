@@ -13,7 +13,7 @@ from pathlib import Path
 import struct
 import subprocess
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 BL31_SHA = '27c06575c5af056fdbedc9385d4bd3c460459f5075ee79dcb65762f71fa5eb85'
 LK_SHA = 'b42e40323c270b649cb0f554e7959c78d09b577275b25af63b38c6693c531e17'
 CALLBACK, CALLBACK_END = 0x58e8, 0x5a10
@@ -53,7 +53,7 @@ def build(bl31_path, lk_path, output, variant='policy'):
         raise ValueError('Unexpected linked loader extent')
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
     output.chmod(0o700)
-    source = ROOT / 'scripts/anne'
+    source = ROOT / 'scripts/anne/tools'
     probe_source = 'monitor_smmu_probe.S' if variant == 'smmu-id' else 'monitor_probe.S'
     probe = assemble(source / probe_source, output / 'probe.bin', 0x35e00000 + CALLBACK)
     if len(probe) > CALLBACK_END - CALLBACK:

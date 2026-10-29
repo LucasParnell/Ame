@@ -35,7 +35,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 SERIAL_FILE = ROOT / "out/anne-device-private/adb-targets.json"
 BUNDLED_FASTBOOT = (
     ROOT / "out/anne-device-private/usb-auto-v5/platform-tools/fastboot",
@@ -505,7 +505,7 @@ def main(argv=None) -> int:
             device.command(["flash", PARTITION, checked["image"]], args.command, timeout=90)
             report.update(recorder.finish(True, flash_acknowledged=True))
             emit(args, report)
-            print("flashed; next: scripts/anne/fastboot.py reboot --to system")
+            print("flashed; next: scripts/anne/tools/fastboot.py reboot --to system")
             return 0
 
         device, recorder = connect(args)

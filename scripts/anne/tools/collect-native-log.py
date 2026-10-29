@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import struct
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 NAMES = ['console-ramoops-0', 'pmsg-ramoops-0',
          'dmesg-ramoops-0', 'dmesg-ramoops-1', 'dmesg-ramoops-2']
 

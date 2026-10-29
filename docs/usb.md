@@ -169,7 +169,7 @@ one nonempty EP0 OUT receive: value 0 cancels, 1 tries CNAK alone, and 2 tries
 full-window programming followed by CNAK. It accepts no register address or
 arbitrary register value. A bus reset or role teardown clears the trial; STATUS
 OUT does not consume it. Existing observations 0x5a–0x5c remain read-only.
-`scripts/anne/usb-ep0-trial.py --mode MODE --output UNIQUE_PATH` detaches only
+`scripts/anne/tools/usb-ep0-trial.py --mode MODE --output UNIQUE_PATH` detaches only
 the CDC control driver, arms one trial, sends the seven-byte class request,
 captures retained state before cleanup, cancels any unused arm and reattaches
 the driver. History flag bit 9 identifies post-programming RECEIVE registers;
@@ -192,7 +192,7 @@ snapshot after re-enumeration is empty; that alone does not establish a process
 crash or kernel fault.
 
 v36 adds read-only request 0x5f for a frozen window of the last 8 KiB of the
-retained kernel log. `scripts/anne/usb-log-tail.py` reads its metadata and bounded
+retained kernel log. `scripts/anne/tools/usb-log-tail.py` reads its metadata and bounded
 64-byte pages. Controller exits for an oversized RX status or a SETUP TX-flush
 timeout emit `USB_EP0_FAIL` markers. The default transfer behavior remains the
 v32 baseline. The verified v36 installation passes the selected graphics gate:
@@ -358,7 +358,7 @@ only after the user's explicit flash request. Evidence:
 
 The trial tool now records class state before arming, the arm's request identity,
 and whether the later class snapshot matches the trial before comparing bytes.
-`scripts/anne/serial-reconnect.py` interrupts log transfers and requires fresh
+`scripts/anne/tools/serial-reconnect.py` interrupts log transfers and requires fresh
 shell challenges after each reopen, guarding against mistaking input echo for a
 working command path.
 
@@ -441,7 +441,7 @@ signature and object digest is still checked before bundle publication.
 ```sh
 cmake --preset anne-usb-native-dev
 cmake --build --preset anne-usb-native-dev --target anko mochi_system provenance
-python3 scripts/anne/build-native-package.py --build out/anne-usb-native-dev \
+python3 scripts/anne/tools/build-native-package.py --build out/anne-usb-native-dev \
   --output out/anne-usb-native-package
 ```
 
@@ -463,8 +463,8 @@ to the terminal; `tty.fb0` remains the single producer of the shell input ring.
 Keyboard layout/HID policy stays in its own services. From the Mac:
 
 ```sh
-python3 scripts/anne/usb-input.py --serial /dev/cu.usbmodemNN console
-python3 scripts/anne/usb-input.py --serial /dev/cu.usbmodemNN console --send help --enter --read 3
+python3 scripts/anne/tools/usb-input.py --serial /dev/cu.usbmodemNN console
+python3 scripts/anne/tools/usb-input.py --serial /dev/cu.usbmodemNN console --send help --enter --read 3
 ```
 
 Interactive console mode sets both terminals raw, restores them on exit, and
@@ -479,7 +479,7 @@ shell endpoints, BootInfo/capabilities/rings/doorbells, service state, and the
 retained kernel and userland boot log. For example:
 
 ```sh
-python3 scripts/anne/usb-input.py --serial /dev/cu.usbmodemNN console --send diag --enter --read 30 > out/anne-diagnostics.txt
+python3 scripts/anne/tools/usb-input.py --serial /dev/cu.usbmodemNN console --send diag --enter --read 30 > out/anne-diagnostics.txt
 ```
 
 `diag el2` prints just the CPU/EL2 report; `diag log` prints just the retained
@@ -499,7 +499,7 @@ external power. See [power mechanisms and validation](../boards/huawei-anne/hard
 Framed keyboard injection remains on the independent vendor bulk function:
 
 ```sh
-python3 scripts/anne/usb-input.py --bulk text help --enter
+python3 scripts/anne/tools/usb-input.py --bulk text help --enter
 ```
 
 Bulk requires PyUSB/libusb and interface 2, endpoints `0x04/0x85`. Its AMK1 ACK
@@ -681,15 +681,15 @@ The framed AMK1 keycode injector no longer runs on the CDC port; it lives on
 the vendor **bulk** function (`dev.usb-input`, interface 2, PyUSB required):
 
 ```
-python3 scripts/anne/usb-input.py --bulk text 'help' --enter
-python3 scripts/anne/usb-input.py --bulk interactive
+python3 scripts/anne/tools/usb-input.py --bulk text 'help' --enter
+python3 scripts/anne/tools/usb-input.py --bulk interactive
 ```
 
 For the raw console from scripts, either use `screen` or:
 
 ```
-python3 scripts/anne/usb-input.py console                 # interactive
-python3 scripts/anne/usb-input.py console --send 'help' --enter --read 3
+python3 scripts/anne/tools/usb-input.py console                 # interactive
+python3 scripts/anne/tools/usb-input.py console --send 'help' --enter --read 3
 ```
 
 <a id="serial_console-scope"></a>

@@ -4,10 +4,10 @@
 Ame's shell owns power transitions: ``reboot fastboot`` (alias
 ``reboot bootloader``) asks init to reset with the fastboot boot reason. The
 command travels over the development CDC serial port, the same transport as
-``scripts/anne/usb-input.py console``.
+``scripts/anne/tools/usb-input.py console``.
 
 Use this when the phone is running Ame and you want to flash: reboot to
-fastboot here, then hand over to ``scripts/anne/fastboot.py``.
+fastboot here, then hand over to ``scripts/anne/tools/fastboot.py``.
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ def main(argv=None) -> int:
     else:
         print(f"sent {target!r} on {port}")
         if args.to == "fastboot":
-            print("phone is in fastboot; next: scripts/anne/fastboot.py flash --package DIR --write")
+            print("phone is in fastboot; next: scripts/anne/tools/fastboot.py flash --package DIR --write")
     return 0
 
 

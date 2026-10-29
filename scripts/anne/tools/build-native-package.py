@@ -17,7 +17,7 @@ import sys
 import tempfile
 import zlib
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 AVB_COMMIT = '761178607206f4cb2af79ed9eec52d8cbd814adb'
 AVB_SHA256 = 'e5a664a38db623da00f080219bc0ee60a640a9dc4a872803616fae4938ac749b'
 AVB_URL = f'https://android.googlesource.com/platform/external/avb/+/{AVB_COMMIT}/avbtool.py?format=TEXT'
@@ -298,11 +298,13 @@ def main():
     parser.add_argument('--avbtool', type=Path, default=DEFAULT_AVBTOOL)
     parser.add_argument('--avb-key', type=Path, default=DEFAULT_AVBKEY)
     parser.add_argument('--download-avbtool', action='store_true', help='fetch the pinned official AVB tool')
+    parser.add_argument('--quiet', action='store_true', help='write manifests without printing their contents')
     args = parser.parse_args()
     verified_avbtool(args.avbtool, args.download_avbtool)
-    print(json.dumps(build(args.build, args.backups, args.output, args.probe, args.avbtool.resolve(),
-                          args.avb_key.resolve(), minimal=args.minimal,
-                          stock_control=args.stock_control), indent=2))
+    report = build(args.build, args.backups, args.output, args.probe, args.avbtool.resolve(),
+                   args.avb_key.resolve(), minimal=args.minimal, stock_control=args.stock_control)
+    if not args.quiet:
+        print(json.dumps(report, indent=2))
 
 
 if __name__ == '__main__':

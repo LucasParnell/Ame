@@ -11,11 +11,11 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('anne_evaluation',
-                                            ROOT / 'scripts/anne/build-recovery-evaluation.py')
+                                            ROOT / 'scripts/anne/tools/build-recovery-evaluation.py')
 evaluation = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(evaluation)
 RUN_SPEC = importlib.util.spec_from_file_location('anne_evaluation_runner',
-                                                ROOT / 'scripts/anne/run-recovery-evaluation.py')
+                                                ROOT / 'scripts/anne/tools/run-recovery-evaluation.py')
 runner = importlib.util.module_from_spec(RUN_SPEC)
 RUN_SPEC.loader.exec_module(runner)
 

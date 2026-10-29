@@ -838,20 +838,19 @@ diag gpu vulkan
 The ordinary `diag gpu` command still uses GLES. A build without the optional
 ICD rejects the Vulkan request.
 
-Run the flash and both diagnostics in one step with:
+Build and run the matching image, then exercise both APIs through the console:
 
 ```sh
-.venv/bin/python3 scripts/anne/panvk-gate.py
+scripts/huawei build-run
+scripts/huawei console --send 'diag gpu vulkan' --read 60
+scripts/huawei console --send 'diag gpu' --read 35
 ```
 
-It verifies the package hash against the approved image, waits for BootROM or a
-verified RAM LK without a deadline by default, flashes with a kernel backup and
-full readback, then drives `diag gpu vulkan` followed by `diag gpu`. It exits 0
-only when Vulkan executed GPU work, restored the display, and GLES still
-rendered. `--test-only` re-tests an already-booted handset, `--check` verifies
-inputs without USB access, and `--wait-seconds N` bounds the BootROM wait. GLES
-is attempted even after a Vulkan fault, because whether the baseline survived is
-the result that matters most during bring-up.
+The common runner verifies the selected package and firmware, waits for BootROM,
+checks the complete flashed partition, and boots through the RAM EL2 handoff.
+The reusable hardware verdict helper in `scripts/anne/tools/panvk-gate.py`
+checks GPU execution, display restoration and GLES after Vulkan; its historical
+hard-coded package/flash command has been retired.
 
 <a id="anne_vulkan_midgard-validation-completed"></a>
 ### Validation completed
@@ -1127,7 +1126,7 @@ This supersedes v6 by also clearing the current-batch pointer after a failed
 preload, preventing a failed batch from being closed/linked twice.
 It includes the boot-regression fixes and the current workspace's native system.
 The v5 package and guest artifacts remain intact. Test with the existing flash
-backup/readback procedure and `panvk-gate.py --require-load`; the additional gate
+backup/readback procedure and the hardware verdict helper with `require_load=True`; the additional gate
 requires the LOAD proof line and more than one animation frame, followed by
 successful display restoration and GLES. Evidence lives in
 `out/panvk-preload-work/`.

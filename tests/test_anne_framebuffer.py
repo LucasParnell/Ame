@@ -6,13 +6,13 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location('anne_fb_inspection', ROOT / 'scripts/anne/inspect-framebuffer.py')
+SPEC = importlib.util.spec_from_file_location('anne_fb_inspection', ROOT / 'scripts/anne/tools/inspect-framebuffer.py')
 inspection = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(inspection)
-LOG_SPEC = importlib.util.spec_from_file_location('anne_fb_log', ROOT / 'scripts/anne/collect-native-log.py')
+LOG_SPEC = importlib.util.spec_from_file_location('anne_fb_log', ROOT / 'scripts/anne/tools/collect-native-log.py')
 logs = importlib.util.module_from_spec(LOG_SPEC)
 LOG_SPEC.loader.exec_module(logs)
-DFX_SPEC = importlib.util.spec_from_file_location('anne_fb_dfx', ROOT / 'scripts/anne/extract-dfx-native-log.py')
+DFX_SPEC = importlib.util.spec_from_file_location('anne_fb_dfx', ROOT / 'scripts/anne/tools/extract-dfx-native-log.py')
 dfx = importlib.util.module_from_spec(DFX_SPEC)
 DFX_SPEC.loader.exec_module(dfx)
 

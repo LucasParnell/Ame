@@ -213,7 +213,7 @@ plaintext; no fuse or key material was needed or copied into the repository.
 Reproduce the non-secret evidence extraction with:
 
 ```sh
-python3 scripts/anne/audit-bl31-gpu.py /private/path/trustfirmware.decrypted.bin
+python3 scripts/anne/tools/audit-bl31-gpu.py /private/path/trustfirmware.decrypted.bin
 ```
 
 The script rejects other firmware hashes. Function descriptions below are
@@ -374,7 +374,7 @@ well as the separate adjacent mapping at `0x136f0`. Both GPU master IDs
 extension is necessary. DMSS is also mapped by stock BL31. This establishes
 secure virtual mappings, not successful live accesses or a GPU SMMU route.
 
-`scripts/anne/build-monitor-probe.py` accepts only the exact pinned BL31 and
+`scripts/anne/tools/build-monitor-probe.py` accepts only the exact pinned BL31 and
 RAM LK hashes. It replaces callback 2's DDR statistics copy routine with a
 bounded read-only diagnostic, leaving DDR protection services unchanged.
 SMC `0xc500aa01`, callback cookie `0x55bbcce2`, accepts an independent argument

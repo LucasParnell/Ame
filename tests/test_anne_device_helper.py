@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
-    "anne_fastboot_helper", ROOT / "scripts/anne/fastboot.py")
+    "anne_fastboot_helper", ROOT / "scripts/anne/tools/fastboot.py")
 fastboot = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(fastboot)
 

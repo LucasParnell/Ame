@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 # Huawei may reject generic product/unlocked variables. These OEM commands are
 # information queries; no flash, erase, unlock, reboot, boot, or download occurs.
 QUERIES = {

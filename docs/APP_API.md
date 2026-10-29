@@ -52,7 +52,7 @@ adopts these APIs must reserve this layout in its own address space too.
 
 Build the example explicitly with `cmake --build BUILD --target ipc_bench_app`.
 Use the existing installed `/data/apps/bench.ipc` from msh, or stream the built
-`userland/bench.ipc.mxi` through `scripts/anne/app-stream.py` after
+`userland/bench.ipc.mxi` through `scripts/anne/tools/app-stream.py` after
 `container start`. Apps are excluded from the production boot bundle; the app
 installer remains removed.
 

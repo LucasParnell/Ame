@@ -1,7 +1,7 @@
 // Development authority: opaque bulk bytes -> validated key events on its OWN
 // producer ring. ui.input remains the single layout/lock/terminal policy.
 //
-// The bulk function carries the framed keycode protocol (scripts/anne/
+// The bulk function carries the framed keycode protocol (scripts/anne/tools/
 // usb-input.py --bulk). The ACM stream belongs to dev.serial, which serves
 // the shell as a raw serial console.
 #include "mochi/driver.h"

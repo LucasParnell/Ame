@@ -7,8 +7,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'scripts/anne'))
-spec = importlib.util.spec_from_file_location('app_stream', ROOT / 'scripts/anne/app-stream.py')
+sys.path.insert(0, str(ROOT / 'scripts/anne/tools'))
+spec = importlib.util.spec_from_file_location('app_stream', ROOT / 'scripts/anne/tools/app-stream.py')
 sender = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sender)
 

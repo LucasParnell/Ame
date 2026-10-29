@@ -17,7 +17,7 @@ import time
 
 from p20re_transport import Factory, upload
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('anne_flash', Path(__file__).with_name('flash-el2.py'))
 flash = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(flash)

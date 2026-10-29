@@ -16,6 +16,18 @@ Phone hardware, installation and firmware evidence starts at
 The [app API](docs/APP_API.md), [IPC helpers](docs/IPC_OPTIMIZATIONS.md), and
 [shared-buffer loans](docs/SHARED_BUFFER_LOANS.md) describe the native app runtime.
 
+## Huawei
+
+```sh
+scripts/huawei build       # all native components + Linux/Mesa GPU guest + package
+scripts/huawei run         # BootROM flash/verified readback/boot; no rebuilding
+scripts/huawei build-run   # build, then run through BootROM
+scripts/huawei console     # raw Ame serial terminal
+```
+
+See [the Huawei workflow guide](scripts/anne/README.md) for prerequisites and
+`--native-only`, prebuilt guest inputs, signing keys and device firmware.
+
 ## Build
 
 Host dependencies: CMake 3.25 or newer, Ninja, Python 3, Clang/LLD and LLVM

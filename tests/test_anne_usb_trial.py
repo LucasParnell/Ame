@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/anne/usb-ep0-trial.py'
+SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/anne/tools/usb-ep0-trial.py'
 spec = importlib.util.spec_from_file_location('usb_ep0_trial', SCRIPT)
 trial = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(trial)

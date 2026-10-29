@@ -17,7 +17,7 @@ import time
 
 from p20re_transport import Factory, upload
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 XLOADER_SHA = '07c2ec41717b532b5f8d27968111539901854afacb0c0f35ac8b85dc08be0e81'
 LK_SHA = 'b42e40323c270b649cb0f554e7959c78d09b577275b25af63b38c6693c531e17'
 TEE_SHA = '00699c5b984be77db180dc274b567f981d9c17b8465d7efc351456f9107ae239'
@@ -165,9 +165,12 @@ def main():
     parser.add_argument('--running', action='store_true', help='Use verified EL2/TEE LK already in RAM')
     parser.add_argument('--no-boot', action='store_true', help='Leave RAM LK active after readback')
     parser.add_argument('--backup', action='store_true', help='Also capture the previous kernel before flashing')
+    parser.add_argument('--expect-sha256', help='Require this image hash immediately before USB operations')
     parser.add_argument('--enter-only', action='store_true', help='Enter and verify diagnostic RAM LK without flashing or booting')
     args = parser.parse_args()
     image, m, blobs = inputs(args.package, args.firmware)
+    if args.expect_sha256 and sha(image) != args.expect_sha256:
+        raise RuntimeError('Kernel package changed after selection; no USB operation requested')
     print('Verified package and all firmware hashes. Kernel SHA256:', sha(image), flush=True)
     if args.check:
         return

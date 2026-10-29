@@ -18,10 +18,10 @@ try:
     from unicorn import arm64_const as arm64
 except ImportError as error:
     raise SystemExit("Install analysis dependencies with .venv/bin/python -m pip install "
-                     "-r scripts/anne/requirements-unicorn.txt") from error
+                     "-r scripts/anne/tools/requirements-unicorn.txt") from error
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_IMAGE = ROOT / 'out/anne-device-private/el2-firmware-inspection/fastboot.img'
 STOCK_SHA256 = '16e307a5d538a76803d2de3a5fd143fb0c61f4aba7a295b5eaa6ae957d7bee52'
 PAGE = 0x1000

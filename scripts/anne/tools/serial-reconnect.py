@@ -6,7 +6,7 @@ Each challenge requires shell output on its own line, not the echoed command.
 """
 import argparse,importlib.util,json,re,time,subprocess,sys
 from pathlib import Path
-ROOT=Path(__file__).resolve().parents[2]
+ROOT=Path(__file__).resolve().parents[3]
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--expected-run-tag',required=True)
 p.add_argument('--iterations',type=int,default=8)
@@ -14,7 +14,7 @@ p.add_argument('--output',type=Path,required=True)
 p.add_argument('--usb-state-on-failure',action='store_true')
 a=p.parse_args()
 if not 1<=a.iterations<=100:raise ValueError('iterations must be 1..100')
-spec=importlib.util.spec_from_file_location('panvk_gate',ROOT/'scripts/anne/panvk-gate.py')
+spec=importlib.util.spec_from_file_location('panvk_gate',ROOT/'scripts/anne/tools/panvk-gate.py')
 gate=importlib.util.module_from_spec(spec);spec.loader.exec_module(gate)
 a.output.mkdir(parents=True,exist_ok=True)
 report={'passed':False,'requested_iterations':a.iterations,'completed_iterations':0}
@@ -52,7 +52,7 @@ except Exception as error:
     if a.usb_state_on_failure:
         # Observe the failed state before closing/restoring termios, which
         # would issue another CDC request and overwrite the useful evidence.
-        captured=subprocess.run([sys.executable,str(ROOT/'scripts/anne/usb-state.py'),
+        captured=subprocess.run([sys.executable,str(ROOT/'scripts/anne/tools/usb-state.py'),
             '--output',str(a.output/'failure-usb-state.json')],capture_output=True,
             text=True,timeout=20)
         (a.output/'failure-usb-state.log').write_text(captured.stdout+captured.stderr)

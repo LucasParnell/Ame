@@ -17,7 +17,7 @@ import tempfile
 import zlib
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 MAX_TEXT = 1024 * 1024
 MAX_ARTIFACT = 8 * 1024 * 1024
 MAX_CONFIG = 4 * 1024 * 1024

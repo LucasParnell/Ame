@@ -62,8 +62,17 @@ class HuaweiWorkflow(unittest.TestCase):
         self.assertIn('-DPython3_EXECUTABLE=' + sys.executable, calls[0])
         self.assertEqual(calls[1][-len(cli.TARGETS):], list(cli.TARGETS))
         self.assertIn(cli.TOOLS / 'build-native-package.py', calls[2])
+        self.assertNotIn('--backups', calls[2])
         self.assertIn(output, calls[2])
         remember.assert_not_called()
+
+    def test_explicit_backup_is_forwarded_to_packager(self):
+        args = cli.parser().parse_args(['build', '--native-only', '--dry-run',
+                                        '--backups', '/optional/backup'])
+        with patch.object(cli, 'execute') as execute:
+            cli.build(args)
+        command = execute.call_args.args[0]
+        self.assertEqual(command[-2:], ['--backups', Path('/optional/backup')])
 
     def test_guest_builds_both_mesa_drivers_then_kernel_renderer_and_manifest(self):
         with tempfile.TemporaryDirectory() as work:

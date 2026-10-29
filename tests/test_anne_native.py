@@ -1,6 +1,7 @@
 import gzip
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import struct
 import subprocess
@@ -35,6 +36,41 @@ def stock_image():
 
 
 class NativePackage(unittest.TestCase):
+    def test_stock_control_still_requires_a_real_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / 'board.json').write_text(json.dumps(
+                {'board': 'huawei-anne', 'load_base': '0x00480000'}))
+            with self.assertRaisesRegex(ValueError, 'requires --backups'):
+                package.build(base, None, base / 'package', stock_control=True)
+            self.assertFalse((base / 'package').exists())
+
+    def test_explicit_bad_backup_never_falls_back_to_generated_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / 'board.json').write_text(json.dumps(
+                {'board': 'huawei-anne', 'load_base': '0x00480000'}))
+            (base / 'manifest.json').write_text(json.dumps(
+                {'kernel': {'bytes': 3, 'sha256': 'incorrect'}}))
+            (base / 'kernel.img').write_bytes(b'bad')
+            with self.assertRaisesRegex(ValueError, 'backup is corrupt'):
+                package.build(base, base, base / 'package', stock_control=True)
+            self.assertFalse((base / 'package').exists())
+
+    def test_generated_container_needs_no_backup(self):
+        native = package.kernel_container(None, raw_image())
+        length, address, ramdisk_size, _, second_size, _, tags, page, version, os_version = \
+            struct.unpack_from('<10I', native, 8)
+        self.assertEqual((address, ramdisk_size, second_size, tags, page, version, os_version),
+                         (0x480000, 0, 0, 0x7e00000, 2048, 0, 0))
+        self.assertEqual(native[:8], b'ANDROID!')
+        payload = native[page:page + length]
+        self.assertEqual(gzip.decompress(payload), raw_image())
+        self.assertEqual(native[576:608], hashlib.sha1(
+            payload + struct.pack('<III', length, 0, 0)).digest() + bytes(12))
+        self.assertEqual(native[64:576], bytes(512))
+        self.assertEqual(len(native) % page, 0)
+
     def test_stock_avb_footer_uses_observed_effective_partition_end(self):
         data = bytearray(stock_image())
         effective = len(data) - 4096

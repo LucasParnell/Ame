@@ -82,11 +82,21 @@ these with `--signing-key` and `--trusted-key`. `--dev-signing` explicitly
 selects the development bundle identity instead.
 
 The AVB key defaults to `~/.ame-keys/anne-avb-key.pem`, falling back to the
-existing `out/anne-native-build/dev-avb-key.pem`. `--avb-key` overrides it. Stock
-kernel backups and their verified manifest live in
-`out/anne-device-private/boot-backups/` (`--backups` overrides this). Missing
-keys or backups stop the build before compilation. The pinned AVB tool is
+existing `out/anne-native-build/dev-avb-key.pem`. `--avb-key` overrides it.
+Missing keys stop the build before compilation. The pinned AVB tool is
 downloaded and hash-verified if needed.
+
+Normal builds require no stock kernel backup. They generate an Android v0
+header using the recorded ANE-LX1 load/tag addresses and 2048-byte page size,
+gzip the native Image, calculate its legacy checksum, and sign AVB metadata
+with rollback index zero. The footer ends 4096 bytes before the 24 MiB partition
+end; the reserved final page is zero-filled. The generated header/trailer
+variant passes local format/signature checks; phone acceptance has not yet
+been checked. It produces no stock restore image.
+
+To preserve a stock header/trailer and include a restore image, explicitly pass
+`--backups DIR` containing `kernel.img` and its verified `manifest.json`.
+An explicitly supplied corrupt or incomplete backup fails the build.
 
 BootROM runs also need the four private files in
 `out/anne-device-private/el2-firmware/`: `xloader.img`,

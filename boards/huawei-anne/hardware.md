@@ -112,12 +112,13 @@ starts one CPU. It embeds the existing signed MXB payload in the native Image;
 the same bundle authentication still runs before service loading. Android and
 TWRP ramdisk partitions remain unchanged.
 
-The package builder validates the native ELF/Image, current embedded bundle,
-stock header/hash and restore backup. It preserves Huawei's stock header fields,
-replaces the compressed kernel payload and legacy payload hash, and creates
-locally verified AVB metadata with a development RSA-2048 key. It checks
-partition fit and produces `ame-native-kernel.img`, `restore-stock-kernel.img`,
-checksums, and provenance. These are experimental images, not a phone release.
+The package builder validates the native ELF/Image and current embedded bundle.
+Normal builds generate the Android v0 header from the recorded ANE-LX1 layout,
+compress the kernel payload, calculate its legacy hash, and create locally
+verified AVB metadata with a local RSA-2048 key. No kernel backup is required.
+It checks partition fit and produces `ame-native-kernel.img`, checksums, and
+provenance. An explicit `--backups DIR` validates and preserves the stock
+header/trailer and additionally produces `restore-stock-kernel.img`.
 
 The captured stock AVB footer ends at byte 25,161,728, one 4096-byte page before
 the physical partition end. The stock metadata uses SHA256_RSA2048, rollback
@@ -125,11 +126,13 @@ index 0, flags 0, and a `kernel` hash descriptor. The first two test containers
 omitted AVB metadata entirely; this is a concrete packaging mismatch and their
 inconclusive results do not isolate runtime failures. The corrected builder
 uses a SHA-256-pinned official avbtool revision, retains the observed effective
-partition size and trailing page, and verifies both the new metadata signature
+partition size, and verifies both the new metadata signature
 and the kernel payload hash before producing the full physical-partition image.
 Its development key is not Huawei's key; handset acceptance still depends on
 the already unlocked bootloader. V6 and the full Anko capture demonstrate
-execution of this packaging route on this device. No vbmeta
+execution of the stock-template packaging route on this device. The generated
+header variant uses zero optional fields and a zero-filled final reserved page;
+its acceptance still needs a phone boot check. No vbmeta
 partition is modified. Reference:
 [Android AVB documentation](https://android.googlesource.com/platform/external/avb/+/refs/heads/main/README.md).
 
@@ -137,10 +140,10 @@ For a fresh local build, create a development signing key once (keep it outside
 version control), then allow the builder to fetch the pinned AVB tool:
 
 ```sh
-mkdir -p out/anne-native-build
+mkdir -p ~/.ame-keys
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
-  -out out/anne-native-build/dev-avb-key.pem
-chmod 600 out/anne-native-build/dev-avb-key.pem
+  -out ~/.ame-keys/anne-avb-key.pem
+chmod 600 ~/.ame-keys/anne-avb-key.pem
 python3 scripts/anne/tools/build-native-package.py --download-avbtool \
   --output out/anne-native-package-new
 ```

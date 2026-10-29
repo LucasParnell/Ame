@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build an experimental native Huawei kernel container and verified restore image.
+"""Build a native Huawei kernel container using the recorded ANE-LX1 layout.
 
-Uses the captured stock Android v0 kernel header, preserving its load addresses
-and firmware fields. No phone commands, flashing, or boot are performed here.
+An optional stock backup preserves its header/trailer and supplies a restore
+image. No phone commands, flashing, or boot are performed here.
 """
 import argparse
 import base64
@@ -22,7 +22,10 @@ AVB_COMMIT = '761178607206f4cb2af79ed9eec52d8cbd814adb'
 AVB_SHA256 = 'e5a664a38db623da00f080219bc0ee60a640a9dc4a872803616fae4938ac749b'
 AVB_URL = f'https://android.googlesource.com/platform/external/avb/+/{AVB_COMMIT}/avbtool.py?format=TEXT'
 DEFAULT_AVBTOOL = ROOT / 'out/host-tools/avb/avbtool.py'
-DEFAULT_AVBKEY = ROOT / 'out/anne-native-build/dev-avb-key.pem'
+DEFAULT_AVBKEY = Path.home() / '.ame-keys/anne-avb-key.pem'
+PARTITION_BYTES = 24 * 1024**2
+TRAILER_BYTES = 4096
+PAGE_BYTES = 2048
 SPEC = importlib.util.spec_from_file_location('board_image', ROOT / 'scripts/check-board-image.py')
 board_image = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(board_image)
@@ -56,7 +59,15 @@ def stock_header(data):
 
 
 def kernel_container(template, image):
-    header = bytearray(stock_header(template))
+    if template is None:
+        header = bytearray(PAGE_BYTES)
+        header[:8] = b'ANDROID!'
+        # Android v0: no ramdisk/second stage, board name or command line.
+        # LK obtains the device tree separately on this split-partition layout.
+        struct.pack_into('<10I', header, 8, 0, 0x00480000, 0, 0,
+                         0, 0, 0x07e00000, PAGE_BYTES, 0, 0)
+    else:
+        header = bytearray(stock_header(template))
     if len(image) < 64 or image[56:60] != b'ARM\x64':
         raise ValueError('expected a native ARM64 Image')
     offset, footprint, flags = struct.unpack_from('<3Q', image, 8)
@@ -68,7 +79,7 @@ def kernel_container(template, image):
     header[576:608] = hashlib.sha1(compressed + struct.pack('<III', len(compressed), 0, 0)).digest() + bytes(12)
     padding = bytes((-len(compressed)) % len(header))
     result = bytes(header) + compressed + padding
-    if len(result) > len(template):
+    if len(result) > (len(template) if template is not None else PARTITION_BYTES):
         raise ValueError('native image does not fit kernel partition')
     return result
 
@@ -113,7 +124,10 @@ def add_avb(stock, container, avbtool, key):
     verified_avbtool(avbtool)
     if not key.is_file():
         raise ValueError('provide a local development RSA-2048 PEM with --avb-key')
-    effective, rollback = footer_layout(stock)
+    # Recorded in boards/huawei-anne/hardware.md: rollback=0 and an AVB footer
+    # one page before the physical partition end. No fabricated stock backup.
+    effective, rollback = footer_layout(stock) if stock is not None else (PARTITION_BYTES - TRAILER_BYTES, 0)
+    trailer = stock[effective:] if stock is not None else bytes(TRAILER_BYTES)
     with tempfile.TemporaryDirectory(prefix='ame-anne-avb-') as directory:
         # avbtool verifies hash descriptors using their partition name.
         image = Path(directory) / 'kernel.img'
@@ -128,8 +142,8 @@ def add_avb(stock, container, avbtool, key):
                                   capture_output=True, text=True, check=True)
         metadata = subprocess.run([sys.executable, str(avbtool), 'info_image', '--image', str(image)],
                                   capture_output=True, text=True, check=True)
-        physical = image.read_bytes() + stock[effective:]
-    if len(physical) != len(stock):
+        physical = image.read_bytes() + trailer
+    if len(physical) != (len(stock) if stock is not None else PARTITION_BYTES):
         raise ValueError('AVB-packaged image does not match the physical kernel partition size')
     return physical, verified.stdout, metadata.stdout
 
@@ -145,11 +159,15 @@ def build(build_dir, backups, output, probe=False, avbtool=DEFAULT_AVBTOOL, key=
         raise ValueError('unexpected native board configuration')
     if not minimal and not stock_control and board_image.check(build_dir, 'huawei-anne') != 0x00480000:
         raise ValueError('unexpected native ELF entry')
-    backup_manifest = json.loads((backups / 'manifest.json').read_text())
-    stock = (backups / 'kernel.img').read_bytes()
-    if (backup_manifest['kernel']['bytes'] != len(stock) or
-            backup_manifest['kernel']['sha256'] != sha(stock)):
-        raise ValueError('stock kernel backup is corrupt')
+    stock = None
+    if backups is not None:
+        backup_manifest = json.loads((backups / 'manifest.json').read_text())
+        stock = (backups / 'kernel.img').read_bytes()
+        if (backup_manifest['kernel']['bytes'] != len(stock) or
+                backup_manifest['kernel']['sha256'] != sha(stock)):
+            raise ValueError('stock kernel backup is corrupt')
+    if stock_control and stock is None:
+        raise ValueError('--stock-control requires --backups DIR')
     target = 'anko-minimal' if minimal else ('anne-entry-probe' if probe else 'anko')
     if stock_control:
         stock_header(stock)
@@ -205,7 +223,8 @@ def build(build_dir, backups, output, probe=False, avbtool=DEFAULT_AVBTOOL, key=
     image, avb_validation, avb_metadata = add_avb(stock, kernel_container(stock, raw), avbtool, key)
     output.mkdir(parents=True, mode=0o700)
     (output / 'ame-native-kernel.img').write_bytes(image)
-    (output / 'restore-stock-kernel.img').write_bytes(stock)
+    if stock is not None:
+        (output / 'restore-stock-kernel.img').write_bytes(stock)
     if not stock_control:
         # Keep the exact executable that produced this Image for fault-PC decoding.
         (output / 'kernel.elf').write_bytes(elf)
@@ -220,19 +239,24 @@ def build(build_dir, backups, output, probe=False, avbtool=DEFAULT_AVBTOOL, key=
                             ('visible native entry probe' if probe else 'native Anko and Mochi')),
                 'avb': {'algorithm': 'SHA256_RSA2048', 'signer': 'local development key; not Huawei',
                         'avbtool_commit': AVB_COMMIT, 'avbtool_sha256': AVB_SHA256,
-                        'effective_partition_bytes': len(stock) - 4096,
+                        'effective_partition_bytes': PARTITION_BYTES - TRAILER_BYTES,
                         'trailing_firmware_bytes': 4096, 'local_signature_and_hash_verified': True,
+                        'trailer_source': 'stock backup' if stock is not None else 'zero-filled reserved page',
                         'bootloader_acceptance': 'unverified; requires the already unlocked bootloader'},
                 'boot_route': 'unlocked Huawei bootloader -> gzip ARM64 ' + ('stock Image' if stock_control else 'Anko Image'),
-                'partition': 'kernel', 'partition_bytes': len(stock), 'load_base': '0x00480000',
+                'container_source': 'stock backup' if stock is not None else 'recorded ANE-LX1 layout',
+                'restore_image_available': stock is not None,
+                'partition': 'kernel', 'partition_bytes': PARTITION_BYTES, 'load_base': '0x00480000',
                 'text_offset': '0x00080000', 'native_image_bytes': len(image),
-                'native_image_sha256': sha(image), 'restore_kernel_sha256': sha(stock),
+                'native_image_sha256': sha(image), 'restore_kernel_sha256': sha(stock) if stock is not None else None,
                 'raw_kernel_sha256': sha(raw), 'signed_bundle_sha256': None if probe or minimal or stock_control else sha(bundle),
                 'log_collection': ('recovery ADB if the unchanged stock kernel boots' if stock_control else
                                    'AMEFL record through Huawei DFX; LED stages; framebuffer when supported' if minimal else
                                    'live green EL1 / magenta EL2 screen; no persistent log' if probe else
                                    'AMEANKO1 checkpoints, console and fault registers in five ramoops zones; read from TWRP after stock restore'),
                 'effect': 'temporarily replaces the shared kernel; Android/TWRP require stock kernel restoration'}
+    if stock is None:
+        manifest['generated_container_hardware_verified'] = False
     if minimal and diagnostic_info:
         manifest['diagnostic'] = diagnostic_info
     elif not (probe or stock_control):
@@ -288,7 +312,7 @@ def build(build_dir, backups, output, probe=False, avbtool=DEFAULT_AVBTOOL, key=
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', type=Path, default=ROOT / 'out/anne-native-dev')
-    parser.add_argument('--backups', type=Path, default=ROOT / 'out/anne-device-private/boot-backups')
+    parser.add_argument('--backups', type=Path, help='optional verified stock backup; also emit a restore image')
     parser.add_argument('--output', required=True, type=Path)
     diagnostic = parser.add_mutually_exclusive_group()
     diagnostic.add_argument('--probe', action='store_true', help='package the bounded visible-entry diagnostic')

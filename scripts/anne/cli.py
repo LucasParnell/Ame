@@ -214,7 +214,9 @@ def build(args):
     if not args.dry_run:
         if args.output and args.output.exists():
             raise ValueError('Package output already exists; choose a fresh --output directory')
-        required = [args.avb_key, args.backups / 'kernel.img', args.backups / 'manifest.json']
+        required = [args.avb_key]
+        if args.backups:
+            required += [args.backups / 'kernel.img', args.backups / 'manifest.json']
         if not args.dev_signing:
             required += [args.signing_key, args.trusted_key]
         missing = [str(p) for p in required if not p.is_file()]
@@ -239,9 +241,12 @@ def build(args):
              '--target', *TARGETS], dry_run=args.dry_run)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     package = args.output or WORK / 'packages' / stamp
-    execute([sys.executable, TOOLS / 'build-native-package.py', '--build', args.build_dir,
-             '--backups', args.backups, '--output', package, '--avb-key', args.avb_key,
-             '--avbtool', args.avbtool, '--download-avbtool', '--quiet'], dry_run=args.dry_run)
+    package_command = [sys.executable, TOOLS / 'build-native-package.py', '--build', args.build_dir,
+                       '--output', package, '--avb-key', args.avb_key,
+                       '--avbtool', args.avbtool, '--download-avbtool', '--quiet']
+    if args.backups:
+        package_command += ['--backups', args.backups]
+    execute(package_command, dry_run=args.dry_run)
     if not args.dry_run:
         remember(package, args.build_dir, profile)
         print('Huawei package ready: ' + str(package), flush=True)
@@ -300,7 +305,7 @@ def parser():
             default_key = ROOT / 'out/anne-native-build/dev-avb-key.pem'
         command.add_argument('--avb-key', type=path, default=default_key)
         command.add_argument('--avbtool', type=path, default=ROOT / 'out/host-tools/avb/avbtool.py')
-        command.add_argument('--backups', type=path, default=ROOT / 'out/anne-device-private/boot-backups')
+        command.add_argument('--backups', type=path, help='optional stock backup; preserve its container and include a restore image')
         command.add_argument('--output', type=path, help='fresh package directory')
 
     def run_options(command):

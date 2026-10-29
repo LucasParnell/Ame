@@ -3,6 +3,9 @@ set -euo pipefail
 AME="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${DANGO_LINUX_OUT:-${AME}/out/dango-linux-panfrost}"
 MESA="${DANGO_MESA_PREFIX:-${AME}/out/mesa-panfrost/install}"
+# libdrm does not install the Panfrost kernel UAPI. Use the header shipped
+# with the same pinned Mesa source that produced the runtime libraries.
+MESA_SOURCE="${DANGO_MESA_BUILD:-${AME}/out/mesa-panfrost}/mesa-24.3.4"
 [[ -f "${MESA}/lib/libEGL.so" ]] || { echo 'Build Mesa with scripts/linux/build-panfrost-mesa.sh first' >&2; exit 1; }
 mkdir -p "${OUT}"
 PANVK_ARGS=()
@@ -40,6 +43,7 @@ ICD
 fi
 aarch64-linux-gnu-gcc -std=c11 -O3 -g -mcpu=cortex-a53 -Wall -Wextra -Werror \
     -I"${AME}/shared/include" -I"${MESA}/include" -I"${MESA}/include/libdrm" \
+    -I"${MESA_SOURCE}/include/drm-uapi" \
     -I/usr/aarch64-linux-gnu/include/drm \
     "${AME}/linux-artifacts/panfrost-renderer/main.c" \
     -L"${MESA}/lib" -Wl,-rpath-link,"${MESA}/lib" -Wl,--disable-new-dtags,-rpath,/usr/lib \

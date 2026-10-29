@@ -56,8 +56,9 @@ static void fatal_signal(int signal, siginfo_t* info, void* context) {
         render_phase, info->si_addr, pc, (uintptr_t)registers->uc_mcontext.regs[30],
         module.dli_fname ? module.dli_fname : "unknown", pc - (uintptr_t)module.dli_fbase);
     if (length > 0) {
-        (void)write(STDERR_FILENO, line,
+        const ssize_t written = write(STDERR_FILENO, line,
                     (size_t)length < sizeof(line) ? (size_t)length : sizeof(line));
+        (void)written; /* Best-effort diagnostic from the fatal signal handler. */
     }
     // PID 1 must stay alive so the native host can collect the failure.
     for (;;) {

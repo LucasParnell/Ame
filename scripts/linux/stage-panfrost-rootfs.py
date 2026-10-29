@@ -9,6 +9,17 @@ import shutil
 import subprocess
 
 
+def find_library(name, search):
+    found = next((p / name for p in search if (p / name).is_file()), None)
+    if found:
+        return found
+    # On native AArch64 Debian/Ubuntu, the cross compiler shares the native
+    # multiarch C++ runtime rather than duplicating it under the cross sysroot.
+    candidate = Path(subprocess.check_output(
+        ['aarch64-linux-gnu-g++', '-print-file-name=' + name], text=True).strip())
+    return candidate if candidate.is_absolute() and candidate.is_file() else None
+
+
 def stage(agent, mesa, sysroot, output, extra_libraries=(), extra_executables=(), icd_json=None, cts_data=None):
     output.mkdir(parents=True, exist_ok=True)
     root = output / 'rootfs'
@@ -36,7 +47,7 @@ def stage(agent, mesa, sysroot, output, extra_libraries=(), extra_executables=()
         for needed in re.findall(r'\(NEEDED\).*\[(.*?)\]', dynamic):
             if '/' in needed or '..' in needed:
                 raise ValueError('unsafe dependency name')
-            found = next((p / needed for p in search if (p / needed).is_file()), None)
+            found = find_library(needed, search)
             if not found:
                 raise ValueError(f'unresolved dependency: {source}: {needed}')
             pending.append((found, Path('/usr/lib') / needed))
@@ -44,7 +55,7 @@ def stage(agent, mesa, sysroot, output, extra_libraries=(), extra_executables=()
             subprocess.check_output(['aarch64-linux-gnu-readelf', '-lW', str(source)], text=True))
         if interpreter:
             target_loader = Path(interpreter[1])
-            loader = next((p / target_loader.name for p in search if (p / target_loader.name).is_file()), None)
+            loader = find_library(target_loader.name, search)
             if not loader:
                 raise ValueError('ELF interpreter missing')
             pending.append((loader, target_loader))

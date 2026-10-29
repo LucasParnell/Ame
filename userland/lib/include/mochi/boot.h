@@ -120,11 +120,15 @@ static inline mx_handle_t require_handle(const MxBootInfo* info, const char* nam
 static inline RingPage* map_ring(const MxBootInfo* info, const char* name, mx_vaddr_t va,
                                  uint32_t default_order, uint32_t* order_out = nullptr) {
     const MxBootEntry* entry = find_type(info, name, MX_BOOT_ENTRY_RING);
-    if (!entry || entry->handle == MX_NULL_HANDLE) return nullptr;
+    if (!entry || entry->handle == MX_NULL_HANDLE)
+        return nullptr;
     const auto order = entry->aux0 ? entry->aux0 : default_order;
-    if (order >= sizeof(mx_u32_t) * 8) return nullptr;
-    if (mx_map_page(entry->handle, va, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) return nullptr;
-    if (order_out) *order_out = static_cast<uint32_t>(order);
+    if (order >= sizeof(mx_u32_t) * 8)
+        return nullptr;
+    if (mx_map_page(entry->handle, va, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK)
+        return nullptr;
+    if (order_out)
+        *order_out = static_cast<uint32_t>(order);
     return reinterpret_cast<RingPage*>(va);
 }
 
@@ -141,9 +145,10 @@ inline Ring map_ring(const MxBootInfo* info, const RingMapping& mapping) {
     Ring result{};
     result.doorbell = handle(info, mapping.doorbell);
     result.handle = handle(info, mapping.name);
-    if (mapping.space_doorbell) result.space_doorbell = handle(info, mapping.space_doorbell);
-    result.ring = map_ring(info, mapping.name, mapping.address,
-                           mapping.default_order, &result.order);
+    if (mapping.space_doorbell)
+        result.space_doorbell = handle(info, mapping.space_doorbell);
+    result.ring =
+        map_ring(info, mapping.name, mapping.address, mapping.default_order, &result.order);
     return result;
 }
 
@@ -151,22 +156,26 @@ inline Ring map_ring(const MxBootInfo* info, const RingMapping& mapping) {
 // partial failure release only mappings created here and return an empty view.
 inline SpscEndpoint map_endpoint(const MxBootInfo* info, const RingMapping& tx_spec,
                                  const RingMapping& rx_spec) {
-    if (tx_spec.address == rx_spec.address) return {};
+    if (tx_spec.address == rx_spec.address)
+        return {};
     const Ring tx = map_ring(info, tx_spec);
     const Ring rx = map_ring(info, rx_spec);
     if (tx.valid() && rx.valid() && tx.order == rx.order && tx.doorbell && rx.doorbell) {
-        return {tx.ring, rx.ring, tx.order, tx.doorbell, rx.doorbell,
+        return {tx.ring,   rx.ring,   tx.order,          tx.doorbell,      rx.doorbell,
                 tx.handle, rx.handle, tx.space_doorbell, rx.space_doorbell};
     }
-    if (tx.ring) (void)sys_unmap_page(tx_spec.address);
-    if (rx.ring) (void)sys_unmap_page(rx_spec.address);
+    if (tx.ring)
+        (void)unmap_ring(tx_spec.address, tx.order);
+    if (rx.ring)
+        (void)unmap_ring(rx_spec.address, rx.order);
     return {};
 }
 
 // Services publish readiness only after their endpoints and local state exist.
 static inline void ready(const MxBootInfo* info) {
     const auto db = handle(info, "service.ready");
-    if (db != MX_NULL_HANDLE) (void)sys_notify(db);
+    if (db != MX_NULL_HANDLE)
+        (void)sys_notify(db);
 }
 
 } // namespace mochi::boot

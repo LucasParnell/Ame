@@ -17,6 +17,9 @@ class FramedRing(unittest.TestCase):
     def test_packed_records_block_for_data_and_credits_without_yielding(self):
         self.run_probe('packed_ring_blocking_probe.cc')
 
+    def test_channel_batches_credit_exchange_and_exclusive_cursor_caches(self):
+        self.run_probe('framed_channel_probe.cc')
+
     def run_probe(self, source):
         with tempfile.TemporaryDirectory(prefix='ame-framed-ring-') as work:
             binary = str(Path(work) / 'probe')

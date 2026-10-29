@@ -11,9 +11,8 @@ namespace {
 u32 g_next_mem_id = 1;
 
 class KernelAddressSpaceGuard {
-public:
-    explicit KernelAddressSpaceGuard(PhysAddr restore_root)
-        : restore_root_(restore_root) {
+  public:
+    explicit KernelAddressSpaceGuard(PhysAddr restore_root) : restore_root_(restore_root) {
         mm::vm_activate(0);
     }
 
@@ -24,12 +23,13 @@ public:
     KernelAddressSpaceGuard(const KernelAddressSpaceGuard&) = delete;
     KernelAddressSpaceGuard& operator=(const KernelAddressSpaceGuard&) = delete;
 
-private:
+  private:
     PhysAddr restore_root_;
 };
 
 bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
-    if (!out_pages || pages == 0) return false;
+    if (!out_pages || pages == 0)
+        return false;
 
     usize bytes = 0;
     if (__builtin_mul_overflow(pages, static_cast<usize>(sizeof(PhysAddr)), &bytes)) {
@@ -50,8 +50,8 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
     usize i = 0;
     while (i < pages) {
         if (pages - i >= kStage2BlockPages) {
-            const PhysAddr chunk = mm::alloc_pages_contiguous_aligned(kStage2BlockPages,
-                                                                     kStage2BlockPages);
+            const PhysAddr chunk =
+                mm::alloc_pages_contiguous_aligned(kStage2BlockPages, kStage2BlockPages);
             if (chunk) {
                 for (usize k = 0; k < kStage2BlockPages; ++k) {
                     const PhysAddr pa = chunk + static_cast<PhysAddr>(k) * PAGE_SIZE;
@@ -67,7 +67,9 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
             ANKO_LOGF_ERROR("kernel/vm", "vm_memory alloc_page failed at %llu/%llu",
                             static_cast<unsigned long long>(i),
                             static_cast<unsigned long long>(pages));
-            for (usize j = 0; j < i; ++j) if (backing[j]) mm::free_page(backing[j]);
+            for (usize j = 0; j < i; ++j)
+                if (backing[j])
+                    mm::free_page(backing[j]);
             mm::slab_free(backing, bytes, alignof(PhysAddr));
             return false;
         }
@@ -81,36 +83,49 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
 }
 
 void free_backing_pages(PhysAddr* pages, usize page_count) {
-    if (!pages) return;
-    for (usize i = 0; i < page_count; ++i) if (pages[i]) mm::free_page(pages[i]);
+    if (!pages)
+        return;
+    for (usize i = 0; i < page_count; ++i)
+        if (pages[i])
+            mm::free_page(pages[i]);
     mm::slab_free(pages, page_count * sizeof(PhysAddr), alignof(PhysAddr));
 }
 
 bool mapping_overlaps(const VmMemory& mem, u64 guest_pa, u64 size) {
-    if (!mem.mapped_stage2 || mem.mapped_size == 0) return false;
+    if (!mem.mapped_stage2 || mem.mapped_size == 0)
+        return false;
     u64 end = 0;
     u64 other_end = 0;
-    if (__builtin_add_overflow(guest_pa, size, &end)) return true;
-    if (__builtin_add_overflow(mem.guest_pa_base, mem.mapped_size, &other_end)) return true;
+    if (__builtin_add_overflow(guest_pa, size, &end))
+        return true;
+    if (__builtin_add_overflow(mem.guest_pa_base, mem.mapped_size, &other_end))
+        return true;
     return guest_pa < other_end && end > mem.guest_pa_base;
 }
 
 bool guest_range_valid(u64 guest_pa, u64 size) {
-    if (size == 0) return false;
-    if ((guest_pa & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0) return false;
+    if (size == 0)
+        return false;
+    if ((guest_pa & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0)
+        return false;
     u64 end = 0;
-    if (__builtin_add_overflow(guest_pa, size, &end)) return false;
-    if (end <= guest_pa) return false;
+    if (__builtin_add_overflow(guest_pa, size, &end))
+        return false;
+    if (end <= guest_pa)
+        return false;
     return guest_pa >= kGuestPhysMin && end <= kGuestPhysMax;
 }
 
 // A shared staging object maps only inside the device-side staging window, never
 // in the RAM window (and stays out of every DMA domain).
 bool staging_range_valid(u64 guest_pa, u64 size) {
-    if (size == 0) return false;
-    if ((guest_pa & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0) return false;
+    if (size == 0)
+        return false;
+    if ((guest_pa & (PAGE_SIZE - 1)) != 0 || (size & (PAGE_SIZE - 1)) != 0)
+        return false;
     u64 end = 0;
-    if (__builtin_add_overflow(guest_pa, size, &end)) return false;
+    if (__builtin_add_overflow(guest_pa, size, &end))
+        return false;
     return guest_pa >= kStagingWindowBase && end <= kStagingWindowBase + kStagingWindowSize;
 }
 
@@ -121,18 +136,20 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
     SysError rc = E_OK;
     auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
     if (!v) {
-        ANKO_LOGF_ERROR("kernel/vm", "vm_memory_create vm cap fail rc=%d",
-                        static_cast<int>(rc));
-        if (out_error) *out_error = rc;
+        ANKO_LOGF_ERROR("kernel/vm", "vm_memory_create vm cap fail rc=%d", static_cast<int>(rc));
+        if (out_error)
+            *out_error = rc;
         return kNullCap;
     }
     if (v->memory_count >= kMaxVmMemoryObjects) {
-        if (out_error) *out_error = E_OVERFLOW;
+        if (out_error)
+            *out_error = E_OVERFLOW;
         note_error();
         return kNullCap;
     }
     if (size == 0 || size > 256ull * 1024 * 1024 || (size & (PAGE_SIZE - 1)) != 0) {
-        if (out_error) *out_error = E_INVALID;
+        if (out_error)
+            *out_error = E_INVALID;
         note_error();
         return kNullCap;
     }
@@ -141,19 +158,22 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
     // window is bounded so a runaway request cannot consume the VM's budget.
     const bool shared_staging = (flags & MX_VM_MEMORY_FLAG_SHARED_STAGING) != 0;
     if ((flags & ~static_cast<u64>(MX_VM_MEMORY_FLAG_SHARED_STAGING)) != 0) {
-        if (out_error) *out_error = E_INVALID;
+        if (out_error)
+            *out_error = E_INVALID;
         note_error();
         return kNullCap;
     }
     if (shared_staging && size != kStagingWindowSize) {
-        if (out_error) *out_error = E_INVALID;
+        if (out_error)
+            *out_error = E_INVALID;
         note_error();
         return kNullCap;
     }
 
     VmMemory* mem = static_cast<VmMemory*>(mm::slab_alloc(sizeof(VmMemory), alignof(VmMemory)));
     if (!mem) {
-        if (out_error) *out_error = E_NOMEM;
+        if (out_error)
+            *out_error = E_NOMEM;
         note_error();
         return kNullCap;
     }
@@ -169,7 +189,8 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
     if (!backing_ok) {
         mm::slab_free(mem, sizeof(VmMemory), alignof(VmMemory));
         ANKO_LOG_ERROR("kernel/vm", "vm_memory_create backing allocation failed");
-        if (out_error) *out_error = E_NOMEM;
+        if (out_error)
+            *out_error = E_NOMEM;
         note_error();
         return kNullCap;
     }
@@ -189,18 +210,23 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
     // domain until a device assignment registers them explicitly.
     ANKO_ASSERT(!mem->shared_staging || mem->size == kStagingWindowSize);
 
-    mem->owner_lifetime = v->lifetime; object::retain(mem->owner_lifetime);
+    mem->owner_lifetime = v->lifetime;
+    object::retain(mem->owner_lifetime);
     mem->lifetime = object::create(mem, dispose_memory);
-    if (!mem->lifetime) { dispose_memory(mem); if (out_error) *out_error = E_NOMEM; return kNullCap; }
-    const CapHandle cap_h = cap::alloc(*caller.cap_table, CAP_VM_MEMORY, mem,
-                                       RIGHT_WRITE |
-                                           RIGHT_VM_MEMORY_MAP |
-                                           RIGHT_VM_MEMORY_INSPECT |
-                                           RIGHT_DUP);
+    if (!mem->lifetime) {
+        dispose_memory(mem);
+        if (out_error)
+            *out_error = E_NOMEM;
+        return kNullCap;
+    }
+    const CapHandle cap_h =
+        cap::alloc(*caller.cap_table, CAP_VM_MEMORY, mem,
+                   RIGHT_WRITE | RIGHT_VM_MEMORY_MAP | RIGHT_VM_MEMORY_INSPECT | RIGHT_DUP);
     if (cap_h == kNullCap) {
         ANKO_LOG_ERROR("kernel/vm", "vm_memory_create cap alloc failed");
         object::release(mem->lifetime);
-        if (out_error) *out_error = E_OVERFLOW;
+        if (out_error)
+            *out_error = E_OVERFLOW;
         note_error();
         return kNullCap;
     }
@@ -208,18 +234,21 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
     v->memory_objects[v->memory_count++] = mem;
     metric_inc(VM_DEBUG_MEMORY_CREATED);
     refresh_vm_state(v);
-    if (out_error) *out_error = E_OK;
+    if (out_error)
+        *out_error = E_OK;
     return cap_h;
 }
 
-SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
-                    u64 guest_pa, u64 size, u32 rights) {
+SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap, u64 guest_pa, u64 size,
+                    u32 rights) {
     SysError rc = E_OK;
     auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_MAP, &rc);
-    if (!v) return rc;
+    if (!v)
+        return rc;
 
     auto mem = memory_from_cap(caller, memory_cap, RIGHT_VM_MEMORY_MAP, &rc);
-    if (!mem) return rc;
+    if (!mem)
+        return rc;
     if (mem->owner_vm_id != v->vm_id) {
         note_error();
         return E_PERM;
@@ -240,7 +269,8 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
 
     for (u32 i = 0; i < v->memory_count; ++i) {
         VmMemory* existing = v->memory_objects[i];
-        if (!existing || existing == mem || existing->dead) continue;
+        if (!existing || existing == mem || existing->dead)
+            continue;
         if (mapping_overlaps(*existing, guest_pa, size)) {
             note_error();
             return E_BUSY;
@@ -256,8 +286,7 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
     // it costs one record per kStage2BlockPages. The page fallback needs more and
     // is allowed to fail with E_OVERFLOW once the table fills -- budgeting the
     // page count here would refuse every block-mappable region instead.
-    const usize blocks = pages / kStage2BlockPages +
-                         ((pages % kStage2BlockPages) != 0 ? 1u : 0u);
+    const usize blocks = pages / kStage2BlockPages + ((pages % kStage2BlockPages) != 0 ? 1u : 0u);
     if (!stage2_has_capacity(&v->stage2, blocks)) {
         note_error();
         return E_OVERFLOW;
@@ -290,7 +319,8 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
             }
         }
         rc = stage2_map_page(&v->stage2, ipa, mem->pages[mapped], rights);
-        if (rc != E_OK) break;
+        if (rc != E_OK)
+            break;
         ++mapped;
     }
     if (rc != E_OK) {
@@ -328,7 +358,8 @@ SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
 SysError unmap_memory(Process& caller, CapHandle vm_cap, u64 guest_pa, u64 size) {
     SysError rc = E_OK;
     auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_MAP, &rc);
-    if (!v) return rc;
+    if (!v)
+        return rc;
     if (!guest_range_valid(guest_pa, size) && !staging_range_valid(guest_pa, size)) {
         note_error();
         return E_INVALID;
@@ -337,9 +368,9 @@ SysError unmap_memory(Process& caller, CapHandle vm_cap, u64 guest_pa, u64 size)
     VmMemory* mem = nullptr;
     for (u32 i = 0; i < v->memory_count; ++i) {
         VmMemory* candidate = v->memory_objects[i];
-        if (!candidate || candidate->dead) continue;
-        if (candidate->mapped_stage2 &&
-            candidate->guest_pa_base == guest_pa &&
+        if (!candidate || candidate->dead)
+            continue;
+        if (candidate->mapped_stage2 && candidate->guest_pa_base == guest_pa &&
             candidate->mapped_size == size) {
             mem = candidate;
             break;
@@ -358,18 +389,22 @@ SysError unmap_memory(Process& caller, CapHandle vm_cap, u64 guest_pa, u64 size)
     mem->guest_pa_base = 0;
     mem->mapped_size = 0;
     mem->rights = 0;
-    if (v->guest_ram_bytes >= size) v->guest_ram_bytes -= size;
-    if (v->mapped_regions > 0) --v->mapped_regions;
+    if (v->guest_ram_bytes >= size)
+        v->guest_ram_bytes -= size;
+    if (v->mapped_regions > 0)
+        --v->mapped_regions;
     metric_inc(VM_DEBUG_MEMORY_UNMAPPED);
     refresh_vm_state(v);
     return E_OK;
 }
 
 SysError inspect_memory(Process& caller, CapHandle memory_cap, VmMemoryInfo* out) {
-    if (!out) return E_INVALID;
+    if (!out)
+        return E_INVALID;
     SysError rc = E_OK;
     auto mem = memory_from_cap(caller, memory_cap, RIGHT_VM_MEMORY_INSPECT, &rc);
-    if (!mem) return rc;
+    if (!mem)
+        return rc;
 
     VmMemoryInfo info{};
     info.mem_id = mem->mem_id;
@@ -387,13 +422,16 @@ SysError inspect_memory(Process& caller, CapHandle memory_cap, VmMemoryInfo* out
     return E_OK;
 }
 
-SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset,
-                      const void* src, u64 len) {
-    if (!src && len != 0) return E_INVALID;
+SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset, const void* src,
+                      u64 len) {
+    if (!src && len != 0)
+        return E_INVALID;
     SysError rc = E_OK;
     auto mem = memory_from_cap(caller, memory_cap, RIGHT_WRITE, &rc);
-    if (!mem) return rc;
-    if (len == 0) return E_OK;
+    if (!mem)
+        return rc;
+    if (len == 0)
+        return E_OK;
     u64 end = 0;
     if (__builtin_add_overflow(guest_offset, len, &end)) {
         note_error();
@@ -420,9 +458,11 @@ SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset,
             const usize src_page_off = static_cast<usize>(src_va & (PAGE_SIZE - 1));
             usize chunk = PAGE_SIZE - page_off;
             const usize src_chunk = PAGE_SIZE - src_page_off;
-            if (chunk > src_chunk) chunk = src_chunk;
+            if (chunk > src_chunk)
+                chunk = src_chunk;
             const u64 remaining = len - copied;
-            if (chunk > remaining) chunk = static_cast<usize>(remaining);
+            if (chunk > remaining)
+                chunk = static_cast<usize>(remaining);
             if (page_index >= mem->page_count || !mem->pages[page_index]) {
                 note_error();
                 return E_INVALID;
@@ -435,8 +475,7 @@ SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset,
             }
 
             const PhysAddr dst_pa = mem->pages[page_index] + page_off;
-            libk::memcpy(reinterpret_cast<void*>(dst_pa),
-                         reinterpret_cast<const void*>(src_pa),
+            libk::memcpy(reinterpret_cast<void*>(dst_pa), reinterpret_cast<const void*>(src_pa),
                          chunk);
             // Guest RAM can be executable through stage-2 immediately after this
             // write. Make freshly-copied kernel/trampoline bytes visible to the
@@ -449,7 +488,8 @@ SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset,
 }
 
 void destroy_memory_object(VmMemory* mem) {
-    if (!mem || mem->dead) return;
+    if (!mem || mem->dead)
+        return;
     free_backing_pages(mem->pages, static_cast<usize>(mem->page_count));
     mem->pages = nullptr;
     mem->page_count = 0;

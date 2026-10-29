@@ -5,29 +5,29 @@
 #include "midix/abi/types.h"
 
 enum MxCapType : mx_u16_t {
-    MX_CAP_NULL          = 0,
-    MX_CAP_THREAD        = 1,
-    MX_CAP_PROCESS       = 2,
-    MX_CAP_PAGE          = 3,
-    MX_CAP_SHARED_RING   = 4,
-    MX_CAP_DOORBELL      = 5,
-    MX_CAP_ARENA         = 6,
-    MX_CAP_NAMESERVICE   = 7,
-    MX_CAP_SUPERVISOR    = 8,
-    MX_CAP_UART          = 9,
-    MX_CAP_TIMER         = 10,
-    MX_CAP_VM_ROOT       = 11,
-    MX_CAP_VM            = 12,
-    MX_CAP_VCPU          = 13,
-    MX_CAP_VM_MEMORY     = 14,
-    MX_CAP_VM_CHANNEL    = 15,
+    MX_CAP_NULL = 0,
+    MX_CAP_THREAD = 1,
+    MX_CAP_PROCESS = 2,
+    MX_CAP_PAGE = 3,
+    MX_CAP_SHARED_RING = 4,
+    MX_CAP_DOORBELL = 5,
+    MX_CAP_ARENA = 6,
+    MX_CAP_NAMESERVICE = 7,
+    MX_CAP_SUPERVISOR = 8,
+    MX_CAP_UART = 9,
+    MX_CAP_TIMER = 10,
+    MX_CAP_VM_ROOT = 11,
+    MX_CAP_VM = 12,
+    MX_CAP_VCPU = 13,
+    MX_CAP_VM_MEMORY = 14,
+    MX_CAP_VM_CHANNEL = 15,
     MX_CAP_SCHED_CONTEXT = 16,
-    MX_CAP_MMIO          = 17,  // device MMIO range object (phys_base, size, memory attrs)
-    MX_CAP_IRQ           = 18,  // IRQ line object; driver binds to a doorbell explicitly
-    MX_CAP_PCI_FUNCTION  = 19,  // host PCI function authority object (Phase D)
-    MX_CAP_VM_DEVICE     = 20,  // VM device-assignment object (Phase D, spec §6.1)
-    MX_CAP_PLATFORM      = 22, // narrow board mechanism authority
-    MX_CAP_VM_SHARED     = 21,  // attached shared arena (Phase L, spec §12.3)
+    MX_CAP_MMIO = 17,         // device MMIO range object (phys_base, size, memory attrs)
+    MX_CAP_IRQ = 18,          // IRQ line object; driver binds to a doorbell explicitly
+    MX_CAP_PCI_FUNCTION = 19, // host PCI function authority object (Phase D)
+    MX_CAP_VM_DEVICE = 20,    // VM device-assignment object (Phase D, spec §6.1)
+    MX_CAP_PLATFORM = 22,     // narrow board mechanism authority
+    MX_CAP_VM_SHARED = 21,    // attached shared arena (Phase L, spec §12.3)
 };
 
 enum MxMmioAttr : mx_u32_t {
@@ -63,15 +63,15 @@ constexpr mx_u32_t MX_ARENA_REFERENCE_SHIFT = 16;
 constexpr mx_u32_t MX_ARENA_REFERENCE_MASK = 0xffff0000u;
 
 enum MxRights : mx_rights_t {
-    MX_RIGHT_READ     = 1u << 0,
-    MX_RIGHT_WRITE    = 1u << 1,
-    MX_RIGHT_MAP      = 1u << 2,
-    MX_RIGHT_EXEC     = 1u << 3,
-    MX_RIGHT_NOTIFY   = 1u << 4,
-    MX_RIGHT_WAIT     = 1u << 5,
-    MX_RIGHT_DUP      = 1u << 6,
-    MX_RIGHT_SPAWN    = 1u << 7,
-    MX_RIGHT_KILL     = 1u << 8,
+    MX_RIGHT_READ = 1u << 0,
+    MX_RIGHT_WRITE = 1u << 1,
+    MX_RIGHT_MAP = 1u << 2,
+    MX_RIGHT_EXEC = 1u << 3,
+    MX_RIGHT_NOTIFY = 1u << 4,
+    MX_RIGHT_WAIT = 1u << 5,
+    MX_RIGHT_DUP = 1u << 6,
+    MX_RIGHT_SPAWN = 1u << 7,
+    MX_RIGHT_KILL = 1u << 8,
     MX_RIGHT_REGISTER = 1u << 9,
     MX_RIGHT_THREAD_CONTROL = 1u << 10,
     MX_RIGHT_VM_CONTROL = 1u << 11,
@@ -93,7 +93,8 @@ enum MxRights : mx_rights_t {
 constexpr mx_rights_t MX_RIGHTS_NONE = 0;
 constexpr mx_rights_t MX_RIGHTS_RW = MX_RIGHT_READ | MX_RIGHT_WRITE;
 constexpr mx_rights_t MX_RIGHTS_RWMAP = MX_RIGHT_READ | MX_RIGHT_WRITE | MX_RIGHT_MAP;
-constexpr mx_rights_t MX_RIGHTS_RING_ENDPOINT = MX_RIGHT_READ | MX_RIGHT_WRITE | MX_RIGHT_MAP | MX_RIGHT_DUP;
+constexpr mx_rights_t MX_RIGHTS_RING_ENDPOINT =
+    MX_RIGHT_READ | MX_RIGHT_WRITE | MX_RIGHT_MAP | MX_RIGHT_DUP;
 constexpr mx_rights_t MX_RIGHTS_DOORBELL_ENDPOINT = MX_RIGHT_WAIT | MX_RIGHT_NOTIFY | MX_RIGHT_DUP;
 
 #ifndef MIDIX_ABI_NO_COMPAT_NAMES
@@ -184,7 +185,8 @@ inline constexpr MxCapTypeName kMxCapTypeNames[] = {
 };
 inline const char* mx_cap_type_name(mx_u32_t type) {
     for (const MxCapTypeName& row : kMxCapTypeNames) {
-        if (row.type == type) return row.name;
+        if (row.type == type)
+            return row.name;
     }
     return "unknown";
 }

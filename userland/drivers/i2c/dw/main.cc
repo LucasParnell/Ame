@@ -20,24 +20,31 @@ extern "C" [[noreturn]] void _start() {
     auto* r = arena.alloc<Runtime>();
     const auto cap = mochi::boot::handle(boot, "i2c.control");
     constexpr auto service = "drv.i2c.dw";
-    if (!r) mochi::driver::startup_failed(service, "state arena", MX_ERR_NOMEM);
+    if (!r)
+        mochi::driver::startup_failed(service, "state arena", MX_ERR_NOMEM);
     auto status = mx_platform_control(cap, MX_PLATFORM_CLAIM);
-    if (status != MX_OK) mochi::driver::startup_failed(service, "platform claim", status);
+    if (status != MX_OK)
+        mochi::driver::startup_failed(service, "platform claim", status);
     status = mx_platform_control(cap, MX_PLATFORM_I2C_CLOCK_ON);
-    if (status != MX_OK) mochi::driver::startup_failed(service, "clock enable", status);
+    if (status != MX_OK)
+        mochi::driver::startup_failed(service, "clock enable", status);
     status = mx_platform_control(cap, MX_PLATFORM_I2C_PINS);
-    if (status != MX_OK) mochi::driver::startup_failed(service, "pin mux", status);
-    r->executor.mmio = mochi::driver::registers(boot, "i2c.mmio", mochi::va::native_driver::kLinks,
-                                              service);
+    if (status != MX_OK)
+        mochi::driver::startup_failed(service, "pin mux", status);
+    r->executor.mmio =
+        mochi::driver::registers(boot, "i2c.mmio", mochi::va::native_driver::kLinks, service);
     r->links[0] = mochi::driver::link(boot, "i2c.0", mochi::va::native_driver::kPayload);
     r->links[1] = mochi::driver::link(
         boot, "i2c.1",
         (mochi::va::native_driver::kPayload + mochi::va::native_driver::kLinkStride));
     r->addresses[0] = mochi::driver::value(boot, "i2c.0.address");
     r->addresses[1] = mochi::driver::value(boot, "i2c.1.address");
-    if (!r->links[0].valid()) mochi::driver::startup_failed(service, "Type-C transport");
-    if (!r->links[1].valid()) mochi::driver::startup_failed(service, "power transport");
-    if (!r->addresses[0] || !r->addresses[1]) mochi::driver::startup_failed(service, "address leases");
+    if (!r->links[0].valid())
+        mochi::driver::startup_failed(service, "Type-C transport");
+    if (!r->links[1].valid())
+        mochi::driver::startup_failed(service, "power transport");
+    if (!r->addresses[0] || !r->addresses[1])
+        mochi::driver::startup_failed(service, "address leases");
     mx_u32_t comp = 0;
     (void)r->executor.mmio.read32(0xfc, &comp);
     char comp_line[80];
@@ -51,9 +58,9 @@ extern "C" [[noreturn]] void _start() {
         r->executor.advance(mx_clock_ns());
         if (r->executor.phase == mochi::i2c::Phase::Fault) {
             char fault_line[80];
-            const int fault_len = libk::snprintf(fault_line, sizeof(fault_line),
-                                                 "fault abort=0x%08x",
-                                                 static_cast<unsigned>(r->executor.abort_source));
+            const int fault_len =
+                libk::snprintf(fault_line, sizeof(fault_line), "fault abort=0x%08x",
+                               static_cast<unsigned>(r->executor.abort_source));
             if (fault_len > 0 && static_cast<size_t>(fault_len) < sizeof(fault_line)) {
                 mochi::log_raw_marker(fault_line);
             }

@@ -114,7 +114,7 @@ def check_manifest(manifest: dict) -> list[str]:
         if not isinstance(svc.get("restart"), str) or svc["restart"] not in RESTARTS:
             problems.append(f"{label}: unknown restart policy {svc.get('restart')!r}")
         activation = svc.get("activation", "boot")
-        if not isinstance(activation, str) or activation not in {"boot", "usb-host"}:
+        if not isinstance(activation, str) or activation not in {"boot", "usb-host", "manual"}:
             problems.append(f"{label}: unknown activation policy")
         elif activation == "usb-host" and svc["name"] != "usb.fn.fido2":
             problems.append(f"{label}: usb-host activation is reserved for usb.fn.fido2")

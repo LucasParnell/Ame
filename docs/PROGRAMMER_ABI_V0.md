@@ -174,3 +174,60 @@ The shell snapshots the log length before emitting its report so concurrent log
 growth cannot extend a capture indefinitely. Live counters are independent
 samples. This extends the existing bring-up debug interface; it grants no
 hardware-control capability.
+
+
+## Native application startup
+
+The shell and USB app container share the public `mochi::app::Process` API in
+`mochi/app_process.h`. They load a
+validated executable into a suspended `native_sandboxed` process, claim BootInfo
+slot zero first, publish startup entries, then resume. Wiring failure kills and
+reaps the child before releasing the upload, BootInfo and log mappings. Shell
+`exec` returns the actual app exit status and supports images up to 8 MiB.
+
+| Entry | Contract |
+|---|---|
+| `log.ring`, `log.doorbell` | Order-6 stdout ring; the launcher drains all remaining slots before cleanup |
+| `service.ready` | Notification alias for the app log doorbell |
+| `cpu.count`, `cpu.mask` | Online CPU topology inherited from the launcher |
+| `supervisor` | Delegation naming this app itself; its child exit stream is separate from the launcher's |
+| `thread.self`, `self.identity` | Main-thread control handle and process incarnation supplied by libmochi |
+| `app.image.size` | Exact executable byte length, at most 8 MiB |
+| `app.image.00` … `app.image.31` | Read-only arena snapshots in 256 KiB chunks; `aux0` is each chunk's valid byte count |
+
+`mochi::app::map_image()` maps the snapshots consecutively. They survive wiping
+and reuse of the launcher's upload buffer. An app can spawn a second copy of its
+executable without receiving the system boot archive. Descendants that request
+`MX_SPAWN_KILL_WITH_SUPERVISOR` die with their supervisor.
+
+`mochi::appio::write()` retries under stdout backpressure until the entire byte
+run is accepted; `try_write()` returns the accepted prefix without yielding.
+Both use the debug channel when no parent stdout ring is attached. The ring has
+one producer: an app supervising multiple workers must relay separate worker
+rings rather than share its stdout ring between concurrent producers.
+
+Arguments, working directory, per-app filesystem sessions and quotas are not
+part of this startup contract yet. Principal IDs are named constants: trusted
+is **1**, sandboxed is **2**. A sandboxed bootstrap creates ordinary doorbells;
+nonzero scheduler hints require a trusted principal.
+
+`mochi::app::start()` maps BootInfo and stdout once and returns the application
+context. `Context::self_image()` supplies a reusable executable snapshot without
+application-selected mapping addresses. Process launch, affinity, output relay,
+exit collection and cleanup are explicit public APIs. See
+[the IPC benchmark app walkthrough](APP_API.md), which uses the actual benchmark
+as the example.
+
+## Conditional IPC extensions
+
+`DOORBELL_CREATE` accepts `HANDOFF_OK | BOUND_HANDOFF` plus a thread capability
+in argument 1. It requires `THREAD_CONTROL` and retains the receiver identity;
+other scheduling hints remain trusted-only. `WAIT_RING` direction
+`WRITABLE | MIN_SPACE` uses argument 4 for required free cursor units.
+`NOTIFY_WAIT` with `EXCHANGE_WRITABLE` uses argument 5 for required room and
+cannot combine synchronous request/reply flags. Without the new flags, unused
+argument registers remain ignored, preserving existing binaries.
+
+`IPC_POLICY` operations 5 and 6 return the current thread's cumulative/max
+wake-to-dispatch delay and dispatch count, respectively.
+See [the public IPC API guide](IPC_OPTIMIZATIONS.md).

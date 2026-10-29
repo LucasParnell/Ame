@@ -6,22 +6,31 @@
 #include "mochi/log.h"
 #include "mochi/boot_log.h"
 #include "midix/abi/protocols/board_usb.h"
+#include "midix/abi/platform.h"
 namespace {
 struct Runtime {
     mochi::i2c::Client bus;
     mochi::SpscEndpoint control;
     MxBoardReply reply;
-    mx_u64_t lease, feed;
+    mx_u64_t lease, feed, observe_at;
+    CapHandle observer;
+    mochi::hi6523::ChargeHandoff charge;
     bool enabled, pending, faulted, startup_check;
 };
 bool disable(Runtime& r) {
-    const bool ok = r.bus.update(0x80, 0x40, 0);
+    if (!r.bus.update(0x80, 0x40, 0)) {
+        // Keep retrying shutdown; uncertainty must not look like source-off.
+        r.enabled = true;
+        r.faulted = true;
+        r.lease = 0;
+        return false;
+    }
     r.enabled = false;
     r.lease = 0;
-    return ok;
+    return r.charge.resume(r.bus);
 }
 bool enable(Runtime& r) {
-    if (!r.bus.update(0x90, 0x20, 0) || !r.bus.update(0x80, 0x58, 0x18)) {
+    if (!r.charge.suspend(r.bus) || !r.bus.update(0x80, 0x58, 0x18)) {
         return false;
     }
     struct Setting {
@@ -57,20 +66,27 @@ extern "C" [[noreturn]] void _start() {
               static_cast<mx_u16_t>(mochi::driver::value(boot, "i2c.address"))};
     r->control = mochi::driver::link(
         boot, "power", (mochi::va::native_driver::kLinks + mochi::va::native_driver::kLinkStride));
-    if (!r->control.valid()) mochi::driver::startup_failed(service, "power link");
-    if (!r->bus.endpoint.valid()) mochi::driver::startup_failed(service, "i2c link");
+    if (!r->control.valid())
+        mochi::driver::startup_failed(service, "power link");
+    if (!r->bus.endpoint.valid())
+        mochi::driver::startup_failed(service, "i2c link");
     mx_u8_t id = 0;
-    if (!r->bus.read(4, id)) mochi::driver::startup_failed(service, "device id read");
+    if (!r->bus.read(4, id))
+        mochi::driver::startup_failed(service, "device id read");
     if (id != 1 && id != 2 && id != 3) {
         char line[80];
-        const int length = libk::snprintf(line, sizeof(line), "device id=0x%02x",
-                                          static_cast<unsigned>(id));
+        const int length =
+            libk::snprintf(line, sizeof(line), "device id=0x%02x", static_cast<unsigned>(id));
         if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
             mochi::log_raw_marker(line);
         }
         mochi::driver::startup_failed(service, "device id");
     }
-    if (!disable(*r)) mochi::driver::startup_failed(service, "boost disable");
+    r->observer = mochi::boot::handle(boot, "charger.observe");
+    if (!r->observer || mx_platform_control(r->observer, MX_PLATFORM_CLAIM) != MX_OK)
+        mochi::driver::startup_failed(service, "charger observer");
+    if (!disable(*r))
+        mochi::driver::startup_failed(service, "boost disable");
     mochi::boot::ready(boot);
     for (;;) {
         const auto now = mx_clock_ns();
@@ -79,26 +95,41 @@ extern "C" [[noreturn]] void _start() {
             mochi::log_raw_marker("drv.power.hi6523: source lease expired\n");
             (void)disable(*r);
         }
-        if (r->enabled && now >= r->feed) {
+        if (r->enabled && !r->faulted && now >= r->feed) {
             const auto health = mochi::hi6523::maintain_source(r->bus, r->startup_check);
             r->startup_check = false;
             if (!health.ok()) {
                 char line[128];
-                const int length = libk::snprintf(line, sizeof(line),
+                const int length = libk::snprintf(
+                    line, sizeof(line),
                     "drv.power.hi6523: source stopped reason=%u status=0x%02x faults=0x%02x\n",
                     static_cast<unsigned>(health.failure), static_cast<unsigned>(health.status),
                     static_cast<unsigned>(health.faults));
-                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) mochi::log_raw_marker(line);
+                if (length > 0 && static_cast<size_t>(length) < sizeof(line))
+                    mochi::log_raw_marker(line);
                 r->faulted = true;
                 (void)disable(*r);
             } else if (health.faults & 0x1c) {
                 char line[112];
                 const int length = libk::snprintf(line, sizeof(line),
-                    "drv.power.hi6523: startup event cleared; boost healthy status=0x%02x faults=0x%02x\n",
-                    static_cast<unsigned>(health.status), static_cast<unsigned>(health.faults));
-                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) mochi::log_raw_marker(line);
+                                                  "drv.power.hi6523: startup event cleared; boost "
+                                                  "healthy status=0x%02x faults=0x%02x\n",
+                                                  static_cast<unsigned>(health.status),
+                                                  static_cast<unsigned>(health.faults));
+                if (length > 0 && static_cast<size_t>(length) < sizeof(line))
+                    mochi::log_raw_marker(line);
             }
             r->feed = now + 1000000000ull;
+        }
+        if (now >= r->observe_at) {
+            mx_u8_t status = 0, config = 0;
+            // Read only: the gauge/charger retain firmware charging policy.
+            if (r->bus.read(0x06, status) && r->bus.read(0x90, config))
+                (void)mx_platform_control(r->observer, MX_PLATFORM_CHARGER_SAMPLE,
+                                          status | (mx_u64_t{config} << 8));
+            else
+                (void)mx_platform_control(r->observer, MX_PLATFORM_CHARGER_INVALIDATE);
+            r->observe_at = mx_clock_ns() + 1000000000;
         }
         if (r->pending && r->control.tx().try_push_msg(MX_POWER_REPLY, r->reply)) {
             r->pending = false;
@@ -111,18 +142,20 @@ extern "C" [[noreturn]] void _start() {
             if (ok) {
                 // A renewal cannot silently restart a failed/expired session.
                 // The role owner must acknowledge shutdown before starting anew.
-                if (request.value) ok = !r->faulted && (r->enabled || enable(*r));
+                if (request.value)
+                    ok = !r->faulted && (r->enabled || enable(*r));
                 else {
                     ok = disable(*r);
-                    if (ok) r->faulted = false;
+                    if (ok)
+                        r->faulted = false;
                 }
             }
             if (!ok) {
                 (void)disable(*r);
                 char line[96];
-                const int length = libk::snprintf(line, sizeof(line),
-                                                  "drv.power.hi6523: set %u failed\n",
-                                                  static_cast<unsigned>(request.value));
+                const int length =
+                    libk::snprintf(line, sizeof(line), "drv.power.hi6523: set %u failed\n",
+                                   static_cast<unsigned>(request.value));
                 if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
                     mochi::log_raw_marker(line);
                 }

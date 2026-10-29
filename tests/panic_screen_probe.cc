@@ -21,6 +21,7 @@ constexpr uint32_t kTitle = 0xFF6B6B;
 constexpr uint32_t kReason = 0xFFD9A0;
 constexpr uint32_t kCaption = 0xC8D6E8;
 constexpr uint32_t kArtDim = 0x8FA6C4;
+constexpr uint32_t kArtMid = 0xB9CCE4;
 constexpr uint32_t kArtBright = 0xEAF1FF;
 
 struct Frame {
@@ -28,7 +29,8 @@ struct Frame {
     uint32_t height;
     std::vector<uint32_t> px;
     Frame(uint32_t w, uint32_t h)
-        : width(w), height(h), px(static_cast<size_t>(w) * h, 0xDEADBEEFu) {}
+        : width(w), height(h), px(static_cast<size_t>(w) * h, 0xDEADBEEFu) {
+    }
 };
 
 int failures = 0;
@@ -40,7 +42,9 @@ void check(bool cond, const char* what) {
     }
 }
 
-bool near(uint32_t a, uint32_t b) { return a == b; }
+bool near(uint32_t a, uint32_t b) {
+    return a == b;
+}
 
 const char* kPayload =
     "AMEQR1 core=0\n"
@@ -67,13 +71,20 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
     for (uint32_t y = 0; y < h; ++y) {
         for (uint32_t x = 0; x < w; ++x) {
             const uint32_t c = f.px[static_cast<size_t>(y) * w + x];
-            if (near(c, kQrModule) || near(c, kQrPanel)) qr_area_ink += (c != kQrPanel);
-            if (near(c, kQrPanel)) qr_area_ink += 0;
-            if (near(c, kQrModule)) ++qr_dark;
-            if (near(c, kTitle)) ++title;
-            if (near(c, kReason)) ++reason;
-            if (near(c, kCaption)) ++caption;
-            if (near(c, kArtDim) || near(c, kArtBright)) ++art;
+            if (near(c, kQrModule) || near(c, kQrPanel))
+                qr_area_ink += (c != kQrPanel);
+            if (near(c, kQrPanel))
+                qr_area_ink += 0;
+            if (near(c, kQrModule))
+                ++qr_dark;
+            if (near(c, kTitle))
+                ++title;
+            if (near(c, kReason))
+                ++reason;
+            if (near(c, kCaption))
+                ++caption;
+            if (near(c, kArtDim) || near(c, kArtMid) || near(c, kArtBright))
+                ++art;
             if (c != kBg && c != kQrPanel && c != kQrModule && !near(c, kTitle) &&
                 !near(c, kReason) && !near(c, kCaption) && !near(c, kArtDim) &&
                 !near(c, kArtBright)) {
@@ -82,8 +93,8 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
         }
     }
 
-    std::printf("  %-11s %4ux%-4u qr_dark=%u title=%u reason=%u caption=%u art=%u\n",
-                label, w, h, qr_dark, title, reason, caption, art);
+    std::printf("  %-11s %4ux%-4u qr_dark=%u title=%u reason=%u caption=%u art=%u\n", label, w, h,
+                qr_dark, title, reason, caption, art);
     (void)qr_area_ink;
 
     check(qr_dark > 50, "QR code drawn in the top-left");
@@ -99,14 +110,20 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
         for (uint32_t x = 0; x < w; ++x) {
             const uint32_t c = f.px[static_cast<size_t>(y) * w + x];
             if (near(c, kQrModule) || near(c, kQrPanel)) {
-                if (x < qr_x_min) qr_x_min = x;
-                if (x > qr_x_max) qr_x_max = x;
-                if (y < qr_y_min) qr_y_min = y;
-                if (y > qr_y_max) qr_y_max = y;
+                if (x < qr_x_min)
+                    qr_x_min = x;
+                if (x > qr_x_max)
+                    qr_x_max = x;
+                if (y < qr_y_min)
+                    qr_y_min = y;
+                if (y > qr_y_max)
+                    qr_y_max = y;
             }
             if (near(c, kTitle)) {
-                if (y < title_y_min) title_y_min = y;
-                if (x > title_x_max) title_x_max = x;
+                if (y < title_y_min)
+                    title_y_min = y;
+                if (x > title_x_max)
+                    title_x_max = x;
             }
         }
     }
@@ -125,14 +142,16 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
     for (uint32_t y = 0; y < h; ++y) {
         for (uint32_t x = 0; x < w; ++x) {
             const uint32_t c = f.px[static_cast<size_t>(y) * w + x];
-            if ((near(c, kArtDim) || near(c, kArtBright)) && x < art_x_min) art_x_min = x;
+            if ((near(c, kArtDim) || near(c, kArtMid) || near(c, kArtBright)) && x < art_x_min)
+                art_x_min = x;
         }
     }
     uint32_t caption_in_logo = 0;
     for (uint32_t y = 0; y < h; ++y) {
         for (uint32_t x = art_x_min; x < w; ++x) {
             const uint32_t c = f.px[static_cast<size_t>(y) * w + x];
-            if (near(c, kCaption)) ++caption_in_logo;
+            if (near(c, kCaption))
+                ++caption_in_logo;
         }
     }
     check(caption_in_logo == 0, "caption stays out of the logo column");
@@ -144,12 +163,16 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
         for (uint32_t ah = 0; ah <= 900; ah += 17) {
             uint32_t cw = 0, ch = 0;
             anko::panic_screen::art_cell(aw, ah, &cw, &ch);
-            if (cw == 0 || ch == 0) continue;
-            if (ch != cw * 2u) ++art_bad;                       // proportions kept
-            if (cw * 139u > aw || ch * 51u > ah) ++art_bad;      // and it fits
+            if (cw == 0 || ch == 0)
+                continue;
+            if (ch != cw * 2u)
+                ++art_bad; // proportions kept
+            if (cw * 139u > aw || ch * 51u > ah)
+                ++art_bad; // and it fits
             uint32_t bw = 0, bh = 0;
             anko::panic_screen::art_cell(aw, ah, &bw, &bh);
-            if (bw != cw) ++art_bad;                            // deterministic
+            if (bw != cw)
+                ++art_bad; // deterministic
         }
     }
     check(art_bad == 0, "logo cell is proportional, maximal and fits the box");
@@ -161,6 +184,111 @@ void run_size(uint32_t w, uint32_t h, const char* label) {
     check(f.px == g.px, "re-render is deterministic");
 }
 
+// Portrait panel (P20 Lite, 1080x2280). The layout is not the landscape one:
+// the header sits at the top, the QR is a full-width element under it, the report
+// runs beneath the QR, and the logo spans the bottom third. Asserting the
+// landscape geometry here would just encode the old bug.
+void run_portrait(uint32_t w, uint32_t h, const char* label) {
+    Frame f(w, h);
+    anko::panic_screen::bind(reinterpret_cast<volatile uint32_t*>(f.px.data()), w, h);
+    check(anko::panic_screen::bound(), "portrait: bound()");
+    const bool have_qr =
+        anko::panic_screen::show("KERNEL PANIC", "data abort (EL1)", kPayload, kQrUrl);
+    check(have_qr, "portrait: QR drawn");
+
+    uint32_t qr_dark = 0, title = 0, reason = 0, caption = 0, art = 0;
+    uint32_t qr_x0 = w, qr_x1 = 0, qr_y0 = h, qr_y1 = 0, title_y = h, art_y0 = h;
+    for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+            const uint32_t c = f.px[static_cast<size_t>(y) * w + x];
+            if (near(c, kQrModule))
+                ++qr_dark;
+            if (near(c, kTitle)) {
+                ++title;
+                if (y < title_y)
+                    title_y = y;
+            }
+            if (near(c, kReason))
+                ++reason;
+            if (near(c, kCaption))
+                ++caption;
+            if (near(c, kArtDim) || near(c, kArtMid) || near(c, kArtBright)) {
+                ++art;
+                if (y < art_y0)
+                    art_y0 = y;
+            }
+            if (near(c, kQrModule) || near(c, kQrPanel)) {
+                if (x < qr_x0)
+                    qr_x0 = x;
+                if (x > qr_x1)
+                    qr_x1 = x;
+                if (y < qr_y0)
+                    qr_y0 = y;
+                if (y > qr_y1)
+                    qr_y1 = y;
+            }
+        }
+    }
+    const uint32_t qr_side = qr_x1 - qr_x0 + 1;
+    std::printf("  %-11s %4ux%-4u qr=%u@(%u,%u) title=%u reason=%u caption=%u art=%u\n", label, w,
+                h, qr_side, qr_x0, qr_y0, title, reason, caption, art);
+
+    check(qr_dark > 50, "portrait: QR ink drawn");
+    check(title > 100, "portrait: title drawn");
+    check(reason > 100, "portrait: reason drawn");
+    check(caption > 500, "portrait: report drawn");
+    check(art > 500, "portrait: logo drawn");
+    check(title_y < h / 10, "portrait: title at the top");
+    check(qr_y0 >= h / 40, "portrait: QR clears the header");
+    check(qr_side == (qr_y1 - qr_y0 + 1), "portrait: QR is square");
+    // Big enough to scan off a phone screen; small enough to leave the report room.
+    check(qr_side >= w / 3, "portrait: QR large enough to scan");
+    check(qr_side <= (w * 4) / 5, "portrait: QR leaves room for the report");
+    check(art_y0 > qr_y1, "portrait: logo starts below the QR");
+    check(art_y0 > h / 2, "portrait: logo in the lower half");
+
+    uint32_t caption_in_art = 0;
+    for (uint32_t y = art_y0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+            if (near(f.px[static_cast<size_t>(y) * w + x], kCaption))
+                ++caption_in_art;
+        }
+    }
+    check(caption_in_art == 0, "portrait: report stays out of the logo band");
+}
+
+// The anne DSS scans a 1080-wide window out of a padded row. Every pixel outside
+// `width` must stay untouched: advancing by width instead of stride paints the
+// next row one row early, which sheared the whole image diagonally.
+void run_stride() {
+    constexpr uint32_t kW = 1080, kH = 2280, kStride = 1152;
+    Frame f(kStride, kH);
+    anko::panic_screen::bind(reinterpret_cast<volatile uint32_t*>(f.px.data()), kW, kH, kStride);
+    check(anko::panic_screen::bound(), "stride: bound() with a padded row");
+    anko::panic_screen::show("KERNEL PANIC", "data abort (EL1)", kPayload, kQrUrl);
+
+    uint32_t guard = 0, painted = 0;
+    for (uint32_t y = 0; y < kH; ++y) {
+        for (uint32_t x = kW; x < kStride; ++x) {
+            if (f.px[static_cast<size_t>(y) * kStride + x] != 0xDEADBEEFu)
+                ++guard;
+        }
+        for (uint32_t x = 0; x < kW; ++x) {
+            if (f.px[static_cast<size_t>(y) * kStride + x] != 0xDEADBEEFu)
+                ++painted;
+        }
+    }
+    check(guard == 0, "stride: no writes past the visible row");
+    check(painted > kW * kH / 2, "stride: the visible area is painted");
+}
+
+// A stride narrower than the row would make each line overwrite the previous one.
+void run_bad_stride() {
+    Frame f(256, 256);
+    anko::panic_screen::bind(reinterpret_cast<volatile uint32_t*>(f.px.data()), 128, 256, 64);
+    check(!anko::panic_screen::bound(), "stride: narrower than width rejected");
+}
+
 } // namespace
 
 int main() {
@@ -170,6 +298,12 @@ int main() {
     run_size(640, 480, "small");
     run_size(400, 300, "tiny");
 
+    // The actual target: a 1080x2280 phone panel, plus the padded-row case.
+    run_portrait(1080, 2280, "p20-lite");
+    run_portrait(720, 1440, "720p-portrait");
+    run_stride();
+    run_bad_stride();
+
     // Without a payload the screen still renders (title/reason/logo only).
     {
         Frame f(1024, 768);
@@ -177,7 +311,8 @@ int main() {
         anko::panic_screen::show("KERNEL PANIC", "no payload", nullptr, nullptr);
         uint32_t uk = 0;
         for (uint32_t c : f.px) {
-            if (c != kBg) ++uk;
+            if (c != kBg)
+                ++uk;
         }
         check(uk > 1000, "screen renders without a QR payload");
     }

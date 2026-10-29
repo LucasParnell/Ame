@@ -15,20 +15,21 @@ namespace sched {
 // handoff_next — installs receiver as next thread for handoff
 // ---------------------------------------------------------------------------
 void set_handoff_next(Thread* receiver) {
-    Eki& e         = current_eki();
+    Eki& e = current_eki();
     e.handoff_next = receiver;
 }
 
 // Consume a pending handoff target: post_syscall runs it instead of pick_next.
 Thread* handoff_take_next(Eki& e) {
-    Thread* next   = e.handoff_next;
+    Thread* next = e.handoff_next;
     e.handoff_next = nullptr;
     return next;
 }
 
 // Drop a queued handoff target if it is the thread being retired.
 void handoff_forget(Eki& e, Thread* t) {
-    if (e.handoff_next == t) e.handoff_next = nullptr;
+    if (e.handoff_next == t)
+        e.handoff_next = nullptr;
 }
 
 // True once a granted handoff quantum has outlived its deadline.
@@ -42,10 +43,9 @@ bool handoff_deadline_expired(const Thread* t, u64 now) {
 // thread stays CPU-bound past the window, stripping remaining wake credit.
 // ---------------------------------------------------------------------------
 void ipc_drain_quantum_begin(Thread* t, u64 now) {
-    if (t->last_wake_reason == WAKE_DOORBELL
-        && t->latency_hint == LATENCY_IPC_SERVER
-        && !t->in_drain_quantum) {
-        t->in_drain_quantum       = true;
+    if (t->last_wake_reason == WAKE_DOORBELL && t->latency_hint == LATENCY_IPC_SERVER &&
+        !t->in_drain_quantum) {
+        t->in_drain_quantum = true;
         t->drain_quantum_start_ns = now;
     }
 }
@@ -56,9 +56,9 @@ void ipc_drain_quantum_expire(Thread* t, u64 now) {
         t->has_donation = false;
         t->donated_key = 0;
     }
-    if (t->in_drain_quantum && now - t->drain_quantum_start_ns > kIpcDrainQuantumNs) {
+    if (t->in_drain_quantum && now - t->drain_quantum_start_ns >= kIpcDrainQuantumNs) {
         t->in_drain_quantum = false;
-        t->wake_credit_ns   = 0;
+        t->wake_credit_ns = 0;
     }
 }
 
@@ -67,7 +67,8 @@ void ipc_drain_quantum_expire(Thread* t, u64 now) {
 // dies before the handoff completes.
 // ---------------------------------------------------------------------------
 void handoff_abort_reply(Thread* t) {
-    if (!t->reply_target) return;
+    if (!t->reply_target)
+        return;
     Thread* peer = t->reply_target;
     t->reply_target = nullptr;
     if (peer->reply_target == t) {
@@ -82,13 +83,13 @@ void handoff_abort_reply(Thread* t) {
 // reply_handoff.  effective_key() consults the donation as a lower-bound key.
 // ---------------------------------------------------------------------------
 void handoff_grant_donation(Thread* receiver, const Thread* sender) {
-    receiver->donated_key  = sender->vruntime_ns;
+    receiver->donated_key = sender->vruntime_ns;
     receiver->has_donation = true;
 }
 
 void handoff_clear_donation(Thread* donor) {
     donor->has_donation = false;
-    donor->donated_key  = 0;
+    donor->donated_key = 0;
 }
 
 } // namespace sched

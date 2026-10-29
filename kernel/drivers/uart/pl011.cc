@@ -26,7 +26,8 @@ static void pl011_putchar(char c) {
 #endif
     while (g_base[platform::kUartFR / 4] & platform::kUartFR_TXFF) {
 #ifdef ANKO_BOARD_HUAWEI_ANNE
-        if (++tries == 100000) return;
+        if (++tries == 100000)
+            return;
 #else
         // spin
 #endif
@@ -40,6 +41,6 @@ static void pl011_early_init(PhysAddr base) {
     g_base = reinterpret_cast<volatile u32*>(base);
 }
 
-extern const ConsoleOps kPl011Ops = { pl011_early_init, pl011_putchar };
+extern const ConsoleOps kPl011Ops = {pl011_early_init, pl011_putchar};
 
 } // namespace drivers::uart

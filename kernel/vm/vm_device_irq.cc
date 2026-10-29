@@ -71,9 +71,11 @@ void device_irq_init() {
 bool device_irq_vector_used(const Vcpu& vcpu, u32 guest_irq) {
     kernel::LockGuard guard(g_route_lock);
     for (const auto& slot : g_routes) {
-        if (!slot.used) continue;
+        if (!slot.used)
+            continue;
         const auto& route = slot.owner->irq[slot.route_index];
-        if (route.target == &vcpu && route.guest_irq == guest_irq) return true;
+        if (route.target == &vcpu && route.guest_irq == guest_irq)
+            return true;
     }
     return false;
 }
@@ -90,8 +92,7 @@ SysError device_irq_install(VmDeviceAssignment* a, u32 route_index) {
         // A host line that is not a programmable SPI cannot be routed; this is
         // a hard rejection, not a silent fallback.  Log the id so a mis-derived
         // INTx (wrong host interrupt-map parse) is immediately visible.
-        ANKO_LOGF_ERROR("kernel/vm", "assign: host irq %u is not a bindable SPI",
-                        route.host_irq);
+        ANKO_LOGF_ERROR("kernel/vm", "assign: host irq %u is not a bindable SPI", route.host_irq);
         return E_INVALID;
     }
     // A channel owns its edge-triggered vector exclusively. Sharing it with
@@ -99,7 +100,8 @@ SysError device_irq_install(VmDeviceAssignment* a, u32 route_index) {
     if (auto* owner = owner_for_vcpu(route.target)) {
         for (u32 i = 0; i < owner->channel_count; ++i) {
             const auto* ch = owner->channels[i];
-            if (ch && ch->target == route.target && ch->guest_irq == route.guest_irq) return E_BUSY;
+            if (ch && ch->target == route.target && ch->guest_irq == route.guest_irq)
+                return E_BUSY;
         }
     }
 
@@ -174,7 +176,8 @@ void device_irq_deliver(u32 host_irq) {
     // this same lock before removing a slot and releasing retained objects.
     kernel::LockGuard guard(g_route_lock);
     RouteSlot* slot = find_by_host_locked(host_irq, kRouteSlots);
-    if (!slot || !slot->owner || slot->route_index >= slot->owner->irq_count) return;
+    if (!slot || !slot->owner || slot->route_index >= slot->owner->irq_count)
+        return;
     VmDeviceAssignment* owner = slot->owner;
     const u32 route_index = slot->route_index;
     VmAssignIrq& route = owner->irq[route_index];

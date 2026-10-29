@@ -72,7 +72,7 @@ def parse_log(text, expected_config=None):
                     all(char in '0123456789abcdef' for char in digest), 'missing compiled workload hash')
             require(row['client_process'] != row['server_process'], 'peers are not separate processes')
             require(isinstance(row.get('transport'), str) and row['transport'], 'missing transport')
-            require(row.get('diagnostic_scope') in ('isolated_system', 'client_process'), 'unknown diagnostic scope')
+            require(row.get('diagnostic_scope') in ('isolated_system', 'shared_system', 'client_process'), 'unknown diagnostic scope')
             if expected_config:
                 for key, value in expected_config.items():
                     require(row.get(key) == value, f'compiled/run configuration mismatch: {key}')
@@ -230,6 +230,8 @@ def compare(baseline, candidate, cross_os=False):
         require(a.get('machine_id') and a.get('machine_id') == b.get('machine_id'),
                 'cross-OS comparison needs an explicit matching physical/emulated machine-id')
     else:
+        require(baseline['runs'][0]['header']['diagnostic_scope'] == candidate['runs'][0]['header']['diagnostic_scope'],
+                'regression diagnostic scope mismatch')
         require(a.get('machine_id') == b.get('machine_id') and a.get('host_identity') == b.get('host_identity'),
                 'regression runs use different machines/hosts')
         require(a.get('affinity') == b.get('affinity'), 'regression CPU affinity/topology mismatch')

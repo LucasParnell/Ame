@@ -220,6 +220,7 @@ int main() {
                 '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 *['-I' + str(ROOT / p) for p in ('kernel/include', 'shared/include',
                                                 'boards/huawei-anne', 'tests')],
+                '-idirafter', str(ROOT / 'lib/include'),
                 str(cpp), str(ROOT / 'shared/drivers/emmc/sdhci.cc'),
                 str(ROOT / 'boards/huawei-anne/emmc.cc'),
                 str(ROOT / 'boards/huawei-anne/rpmb_provisioning.cc'), '-o', str(probe)],

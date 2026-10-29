@@ -7,78 +7,203 @@
 #include <vector>
 #include "anko/emmc.h"
 #include "emmc.h"
+#include "../kernel/power/anne/pll.h"
 
 using namespace drivers::emmc;
 #include "emmc_model.h"
 
 static Frame frame(u16 type, u16 address = 0, u16 count = 0) {
     Frame f{};
-    f.bytes[510] = u8(type >> 8); f.bytes[511] = u8(type);
-    f.bytes[504] = u8(address >> 8); f.bytes[505] = u8(address);
-    f.bytes[506] = u8(count >> 8); f.bytes[507] = u8(count);
+    f.bytes[510] = u8(type >> 8);
+    f.bytes[511] = u8(type);
+    f.bytes[504] = u8(address >> 8);
+    f.bytes[505] = u8(address);
+    f.bytes[506] = u8(count >> 8);
+    f.bytes[507] = u8(count);
     f.bytes[484] = 0x76; // nonce survives PIO and bridge copies
     return f;
 }
-static void le32(u8* p, u32 value) { for (unsigned i = 0; i < 4; ++i) p[i] = u8(value >> (8 * i)); }
+static void le32(u8* p, u32 value) {
+    for (unsigned i = 0; i < 4; ++i)
+        p[i] = u8(value >> (8 * i));
+}
 
 int main(int argc, char** argv) {
+    constexpr auto pll = 1u | (3u << 2) | (250u << 8) | (1u << 20) | (1u << 23);
+    static_assert(anne::clocks::pll_rate(pll, 1u << 24) == 1600000000);
+    static_assert(anne::clocks::pll_rate(pll, 1u << 23) == 1603200000);
+    static_assert(anne::clocks::pll_rate(pll & ~(63u << 2), 0) == 0);
+    static_assert(anne::clocks::pll_rate(0, 0) == 0);
+    static_assert(anne::clocks::pll_rate(3, 0) == 19200000);
     assert(argc == 2);
     const std::string scenario(argv[1]);
     Model m;
     Driver driver(m.io());
-    if (scenario == "power-off") { m.put(0x29, 0, 1); assert(driver.initialize(200000000) == Error::NotReady); return 0; }
-    if (scenario == "clock-timeout") m.clock_stall = true;
-    if (scenario == "reset-timeout") m.reset_stall = true;
-    if (scenario == "command-timeout") m.command_stall = true;
-    if (scenario == "byte-addressing") m.byte_addressing = true;
-    if (scenario == "native-4k") m.csd[61] = 1;
-    if (scenario == "cache-flush" || scenario == "buffered-flush") m.csd[33] = 1;
-    const bool wide = scenario == "wide" || scenario == "wide-fallback" || scenario == "wide-restore-error";
-    if (wide) m.put(0x40, 1u << 18, 4);
-    if (scenario == "wide-fallback" || scenario == "wide-restore-error") m.corrupt_wide = true;
-    if (scenario == "wide-restore-error") m.fail_width_restore = true;
-    const auto init = driver.initialize(200000000, true, wide ? 8 : 1);
-    if (scenario == "wide-restore-error") { assert(init != Error::Ok && !driver.ready()); return 0; }
-    if (scenario == "clock-timeout" || scenario == "reset-timeout" || scenario == "command-timeout") {
-        assert(init == Error::Timeout && !driver.ready()); assert(m.time < 4000000); return 0;
+
+    if (scenario.starts_with("handoff")) {
+        m.put(0x28, 0xf4, 1);
+        m.put(0x3e, 0x8d, 2);
+        m.put(0x2c, 7, 2);
+        m.put(0x430, 1u << 7, 4);
+        m.put(0x440, 0x42, 4);
+        m.put(0x40, (1u << 18) | (1u << 19), 4);
+        m.csd[183] = 6;
+        m.csd[185] = 0x43;
+        m.csd[192] = 8;
+        m.csd[196] = 0x57;
+        m.csd[197] = 31;
+        m.csd[33] = 1;
+
+        if (scenario == "handoff-no-dll")
+            m.put(0x440, 0x40, 4);
+        if (scenario == "handoff-host-card")
+            m.csd[183] = 2;
+        if (scenario == "handoff-queue")
+            m.csd[15] = 1;
+        if (scenario == "handoff-read-error")
+            m.fail_r1 = 8;
+        if (scenario == "handoff-late-mismatch")
+            m.mismatch_second_ext = true;
+        if (scenario == "handoff-busy")
+            m.busy_stall = true;
+        if (scenario == "handoff-voltage")
+            m.put(0x3e, 0x85, 2);
+        if (scenario == "handoff-v4")
+            m.put(0x3e, 0x108d, 2);
+        if (scenario == "handoff-strobe-mismatch")
+            m.put(0x78, 1, 2);
+        if (scenario == "handoff-enhanced") {
+            m.put(0x78, 1, 2);
+            m.csd[183] = 0x86;
+            m.csd[184] = 1;
+        }
+        if (scenario == "handoff-divided")
+            m.put(0x2c, 0x107, 2);
+
+        const auto result =
+            driver.adopt_hs400(scenario == "handoff-overclock" ? 400000000 : 200000000, 8);
+        if (scenario != "handoff" && scenario != "handoff-divided" &&
+            scenario != "handoff-enhanced") {
+            assert(result != Error::Ok && !driver.ready());
+            m.busy_stall = false;
+            m.mismatch_second_ext = false;
+            m.put(0x440, 0x40, 4);
+            assert(driver.initialize(200000000, true, 8) == Error::Ok);
+            assert(!driver.info().inherited_hs400 && driver.info().bus_clock_hz == 25000000);
+            return 0;
+        }
+
+        assert(result == Error::Ok && driver.ready());
+        assert(driver.info().inherited_hs400 && driver.info().bus_width == 8);
+        assert(driver.info().ext_csd[183] == 0);
+        assert(driver.info().bus_clock_hz ==
+               (scenario == "handoff-divided" ? 100000000u : 200000000u));
+        assert(m.get(0x3e, 2) == 0x8d && m.get(0x430, 4) == (1u << 7));
+        for (const auto& command : m.commands)
+            assert(command.index == 8 || command.index == 13);
+
+        assert(driver.enable_dma({m.dma.data(), Model::dma_phys, m.dma.size()}) == Error::Ok);
+        std::array<u8, 4096> bytes{};
+        assert(driver.read(0, 8, bytes.data()) == Error::Ok);
+        assert(!std::memcmp(bytes.data(), m.disk.data(), bytes.size()));
+        bytes.fill(0x73);
+        assert(driver.write_buffered(0, 8, bytes.data()) == Error::Ok);
+        assert(driver.flush() == Error::Ok);
+        assert(!std::memcmp(bytes.data(), m.disk.data(), bytes.size()));
+        assert(m.csd[185] == 0x43 && m.csd[183] == (scenario == "handoff-enhanced" ? 0x86 : 6));
+        return 0;
     }
-    if (scenario == "byte-addressing" || scenario == "native-4k") { assert(init == Error::Unsupported); return 0; }
+
+    if (scenario == "power-off") {
+        m.put(0x29, 0, 1);
+        assert(driver.initialize(200000000) == Error::NotReady);
+        return 0;
+    }
+    if (scenario == "clock-timeout")
+        m.clock_stall = true;
+    if (scenario == "reset-timeout")
+        m.reset_stall = true;
+    if (scenario == "command-timeout")
+        m.command_stall = true;
+    if (scenario == "byte-addressing")
+        m.byte_addressing = true;
+    if (scenario == "native-4k")
+        m.csd[61] = 1;
+    if (scenario == "cache-flush" || scenario == "buffered-flush")
+        m.csd[33] = 1;
+    const bool wide =
+        scenario == "wide" || scenario == "wide-fallback" || scenario == "wide-restore-error";
+    if (wide)
+        m.put(0x40, 1u << 18, 4);
+    if (scenario == "wide-fallback" || scenario == "wide-restore-error")
+        m.corrupt_wide = true;
+    if (scenario == "wide-restore-error")
+        m.fail_width_restore = true;
+    const auto init = driver.initialize(200000000, true, wide ? 8 : 1);
+    if (scenario == "wide-restore-error") {
+        assert(init != Error::Ok && !driver.ready());
+        return 0;
+    }
+    if (scenario == "clock-timeout" || scenario == "reset-timeout" ||
+        scenario == "command-timeout") {
+        assert(init == Error::Timeout && !driver.ready());
+        assert(m.time < 4000000);
+        return 0;
+    }
+    if (scenario == "byte-addressing" || scenario == "native-4k") {
+        assert(init == Error::Unsupported);
+        return 0;
+    }
     assert(init == Error::Ok && driver.ready() && driver.info().sectors == 128);
     if (scenario.starts_with("dma")) {
         const DmaArena arena{m.dma.data(), Model::dma_phys, m.dma.size()};
         assert(driver.enable_dma(arena) == Error::Unsupported && !driver.dma_enabled());
         m.put(0x40, 1u << 19, 4);
-        for (auto invalid : {DmaArena{}, DmaArena{arena.cpu+1,arena.physical,arena.size},
-                DmaArena{arena.cpu,arena.physical+1,arena.size}, DmaArena{arena.cpu,arena.physical,arena.size-1},
-                DmaArena{arena.cpu,1ull<<32,arena.size},DmaArena{arena.cpu,0xfffff000,arena.size}})
+        for (auto invalid : {DmaArena{}, DmaArena{arena.cpu + 1, arena.physical, arena.size},
+                             DmaArena{arena.cpu, arena.physical + 1, arena.size},
+                             DmaArena{arena.cpu, arena.physical, arena.size - 1},
+                             DmaArena{arena.cpu, 1ull << 32, arena.size},
+                             DmaArena{arena.cpu, 0xfffff000, arena.size}})
             assert(driver.enable_dma(invalid) == Error::Invalid && !driver.dma_enabled());
         assert(driver.enable_dma(arena) == Error::Ok && driver.dma_enabled());
         const auto fifo = m.fifo_words;
         std::array<u8, 65537> buffer{};
         if (scenario == "dma") {
             for (auto count : {1u, 8u, 64u, 65u, 128u}) {
-                assert(driver.read(0, count, buffer.data()+1) == Error::Ok);
-                assert(!std::memcmp(buffer.data()+1,m.disk.data(),count*512));
-                for (u32 i=1;i<=count*512;++i) buffer[i]=u8(i+count);
-                assert(driver.write_buffered(0,count,buffer.data()+1)==Error::Ok);
-                assert(!std::memcmp(buffer.data()+1,m.disk.data(),count*512));
+                assert(driver.read(0, count, buffer.data() + 1) == Error::Ok);
+                assert(!std::memcmp(buffer.data() + 1, m.disk.data(), count * 512));
+                for (u32 i = 1; i <= count * 512; ++i)
+                    buffer[i] = u8(i + count);
+                assert(driver.write_buffered(0, count, buffer.data() + 1) == Error::Ok);
+                assert(!std::memcmp(buffer.data() + 1, m.disk.data(), count * 512));
             }
-            assert(m.dma_transfers==10 && m.fifo_words==fifo);
+            assert(m.dma_transfers == 10 && m.fifo_words == fifo);
             // RPMB continues through the PIO transport with DMA configured.
-            auto request=frame(2);Frame response{};
-            assert(driver.rpmb(&request,1,&response,1)==Error::Ok && response.bytes[484]==0x76);
-            assert(m.dma_transfers==10 && m.fifo_words>fifo);
+            auto request = frame(2);
+            Frame response{};
+            assert(driver.rpmb(&request, 1, &response, 1) == Error::Ok &&
+                   response.bytes[484] == 0x76);
+            assert(m.dma_transfers == 10 && m.fifo_words > fifo);
         } else {
-            if (scenario == "dma-timeout" || scenario == "dma-reset-error") m.data_stall=true;
-            if (scenario == "dma-error") m.adma_error=true;
-            if (scenario == "dma-reset-error") m.reset_stall=true;
+            if (scenario == "dma-timeout" || scenario == "dma-reset-error")
+                m.data_stall = true;
+            if (scenario == "dma-error")
+                m.adma_error = true;
+            if (scenario == "dma-reset-error")
+                m.reset_stall = true;
             buffer.fill(0x39);
-            const auto result=driver.read(0,128,buffer.data()+1);
+            const auto result = driver.read(0, 128, buffer.data() + 1);
             assert(result == (scenario == "dma-error" ? Error::Controller : Error::Timeout));
-            for (auto byte : buffer) assert(byte==0x39); // never publish partial DMA reads
-            assert(m.dma_transfers==1 && m.fifo_words==fifo);
-            if (scenario=="dma-reset-error") assert(!driver.ready());
-            else { m.data_stall=false;m.adma_error=false;assert(driver.read(0,1,buffer.data())==Error::Ok); }
+            for (auto byte : buffer)
+                assert(byte == 0x39); // never publish partial DMA reads
+            assert(m.dma_transfers == 1 && m.fifo_words == fifo);
+            if (scenario == "dma-reset-error")
+                assert(!driver.ready());
+            else {
+                m.data_stall = false;
+                m.adma_error = false;
+                assert(driver.read(0, 1, buffer.data()) == Error::Ok);
+            }
         }
         return 0;
     }
@@ -90,17 +215,20 @@ int main(int argc, char** argv) {
         assert(std::memcmp(block.data(), m.disk.data(), 512) == 0);
         return 0;
     }
-    assert(m.get(0x3e, 2) == 8); // inherited 1.8V signaling preserved
-    assert((m.get(0x2c, 2) & 0xff00) == 0x0800); // 200MHz / 16
+    assert(m.get(0x3e, 2) == 8);                 // inherited 1.8V signaling preserved
+    assert((m.get(0x2c, 2) & 0xff00) == 0x0400); // 200MHz / 8 = 25MHz
     m.commands.clear();
     Frame request = frame(2), response{};
     if (scenario == "buffered-flush") {
         std::array<u8, 512> buffer{};
         assert(driver.write_buffered(0, 1, buffer.data()) == Error::Ok);
-        for (const auto& c : m.commands) assert(c.index != 6);
+        for (const auto& c : m.commands)
+            assert(c.index != 6);
         assert(driver.flush() == Error::Ok);
         unsigned flushes = 0;
-        for (const auto& c : m.commands) if (c.index == 6 && ((c.arg >> 16) & 255) == 32) ++flushes;
+        for (const auto& c : m.commands)
+            if (c.index == 6 && ((c.arg >> 16) & 255) == 32)
+                ++flushes;
         assert(flushes == 1);
         m.fail_command = 6;
         assert(driver.flush() != Error::Ok);
@@ -123,7 +251,8 @@ int main(int argc, char** argv) {
         if (scenario == "cache-flush") {
             bool flushed = false;
             for (const auto& c : m.commands)
-                if (c.index == 6 && ((c.arg >> 16) & 255) == 32) flushed = true;
+                if (c.index == 6 && ((c.arg >> 16) & 255) == 32)
+                    flushed = true;
             assert(flushed);
         }
         const auto n = m.commands.size();
@@ -133,41 +262,52 @@ int main(int argc, char** argv) {
         assert(driver.read(0, 1, nullptr) == Error::Invalid);
         assert(m.commands.size() == n);
     } else if (scenario == "counter" || scenario == "card-result") {
-        if (scenario == "card-result") m.card_result = 7;
+        if (scenario == "card-result")
+            m.card_result = 7;
         assert(driver.rpmb(&request, 1, &response, 1) == Error::Ok);
         assert(response.bytes[484] == 0x76 && response.bytes[510] == 2);
         assert(response.bytes[509] == m.card_result && m.partition == 0x48);
         std::vector<u32> sequence;
-        for (const auto& c : m.commands) if (c.index != 13) sequence.push_back(c.index);
+        for (const auto& c : m.commands)
+            if (c.index != 13)
+                sequence.push_back(c.index);
         assert((sequence == std::vector<u32>{6, 23, 25, 23, 18, 6}));
     } else if (scenario == "write" || scenario == "legacy-reliable") {
         std::array<Frame, 32> requests;
-        for (auto& f : requests) f = frame(0x1003, 16, 32);
+        for (auto& f : requests)
+            f = frame(0x1003, 16, 32);
         if (scenario == "legacy-reliable") {
             m.csd[166] = 0;
             assert(driver.initialize(200000000) == Error::Ok);
             assert(driver.rpmb(requests.data(), 32, &response, 1) == Error::Unsupported);
-            for (auto& f : requests) f = frame(3, 16, 2);
+            for (auto& f : requests)
+                f = frame(3, 16, 2);
         }
-        assert(driver.rpmb(requests.data(), scenario == "write" ? 32 : 2, &response, 1) == Error::Ok);
+        assert(driver.rpmb(requests.data(), scenario == "write" ? 32 : 2, &response, 1) ==
+               Error::Ok);
         assert(m.partition == 0x48);
         bool saw = false;
-        for (const auto& c : m.commands) if (c.index == 23 && (c.arg >> 31)) saw = true;
+        for (const auto& c : m.commands)
+            if (c.index == 23 && (c.arg >> 31))
+                saw = true;
         assert(saw);
     } else if (scenario == "read32") {
         request = frame(4, 12);
         std::array<Frame, 32> responses;
         assert(driver.rpmb(&request, 1, responses.data(), 32) == Error::Ok);
-        for (auto& f : responses) assert(f.bytes[510] == 4 && f.bytes[484] == 0x76);
+        for (auto& f : responses)
+            assert(f.bytes[510] == 4 && f.bytes[484] == 0x76);
     } else if (scenario == "invalid") {
         assert(driver.rpmb(&request, 0, &response, 1) == Error::Invalid);
         request = frame(1);
         request.bytes[196] = 0x5a; // key material is opaque to the transport
         assert(driver.rpmb(&request, 1, &response, 1) == Error::Ok);
-        assert(response.bytes[510] == 1 && response.bytes[511] == 0 &&
-               response.bytes[508] == 0 && response.bytes[509] == 0);
+        assert(response.bytes[510] == 1 && response.bytes[511] == 0 && response.bytes[508] == 0 &&
+               response.bytes[509] == 0);
         std::vector<u32> key_sequence;
-        for (const auto& c : m.commands) if (c.index != 13) key_sequence.push_back(c.index);
+        for (const auto& c : m.commands)
+            if (c.index != 13)
+                key_sequence.push_back(c.index);
         assert((key_sequence == std::vector<u32>{6, 23, 25, 23, 25, 23, 18, 6}));
         m.commands.clear();
         request = frame(4, 0xffff);
@@ -176,13 +316,20 @@ int main(int argc, char** argv) {
         assert(driver.rpmb(&request, 1, &response, 1) == Error::Invalid);
         assert(m.commands.empty());
     } else if (scenario == "data-timeout" || scenario == "crc-error" || scenario == "r1-error" ||
-               scenario == "restore-error" || scenario == "switch-error" || scenario == "bad-response") {
-        if (scenario == "data-timeout") m.data_stall = true;
-        if (scenario == "crc-error") m.error_with_ready = true;
-        if (scenario == "r1-error") m.fail_r1 = 23;
-        if (scenario == "switch-error") m.fail_command = 6;
-        if (scenario == "restore-error") m.fail_restore = true;
-        if (scenario == "bad-response") m.corrupt_response = true;
+               scenario == "restore-error" || scenario == "switch-error" ||
+               scenario == "bad-response") {
+        if (scenario == "data-timeout")
+            m.data_stall = true;
+        if (scenario == "crc-error")
+            m.error_with_ready = true;
+        if (scenario == "r1-error")
+            m.fail_r1 = 23;
+        if (scenario == "switch-error")
+            m.fail_command = 6;
+        if (scenario == "restore-error")
+            m.fail_restore = true;
+        if (scenario == "bad-response")
+            m.corrupt_response = true;
         const auto result = driver.rpmb(&request, 1, &response, 1);
         if (scenario == "bad-response") {
             assert(result == Error::Ok && response.bytes[510] == 1 && m.partition == 0x48);
@@ -192,16 +339,22 @@ int main(int argc, char** argv) {
         if (scenario == "restore-error") {
             assert(result == Error::RestoreFailed && !driver.ready());
             assert(driver.write(0, 1, &response) == Error::NotReady);
-        } else assert(m.partition == 0x48);
-        if (scenario == "data-timeout") assert(result == Error::Timeout && m.time < 4000000);
-        if (scenario == "crc-error") assert(result == Error::Controller && driver.failure().command == 25);
-        if (scenario == "r1-error") assert(result == Error::Card);
+        } else
+            assert(m.partition == 0x48);
+        if (scenario == "data-timeout")
+            assert(result == Error::Timeout && m.time < 4000000);
+        if (scenario == "crc-error")
+            assert(result == Error::Controller && driver.failure().command == 25);
+        if (scenario == "r1-error")
+            assert(result == Error::Card);
     } else if (scenario == "key-missing" || scenario == "key-unknown" || scenario == "provision" ||
                scenario == "wrong-counter") {
         anne::emmc::Backend backend(driver);
         std::array<u8, 0x8000> window{};
-        if (scenario == "key-missing") m.card_result = 7;
-        if (scenario == "key-unknown") m.corrupt_response = true;
+        if (scenario == "key-missing")
+            m.card_result = 7;
+        if (scenario == "key-unknown")
+            m.corrupt_response = true;
         const auto key = backend.key_info();
         if (scenario == "key-missing" || scenario == "key-unknown") {
             assert(!key.present() && key.missing() == (scenario == "key-missing"));
@@ -217,7 +370,8 @@ int main(int argc, char** argv) {
             const auto n = m.commands.size();
             assert(backend.provision_key(window.data(), window.size()) == 0xff09);
             assert(m.commands.size() == n);
-            window[511] = 1; window[196] = 0xa4;
+            window[511] = 1;
+            window[196] = 0xa4;
             assert(backend.provision_key(window.data(), window.size()) == 0);
             assert(window[510] == 1 && !window[511] && m.partition == 0x48);
         } else {
@@ -262,5 +416,6 @@ int main(int argc, char** argv) {
         assert(backend.service(window.data(), window.size()) == 0xff09);
         assert(backend.service(window.data(), 512) == 0xff03);
         assert(backend.service(nullptr, window.size()) == 0xff03);
-    } else assert(false);
+    } else
+        assert(false);
 }

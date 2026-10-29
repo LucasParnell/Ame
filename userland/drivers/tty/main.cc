@@ -130,18 +130,20 @@ bool service_output() {
         };
         if (view.state == MX_FIDO2_WAITING) {
             write("\n[Security key]\n");
-            if (view.operation == MX_FIDO2_SELECT) write("Select this key for the browser.");
+            if (view.operation == MX_FIDO2_SELECT)
+                write("Select this key for the browser.");
             else {
                 write(view.operation == 1 ? "Register with: " : "Sign in to: ");
                 write(view.rp);
             }
             write("\nPress VOLUME UP to approve within 30 seconds.\n");
         } else {
-            write(view.state == MX_FIDO2_SELECTED ? "\nSecurity key: selected. Continue in the browser.\n"
-                  : view.state == MX_FIDO2_APPROVED ? "\nSecurity key: approved.\n"
+            write(view.state == MX_FIDO2_SELECTED
+                      ? "\nSecurity key: selected. Continue in the browser.\n"
+                  : view.state == MX_FIDO2_APPROVED  ? "\nSecurity key: approved.\n"
                   : view.state == MX_FIDO2_CANCELLED ? "\nSecurity key: cancelled.\n"
-                  : view.state == MX_FIDO2_EXPIRED ? "\nSecurity key: request expired.\n"
-                                                  : "\nSecurity key: request rejected.\n");
+                  : view.state == MX_FIDO2_EXPIRED   ? "\nSecurity key: request expired.\n"
+                                                     : "\nSecurity key: request rejected.\n");
         }
         progress = true;
     }
@@ -190,8 +192,8 @@ extern "C" [[noreturn]] void _start() {
         boot, {"term.output.ring", kVaShellOutputRing, "term.output.doorbell"})};
     g_tty->serial_input =
         mochi::boot::map_ring(boot, {"serial.in.ring", kVaSerialInRing, "serial.in.doorbell"});
-    g_tty->fido_prompt = mochi::boot::map_ring(boot, {"fido2.prompt.ring",
-        kVaFido2Prompt, "fido2.prompt.doorbell"});
+    g_tty->fido_prompt =
+        mochi::boot::map_ring(boot, {"fido2.prompt.ring", kVaFido2Prompt, "fido2.prompt.doorbell"});
     g_tty->serial.output = {
         mochi::boot::map_ring(boot, {"serial.out.ring", kVaSerialOutRing, "serial.out.doorbell"})};
     g_tty->shell_attached = g_tty->shell_input.valid() && g_tty->shell_output.valid();
@@ -219,12 +221,14 @@ extern "C" [[noreturn]] void _start() {
     const auto bar_height = mochi::driver::value(boot, "tty.status.height", 64);
     if (mochi::driver::value(boot, "tty.status", 1) && bar_height < info.height &&
         render.status.configure(info.width, bar_height,
-            mochi::driver::value(boot, "tty.status.scale", 1),
-            mochi::driver::value(boot, "tty.status.margin", 16),
-            mochi::driver::value(boot, "tty.status.notch", 0))) {
-        if (!mochi::boot::find(boot, "tty.y")) render.origin_y = bar_height + 16;
+                                mochi::driver::value(boot, "tty.status.scale", 1),
+                                mochi::driver::value(boot, "tty.status.margin", 16),
+                                mochi::driver::value(boot, "tty.status.notch", 0))) {
+        if (!mochi::boot::find(boot, "tty.y"))
+            render.origin_y = bar_height + 16;
         // Explicit terminal geometry must leave the status panels untouched.
-        if (render.origin_y < bar_height) render.status.enabled = false;
+        if (render.origin_y < bar_height)
+            render.status.enabled = false;
     }
     if (render.origin_x > info.width || render.origin_y > info.height)
         mochi::boot::invalid_boot();
@@ -269,7 +273,8 @@ extern "C" [[noreturn]] void _start() {
         if (!g_tty->input_unlocked && mx_doorbell_read(g_tty->activation)) {
             g_tty->input_unlocked = true;
         }
-        if (render.status.sample(mx_clock_ns())) render.present_pending = true;
+        if (render.status.sample(mx_clock_ns()))
+            render.present_pending = true;
         const bool exhausted = mochi::driver::run_batch([] {
             const bool input = service_input();
             const bool output = service_output();
@@ -283,8 +288,8 @@ extern "C" [[noreturn]] void _start() {
         const bool output_blocked = !g_tty->serial.pending.empty();
         const bool retry = input_blocked || output_blocked || g_tty->render.pending();
         auto deadline = retry ? mx_clock_ns() + mochi::driver::kBackpressureRetryNs
-                              : !g_tty->input_unlocked ? mx_clock_ns() + 10000000ull
-                                                       : 0;
+                        : !g_tty->input_unlocked ? mx_clock_ns() + 10000000ull
+                                                 : 0;
         if (g_tty->fido_view.expires && (!deadline || g_tty->fido_view.expires < deadline))
             deadline = g_tty->fido_view.expires;
         if (render.status.enabled && !render.status.pending() &&

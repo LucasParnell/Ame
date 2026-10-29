@@ -11,24 +11,42 @@ bool span(u32 off, u32 len, u32 total) {
 // name twice while the input may still be uncached physical memory.
 u32 string_length(const u8* p, u32 len) {
     u32 i = 0;
-    while (i < len && p[i]) ++i;
+    while (i < len && p[i])
+        ++i;
     return i;
 }
 Property classify(const char* name, u32 length) {
     // Length selects a small group before comparing bytes. No hashing of the
     // actual string is necessary: FDT already interns names by integer offset.
     switch (length) {
-    case 3: if (libk::memcmp(name, "reg", 3) == 0) return Property::Reg; break;
-    case 5: if (libk::memcmp(name, "width", 5) == 0) return Property::Width; break;
-    case 6:
-        if (libk::memcmp(name, "ranges", 6) == 0) return Property::Ranges;
-        if (libk::memcmp(name, "status", 6) == 0) return Property::Status;
-        if (libk::memcmp(name, "height", 6) == 0) return Property::Height;
-        if (libk::memcmp(name, "stride", 6) == 0) return Property::Stride;
-        if (libk::memcmp(name, "format", 6) == 0) return Property::Format;
+    case 3:
+        if (libk::memcmp(name, "reg", 3) == 0)
+            return Property::Reg;
         break;
-    case 10: if (libk::memcmp(name, "compatible", 10) == 0) return Property::Compatible; break;
-    case 11: if (libk::memcmp(name, "stdout-path", 11) == 0) return Property::StdoutPath; break;
+    case 5:
+        if (libk::memcmp(name, "width", 5) == 0)
+            return Property::Width;
+        break;
+    case 6:
+        if (libk::memcmp(name, "ranges", 6) == 0)
+            return Property::Ranges;
+        if (libk::memcmp(name, "status", 6) == 0)
+            return Property::Status;
+        if (libk::memcmp(name, "height", 6) == 0)
+            return Property::Height;
+        if (libk::memcmp(name, "stride", 6) == 0)
+            return Property::Stride;
+        if (libk::memcmp(name, "format", 6) == 0)
+            return Property::Format;
+        break;
+    case 10:
+        if (libk::memcmp(name, "compatible", 10) == 0)
+            return Property::Compatible;
+        break;
+    case 11:
+        if (libk::memcmp(name, "stdout-path", 11) == 0)
+            return Property::StdoutPath;
+        break;
     }
     return Property::Unknown;
 }
@@ -56,7 +74,11 @@ bool walk(const u8* dtb, const Callbacks& cb, usize available) {
     // Walk-local, direct-mapped cache. Full offset tags make collisions harmless;
     // zero denotes an empty entry. Never retain a validation across blobs or
     // calls, where the same offset could refer to changed or malformed bytes.
-    struct NameEntry { u32 tag; Property id; };
+    struct NameEntry {
+        u32 tag;
+        Property id;
+        bool deliver;
+    };
     NameEntry names[128]{};
     const u8* structure = dtb + off;
     const u8* string_data = dtb + strings;
@@ -102,13 +124,15 @@ bool walk(const u8* dtb, const Callbacks& cb, usize available) {
             const auto* property_name = reinterpret_cast<const char*>(string_data + name);
             if (entry.tag != name + 1) {
                 const u32 length = string_length(string_data + name, string_size - name);
-                if (length == string_size - name) return false;
+                if (length == string_size - name)
+                    return false;
                 entry.tag = name + 1;
                 entry.id = cb.property ? classify(property_name, length) : Property::Unknown;
+                entry.deliver = !cb.filter || cb.filter(property_name, length);
             }
-            if (cb.property) {
+            if (entry.deliver && cb.property) {
                 cb.property(cb.ctx, entry.id, property_name, structure + pos, len, depth - 1);
-            } else {
+            } else if (entry.deliver) {
                 cb.prop(cb.ctx, property_name, structure + pos, len, depth - 1);
             }
             pos = (pos + len + 3u) & ~3u;

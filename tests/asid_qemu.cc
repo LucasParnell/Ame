@@ -3,7 +3,9 @@
 #include "../kernel/mm/vm_space.cc"
 
 HwInfo g_hw{};
-struct alignas(4096) Tables { u64 root[512], l1[512], l2[512], l3[512]; } tables[3];
+struct alignas(4096) Tables {
+    u64 root[512], l1[512], l2[512], l3[512];
+} tables[3];
 alignas(4096) static u64 payload[2][512];
 static void (*volatile activate)(PhysAddr) = mm::vm_activate;
 
@@ -12,15 +14,22 @@ static void (*volatile activate)(PhysAddr) = mm::vm_activate;
     register u64 operation asm("x0") = 0x20;
     register const u64* data asm("x1") = args;
     asm volatile("hlt #0xf000" : "+r"(operation) : "r"(data) : "memory");
-    for (;;) asm volatile("wfe");
+    for (;;)
+        asm volatile("wfe");
 }
-static void require(bool value, u64 code) { if (!value) finish(code); }
-static PhysAddr address(const void* pointer) { return reinterpret_cast<PhysAddr>(pointer); }
+static void require(bool value, u64 code) {
+    if (!value)
+        finish(code);
+}
+static PhysAddr address(const void* pointer) {
+    return reinterpret_cast<PhysAddr>(pointer);
+}
 
 extern "C" void boot_cache_test(PhysAddr) {
     constexpr u64 va = 0x20000000;
     constexpr u64 first = 0x123456789abcdef0, second = 0xfedcba9876543210;
-    payload[0][0] = first; payload[1][0] = second;
+    payload[0][0] = first;
+    payload[1][0] = second;
     const u64 attrs = mm::kernel_page_attrs(false, address(payload));
     require(attrs & mm::PTE_NG, 1);
     for (u32 i = 0; i < 3; ++i) {

@@ -12,13 +12,16 @@ bool producer_allowed(u64 fid);
 // Existing research operations share this gate. An armed lifecycle owns it
 // exclusively until all firmware calls return and the request is completed.
 class ResearchAccess {
-public:
+  public:
     ResearchAccess();
     ~ResearchAccess();
     ResearchAccess(const ResearchAccess&) = delete;
     ResearchAccess& operator=(const ResearchAccess&) = delete;
-    explicit operator bool() const { return acquired_; }
-private:
+    explicit operator bool() const {
+        return acquired_;
+    }
+
+  private:
     bool acquired_ = false;
 };
 
@@ -35,4 +38,4 @@ struct Storage {
 // host tests exercise the same lifecycle with a byte buffer and firmware shim.
 void execute(u32 action, MxDiagEl3Rpmb& out, volatile u8* request, Smc call,
              const Storage* storage = nullptr);
-}
+} // namespace anne::rpmb_diag

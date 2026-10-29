@@ -15,12 +15,13 @@ int main() {
     report.build = "ame-test-1.2.3";
 
     u64 x[31] = {};
-    for (u32 i = 0; i < 31; ++i) x[i] = 0x1000ull + i;
+    for (u32 i = 0; i < 31; ++i)
+        x[i] = 0x1000ull + i;
     x[29] = 0xffff000000123500ull;
     x[30] = 0x0000000010001f20ull;
-    anko::panic_report::capture_registers(report, x, 0xffff000000123400ull,
-                                          0x00000000100018a4ull, 0x00000000600003c5ull,
-                                          0x0000000096000045ull, 0x0000000000000042ull);
+    anko::panic_report::capture_registers(report, x, 0xffff000000123400ull, 0x00000000100018a4ull,
+                                          0x00000000600003c5ull, 0x0000000096000045ull,
+                                          0x0000000000000042ull);
 
     report.trace_count = 3;
     report.trace[0] = 0x0000000010001f20ull;

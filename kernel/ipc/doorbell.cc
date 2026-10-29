@@ -12,27 +12,26 @@
 // Locking discipline: per-doorbell spinlock held with IRQs masked.
 // Cross-CPU wake routes through the target CPU's pending_wakes stack.
 
+#include "libk/atomic.h"
 #include "anko/ipc.h"
 #include "anko/sched.h"
 #include "anko/cap.h"
 #include "anko/mm.h"
 #include "anko/panic.h"
 #include "anko/interrupt_mask.h"
+#include "anko/timer.h"
 #include "anko/spinlock.h"
 #include "libk/metric.h"
 #include "libk/cpu.h"
 #include "libk/string.h"
+#include "libk/deadline.h"
 #include "../sched/sched_internal.h"
 #include "ipc_internal.h"
 
 namespace ipc {
 
-static void destroy_doorbell(void* target) {
-    auto* db = static_cast<Doorbell*>(target);
-    ANKO_ASSERT(!db->waiter);
-    mm::slab_free(db, sizeof(Doorbell), alignof(Doorbell));
-}
-
+// Defined after the deadline queue, which it must retire rows from.
+static void destroy_doorbell(void* target);
 
 // Each CPU writes one statistics line. Totals are formed only on diagnostic
 // reads, so unrelated channels no longer bounce global metric cache lines.
@@ -42,10 +41,13 @@ struct alignas(64) IpcMetrics {
 };
 static_assert(sizeof(IpcMetrics) == 64);
 static IpcMetrics metrics[kMaxCpus]{};
-static IpcMetrics& local_metrics() { return metrics[sched::current_cpu_id()]; }
+static IpcMetrics& local_metrics() {
+    return metrics[sched::current_cpu_id()];
+}
 static u64 metric_total(u64 IpcMetrics::* field) {
     u64 total = 0;
-    for (auto& cpu : metrics) total += libk::metric_load(cpu.*field);
+    for (auto& cpu : metrics)
+        total += libk::metric_load(cpu.*field);
     return total;
 }
 
@@ -73,55 +75,87 @@ static cap::Ref resolve_doorbell_entry(u32 pid, CapHandle handle, u32 need_right
 
 Doorbell* doorbell_create_object(u32 pid) {
     auto owner = process_reference(pid);
-    if (!owner || !owner->cap_table) return nullptr;
+    if (!owner || !owner->cap_table)
+        return nullptr;
 
     Doorbell* db = static_cast<Doorbell*>(mm::slab_alloc(sizeof(Doorbell), alignof(Doorbell)));
-    if (!db) return nullptr;
+    if (!db)
+        return nullptr;
     libk::memset(db, 0, sizeof(*db));
     db->owner_pid = pid;
-    db->rights = RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP;
 
     db->lifetime = object::create(db, destroy_doorbell);
-    if (!db->lifetime) { destroy_doorbell(db); return nullptr; }
+    if (!db->lifetime) {
+        destroy_doorbell(db);
+        return nullptr;
+    }
     return db;
 }
 
 CapHandle doorbell_cap_alloc(u32 target_pid, Doorbell* db, u32 rights) {
-    if (!db) return kNullCap;
+    if (!db)
+        return kNullCap;
     auto target = process_reference(target_pid);
-    if (!target || !target->cap_table) return kNullCap;
+    if (!target || !target->cap_table)
+        return kNullCap;
 
     const u32 allowed = RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP;
     const u32 requested = rights & allowed;
-    if (requested == 0) return kNullCap;
+    if (requested == 0)
+        return kNullCap;
     return cap::alloc(*target->cap_table, CAP_DOORBELL, db, requested, db->lifetime);
 }
 
 CapHandle doorbell_create(u32 pid, u32 hints) {
     if (hints & ~(IPC_HINT_LATENCY | IPC_HINT_THROUGHPUT | IPC_HINT_WAKE_AFFINE |
-                  IPC_HINT_HANDOFF_OK | IPC_HINT_SERVER | IPC_HINT_NO_STEAL)) return kNullCap;
+                  IPC_HINT_HANDOFF_OK | IPC_HINT_SERVER | IPC_HINT_NO_STEAL))
+        return kNullCap;
     Doorbell* db = doorbell_create_object(pid);
-    if (!db) return kNullCap;
+    if (!db)
+        return kNullCap;
     db->sched_hints = hints;
     CapHandle handle = doorbell_cap_alloc(pid, db, RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP);
     object::release(db->lifetime); // transfer the creator root to the capability
     return handle;
 }
 
+CapHandle doorbell_create_bound(u32 pid, CapHandle server_thread) {
+    auto authority = resolve_entry(pid, server_thread, CAP_THREAD, RIGHT_THREAD_CONTROL);
+    if (!authority)
+        return kNullCap;
+    auto* receiver = static_cast<Thread*>(authority->target);
+    if (libk::atomic::load_acquire(&receiver->terminate_requested) || receiver->state == TS_DEAD)
+        return kNullCap;
+    Doorbell* db = doorbell_create_object(pid);
+    if (!db)
+        return kNullCap;
+    db->sched_hints = IPC_HINT_HANDOFF_OK;
+    db->bound_server = authority->object;
+    object::retain(db->bound_server);
+    const auto handle = doorbell_cap_alloc(pid, db, RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP);
+    object::release(db->lifetime);
+    return handle;
+}
+
 CapHandle doorbell_share(u32 owner_pid, CapHandle db_cap, u32 target_pid, u32 rights) {
     cap::Ref src = resolve_doorbell_entry(owner_pid, db_cap, RIGHT_DUP);
-    if (!src) return kNullCap;
+    if (!src)
+        return kNullCap;
 
     Doorbell* db = static_cast<Doorbell*>(src->target);
-    if (!db) return kNullCap;
+    if (!db)
+        return kNullCap;
 
     auto target = process_reference(target_pid);
-    if (!target || !target->cap_table) return kNullCap;
+    if (!target || !target->cap_table)
+        return kNullCap;
 
     const u32 allowed = RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP;
     const u32 requested = rights & allowed;
-    if (requested == 0) return kNullCap;
-    if ((requested & src->rights_mask) != requested) return kNullCap;
+    if (requested == 0)
+        return kNullCap;
+    if ((requested & src->rights_mask) != requested)
+        return kNullCap;
 
     return cap::alloc(*target->cap_table, CAP_DOORBELL, db, requested, src->object);
 }
@@ -130,14 +164,15 @@ CapHandle doorbell_share(u32 owner_pid, CapHandle db_cap, u32 target_pid, u32 ri
 // atomic and acquire the release publication, but writers need no second LL/SC
 // loop inside a lock they already own.
 static void advance_counter_locked(Doorbell* db) {
-    const u64 counter = __atomic_load_n(&db->counter, __ATOMIC_RELAXED);
-    __atomic_store_n(&db->counter, counter + 1, __ATOMIC_RELEASE);
+    const u64 counter = libk::atomic::load_relaxed(&db->counter);
+    libk::atomic::store_release(&db->counter, counter + 1);
 }
 
 SysError notify_object(Doorbell* db) {
     auto& stats = local_metrics();
     metric_inc(stats.notifies);
-    if (!db) return E_NOTFOUND;
+    if (!db)
+        return E_NOTFOUND;
 
     Thread* waiter = nullptr;
     object::Ref<Thread> waiter_reference;
@@ -150,7 +185,7 @@ SysError notify_object(Doorbell* db) {
     db->waiter = nullptr;
 
     if (waiter) {
-        __atomic_store_n(&waiter->waiting_doorbell, nullptr, __ATOMIC_RELEASE);
+        libk::atomic::store_release(&waiter->waiting_doorbell, nullptr);
         ++db->wake_count;
         metric_inc(stats.wakes);
         sched::ipc_note_wake(waiter->principal_id);
@@ -162,8 +197,7 @@ SysError notify_object(Doorbell* db) {
     local_irq_restore(irq);
 
     if (waiter) {
-        const u32 target = sched::wake_ipc(
-            waiter, sched::current(), db->sched_hints, db->home_cpu);
+        const u32 target = sched::wake_ipc(waiter, sched::current(), db->sched_hints, db->home_cpu);
         if (target == sched::current_cpu_id()) {
             metric_inc(stats.local);
         } else {
@@ -191,17 +225,20 @@ SysError notify(CapHandle handle, u32 caller_pid) {
 // ---------------------------------------------------------------------------
 SysError notify_handoff(CapHandle handle, u64 payload_word, u32 caller_pid) {
     cap::Ref ce = resolve_doorbell_entry(caller_pid, handle, RIGHT_NOTIFY);
-    if (!ce) return E_NOTFOUND;
+    if (!ce)
+        return E_NOTFOUND;
     return notify_handoff_object(static_cast<Doorbell*>(ce->target), payload_word);
 }
 
 SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
     auto& stats = local_metrics();
     metric_inc(stats.notifies);
-    if (!db) return E_NOTFOUND;
+    if (!db)
+        return E_NOTFOUND;
 
     Thread* sender = sched::current();
-    if (!sender) return E_DEAD;
+    if (!sender)
+        return E_DEAD;
 
     Thread* receiver = nullptr;
     object::Ref<Thread> receiver_reference;
@@ -216,7 +253,7 @@ SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
     db->waiter = nullptr;
 
     if (receiver) {
-        __atomic_store_n(&receiver->waiting_doorbell, nullptr, __ATOMIC_RELEASE);
+        libk::atomic::store_release(&receiver->waiting_doorbell, nullptr);
         ++db->wake_count;
 
         // Handoff eligibility (spec §13.3):
@@ -227,14 +264,13 @@ SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
         //   - receiver is not already in a handoff chain (no reply_target)
         //   - receiver's principal is not throttled
         const u32 cpu = sched::current_cpu_id();
-        const bool affinity_ok = (receiver->affinity_mask == 0) ||
-                                 ((receiver->affinity_mask >> cpu) & 1u);
+        const bool affinity_ok =
+            (receiver->affinity_mask == 0) || ((receiver->affinity_mask >> cpu) & 1u);
         if ((db->sched_hints & IPC_HINT_HANDOFF_OK) &&
+            (!db->bound_server || db->bound_server == receiver->lifetime) &&
             sender->reply_target == nullptr &&
-            !__atomic_load_n(&receiver->terminate_requested, __ATOMIC_ACQUIRE) &&
-            receiver->state == TS_SLEEPING &&
-            receiver->cpu_id == cpu &&
-            affinity_ok &&
+            !libk::atomic::load_acquire(&receiver->terminate_requested) &&
+            receiver->state == TS_SLEEPING && receiver->cpu_id == cpu && affinity_ok &&
             receiver->reply_target == nullptr &&
             !sched::principal_throttled(receiver->principal_id)) {
             ++db->handoff_count;
@@ -252,8 +288,7 @@ SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
         if (receiver) {
             metric_inc(stats.wakes);
             sched::ipc_note_wake(receiver->principal_id);
-            const u32 target = sched::wake_ipc(
-                receiver, sender, db->sched_hints, db->home_cpu);
+            const u32 target = sched::wake_ipc(receiver, sender, db->sched_hints, db->home_cpu);
             if (target == sched::current_cpu_id()) {
                 metric_inc(stats.local);
             } else {
@@ -299,8 +334,10 @@ SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
 // ---------------------------------------------------------------------------
 static SysError complete_reply(Thread* cur, u64 reply_val) {
     Thread* sender = cur->reply_target;
-    if (!sender) return E_INVALID;
-    if (sender->state != TS_BLOCKED) return E_INVALID;
+    if (!sender)
+        return E_INVALID;
+    if (sender->state != TS_BLOCKED)
+        return E_INVALID;
 
     // Write reply into sender's saved x0 so it sees reply_val on resume.
     sender->tf.x[0] = reply_val;
@@ -312,11 +349,12 @@ static SysError complete_reply(Thread* cur, u64 reply_val) {
 
     const u32 cpu = sched::current_cpu_id();
     if (sender->cpu_id == cpu && sender->execution_cpu == kInvalidCpu &&
-        !__atomic_load_n(&sender->terminate_requested, __ATOMIC_ACQUIRE) &&
+        !libk::atomic::load_acquire(&sender->terminate_requested) &&
         (!sender->affinity_mask || ((sender->affinity_mask >> cpu) & 1u)) &&
         !sched::principal_throttled(sender->principal_id)) {
         sched::set_handoff_next(sender);
-    } else sched::wake(sender);
+    } else
+        sched::wake(sender);
     // reply-and-wait has already parked the server. Plain reply preserves its
     // historical continue-after-reply behavior by requeueing it.
     sched::request_switch(cur->state == TS_RUNNING, SWITCH_REPLY);
@@ -327,7 +365,8 @@ SysError reply_handoff(u64 reply_val, u32 caller_pid) {
     (void)caller_pid;
     kernel::InterruptGuard irq;
     Thread* cur = sched::current();
-    if (!cur) return E_DEAD;
+    if (!cur)
+        return E_DEAD;
     ANKO_ASSERT(cur->state == TS_RUNNING);
     return complete_reply(cur, reply_val);
 }
@@ -351,14 +390,59 @@ static_assert(sizeof(DeadlineWait) == 40);
 static_assert(sizeof(DeadlineQueue) == 3136);
 static DeadlineQueue deadline_waits[kMaxCpus]{};
 
+static void update_deadline_timer(const DeadlineQueue& queue) {
+    u64 active = queue.active, earliest = 0;
+    while (active) {
+        const auto index = __builtin_ctzll(active);
+        active &= active - 1;
+        const auto deadline = queue.deadlines[index];
+        earliest = libk::earlier_deadline(earliest, deadline);
+    }
+    drivers::timer::set_deadline(drivers::timer::DeadlineSource::Ipc, earliest);
+}
+
+// A cap revoke can land while a thread is asleep on this doorbell, so the teardown
+// must retire the waiter and any deadline row pointing at it. Asserting here let a
+// plain revoke take the kernel down, which userland must never be able to do.
+static void destroy_doorbell(void* target) {
+    auto* db = static_cast<Doorbell*>(target);
+    Thread* waiter = db->waiter;
+    db->waiter = nullptr;
+    if (waiter) {
+        libk::atomic::store_release(&waiter->waiting_doorbell, nullptr);
+        sched::wake(waiter);
+    }
+    for (u32 cpu = 0; cpu < kMaxCpus; ++cpu) {
+        auto& queue = deadline_waits[cpu];
+        u64 active = libk::atomic::load_acquire(&queue.active);
+        if (!active)
+            continue;
+        for (u32 index = 0; index < 64; ++index) {
+            if (!(active & (1ull << index)))
+                continue;
+            const DeadlineWait row = queue.rows[index];
+            if (row.doorbell != db)
+                continue;
+            queue.rows[index] = {};
+            __atomic_and_fetch(&queue.active, ~(1ull << index), __ATOMIC_ACQ_REL);
+            object::release(row.thread_ref);
+            object::release(row.doorbell_ref);
+        }
+    }
+    object::release(db->bound_server);
+    mm::slab_free(db, sizeof(Doorbell), alignof(Doorbell));
+}
+
 void poll_deadline_waiters() {
     auto& queue = deadline_waits[sched::current_cpu_id()];
     // An empty poll can return before touching DAIF. Re-read after IRQ masking
     // in the nonempty case, since a timer may reap entries between these reads.
-    if (!__atomic_load_n(&queue.active, __ATOMIC_RELAXED)) return;
+    if (!libk::atomic::load_relaxed(&queue.active))
+        return;
     kernel::InterruptGuard irq;
     u64 active = queue.active;
-    if (!active) return;
+    if (!active)
+        return;
     const u64 now = sched::sched_clock_ns();
     while (active) {
         const u32 index = __builtin_ctzll(active);
@@ -367,11 +451,11 @@ void poll_deadline_waiters() {
         Doorbell* db = row.doorbell;
         lock(db);
         const bool waiting = db->waiter == row.thread &&
-            __atomic_load_n(&row.thread->wait_sequence, __ATOMIC_RELAXED) == row.sequence;
+                             libk::atomic::load_relaxed(&row.thread->wait_sequence) == row.sequence;
         const bool expired = waiting && now >= queue.deadlines[index];
         if (expired) {
             db->waiter = nullptr;
-            __atomic_store_n(&row.thread->waiting_doorbell, nullptr, __ATOMIC_RELEASE);
+            libk::atomic::store_release(&row.thread->waiting_doorbell, nullptr);
         }
         unlock(db);
         if (expired) {
@@ -387,28 +471,41 @@ void poll_deadline_waiters() {
             object::release(row.doorbell_ref);
         }
     }
+    update_deadline_timer(queue);
 }
 SysError wait_doorbell_until(CapHandle handle, u64 expected, u64 deadline, u32 caller_pid) {
     cap::Ref e = resolve_doorbell_entry(caller_pid, handle, RIGHT_WAIT);
     return wait_doorbell_object(e, expected, deadline);
 }
 
-SysError wait_doorbell_object(const cap::Ref& e, u64 expected, u64 deadline,
-                             const Ring* ring, u64 cursor, bool writable) {
+SysError wait_doorbell_object(const cap::Ref& e, u64 expected, u64 deadline, const Ring* ring,
+                              u64 cursor, bool writable, u32 required_space) {
     auto& stats = local_metrics();
     metric_inc(stats.waits);
     Doorbell* db = e ? static_cast<Doorbell*>(e->target) : nullptr;
-    if (!db) return E_NOTFOUND;
+    if (!db)
+        return E_NOTFOUND;
     Thread* cur = sched::current();
-    if (!cur) return E_DEAD;
+    if (!cur)
+        return E_DEAD;
     ANKO_ASSERT(cur->state == TS_RUNNING);
+    if (required_space && (!ring || !writable || required_space > mx_ring_capacity(ring->order)))
+        return E_INVALID;
     const auto changed = [&] {
-        if (!ring) return __atomic_load_n(&db->counter, __ATOMIC_ACQUIRE) != expected;
+        if (!ring)
+            return libk::atomic::load_acquire(&db->counter) != expected;
         // Kernel-created physical backing is retained by the ring capability;
         // no untrusted VA is dereferenced while holding the doorbell lock.
         const auto* page = reinterpret_cast<const RingHeader*>(ring->phys_base);
-        return __atomic_load_n(writable ? &page->tail.tail : &page->head.head,
-                               __ATOMIC_ACQUIRE) != cursor;
+        if (writable && required_space) {
+            const u64 head = libk::atomic::load_acquire(&page->head.head);
+            const u64 tail = libk::atomic::load_acquire(&page->tail.tail);
+            const u64 pending = head - tail;
+            // Corrupt shared cursors return to userspace validation, never park.
+            return pending > mx_ring_capacity(ring->order) ||
+                   pending <= mx_ring_capacity(ring->order) - required_space;
+        }
+        return libk::atomic::load_acquire(writable ? &page->tail.tail : &page->head.head) != cursor;
     };
     if (!deadline && changed()) {
         metric_inc(stats.immediate);
@@ -417,90 +514,143 @@ SysError wait_doorbell_object(const cap::Ref& e, u64 expected, u64 deadline,
     const u64 irq = local_irq_save_disable();
     // Only timed admission touches the local timer table. Untimed Tier-2 waits
     // retain their original constant work; the periodic tick reaps stale rows.
-    if (deadline) poll_deadline_waiters();
+    if (deadline)
+        poll_deadline_waiters();
     auto& queue = deadline_waits[sched::current_cpu_id()];
     u32 timer = 64;
     if (deadline) {
-        if (sched::sched_clock_ns() >= deadline) { local_irq_restore(irq); return E_OK; }
+        if (sched::sched_clock_ns() >= deadline) {
+            local_irq_restore(irq);
+            return E_OK;
+        }
     }
     // A changed counter already satisfies the wait. Keep this common syscall
     // return off the doorbell lock and timer admission path; recheck after
     // locking below to cover a notify racing with actual sleep registration.
     if (changed()) {
         metric_inc(stats.immediate);
-        local_irq_restore(irq); return E_OK;
+        local_irq_restore(irq);
+        return E_OK;
     }
     if (deadline) {
         const u64 available = ~queue.active;
-        if (!available) { local_irq_restore(irq); return E_OVERFLOW; }
+        if (!available) {
+            local_irq_restore(irq);
+            return E_OVERFLOW;
+        }
         timer = __builtin_ctzll(available);
     }
+    // A supervisor/lifecycle wake can make this thread runnable without
+    // notifying its doorbell. Retire that registration before parking again.
+    // Releasing its last reference after installing the new waiter lets the
+    // old doorbell's destructor wake us a second time, stranding the new one.
+    doorbell_clear_waiter(cur);
     lock(db);
     if (changed()) {
         metric_inc(stats.immediate);
-        unlock(db); local_irq_restore(irq); return E_OK;
+        unlock(db);
+        local_irq_restore(irq);
+        return E_OK;
     }
-    if (db->waiter) { unlock(db); local_irq_restore(irq); return E_BUSY; }
-    auto* previous_wait = cur->waiting_lifetime;
+    if (db->waiter) {
+        unlock(db);
+        local_irq_restore(irq);
+        return E_BUSY;
+    }
     cur->waiting_lifetime = e->object;
     object::retain(cur->waiting_lifetime);
     const u64 sequence = __atomic_add_fetch(&cur->wait_sequence, 1ull, __ATOMIC_RELAXED);
     if (timer < 64) {
         auto* thread_ref = cur->lifetime;
-        if (thread_ref) object::retain(thread_ref);
-        else thread_ref = object::acquire(cur); // caller-owned host fixtures
+        if (thread_ref)
+            object::retain(thread_ref);
+        else
+            thread_ref = object::acquire(cur); // caller-owned host fixtures
         object::retain(e->object);
         queue.rows[timer] = {cur, db, thread_ref, e->object, sequence};
         queue.deadlines[timer] = deadline;
         queue.active |= 1ull << timer;
+        update_deadline_timer(queue);
     }
     db->waiter = cur;
-    __atomic_store_n(&cur->waiting_doorbell, db, __ATOMIC_RELEASE);
+    libk::atomic::store_release(&cur->waiting_doorbell, db);
     cur->state = TS_SLEEPING;
     metric_inc(stats.sleeps);
     sched::ipc_note_park(cur->principal_id);
     sched::block(cur);
     unlock(db);
-    object::release(previous_wait); // final destruction runs outside this doorbell's lock
     local_irq_restore(irq);
     return E_OK;
 }
 
-SysError wait_ring(CapHandle ring_handle, CapHandle doorbell, u64 cursor,
-                   u32 direction, u32 caller_pid) {
-    if (direction > MX_RING_WAIT_WRITABLE) return E_INVALID;
-    auto ring = resolve_entry(caller_pid, ring_handle, CAP_SHARED_RING,
-                              direction == MX_RING_WAIT_WRITABLE ? RIGHT_WRITE : RIGHT_READ);
-    auto db = resolve_doorbell_entry(caller_pid, doorbell, RIGHT_WAIT);
-    if (!ring || !db) return E_NOTFOUND;
-    return wait_doorbell_object(db, 0, 0, static_cast<Ring*>(ring->target), cursor,
-                                direction == MX_RING_WAIT_WRITABLE);
+SysError wait_ring(CapHandle ring_handle, CapHandle doorbell, u64 cursor, u32 direction,
+                   u32 caller_pid, u32 required_space) {
+    const bool writable = direction & MX_RING_WAIT_WRITABLE;
+    if (direction & ~(MX_RING_WAIT_WRITABLE | MX_RING_WAIT_MIN_SPACE))
+        return E_INVALID;
+    if ((direction & MX_RING_WAIT_MIN_SPACE) && (!writable || !required_space))
+        return E_INVALID;
+    if (!(direction & MX_RING_WAIT_MIN_SPACE))
+        required_space = 0;
+    const cap::LookupRequest requests[] = {
+        {ring_handle, CAP_SHARED_RING, writable ? RIGHT_WRITE : RIGHT_READ},
+        {doorbell, CAP_DOORBELL, RIGHT_WAIT}};
+    cap::Ref authority[2];
+    if (!resolve_entries(caller_pid, requests, authority, 2))
+        return E_NOTFOUND;
+    return wait_doorbell_object(authority[1], 0, 0, static_cast<Ring*>(authority[0]->target),
+                                cursor, writable, required_space);
 }
 
 SysError exchange_ring(CapHandle notify_handle, CapHandle ring_handle, CapHandle wait_handle,
-                       u64 cursor, u32 flags, u32 caller_pid) {
-    if (flags & ~(MX_IPC_EXCHANGE_HANDOFF | MX_IPC_EXCHANGE_REPLY)) return E_INVALID;
-    if (flags == (MX_IPC_EXCHANGE_HANDOFF | MX_IPC_EXCHANGE_REPLY)) return E_INVALID;
-    auto ring = resolve_entry(caller_pid, ring_handle, CAP_SHARED_RING, RIGHT_READ);
-    auto wait = resolve_doorbell_entry(caller_pid, wait_handle, RIGHT_WAIT);
-    auto notify = resolve_doorbell_entry(caller_pid, notify_handle, RIGHT_NOTIFY);
+                       u64 cursor, u32 flags, u32 caller_pid, u32 required_space) {
+    if (flags & ~(MX_IPC_EXCHANGE_HANDOFF | MX_IPC_EXCHANGE_REPLY | MX_IPC_EXCHANGE_WRITABLE))
+        return E_INVALID;
+    if (flags == (MX_IPC_EXCHANGE_HANDOFF | MX_IPC_EXCHANGE_REPLY))
+        return E_INVALID;
+    const bool writable = flags & MX_IPC_EXCHANGE_WRITABLE;
+    if (writable && (flags != MX_IPC_EXCHANGE_WRITABLE || !required_space))
+        return E_INVALID;
+    if (!writable)
+        required_space = 0; // original ABI ignores unused a5
+    const cap::LookupRequest requests[] = {
+        {ring_handle, CAP_SHARED_RING, writable ? RIGHT_WRITE : RIGHT_READ},
+        {wait_handle, CAP_DOORBELL, RIGHT_WAIT},
+        {notify_handle, CAP_DOORBELL, RIGHT_NOTIFY}};
+    cap::Ref authority[3];
     // All failure-prone authority checks precede notification/reply side effects.
-    if (!ring || !wait || !notify) return E_NOTFOUND;
+    if (!resolve_entries(caller_pid, requests, authority, 3))
+        return E_NOTFOUND;
+    const auto& wait = authority[1];
+    const auto* ring = static_cast<Ring*>(authority[0]->target);
+    if (writable && required_space > mx_ring_capacity(ring->order))
+        return E_INVALID;
     kernel::InterruptGuard irq;
     Thread* cur = sched::current();
-    if (!cur) return E_DEAD;
+    if (!cur)
+        return E_DEAD;
     if ((flags & MX_IPC_EXCHANGE_REPLY) && cur->reply_target) {
-        if (cur->reply_target->state != TS_BLOCKED) return E_INVALID;
-        const auto rc = wait_doorbell_object(wait, 0, 0, static_cast<Ring*>(ring->target), cursor, false);
-        if (rc != E_OK) return rc;
+        if (cur->reply_target->state != TS_BLOCKED)
+            return E_INVALID;
+        const auto rc = wait_doorbell_object(wait, 0, 0, ring, cursor, false);
+        if (rc != E_OK)
+            return rc;
         return complete_reply(cur, E_OK);
     }
-    auto* db = static_cast<Doorbell*>(notify->target);
-    const auto* page = reinterpret_cast<const RingHeader*>(static_cast<Ring*>(ring->target)->phys_base);
-    const bool ready = __atomic_load_n(&page->head.head, __ATOMIC_ACQUIRE) != cursor;
-    const auto rc = (flags & MX_IPC_EXCHANGE_HANDOFF) && !ready ? notify_handoff_object(db, 0) : notify_object(db);
-    if (rc != E_OK || cur->state == TS_BLOCKED) return rc;
-    return wait_doorbell_object(wait, 0, 0, static_cast<Ring*>(ring->target), cursor, false);
+    auto* db = static_cast<Doorbell*>(authority[2]->target);
+    const auto* page = reinterpret_cast<const RingHeader*>(ring->phys_base);
+    const bool ready = writable || libk::atomic::load_acquire(&page->head.head) != cursor;
+    if (!(flags & MX_IPC_EXCHANGE_HANDOFF) || ready || !(db->sched_hints & IPC_HINT_HANDOFF_OK)) {
+        // Authority is validated already. Register the caller before waking
+        // its peer, allowing a sole local receiver to bypass heap insertion.
+        const auto rc = wait_doorbell_object(wait, 0, 0, ring, cursor, writable, required_space);
+        return rc != E_OK ? rc : notify_object(db);
+    }
+    const auto rc = (flags & MX_IPC_EXCHANGE_HANDOFF) && !ready ? notify_handoff_object(db, 0)
+                                                                : notify_object(db);
+    if (rc != E_OK || cur->state == TS_BLOCKED)
+        return rc;
+    return wait_doorbell_object(wait, 0, 0, ring, cursor, writable, required_space);
 }
 SysError wait_doorbell(CapHandle handle, u64 expected, u32 caller_pid) {
     return wait_doorbell_until(handle, expected, 0, caller_pid);
@@ -509,41 +659,64 @@ SysError wait_doorbell(CapHandle handle, u64 expected, u32 caller_pid) {
 u64 doorbell_counter(CapHandle handle, u32 caller_pid) {
     cap::Ref e = resolve_doorbell_entry(caller_pid, handle, RIGHT_WAIT);
     Doorbell* db = e ? static_cast<Doorbell*>(e->target) : nullptr;
-    if (!db) return 0;
-    return __atomic_load_n(&db->counter, __ATOMIC_ACQUIRE);
+    if (!db)
+        return 0;
+    return libk::atomic::load_acquire(&db->counter);
 }
 
 void doorbell_clear_waiter(Thread* thread) {
-    if (!thread) return;
+    if (!thread)
+        return;
 
-    Doorbell* db = __atomic_load_n(&thread->waiting_doorbell, __ATOMIC_ACQUIRE);
+    Doorbell* db = libk::atomic::load_acquire(&thread->waiting_doorbell);
     if (!db) {
-        object::release(thread->waiting_lifetime); thread->waiting_lifetime = nullptr;
+        object::release(thread->waiting_lifetime);
+        thread->waiting_lifetime = nullptr;
         return;
     }
 
     const u64 irq = local_irq_save_disable();
     lock(db);
-    if (db->waiter == thread) db->waiter = nullptr;
+    if (db->waiter == thread)
+        db->waiter = nullptr;
     // Re-load under lock: notify() may have cleared waiting_doorbell between
     // our initial load above and acquiring the lock.
-    Doorbell* waiting = __atomic_load_n(&thread->waiting_doorbell, __ATOMIC_ACQUIRE);
+    Doorbell* waiting = libk::atomic::load_acquire(&thread->waiting_doorbell);
     if (waiting == db) {
-        __atomic_store_n(&thread->waiting_doorbell, nullptr, __ATOMIC_RELEASE);
+        libk::atomic::store_release(&thread->waiting_doorbell, nullptr);
     }
     unlock(db);
     local_irq_restore(irq);
-    object::release(thread->waiting_lifetime); thread->waiting_lifetime = nullptr;
+    object::release(thread->waiting_lifetime);
+    thread->waiting_lifetime = nullptr;
 }
 
-u64 doorbell_sleep_count()       { return metric_total(&IpcMetrics::sleeps); }
-u64 doorbell_wake_count()        { return metric_total(&IpcMetrics::wakes); }
-u64 doorbell_wait_calls()        { return metric_total(&IpcMetrics::waits); }
-u64 doorbell_wait_immediate()    { return metric_total(&IpcMetrics::immediate); }
-u64 notify_calls()               { return metric_total(&IpcMetrics::notifies); }
-u64 notify_no_waiter()           { return metric_total(&IpcMetrics::no_waiter); }
-u64 notify_woke_thread()         { return metric_total(&IpcMetrics::wakes); }
-u64 doorbell_local_wake_count()  { return metric_total(&IpcMetrics::local); }
-u64 doorbell_remote_wake_count() { return metric_total(&IpcMetrics::remote); }
+u64 doorbell_sleep_count() {
+    return metric_total(&IpcMetrics::sleeps);
+}
+u64 doorbell_wake_count() {
+    return metric_total(&IpcMetrics::wakes);
+}
+u64 doorbell_wait_calls() {
+    return metric_total(&IpcMetrics::waits);
+}
+u64 doorbell_wait_immediate() {
+    return metric_total(&IpcMetrics::immediate);
+}
+u64 notify_calls() {
+    return metric_total(&IpcMetrics::notifies);
+}
+u64 notify_no_waiter() {
+    return metric_total(&IpcMetrics::no_waiter);
+}
+u64 notify_woke_thread() {
+    return metric_total(&IpcMetrics::wakes);
+}
+u64 doorbell_local_wake_count() {
+    return metric_total(&IpcMetrics::local);
+}
+u64 doorbell_remote_wake_count() {
+    return metric_total(&IpcMetrics::remote);
+}
 
 } // namespace ipc

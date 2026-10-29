@@ -75,7 +75,9 @@ State state() {
     __atomic_load(&g_state, &value, __ATOMIC_ACQUIRE);
     return value;
 }
-void set_state(State value) { __atomic_store(&g_state, &value, __ATOMIC_RELEASE); }
+void set_state(State value) {
+    __atomic_store(&g_state, &value, __ATOMIC_RELEASE);
+}
 PhysAddr g_base = 0;
 u32 g_sid_limit = 0;
 u32 g_cmdq_log2 = kCmdqLog2;
@@ -116,7 +118,7 @@ void clean_to_poc(PhysAddr pa, u64 len) {
     if (!g_coherent) {
         const PhysAddr start = pa & ~static_cast<u64>(g_line_bytes - 1);
         for (PhysAddr p = start; p < pa + len; p += g_line_bytes)
-            asm volatile("dc cvac, %0" :: "r"(p) : "memory");
+            asm volatile("dc cvac, %0" ::"r"(p) : "memory");
         asm volatile("dsb osh" ::: "memory");
     } else {
         libk::dma::publish();
@@ -126,7 +128,7 @@ void consume_event(PhysAddr pa) {
     if (!g_coherent) {
         const auto first = pa & ~static_cast<u64>(g_line_bytes - 1);
         for (PhysAddr p = first; p < pa + kEvtBytes; p += g_line_bytes)
-            asm volatile("dc ivac, %0" :: "r"(p) : "memory");
+            asm volatile("dc ivac, %0" ::"r"(p) : "memory");
         asm volatile("dsb osh" ::: "memory");
     } else {
         libk::dma::consume();
@@ -140,7 +142,8 @@ void fail_closed_locked(const char* reason) {
     set_state(State::Failed);
     writel(kRegCr0, 0);
     for (u32 spin = 0; spin < kSyncSpins; ++spin)
-        if (readl(kRegCr0Ack) == 0) break;
+        if (readl(kRegCr0Ack) == 0)
+            break;
     ANKO_LOGF_ERROR("iommu/smmuv3", "controller contained: %s", reason);
 }
 
@@ -148,7 +151,8 @@ void fail_closed_locked(const char* reason) {
 // Command queue
 // ---------------------------------------------------------------------------
 SysError cq_submit_locked(const Cmd& cmd) {
-    if (state() == State::Failed) return E_FAULT;
+    if (state() == State::Failed)
+        return E_FAULT;
     // Never overwrite a command the SMMU still owns. This is bounded cold
     // backpressure, independent of CPU-to-CPU ring release/acquire ordering.
     bool space = false;
@@ -158,9 +162,15 @@ SysError cq_submit_locked(const Cmd& cmd) {
             fail_closed_locked("command queue error");
             return E_FAULT;
         }
-        if (!q_full(g_cmdq_prod, cons, g_cmdq_log2)) { space = true; break; }
+        if (!q_full(g_cmdq_prod, cons, g_cmdq_log2)) {
+            space = true;
+            break;
+        }
     }
-    if (!space) { fail_closed_locked("command queue full timeout"); return E_FAULT; }
+    if (!space) {
+        fail_closed_locked("command queue full timeout");
+        return E_FAULT;
+    }
     Cmd& slot = g_cmdq[q_index(g_cmdq_prod, g_cmdq_log2)];
     libk::memcpy(slot.w, cmd.w, sizeof(slot.w));
     clean_to_poc(reinterpret_cast<PhysAddr>(&slot), kCmdBytes);
@@ -171,7 +181,8 @@ SysError cq_submit_locked(const Cmd& cmd) {
 
 SysError cq_sync_locked() {
     const auto rc = cq_submit_locked(make_cmd_sync());
-    if (rc != E_OK) return rc;
+    if (rc != E_OK)
+        return rc;
     const u32 want = q_wrap_index(g_cmdq_prod, g_cmdq_log2);
     for (u32 spin = 0; spin < kSyncSpins; ++spin) {
         const auto cons = readl(kRegCmdqCons);
@@ -180,7 +191,8 @@ SysError cq_sync_locked() {
             fail_closed_locked("command queue completion error");
             return E_FAULT;
         }
-        if (q_wrap_index(cons, g_cmdq_log2) == want) return E_OK;
+        if (q_wrap_index(cons, g_cmdq_log2) == want)
+            return E_OK;
     }
     fail_closed_locked("command queue sync timeout");
     return E_FAULT;
@@ -193,11 +205,16 @@ SysError publish_ste(void*, const Ste& entry) {
     clean_to_poc(reinterpret_cast<PhysAddr>(&entry), kSteBytes);
     return E_OK;
 }
-SysError submit_update(void*, const Cmd& cmd) { return cq_submit_locked(cmd); }
-SysError sync_update(void*) { return cq_sync_locked(); }
+SysError submit_update(void*, const Cmd& cmd) {
+    return cq_submit_locked(cmd);
+}
+SysError sync_update(void*) {
+    return cq_sync_locked();
+}
 
 SysError program_ste_locked(u32 sid, const Ste& ste) {
-    if (sid >= g_sid_limit) return E_INVALID;
+    if (sid >= g_sid_limit)
+        return E_INVALID;
     Ste& entry = *reinterpret_cast<Ste*>(g_stream_table + (sid & (kStreamEntries - 1)) * kSteBytes);
     return replace_ste(entry, ste, sid, {publish_ste, submit_update, sync_update, nullptr});
 }
@@ -220,7 +237,8 @@ SysError program_deny_locked(u32 sid) {
 // Backend hooks
 // ---------------------------------------------------------------------------
 SysError hook_publish(void*, PhysAddr table_pa, u64 length) {
-    if (state() != State::Ready) return E_FAULT;
+    if (state() != State::Ready)
+        return E_FAULT;
     if (!table_pa || length == 0 || table_pa + length < table_pa) {
         return E_INVALID;
     }
@@ -234,19 +252,24 @@ SysError hook_invalidate(void*, IommuDomain* domain, u64 iova, u64 length) {
     }
     const u16 vmid = static_cast<u16>(domain_index(*domain));
     kernel::LockGuard guard(g_lock);
-    if (length == ~0ull) return cq_submit_locked(make_cmd_tlbi_s12_vmall(vmid));
+    if (length == ~0ull)
+        return cq_submit_locked(make_cmd_tlbi_s12_vmall(vmid));
     if (!length || (length & (PAGE_SIZE - 1)) || (iova & (PAGE_SIZE - 1)) ||
-        length / PAGE_SIZE > 0xFFFF'FFFFull) return E_INVALID;
+        length / PAGE_SIZE > 0xFFFF'FFFFull)
+        return E_INVALID;
     const auto pages = static_cast<u32>(length / PAGE_SIZE);
-    if (g_range_invalidation) return cq_submit_locked(make_cmd_tlbi_s2_ipa(vmid, iova, pages));
+    if (g_range_invalidation)
+        return cq_submit_locked(make_cmd_tlbi_s2_ipa(vmid, iova, pages));
     // Pre-v3.2 cannot consume NUM/SCALE/TG. Keep updates scoped, and avoid
     // filling the queue with millions of single-page commands for large runs.
-    if (pages > 32) return cq_submit_locked(make_cmd_tlbi_s12_vmall(vmid));
+    if (pages > 32)
+        return cq_submit_locked(make_cmd_tlbi_s12_vmall(vmid));
     for (u32 p = 0; p < pages; ++p) {
         auto cmd = make_cmd_tlbi_s2_ipa(vmid, iova + static_cast<u64>(p) * PAGE_SIZE, 1);
         cmd.w[2] &= ~(3u << 10); // TG is RES0 without RIL
         const auto rc = cq_submit_locked(cmd);
-        if (rc != E_OK) return rc;
+        if (rc != E_OK)
+            return rc;
     }
     return E_OK;
 }
@@ -275,7 +298,11 @@ bool hook_ready(void*) {
 }
 
 IommuBackendOps g_backend = {
-    hook_publish,        hook_invalidate, hook_sync, hook_attach, hook_detach,
+    hook_publish,
+    hook_invalidate,
+    hook_sync,
+    hook_attach,
+    hook_detach,
     /* ctx = */ nullptr,
     /* table_format = */ &kArmStage2Tables,
     /* iova_bits = */ static_cast<u8>(kIommuIovaBits),
@@ -344,18 +371,36 @@ SysError smmuv3_bring_up() {
     // before disabling it or replacing any live queue/table base register.
     bool gbpa_idle = false;
     for (u32 spin = 0; spin < kSyncSpins; ++spin)
-        if (!(readl(kRegGbpa) & kGbpaUpdate)) { gbpa_idle = true; break; }
-    if (!gbpa_idle) { set_state(State::Failed); return E_FAULT; }
+        if (!(readl(kRegGbpa) & kGbpaUpdate)) {
+            gbpa_idle = true;
+            break;
+        }
+    if (!gbpa_idle) {
+        set_state(State::Failed);
+        return E_FAULT;
+    }
     writel(kRegGbpa, kGbpaUpdate | kGbpaAbort);
     gbpa_idle = false;
     for (u32 spin = 0; spin < kSyncSpins; ++spin)
-        if (!(readl(kRegGbpa) & kGbpaUpdate)) { gbpa_idle = true; break; }
-    if (!gbpa_idle || !(readl(kRegGbpa) & kGbpaAbort)) { set_state(State::Failed); return E_FAULT; }
+        if (!(readl(kRegGbpa) & kGbpaUpdate)) {
+            gbpa_idle = true;
+            break;
+        }
+    if (!gbpa_idle || !(readl(kRegGbpa) & kGbpaAbort)) {
+        set_state(State::Failed);
+        return E_FAULT;
+    }
     writel(kRegCr0, 0);
     bool disabled = false;
     for (u32 spin = 0; spin < kSyncSpins; ++spin)
-        if (!readl(kRegCr0Ack)) { disabled = true; break; }
-    if (!disabled) { set_state(State::Failed); return E_FAULT; }
+        if (!readl(kRegCr0Ack)) {
+            disabled = true;
+            break;
+        }
+    if (!disabled) {
+        set_state(State::Failed);
+        return E_FAULT;
+    }
 
     const u32 idr0 = readl(kRegIdr0);
     const u32 idr1 = readl(kRegIdr1);
@@ -370,9 +415,8 @@ SysError smmuv3_bring_up() {
         set_state(State::Failed);
         return E_NOTIMPL;
     }
-    if (!(idr5 & kIdr5Gran4K) || ((idr0 >> 2) & 3u) < 2 ||
-        (idr1 & kIdr1Preset) || !idr1_cmdq_size(idr1) || !idr1_eventq_size(idr1) ||
-        !oas_bits(idr5_oas(idr5))) {
+    if (!(idr5 & kIdr5Gran4K) || ((idr0 >> 2) & 3u) < 2 || (idr1 & kIdr1Preset) ||
+        !idr1_cmdq_size(idr1) || !idr1_eventq_size(idr1) || !oas_bits(idr5_oas(idr5))) {
         fail_closed_locked("unsupported table/queue geometry");
         return E_NOTIMPL;
     }
@@ -401,7 +445,8 @@ SysError smmuv3_bring_up() {
     clean_to_poc(reinterpret_cast<PhysAddr>(g_stream_table), sizeof(g_stream_table));
     writel(kRegStrTabBase, static_cast<u32>(reinterpret_cast<PhysAddr>(g_stream_table)));
     writel(kRegStrTabBase + 4, static_cast<u32>(reinterpret_cast<PhysAddr>(g_stream_table) >> 32));
-    writel(kRegStrTabBaseCfg, make_strtab_base_cfg_linear(hw_sid_size < kStreamLog2 ? hw_sid_size : kStreamLog2));
+    writel(kRegStrTabBaseCfg,
+           make_strtab_base_cfg_linear(hw_sid_size < kStreamLog2 ? hw_sid_size : kStreamLog2));
 
     // Command queue.
     libk::memset(g_cmdq, 0, sizeof(g_cmdq));
@@ -460,7 +505,8 @@ SysError smmuv3_bring_up() {
         const SysError rc = register_backend(route, g_backend);
         if (rc != E_OK) {
             fail_closed_locked("backend registration failed");
-            ANKO_LOGF_ERROR("iommu/smmuv3", "backend registration failed rc=%d", static_cast<int>(rc));
+            ANKO_LOGF_ERROR("iommu/smmuv3", "backend registration failed rc=%d",
+                            static_cast<int>(rc));
             return rc;
         }
     }
@@ -484,10 +530,12 @@ SysError smmuv3_program_stream(IommuDeviceId device, IommuDomain* domain) {
             return program_deny_locked(device.requester_or_stream_id);
         const u16 vmid = static_cast<u16>(domain_index(*domain));
         rc = program_ste_locked(device.requester_or_stream_id,
-            make_ste_stage2(domain->root_table_, vmid, 64u - domain->backend_.iova_bits,
-                            kS2Sl0Level1, g_ps, true, g_coherent));
+                                make_ste_stage2(domain->root_table_, vmid,
+                                                64u - domain->backend_.iova_bits, kS2Sl0Level1,
+                                                g_ps, true, g_coherent));
     }
-    if (rc == E_OK) faults::on_stream_attached(device.requester_or_stream_id);
+    if (rc == E_OK)
+        faults::on_stream_attached(device.requester_or_stream_id);
     return rc;
 }
 
@@ -514,7 +562,8 @@ u32 smmuv3_drain_events() {
         Evt evt;
         {
             kernel::LockGuard guard(g_lock);
-            if (state() != State::Ready) break;
+            if (state() != State::Ready)
+                break;
             const u32 prod = readl(kRegEventqProd);
             if (((readl(kRegGerror) ^ readl(kRegGerrorN)) & 0x1FDu) ||
                 q_overflow_changed(prod, g_evq_cons)) {

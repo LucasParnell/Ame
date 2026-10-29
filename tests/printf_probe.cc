@@ -4,7 +4,10 @@
 #include "libk/str.h"
 
 static int failures = 0;
-static void check(bool c) { if (!c) ++failures; }
+static void check(bool c) {
+    if (!c)
+        ++failures;
+}
 
 int main() {
     char b[32];
@@ -27,12 +30,13 @@ int main() {
     check(libk::snprintf(b, 0, "%d", 12345) == 5 && b[0] == 'Z');
 
     // %p and %zu.
-    check(libk::snprintf(b, sizeof(b), "%zu", static_cast<std::size_t>(7)) == 1 && libk::str::equal(b, "7"));
+    check(libk::snprintf(b, sizeof(b), "%zu", static_cast<std::size_t>(7)) == 1 &&
+          libk::str::equal(b, "7"));
 
     // Overflow-checked arithmetic.
     std::uint64_t v = 123;
     check(libk::checked_add(1, 2, &v) && v == 3);
-    check(!libk::checked_add(~0ull, 1ull, &v) && v == 3);   // untouched on failure
+    check(!libk::checked_add(~0ull, 1ull, &v) && v == 3); // untouched on failure
     check(libk::checked_sub(5, 2, &v) && v == 3);
     check(!libk::checked_sub(1, 2, &v));
     check(libk::checked_mul(4, 5, &v) && v == 20);

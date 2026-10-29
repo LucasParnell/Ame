@@ -32,6 +32,8 @@ a style one**, because it decides what a service author is allowed to reach for.
 
 - Move bytes with `libk::copy` / `copy_n` / `fill` over `libk::bytes` views —
   never `memcpy`.
+- Compare byte views with `libk::equal`; it checks lengths and compares the
+  entire range exactly. Use a constant-time primitive for secrets instead.
 - Clear an array or object with `libk::zero(buffer)` / `libk::zero(object)`;
   use `libk::zero(pointer, length)` for dynamic storage. Zeroing includes padding
   and requires a data format with a valid all-zero representation. A bare pointer
@@ -109,3 +111,7 @@ bytes after its declared payload are cleared by the ring producer.
 - `mochi/framebuffer_raster.h` applies framebuffer protocol commands to a
   validated pixel view. The device owner remains responsible for mapping,
   cache maintenance and publishing to scanout.
+- `idle_account.h` provides a 64-byte, single-writer idle residency counter.
+  Writers exclude interrupts; readers use bounded atomic sequence snapshots.
+  Reset is only legal before concurrent use. No lock or cross-CPU counter RMW
+  is needed on the owning CPU's WFI path.

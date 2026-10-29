@@ -1,12 +1,13 @@
-#include "../boards/huawei-anne/power.h"
+#include "../kernel/power/anne/system.h"
 #include <cassert>
 #include <cstdio>
 
 int main() {
     alignas(8) unsigned char pmic[4096]{}, gpio[4096]{}, sctrl[4096]{};
     const libk::Mmio pmic_regs{pmic, sizeof(pmic)}, gpio_regs{gpio, sizeof(gpio)},
-                      sctrl_regs{sctrl, sizeof(sctrl)};
-    for (auto& byte : pmic) byte = 0xa5;
+        sctrl_regs{sctrl, sizeof(sctrl)};
+    for (auto& byte : pmic)
+        byte = 0xa5;
     assert(anne::power::set_reason(pmic_regs, anne::power::kReasonFastboot));
     for (unsigned i = 0; i < sizeof(pmic); ++i)
         assert(pmic[i] == (i == 0x62c ? 1 : 0xa5));

@@ -32,13 +32,18 @@ struct BudgetController {
     uint32_t quiet = 0;
 
     // Seed from the kernel policy. Values above the cap are not trusted.
-    void seed(uint32_t policy) { budget = policy > kMax ? kMax : policy; }
+    void seed(uint32_t policy) {
+        budget = policy > kMax ? kMax : policy;
+        waits = parks = quiet = 0;
+    }
 
     // Record one wait. Returns the new budget when it changed, else 0.
     uint32_t note_wait(bool parked) {
         ++waits;
-        if (parked) ++parks;
-        if (waits < kWindow) return 0;
+        if (parked)
+            ++parks;
+        if (waits < kWindow)
+            return 0;
 
         uint32_t next = budget;
         if (parks >= kGrowParks) {
@@ -51,11 +56,12 @@ struct BudgetController {
                 quiet = 0;
             }
         } else {
-            quiet = 0;   // some parks: hold, this is the dead band
+            quiet = 0; // some parks: hold, this is the dead band
         }
         waits = 0;
         parks = 0;
-        if (next == budget) return 0;
+        if (next == budget)
+            return 0;
         budget = next;
         return next;
     }

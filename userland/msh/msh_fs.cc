@@ -3,6 +3,7 @@
 #include "msh.h"
 
 #include "libk/bytes.h"
+#include "mochi/app_process.h"
 
 // Filesystem builtins: io.fs path resolution and pwd/cd/ls/cat/mkdir/rm/touch.
 // Paths are normalised into components, resolved one component at a time with
@@ -13,19 +14,25 @@ int cmd_pwd(int, char**) {
     return 0;
 }
 
-static bool fs_open_name_at(fs_handle_t parent, const char* name, mx_u32_t flags, FsOpenReply* out) {
-    if (!g.have_fs) return false;
+static bool fs_open_name_at(fs_handle_t parent, const char* name, mx_u32_t flags,
+                            FsOpenReply* out) {
+    if (!g.have_fs)
+        return false;
     return g.fs.wait_open(parent, name, flags, out);
 }
 
 static bool path_push(char parts[][kPathNameMax], uint32_t* count, const char* s, uint32_t len) {
-    if (!parts || !count || len == 0) return true;
-    if (len == 1 && s[0] == '.') return true;
+    if (!parts || !count || len == 0)
+        return true;
+    if (len == 1 && s[0] == '.')
+        return true;
     if (len == 2 && s[0] == '.' && s[1] == '.') {
-        if (*count > 0) --*count;
+        if (*count > 0)
+            --*count;
         return true;
     }
-    if (*count >= kPathDepthMax || len >= kPathNameMax) return false;
+    if (*count >= kPathDepthMax || len >= kPathNameMax)
+        return false;
     (void)libk::copy_n(libk::as_bytes(parts[*count], len), libk::as_bytes(s, len), len);
     parts[*count][len] = '\0';
     ++*count;
@@ -33,49 +40,64 @@ static bool path_push(char parts[][kPathNameMax], uint32_t* count, const char* s
 }
 
 static bool path_collect(const char* path, char parts[][kPathNameMax], uint32_t* count) {
-    if (!path || !parts || !count) return false;
+    if (!path || !parts || !count)
+        return false;
     uint32_t i = 0;
     while (path[i]) {
-        while (path[i] == '/') ++i;
+        while (path[i] == '/')
+            ++i;
         const uint32_t start = i;
-        while (path[i] && path[i] != '/') ++i;
-        if (i > start && !path_push(parts, count, path + start, i - start)) return false;
+        while (path[i] && path[i] != '/')
+            ++i;
+        if (i > start && !path_push(parts, count, path + start, i - start))
+            return false;
     }
     return true;
 }
 
 static bool normalize_path(const char* input, char* out, uint32_t out_cap) {
-    if (!input || !input[0]) input = ".";
-    if (!out || out_cap == 0) return false;
+    if (!input || !input[0])
+        input = ".";
+    if (!out || out_cap == 0)
+        return false;
     char parts[kPathDepthMax][kPathNameMax]{};
     uint32_t count = 0;
     if (input[0] != '/') {
-        if (!path_collect(g.cwd, parts, &count)) return false;
+        if (!path_collect(g.cwd, parts, &count))
+            return false;
     }
-    if (!path_collect(input, parts, &count)) return false;
+    if (!path_collect(input, parts, &count))
+        return false;
     libk::str::Buffer path(out, out_cap);
     path.append('/');
     for (uint32_t i = 0; i < count; ++i) {
-        if (i != 0) path.append('/');
+        if (i != 0)
+            path.append('/');
         path.append(parts[i]);
     }
     return !path.truncated;
 }
 
-static bool split_parent_name(const char* path, char* parent, uint32_t parent_cap,
-                              char* name, uint32_t name_cap) {
-    if (!parent || parent_cap == 0 || !name || name_cap == 0) return false;
+static bool split_parent_name(const char* path, char* parent, uint32_t parent_cap, char* name,
+                              uint32_t name_cap) {
+    if (!parent || parent_cap == 0 || !name || name_cap == 0)
+        return false;
     char norm[kPathMax];
-    if (!normalize_path(path, norm, sizeof(norm))) return false;
-    if (streq(norm, "/")) return false;
+    if (!normalize_path(path, norm, sizeof(norm)))
+        return false;
+    if (streq(norm, "/"))
+        return false;
     uint32_t last = 0;
-    for (uint32_t i = 0; norm[i]; ++i) if (norm[i] == '/') last = i;
+    for (uint32_t i = 0; norm[i]; ++i)
+        if (norm[i] == '/')
+            last = i;
     if (last == 0) {
         libk::str::copy_into(parent, parent_cap, "/");
         libk::str::copy_into(name, name_cap, norm + 1);
     } else {
         libk::str::Buffer prefix(parent, parent_cap);
-        if (!prefix.append(norm, last)) return false;
+        if (!prefix.append(norm, last))
+            return false;
         libk::str::copy_into(name, name_cap, norm + last + 1);
     }
     return name[0] != '\0';
@@ -97,7 +119,8 @@ static void close_resolved(const ResolvedPath& r) {
 }
 
 static bool resolve_normalized(const char* normalized, mx_u32_t flags, ResolvedPath* out) {
-    if (!normalized || !out || !g.have_fs) return false;
+    if (!normalized || !out || !g.have_fs)
+        return false;
     *out = {};
     libk::str::copy_into(out->normalized, sizeof(out->normalized), normalized);
     if (streq(normalized, "/")) {
@@ -117,21 +140,25 @@ static bool resolve_normalized(const char* normalized, mx_u32_t flags, ResolvedP
         uint32_t n = 0;
         while (normalized[i] && normalized[i] != '/') {
             if (n + 1 >= sizeof(component)) {
-                if (parent_owned) (void)g.fs.try_close(parent);
+                if (parent_owned)
+                    (void)g.fs.try_close(parent);
                 return false;
             }
             component[n++] = normalized[i++];
         }
         component[n] = '\0';
-        while (normalized[i] == '/') ++i;
+        while (normalized[i] == '/')
+            ++i;
         const bool final = normalized[i] == '\0';
         FsOpenReply open{};
         const mx_u32_t open_flags = final ? flags : FS_OPEN_READ;
         if (!fs_open_name_at(parent, component, open_flags, &open) || open.status != MX_OK) {
-            if (parent_owned) (void)g.fs.try_close(parent);
+            if (parent_owned)
+                (void)g.fs.try_close(parent);
             return false;
         }
-        if (parent_owned) (void)g.fs.try_close(parent);
+        if (parent_owned)
+            (void)g.fs.try_close(parent);
         if (!final && open.type != FS_INODE_DIR) {
             (void)g.fs.try_close(open.handle);
             return false;
@@ -152,25 +179,29 @@ static bool resolve_normalized(const char* normalized, mx_u32_t flags, ResolvedP
 
 static bool resolve_path(const char* path, mx_u32_t flags, ResolvedPath* out) {
     char norm[kPathMax];
-    if (!normalize_path(path, norm, sizeof(norm))) return false;
+    if (!normalize_path(path, norm, sizeof(norm)))
+        return false;
     return resolve_normalized(norm, flags, out);
 }
 
-
 int cmd_cd(int argc, char** argv) {
-    if (!g.have_fs) return notimpl("cd io.fs");
+    if (!g.have_fs)
+        return notimpl("cd io.fs");
     const char* dst = argc > 1 ? argv[1] : "/";
     ResolvedPath r{};
     if (!resolve_path(dst, FS_OPEN_READ, &r)) {
-        put("msh: cd: no such directory: "); putln(dst);
+        put("msh: cd: no such directory: ");
+        putln(dst);
         return 1;
     }
     if (r.type != FS_INODE_DIR) {
-        put("msh: cd: not a directory: "); putln(dst);
+        put("msh: cd: not a directory: ");
+        putln(dst);
         close_resolved(r);
         return 1;
     }
-    if (g.cwd_handle != 1 && g.cwd_handle != r.handle) (void)g.fs.try_close(g.cwd_handle);
+    if (g.cwd_handle != 1 && g.cwd_handle != r.handle)
+        (void)g.fs.try_close(g.cwd_handle);
     libk::str::copy_into(g.cwd, sizeof(g.cwd), r.normalized);
     g.cwd_handle = r.handle;
     set_var("PWD", g.cwd);
@@ -178,16 +209,20 @@ int cmd_cd(int argc, char** argv) {
 }
 
 int cmd_ls(int argc, char** argv) {
-    if (!g.have_fs) return notimpl("ls io.fs");
+    if (!g.have_fs)
+        return notimpl("ls io.fs");
     const char* name = argc > 1 ? argv[1] : ".";
     ResolvedPath r{};
     if (!resolve_path(name, FS_OPEN_READ, &r)) {
-        put("msh: ls: cannot access: "); putln(name);
+        put("msh: ls: cannot access: ");
+        putln(name);
         return 1;
     }
     if (r.type != FS_INODE_DIR) {
         const char* display = name;
-        for (uint32_t i = 0; name[i]; ++i) if (name[i] == '/') display = name + i + 1;
+        for (uint32_t i = 0; name[i]; ++i)
+            if (name[i] == '/')
+                display = name + i + 1;
         putln(display);
         close_resolved(r);
         return 0;
@@ -217,37 +252,102 @@ int cmd_ls(int argc, char** argv) {
                 break;
             }
         }
-        if (got && reply.name_len > sizeof(reply.name)) reply.status = MX_ERR_BAD_PROTOCOL;
+        if (got && reply.name_len > sizeof(reply.name))
+            reply.status = MX_ERR_BAD_PROTOCOL;
         if (!got || reply.status != MX_OK) {
-            put("msh: ls: "); put_status(reply.status); put("\r\n");
+            put("msh: ls: ");
+            put_status(reply.status);
+            put("\r\n");
             close_resolved(r);
             return 1;
         }
         if (reply.flags & FS_READDIR_HAS_ENTRY) {
-            if (reply.type == FS_INODE_DIR) put("d "); else put("- ");
+            if (reply.type == FS_INODE_DIR)
+                put("d ");
+            else
+                put("- ");
             put_bytes(reply.name, reply.name_len);
-            if (reply.flags & FS_READDIR_TRUNCATED) put("…");
+            if (reply.flags & FS_READDIR_TRUNCATED)
+                put("…");
             put("\r\n");
             any = true;
         }
-        if (reply.flags & FS_READDIR_EOF) break;
+        if (reply.flags & FS_READDIR_EOF)
+            break;
         cookie = reply.next_cookie;
     }
-    if (!any) putln(".");
+    if (!any)
+        putln(".");
     close_resolved(r);
     return 0;
 }
 
+// Use the same resource owner and startup contract as streamed apps.
+int cmd_exec(const char* path) {
+    if (!g.have_fs)
+        return notimpl("exec io.fs");
+    const auto supervisor = mochi::boot::handle(g.boot, "apps.supervisor");
+    if (!supervisor) {
+        putln("msh: exec: no spawn authority in this profile");
+        return 1;
+    }
+    ResolvedPath file{};
+    if (!resolve_path(path, FS_OPEN_READ, &file)) {
+        put("msh: exec: cannot open ");
+        putln(path);
+        return 1;
+    }
+    if (file.type != FS_INODE_FILE || !file.size || file.size > midix::apps::kMaxImage) {
+        close_resolved(file);
+        putln("msh: exec: invalid executable size or type");
+        return 1;
+    }
+    // Keep image-validation state off the shell's small user stack.
+    static mochi::app::Process child{};
+    auto status =
+        child.configure(g.boot, [](const char* data, mx_u32_t size) { put_bytes(data, size); });
+    if (status == MX_OK)
+        status = child.load(g.fs, file.handle, file.size);
+    close_resolved(file);
+    if (status == MX_OK)
+        status = child.launch(file.size, path);
+    child.discard_upload();
+    if (status != MX_OK) {
+        put("msh: exec: launch failed, status=");
+        put_status(status);
+        putln("");
+        child.cancel_and_wait();
+        return 1;
+    }
+    mx_i32_t code = 0;
+    status = child.wait(&code);
+    if (status != MX_OK) {
+        child.cancel_and_wait();
+        putln("msh: exec: wait failed");
+        return 1;
+    }
+    char line[64];
+    libk::snprintf(line, sizeof(line), "msh: exec: child exited, status=%d", code);
+    putln(line);
+    return code;
+}
+
 int cmd_cat(int argc, char** argv) {
-    if (argc < 2) { putln("usage: cat FILE"); return 1; }
-    if (!g.have_fs) return notimpl("cat io.fs");
+    if (argc < 2) {
+        putln("usage: cat FILE");
+        return 1;
+    }
+    if (!g.have_fs)
+        return notimpl("cat io.fs");
     ResolvedPath r{};
     if (!resolve_path(argv[1], FS_OPEN_READ, &r)) {
-        put("msh: cat: open failed: "); putln(argv[1]);
+        put("msh: cat: open failed: ");
+        putln(argv[1]);
         return 1;
     }
     if (r.type != FS_INODE_FILE) {
-        put("msh: cat: not a file: "); putln(argv[1]);
+        put("msh: cat: not a file: ");
+        putln(argv[1]);
         close_resolved(r);
         return 1;
     }
@@ -260,7 +360,9 @@ int cmd_cat(int argc, char** argv) {
             return 1;
         }
         if (read.status != MX_OK) {
-            put("msh: cat: "); put_status(read.status); put("\r\n");
+            put("msh: cat: ");
+            put_status(read.status);
+            put("\r\n");
             close_resolved(r);
             return 1;
         }
@@ -270,93 +372,147 @@ int cmd_cat(int argc, char** argv) {
             close_resolved(r);
             return 1;
         }
-        if (read.length_read == 0) break;
+        if (read.length_read == 0)
+            break;
         put_bytes(reinterpret_cast<const char*>(read.inline_data), read.length_read);
         off += read.length_read;
-        if (read.length_read < FS_INLINE_READ_MAX) break;
+        if (read.length_read < FS_INLINE_READ_MAX)
+            break;
     }
     close_resolved(r);
     return 0;
 }
 
 int cmd_mkdir(int argc, char** argv) {
-    if (argc < 2) { putln("usage: mkdir DIR"); return 1; }
-    if (!g.have_fs) return notimpl("mkdir io.fs");
+    if (argc < 2) {
+        putln("usage: mkdir DIR");
+        return 1;
+    }
+    if (!g.have_fs)
+        return notimpl("mkdir io.fs");
     int rc = 0;
     for (int a = 1; a < argc; ++a) {
         char parent_path[kPathMax]{};
         char name[kPathNameMax]{};
         if (!split_parent_name(argv[a], parent_path, sizeof(parent_path), name, sizeof(name))) {
-            put("mkdir: bad path: "); putln(argv[a]); rc = 1; continue;
+            put("mkdir: bad path: ");
+            putln(argv[a]);
+            rc = 1;
+            continue;
         }
         ResolvedPath parent{};
         if (!resolve_path(parent_path, FS_OPEN_READ, &parent) || parent.type != FS_INODE_DIR) {
             close_resolved(parent);
-            put("mkdir: parent missing: "); putln(parent_path); rc = 1; continue;
+            put("mkdir: parent missing: ");
+            putln(parent_path);
+            rc = 1;
+            continue;
         }
         FsMkdirRequest req{};
         req.parent_inode = parent.handle;
         uint32_t n = slen(name);
-        if (n > sizeof(req.name)) n = sizeof(req.name);
+        if (n > sizeof(req.name))
+            n = sizeof(req.name);
         req.name_len = static_cast<mx_u8_t>(n);
         (void)libk::copy_n(libk::as_bytes(req.name, n), libk::as_bytes(name, n), n);
         mx_i32_t status = MX_ERR_BAD_PROTOCOL;
-        if (!g.fs.ep.send_spinning(FS_MKDIR, &req, sizeof(req)) || !g.fs.wait_status_reply(FS_MKDIR_REPLY, &status)) {
+        if (!g.fs.ep.send_spinning(FS_MKDIR, &req, sizeof(req)) ||
+            !g.fs.wait_status_reply(FS_MKDIR_REPLY, &status)) {
             status = MX_ERR_BAD_PROTOCOL;
         }
         close_resolved(parent);
-        if (status != MX_OK) { put("mkdir: "); put_status(status); put(" "); putln(argv[a]); rc = 1; }
+        if (status != MX_OK) {
+            put("mkdir: ");
+            put_status(status);
+            put(" ");
+            putln(argv[a]);
+            rc = 1;
+        }
     }
     return rc;
 }
 
 int cmd_rm(int argc, char** argv) {
-    if (argc < 2) { putln("usage: rm PATH"); return 1; }
-    if (!g.have_fs) return notimpl("rm io.fs");
+    if (argc < 2) {
+        putln("usage: rm PATH");
+        return 1;
+    }
+    if (!g.have_fs)
+        return notimpl("rm io.fs");
     int rc = 0;
     for (int a = 1; a < argc; ++a) {
         char parent_path[kPathMax]{};
         char name[kPathNameMax]{};
         if (!split_parent_name(argv[a], parent_path, sizeof(parent_path), name, sizeof(name))) {
-            put("rm: bad path: "); putln(argv[a]); rc = 1; continue;
+            put("rm: bad path: ");
+            putln(argv[a]);
+            rc = 1;
+            continue;
         }
         ResolvedPath parent{};
         if (!resolve_path(parent_path, FS_OPEN_READ, &parent) || parent.type != FS_INODE_DIR) {
-            put("rm: parent missing: "); putln(parent_path); rc = 1; continue;
+            put("rm: parent missing: ");
+            putln(parent_path);
+            rc = 1;
+            continue;
         }
         FsUnlinkRequest req{};
         req.parent_inode = parent.handle;
         uint32_t n = slen(name);
-        if (n > sizeof(req.name)) n = sizeof(req.name);
+        if (n > sizeof(req.name))
+            n = sizeof(req.name);
         req.name_len = static_cast<mx_u8_t>(n);
         (void)libk::copy_n(libk::as_bytes(req.name, n), libk::as_bytes(name, n), n);
         mx_i32_t status = MX_ERR_BAD_PROTOCOL;
-        if (!g.fs.ep.send_spinning(FS_UNLINK, &req, sizeof(req)) || !g.fs.wait_status_reply(FS_UNLINK_REPLY, &status)) {
+        if (!g.fs.ep.send_spinning(FS_UNLINK, &req, sizeof(req)) ||
+            !g.fs.wait_status_reply(FS_UNLINK_REPLY, &status)) {
             status = MX_ERR_BAD_PROTOCOL;
         }
         close_resolved(parent);
-        if (status != MX_OK) { put("rm: "); put_status(status); put(" "); putln(argv[a]); rc = 1; }
+        if (status != MX_OK) {
+            put("rm: ");
+            put_status(status);
+            put(" ");
+            putln(argv[a]);
+            rc = 1;
+        }
     }
     return rc;
 }
 
 int cmd_touch(int argc, char** argv) {
-    if (argc < 2) { putln("usage: touch FILE"); return 1; }
-    if (!g.have_fs) return notimpl("touch io.fs");
+    if (argc < 2) {
+        putln("usage: touch FILE");
+        return 1;
+    }
+    if (!g.have_fs)
+        return notimpl("touch io.fs");
     int rc = 0;
     for (int a = 1; a < argc; ++a) {
         char parent_path[kPathMax]{};
         char name[kPathNameMax]{};
         if (!split_parent_name(argv[a], parent_path, sizeof(parent_path), name, sizeof(name))) {
-            put("touch: bad path: "); putln(argv[a]); rc = 1; continue;
+            put("touch: bad path: ");
+            putln(argv[a]);
+            rc = 1;
+            continue;
         }
         ResolvedPath parent{};
         if (!resolve_path(parent_path, FS_OPEN_READ, &parent) || parent.type != FS_INODE_DIR) {
-            put("touch: parent missing: "); putln(parent_path); rc = 1; continue;
+            put("touch: parent missing: ");
+            putln(parent_path);
+            rc = 1;
+            continue;
         }
         FsOpenReply open{};
-        if (!fs_open_name_at(parent.handle, name, FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREATE, &open) || open.status != MX_OK) {
-            put("touch: "); put_status(open.status); put(" "); putln(argv[a]); rc = 1;
+        if (!fs_open_name_at(parent.handle, name, FS_OPEN_READ | FS_OPEN_WRITE | FS_OPEN_CREATE,
+                             &open) ||
+            open.status != MX_OK) {
+            put("touch: ");
+            put_status(open.status);
+            put(" ");
+            putln(argv[a]);
+            rc = 1;
         } else {
             (void)g.fs.try_close(open.handle);
         }
@@ -368,7 +524,10 @@ int cmd_touch(int argc, char** argv) {
 int cmd_sync(int, char**) {
     mx_i32_t status = MX_ERR_NOT_IMPLEMENTED;
     if (!g.have_fs || !g.fs.try_sync(&status) || status != MX_OK) {
-        put("sync: "); put_status(status); put("\r\n"); return 1;
+        put("sync: ");
+        put_status(status);
+        put("\r\n");
+        return 1;
     }
     putln("sync: durable");
     return 0;
@@ -382,54 +541,72 @@ static mx_u8_t check_pattern(mx_u64_t offset) {
 }
 int cmd_fscheck(int argc, char** argv) {
     if (argc != 2 || (!streq(argv[1], "write") && !streq(argv[1], "read"))) {
-        putln("usage: fscheck write|read (/data/storage-check.bin, 3 MiB)"); return 1;
+        putln("usage: fscheck write|read (/data/storage-check.bin, 3 MiB)");
+        return 1;
     }
-    if (!g.have_fs) return notimpl("fscheck io.fs");
+    if (!g.have_fs)
+        return notimpl("fscheck io.fs");
     const bool writing = streq(argv[1], "write");
     ResolvedPath file{};
     mx_u32_t flags = FS_OPEN_READ;
-    if (writing) flags |= FS_OPEN_WRITE | FS_OPEN_CREATE | FS_OPEN_TRUNC;
+    if (writing)
+        flags |= FS_OPEN_WRITE | FS_OPEN_CREATE | FS_OPEN_TRUNC;
     if (!resolve_path("/data/storage-check.bin", flags, &file)) {
-        putln("fscheck: open failed"); return 1;
+        putln("fscheck: open failed");
+        return 1;
     }
     const auto start = mx_clock_ns();
     constexpr mx_u32_t total = 3 * 1024 * 1024;
     if (writing) {
         for (mx_u32_t offset = 0; offset < total; offset += sizeof(check_bytes)) {
-            for (mx_u32_t i = 0; i < sizeof(check_bytes); ++i) check_bytes[i] = check_pattern(offset + i);
+            for (mx_u32_t i = 0; i < sizeof(check_bytes); ++i)
+                check_bytes[i] = check_pattern(offset + i);
             FsWriteReply reply{};
             if (!g.fs.try_write(file.handle, offset, check_bytes, sizeof(check_bytes), &reply) ||
                 reply.status != MX_OK || reply.bytes_written != sizeof(check_bytes)) {
-                put("fscheck: write failed: "); put_status(reply.status); put("\r\n");
-                close_resolved(file); return 1;
+                put("fscheck: write failed: ");
+                put_status(reply.status);
+                put("\r\n");
+                close_resolved(file);
+                return 1;
             }
         }
         mx_i32_t status = MX_ERR_FAULT;
         if (!g.fs.try_sync(&status) || status != MX_OK) {
-            putln("fscheck: sync failed"); close_resolved(file); return 1;
+            putln("fscheck: sync failed");
+            close_resolved(file);
+            return 1;
         }
     }
     for (mx_u32_t offset = 0; offset < total; offset += sizeof(check_bytes)) {
         mx_u32_t received = 0;
         if (!g.fs.read_bytes(file.handle, offset, check_bytes, sizeof(check_bytes), &received) ||
             received != sizeof(check_bytes)) {
-            putln("fscheck: read failed"); close_resolved(file); return 1;
+            putln("fscheck: read failed");
+            close_resolved(file);
+            return 1;
         }
         for (mx_u32_t i = 0; i < received; ++i) {
             if (check_bytes[i] != check_pattern(offset + i)) {
-                putln("fscheck: byte mismatch"); close_resolved(file); return 1;
+                putln("fscheck: byte mismatch");
+                close_resolved(file);
+                return 1;
             }
         }
     }
     // Detect an unexpected suffix as well as missing or damaged bytes.
     FsReadReply eof{};
-    const bool complete = g.fs.try_read(file.handle, total, 1, &eof) && eof.status == MX_OK && !eof.length_read;
+    const bool complete =
+        g.fs.try_read(file.handle, total, 1, &eof) && eof.status == MX_OK && !eof.length_read;
     close_resolved(file);
-    if (!complete) { putln("fscheck: wrong file size"); return 1; }
+    if (!complete) {
+        putln("fscheck: wrong file size");
+        return 1;
+    }
     char message[128];
     libk::snprintf(message, sizeof(message), "fscheck: 3145728 bytes %s verified in %llu ms",
-                  writing ? "written, synced and" : "read and",
-                  static_cast<unsigned long long>((mx_clock_ns() - start) / 1000000));
+                   writing ? "written, synced and" : "read and",
+                   static_cast<unsigned long long>((mx_clock_ns() - start) / 1000000));
     putln(message);
     return 0;
 }

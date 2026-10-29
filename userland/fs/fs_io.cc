@@ -15,8 +15,12 @@ const mx_u64_t kReadBase = MOCHI_FS_READ_BASE;
 mx_u32_t owners[kReadViews], inodes[kReadViews], valid_bytes[kReadViews];
 mx_u64_t offsets[kReadViews], generations[kReadViews];
 mx_handle_t caps[kReadViews];
-mx_u64_t address(mx_u32_t i) { return kReadBase + i * FS_READ_ARENA_MAX; }
-mx_u8_t *bytes(mx_u32_t i) { return reinterpret_cast<mx_u8_t *>(address(i)); }
+mx_u64_t address(mx_u32_t i) {
+    return kReadBase + i * FS_READ_ARENA_MAX;
+}
+mx_u8_t* bytes(mx_u32_t i) {
+    return reinterpret_cast<mx_u8_t*>(address(i));
+}
 bool reusable(mx_u32_t i) {
     if (!caps[i])
         return true;
@@ -40,7 +44,7 @@ void close_transfer_session(mx_u32_t session) {
         valid_bytes[i] = 0;
     }
 }
-mx_i32_t volume_read(const OpenHandle &handle, const FsReadRequest &req, FsReadReply &reply) {
+mx_i32_t volume_read(const OpenHandle& handle, const FsReadRequest& req, FsReadReply& reply) {
     if (req.reserved || (req.flags & ~(FS_READ_ZERO_COPY | FS_READ_DIRECT)))
         return MX_ERR_INVALID;
     if (req.flags & FS_READ_DIRECT)
@@ -48,8 +52,8 @@ mx_i32_t volume_read(const OpenHandle &handle, const FsReadRequest &req, FsReadR
     if (!(handle.access & FS_ACCESS_READ))
         return MX_ERR_PERM;
     if (!req.length || (!(req.flags & FS_READ_ZERO_COPY) && req.length <= FS_INLINE_READ_MAX))
-        return mochi::store::read(g_volume, handle.inode_number, req.offset, reply.inline_data, req.length,
-                                  reply.length_read);
+        return mochi::store::read(g_volume, handle.inode_number, req.offset, reply.inline_data,
+                                  req.length, reply.length_read);
     if (g_session >= MX_MAX_SESSIONS || !g_transfers[g_session].peer)
         return MX_ERR_NOT_IMPLEMENTED;
     const auto generation = g_volume.checkpoint.current_generation;
@@ -88,10 +92,11 @@ mx_i32_t volume_read(const OpenHandle &handle, const FsReadRequest &req, FsReadR
         }
         valid_bytes[selected] = 0;
         libk::zero(bytes(selected), FS_READ_ARENA_MAX);
-        const auto length = FS_READ_ARENA_MAX - static_cast<mx_u32_t>(req.offset % FS_READ_ARENA_MAX);
+        const auto length =
+            FS_READ_ARENA_MAX - static_cast<mx_u32_t>(req.offset % FS_READ_ARENA_MAX);
         mx_u32_t received = 0;
-        const auto status =
-            mochi::store::read(g_volume, handle.inode_number, req.offset, bytes(selected), length, received);
+        const auto status = mochi::store::read(g_volume, handle.inode_number, req.offset,
+                                               bytes(selected), length, received);
         if (status != MX_OK)
             return status;
         if (!received) {
@@ -105,33 +110,41 @@ mx_i32_t volume_read(const OpenHandle &handle, const FsReadRequest &req, FsReadR
         valid_bytes[selected] = received;
     }
     mx_handle_t client_cap = 0;
-    const auto result =
-        mx_cap_grant(g_transfers[g_session].peer, caps[selected], MX_RIGHT_READ | MX_RIGHT_MAP, &client_cap);
+    const auto result = mx_cap_grant(g_transfers[g_session].peer, caps[selected],
+                                     MX_RIGHT_READ | MX_RIGHT_MAP, &client_cap);
     if (result != MX_OK)
         return result;
     reply.arena_cap = client_cap;
     reply.length_read = req.length < valid_bytes[selected] ? req.length : valid_bytes[selected];
     return MX_OK;
 }
-mx_i32_t volume_write(const OpenHandle &handle, const FsWriteRequest &req) {
-    if (!(handle.access & FS_ACCESS_WRITE))
-        return MX_ERR_PERM;
+mx_i32_t write_request_data(const FsWriteRequest& req, const mx_u8_t*& data) {
     if (req.reserved || (req.flags & ~FS_WRITE_ZERO_COPY))
         return MX_ERR_INVALID;
     if (!(req.flags & FS_WRITE_ZERO_COPY)) {
         if (req.length > FS_INLINE_WRITE_MAX)
             return MX_ERR_INVALID;
-        return mochi::store::write(g_volume, handle.inode_number, req.offset, req.payload, req.length);
+        data = req.payload;
+        return MX_OK;
     }
     if (g_session >= MX_MAX_SESSIONS)
         return MX_ERR_INVALID;
-    const auto &transfer = g_transfers[g_session];
+    const auto& transfer = g_transfers[g_session];
     const auto token = libk::load_le<mx_u64_t>(req.payload);
     const auto offset = libk::load_le<mx_u64_t>(req.payload + 8);
     if (!transfer.write || !transfer.write_token || token != transfer.write_token ||
         offset > FS_TRANSFER_MAX || req.length > FS_TRANSFER_MAX - offset ||
         libk::load_le<mx_u64_t>(req.payload + 16))
         return MX_ERR_INVALID;
-    return mochi::store::write(g_volume, handle.inode_number, req.offset, transfer.write + offset,
-                               req.length);
+    data = transfer.write + offset;
+    return MX_OK;
+}
+mx_i32_t volume_write(const OpenHandle& handle, const FsWriteRequest& req) {
+    if (!(handle.access & FS_ACCESS_WRITE))
+        return MX_ERR_PERM;
+    const mx_u8_t* data = nullptr;
+    const auto status = write_request_data(req, data);
+    if (status != MX_OK)
+        return status;
+    return mochi::store::write(g_volume, handle.inode_number, req.offset, data, req.length);
 }

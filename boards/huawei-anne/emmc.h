@@ -10,14 +10,18 @@ inline constexpr u64 kBytes = 0x1000;
 // A successful WR_CNT reserves the RPMB writer until the final chunk or error.
 // One owner must serialize prepare/service/release. No lock spans an SMC.
 class Backend {
-public:
-    explicit Backend(drivers::emmc::Driver& driver) : driver_(driver) {}
+  public:
+    explicit Backend(drivers::emmc::Driver& driver) : driver_(driver) {
+    }
     bool config(rpmb::ConfigInfo& out) const;
     rpmb::KeyInfo key_info();
     u64 provision_key(volatile u8* window, usize bytes);
     u64 service(volatile u8* window, usize bytes);
-    bool write_pending() const { return pending_; }
-private:
+    bool write_pending() const {
+        return pending_;
+    }
+
+  private:
     drivers::emmc::Driver& driver_;
     drivers::emmc::Frame request_[32]{}, response_[32]{};
     bool pending_{};
@@ -41,4 +45,4 @@ drivers::emmc::Error read(u32 lba, u32 count, void* buffer);
 drivers::emmc::Error write(u32 lba, u32 count, const void* buffer);
 // Copies the last controller failure and EXT_CSD without issuing card commands.
 bool status(drivers::emmc::CardInfo& info, drivers::emmc::Failure& failure);
-}
+} // namespace anne::emmc

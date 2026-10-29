@@ -52,8 +52,8 @@ enum CapType : u16 {
     CAP_VM_MEMORY = MX_CAP_VM_MEMORY,
     CAP_VM_CHANNEL = MX_CAP_VM_CHANNEL,
     CAP_SCHED_CONTEXT = MX_CAP_SCHED_CONTEXT,
-    CAP_MMIO = MX_CAP_MMIO, // device MMIO range object
-    CAP_IRQ = MX_CAP_IRQ,   // IRQ line object
+    CAP_MMIO = MX_CAP_MMIO,                 // device MMIO range object
+    CAP_IRQ = MX_CAP_IRQ,                   // IRQ line object
     CAP_PCI_FUNCTION = MX_CAP_PCI_FUNCTION, // host PCI function authority (Phase D)
     CAP_VM_DEVICE = MX_CAP_VM_DEVICE,       // VM device assignment (Phase D, §6.1)
     CAP_VM_SHARED = MX_CAP_VM_SHARED,       // attached shared arena (Phase L, §12.3)
@@ -210,13 +210,16 @@ class Ref {
 
   public:
     Ref() = default;
-    Ref(decltype(nullptr)) {}
+    Ref(decltype(nullptr)) {
+    }
     explicit Ref(const CapEntry& entry)
-        : entry_{entry.target, entry.object, entry.rights_mask, entry.generation,
-                 entry.type_tag, entry.flags} {
+        : entry_{entry.target,     entry.object,   entry.rights_mask,
+                 entry.generation, entry.type_tag, entry.flags} {
         object::retain(entry_.object);
     }
-    Ref(const Ref& other) : entry_(other.entry_) { object::retain(entry_.object); }
+    Ref(const Ref& other) : entry_(other.entry_) {
+        object::retain(entry_.object);
+    }
     Ref(Ref&& other) : entry_(other.entry_) {
         other.entry_ = {};
     }
@@ -224,6 +227,14 @@ class Ref {
         object::release(entry_.object);
     }
     Ref& operator=(const Ref&) = delete;
+    Ref& operator=(Ref&& other) {
+        if (this != &other) {
+            object::release(entry_.object);
+            entry_ = other.entry_;
+            other.entry_ = {};
+        }
+        return *this;
+    }
     const Snapshot* operator->() const {
         return &entry_;
     }
@@ -236,9 +247,12 @@ template <class T> class Borrow {
     Ref reference_;
 
   public:
-    Borrow(decltype(nullptr)) {}
-    explicit Borrow(const Ref& ref) : reference_(ref) {}
-    explicit Borrow(Ref&& ref) : reference_(static_cast<Ref&&>(ref)) {}
+    Borrow(decltype(nullptr)) {
+    }
+    explicit Borrow(const Ref& ref) : reference_(ref) {
+    }
+    explicit Borrow(Ref&& ref) : reference_(static_cast<Ref&&>(ref)) {
+    }
     T* get() const {
         return reference_ ? static_cast<T*>(reference_->target) : nullptr;
     }
@@ -257,10 +271,17 @@ void init();
 // A cached record is optional; its caller must already own a reference to the
 // same target. Rights validation, slot ownership, and generations are identical.
 CapHandle alloc(CapTable& table, CapType type, void* target, u32 rights);
-CapHandle alloc(CapTable& table, CapType type, void* target, u32 rights,
-                object::Record* record);
+CapHandle alloc(CapTable& table, CapType type, void* target, u32 rights, object::Record* record);
 Ref lookup(CapTable& table, CapHandle handle, CapType expected_type);
 Ref lookup_any(CapTable& table, CapHandle handle);
+// Validate a small authority set atomically under one table lock. Outputs must
+// be empty; failure leaves them empty, with no retained partial authority.
+struct LookupRequest {
+    CapHandle handle;
+    CapType type;
+    u32 rights;
+};
+bool lookup_many(CapTable& table, const LookupRequest* requests, Ref* out, u32 count);
 
 // Count of capability operations rejected so far (invalid/revoked handles and
 // type mismatches). Reported by the panic screen; never reset to zero.

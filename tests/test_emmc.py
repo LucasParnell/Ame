@@ -17,12 +17,17 @@ class Emmc(unittest.TestCase):
                 '-DANKO_HOST_TEST=1', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I' + str(ROOT / 'kernel/include'), '-I' + str(ROOT / 'shared/include'),
                 '-I' + str(ROOT / 'boards/huawei-anne'),
+                '-idirafter', str(ROOT / 'lib/include'),
                 str(ROOT / 'tests/emmc_probe.cc'),
                 str(ROOT / 'shared/drivers/emmc/sdhci.cc'),
                 str(ROOT / 'boards/huawei-anne/emmc.cc'), '-o', str(probe)],
                 capture_output=True, text=True)
             self.assertEqual(build.returncode, 0, build.stderr)
-            for scenario in ('dma', 'dma-error', 'dma-timeout', 'dma-reset-error', 'blocks', 'cache-flush', 'buffered-flush', 'user128', 'wide', 'wide-fallback', 'wide-restore-error', 'counter', 'card-result', 'write', 'legacy-reliable',
+            for scenario in ('handoff', 'handoff-divided', 'handoff-enhanced', 'handoff-no-dll', 'handoff-host-card',
+                             'handoff-queue', 'handoff-read-error', 'handoff-late-mismatch',
+                             'handoff-busy', 'handoff-voltage', 'handoff-v4', 'handoff-overclock',
+                             'handoff-strobe-mismatch',
+                             'dma', 'dma-error', 'dma-timeout', 'dma-reset-error', 'blocks', 'cache-flush', 'buffered-flush', 'user128', 'wide', 'wide-fallback', 'wide-restore-error', 'counter', 'card-result', 'write', 'legacy-reliable',
                              'read32', 'invalid', 'data-timeout', 'crc-error', 'r1-error',
                              'restore-error', 'switch-error', 'bad-response', 'bridge',
                              'key-missing', 'key-unknown', 'provision', 'wrong-counter',

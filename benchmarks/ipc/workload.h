@@ -24,8 +24,8 @@ struct Config {
     bool include_spin = false;
     bool valid() const {
         return iterations >= 16 && iterations <= 1048576 && warmup && warmup <= 1048576 &&
-               samples >= 16 && samples <= kMaxSamples && rounds >= 3 && rounds <= 31 &&
-               window && window <= 64 && payload_mask && !(payload_mask & ~31u);
+               samples >= 16 && samples <= kMaxSamples && rounds >= 3 && rounds <= 31 && window &&
+               window <= 64 && payload_mask && !(payload_mask & ~31u);
     }
 };
 enum Kind : u32 { Configure = 1, Ready, Echo, EchoReply, Stream, StreamAck, Ack, Finish, Closed };
@@ -43,10 +43,22 @@ struct Message {
 static_assert(__builtin_offsetof(Message, payload) == 16 && sizeof(Message) == 4112);
 
 enum Counter : u32 {
-    ContextSwitches, VoluntarySwitches, InvoluntarySwitches,
-    IpcSyscalls, DoorbellSleeps, Notifications, Yields, RemoteWakes, IpisSent, TimerPreempts, LocalWakes, CounterCount
+    ContextSwitches,
+    VoluntarySwitches,
+    InvoluntarySwitches,
+    IpcSyscalls,
+    DoorbellSleeps,
+    Notifications,
+    Yields,
+    RemoteWakes,
+    IpisSent,
+    TimerPreempts,
+    LocalWakes,
+    CounterCount
 };
-struct Counters { u64 values[CounterCount]; };
+struct Counters {
+    u64 values[CounterCount];
+};
 struct State {
     Message outgoing{}, incoming{};
     u64 samples[kMaxSamples]{};
@@ -57,20 +69,28 @@ inline std::uint8_t pattern(u64 sequence, u32 offset) {
     return static_cast<std::uint8_t>((sequence * 131 + offset * 17) ^ (offset >> 3));
 }
 inline void prepare(Message& message, u32 kind, u64 sequence, u32 bytes) {
-    message.sequence = sequence; message.kind = kind; message.size = bytes;
-    for (u32 i = 0; i < bytes; ++i) message.payload[i] = pattern(sequence, i);
+    message.sequence = sequence;
+    message.kind = kind;
+    message.size = bytes;
+    for (u32 i = 0; i < bytes; ++i)
+        message.payload[i] = pattern(sequence, i);
 }
 inline void control(Message& message, u32 kind, u64 sequence = 0) {
-    message.kind = kind; message.sequence = sequence; message.size = 0;
+    message.kind = kind;
+    message.sequence = sequence;
+    message.size = 0;
 }
 inline bool valid_payload(const Message& message, u64 sequence, u32 bytes) {
-    if (message.sequence != sequence || message.size != bytes || bytes > kMaxPayload) return false;
+    if (message.sequence != sequence || message.size != bytes || bytes > kMaxPayload)
+        return false;
     for (u32 i = 0; i < bytes; ++i)
-        if (message.payload[i] != pattern(sequence, i)) return false;
+        if (message.payload[i] != pattern(sequence, i))
+            return false;
     return true;
 }
 template <class Backend> void require(Backend& backend, bool value, const char* why) {
-    if (!value) backend.fail(why);
+    if (!value)
+        backend.fail(why);
 }
 template <class Backend> void emit(Backend& backend, libk::str::Buffer& line) {
     require(backend, !line.truncated, "result line truncated");
@@ -99,8 +119,9 @@ template <class Backend> void rpc(Backend& backend, State& state, const Case& it
     prepare(state.outgoing, Echo, ++sequence, item.bytes);
     backend.send(state.outgoing);
     backend.receive(state.incoming);
-    require(backend, state.incoming.kind == EchoReply &&
-            valid_payload(state.incoming, sequence, item.bytes), "echo payload/sequence mismatch");
+    require(backend,
+            state.incoming.kind == EchoReply && valid_payload(state.incoming, sequence, item.bytes),
+            "echo payload/sequence mismatch");
 }
 
 // One-way delivery with an ACK after each window (including the last partial
@@ -108,7 +129,8 @@ template <class Backend> void rpc(Backend& backend, State& state, const Case& it
 template <class Backend>
 void transactions(Backend& backend, State& state, const Case& item, u32 count, u64& sequence) {
     if (item.mode == Rpc) {
-        for (u32 i = 0; i < count; ++i) rpc(backend, state, item, sequence);
+        for (u32 i = 0; i < count; ++i)
+            rpc(backend, state, item, sequence);
         return;
     }
     for (u32 sent = 0; sent < count;) {
@@ -118,8 +140,10 @@ void transactions(Backend& backend, State& state, const Case& item, u32 count, u
             backend.send(state.outgoing);
         }
         backend.receive(state.incoming);
-        require(backend, state.incoming.kind == Ack && !state.incoming.size &&
-                state.incoming.sequence == sequence, "stream completion mismatch");
+        require(backend,
+                state.incoming.kind == Ack && !state.incoming.size &&
+                    state.incoming.sequence == sequence,
+                "stream completion mismatch");
         sent += group;
     }
 }
@@ -134,20 +158,24 @@ template <class Backend> void server(Backend& backend, State& state) {
         if (message.kind == Configure) {
             require(backend, message.size == sizeof(Case), "configuration size");
             (void)libk::copy_exact(libk::as_bytes(&item, sizeof(item)),
-                                  libk::as_bytes(message.payload, sizeof(item)));
-            require(backend, item.bytes <= kMaxPayload && item.window && item.window <= 64 &&
-                    item.mode <= Throughput && item.spin <= 1 && item.different_cpu <= 1 &&
-                    (!item.spin || item.different_cpu), "invalid case");
+                                   libk::as_bytes(message.payload, sizeof(item)));
+            require(backend,
+                    item.bytes <= kMaxPayload && item.window && item.window <= 64 &&
+                        item.mode <= Throughput && item.spin <= 1 && item.different_cpu <= 1 &&
+                        (!item.spin || item.different_cpu),
+                    "invalid case");
             backend.polling(false);
             backend.pin(item.server_cpu);
             const u32 cpu = backend.cpu();
             require(backend, cpu == item.server_cpu, "server CPU affinity");
             control(state.outgoing, Ready, item.id);
             state.outgoing.size = sizeof(cpu);
-            (void)libk::copy_exact(libk::as_bytes(state.outgoing.payload, sizeof(cpu)), libk::as_bytes(&cpu, sizeof(cpu)));
+            (void)libk::copy_exact(libk::as_bytes(state.outgoing.payload, sizeof(cpu)),
+                                   libk::as_bytes(&cpu, sizeof(cpu)));
             backend.send(state.outgoing);
             backend.polling(item.spin != 0);
-            sequence = 0; configured = true;
+            sequence = 0;
+            configured = true;
             continue;
         }
         if (message.kind == Finish) {
@@ -181,13 +209,16 @@ template <class Backend> void client(Backend& backend, State& state, const Confi
         libk::str::Buffer line(state.line);
         line.format("IPC_BENCH {\"record\":\"header\",\"version\":%u,\"transport\":\"%s\","
                     "\"contract_sha256\":\"%s\","
-                    "\"placement_scope\":\"%s\",\"diagnostic_scope\":\"%s\",\"iterations\":%u,\"warmup\":%u,\"samples\":%u,"
+                    "\"placement_scope\":\"%s\",\"diagnostic_scope\":\"%s\",\"iterations\":%u,"
+                    "\"warmup\":%u,\"samples\":%u,"
                     "\"rounds\":%u,\"window\":%u,\"payload_mask\":%u,\"include_spin\":%s,"
                     "\"client_cpu\":%u,\"client_process\":%llu,\"server_process\":%llu}",
-                    kVersion, backend.transport(), IPC_BENCH_CONTRACT_SHA256, backend.placement_scope(), backend.diagnostic_scope(), config.iterations,
-                    config.warmup, config.samples, config.rounds, config.window, config.payload_mask,
-                    config.include_spin ? "true" : "false", backend.client_cpu(),
-                    static_cast<ull>(backend.process()), static_cast<ull>(backend.peer_process()));
+                    kVersion, backend.transport(), IPC_BENCH_CONTRACT_SHA256,
+                    backend.placement_scope(), backend.diagnostic_scope(), config.iterations,
+                    config.warmup, config.samples, config.rounds, config.window,
+                    config.payload_mask, config.include_spin ? "true" : "false",
+                    backend.client_cpu(), static_cast<ull>(backend.process()),
+                    static_cast<ull>(backend.peer_process()));
         emit(backend, line);
     }
     for (u32 i = 0; i < 1024; ++i) {
@@ -199,77 +230,104 @@ template <class Backend> void client(Backend& backend, State& state, const Confi
 
     u32 id = 0;
     for (u32 different = 0; different < 2; ++different)
-    for (u32 spin = 0; spin < 2; ++spin) {
-        if (spin && (!different || !config.include_spin)) continue;
-        for (u32 mode = 0; mode < 2; ++mode)
-        for (u32 p = 0; p < 5; ++p) {
-            if (!(config.payload_mask & (1u << p))) continue;
-            Case item{++id, mode, kPayloads[p], different, spin, backend.server_cpu(different), config.window};
-            if (!backend.supports_placement(different) || (different && item.server_cpu == backend.client_cpu()) || (spin && !backend.supports_polling())) {
-                libk::str::Buffer line(state.line);
-                line.format("IPC_BENCH {\"record\":\"skip\",\"case_id\":%u,\"reason\":\"placement_or_policy_unavailable\"}", id);
-                emit(backend, line);
+        for (u32 spin = 0; spin < 2; ++spin) {
+            if (spin && (!different || !config.include_spin))
                 continue;
-            }
-            backend.polling(false);
-            control(state.outgoing, Configure, item.id);
-            state.outgoing.size = sizeof(item);
-            (void)libk::copy_exact(libk::as_bytes(state.outgoing.payload, sizeof(item)), libk::as_bytes(&item, sizeof(item)));
-            backend.send(state.outgoing); backend.receive(state.incoming);
-            u32 observed_cpu = ~0u;
-            (void)libk::copy_exact(libk::as_bytes(&observed_cpu, sizeof(observed_cpu)),
-                                  libk::as_bytes(state.incoming.payload, sizeof(observed_cpu)));
-            require(backend, state.incoming.kind == Ready && state.incoming.sequence == id &&
-                    state.incoming.size == sizeof(observed_cpu) && observed_cpu == item.server_cpu,
-                    "server readiness/placement");
-            backend.polling(spin != 0);
-            u64 sequence = 0;
-            transactions(backend, state, item, config.warmup, sequence);
-            {
-                libk::str::Buffer line(state.line);
-                line.format("IPC_BENCH {\"record\":\"case\",\"case_id\":%u,\"mode\":\"%s\","
-                            "\"placement\":\"%s\",\"wait_policy\":\"%s\",\"payload_bytes\":%u,\"server_cpu\":%u}",
-                            id, mode == Rpc ? "rpc" : "stream", different ? "different_cpu" : "same_cpu",
-                            spin ? "spin" : "blocking", item.bytes, observed_cpu);
-                emit(backend, line);
-            }
-            for (u32 round = 0; round < config.rounds; ++round) {
-                const auto before = backend.counters();
-                const u64 start = backend.now();
-                transactions(backend, state, item, config.iterations, sequence);
-                const u64 end = backend.now();
-                const auto after = backend.counters();
-                require(backend, end > start && backend.cpu() == backend.client_cpu(), "timing/client placement");
-                libk::str::Buffer line(state.line);
-                line.format("IPC_BENCH {\"record\":\"round\",\"case_id\":%u,\"round\":%u,\"operations\":%u,"
-                            "\"elapsed_ns\":%llu,\"counters\":[", id, round, config.iterations, static_cast<ull>(end - start));
-                for (u32 counter = 0; counter < CounterCount; ++counter) {
-                    if (counter) line.append(',');
-                    if (before.values[counter] == kUnavailable || after.values[counter] == kUnavailable) line.append("null");
-                    else {
-                        require(backend, after.values[counter] >= before.values[counter], "counter regressed");
-                        line.format("%llu", static_cast<ull>(after.values[counter] - before.values[counter]));
+            for (u32 mode = 0; mode < 2; ++mode)
+                for (u32 p = 0; p < 5; ++p) {
+                    if (!(config.payload_mask & (1u << p)))
+                        continue;
+                    Case item{++id,         mode, kPayloads[p],
+                              different,    spin, backend.server_cpu(different),
+                              config.window};
+                    if (!backend.supports_placement(different) ||
+                        (different && item.server_cpu == backend.client_cpu()) ||
+                        (spin && !backend.supports_polling())) {
+                        libk::str::Buffer line(state.line);
+                        line.format("IPC_BENCH "
+                                    "{\"record\":\"skip\",\"case_id\":%u,\"reason\":\"placement_or_"
+                                    "policy_unavailable\"}",
+                                    id);
+                        emit(backend, line);
+                        continue;
+                    }
+                    backend.polling(false);
+                    control(state.outgoing, Configure, item.id);
+                    state.outgoing.size = sizeof(item);
+                    (void)libk::copy_exact(libk::as_bytes(state.outgoing.payload, sizeof(item)),
+                                           libk::as_bytes(&item, sizeof(item)));
+                    backend.send(state.outgoing);
+                    backend.receive(state.incoming);
+                    u32 observed_cpu = ~0u;
+                    (void)libk::copy_exact(
+                        libk::as_bytes(&observed_cpu, sizeof(observed_cpu)),
+                        libk::as_bytes(state.incoming.payload, sizeof(observed_cpu)));
+                    require(backend,
+                            state.incoming.kind == Ready && state.incoming.sequence == id &&
+                                state.incoming.size == sizeof(observed_cpu) &&
+                                observed_cpu == item.server_cpu,
+                            "server readiness/placement");
+                    backend.polling(spin != 0);
+                    u64 sequence = 0;
+                    transactions(backend, state, item, config.warmup, sequence);
+                    {
+                        libk::str::Buffer line(state.line);
+                        line.format("IPC_BENCH {\"record\":\"case\",\"case_id\":%u,\"mode\":\"%s\","
+                                    "\"placement\":\"%s\",\"wait_policy\":\"%s\",\"payload_bytes\":"
+                                    "%u,\"server_cpu\":%u}",
+                                    id, mode == Rpc ? "rpc" : "stream",
+                                    different ? "different_cpu" : "same_cpu",
+                                    spin ? "spin" : "blocking", item.bytes, observed_cpu);
+                        emit(backend, line);
+                    }
+                    for (u32 round = 0; round < config.rounds; ++round) {
+                        const auto before = backend.counters();
+                        const u64 start = backend.now();
+                        transactions(backend, state, item, config.iterations, sequence);
+                        const u64 end = backend.now();
+                        const auto after = backend.counters();
+                        require(backend, end > start && backend.cpu() == backend.client_cpu(),
+                                "timing/client placement");
+                        libk::str::Buffer line(state.line);
+                        line.format(
+                            "IPC_BENCH "
+                            "{\"record\":\"round\",\"case_id\":%u,\"round\":%u,\"operations\":%u,"
+                            "\"elapsed_ns\":%llu,\"counters\":[",
+                            id, round, config.iterations, static_cast<ull>(end - start));
+                        for (u32 counter = 0; counter < CounterCount; ++counter) {
+                            if (counter)
+                                line.append(',');
+                            if (before.values[counter] == kUnavailable ||
+                                after.values[counter] == kUnavailable)
+                                line.append("null");
+                            else {
+                                require(backend, after.values[counter] >= before.values[counter],
+                                        "counter regressed");
+                                line.format("%llu", static_cast<ull>(after.values[counter] -
+                                                                     before.values[counter]));
+                            }
+                        }
+                        line.append("]}");
+                        emit(backend, line);
+                    }
+                    // A separate instrumented distribution; two clock syscalls per RPC
+                    // are included, never silently subtracted or called one-way latency.
+                    if (mode == Rpc) {
+                        for (u32 i = 0; i < config.samples; ++i) {
+                            const u64 start = backend.now();
+                            rpc(backend, state, item, sequence);
+                            const u64 end = backend.now();
+                            require(backend, end >= start, "latency clock regressed");
+                            state.samples[i] = end - start;
+                        }
+                        emit_samples(backend, state, "latency_samples", id, config.samples);
                     }
                 }
-                line.append("]}"); emit(backend, line);
-            }
-            // A separate instrumented distribution; two clock syscalls per RPC
-            // are included, never silently subtracted or called one-way latency.
-            if (mode == Rpc) {
-                for (u32 i = 0; i < config.samples; ++i) {
-                    const u64 start = backend.now();
-                    rpc(backend, state, item, sequence);
-                    const u64 end = backend.now();
-                    require(backend, end >= start, "latency clock regressed");
-                    state.samples[i] = end - start;
-                }
-                emit_samples(backend, state, "latency_samples", id, config.samples);
-            }
         }
-    }
     backend.polling(false);
     control(state.outgoing, Finish);
-    backend.send(state.outgoing); backend.receive(state.incoming);
+    backend.send(state.outgoing);
+    backend.receive(state.incoming);
     require(backend, state.incoming.kind == Closed, "peer shutdown acknowledgement");
     backend.write("IPC_BENCH_DONE\n", 15);
 }

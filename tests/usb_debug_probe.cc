@@ -39,13 +39,13 @@ int main() {
     mx_u8_t descriptors[256]{};
     midix::usb::InterfaceDescriptor interfaces[4]{};
     midix::usb::EndpointDescriptor endpoints[8]{};
-    const MxUsbSpeed speeds[]={MxUsbSpeed::Full,MxUsbSpeed::High};
+    const MxUsbSpeed speeds[] = {MxUsbSpeed::Full, MxUsbSpeed::High};
     for (auto speed : speeds) {
         const auto length = mochi::usb::gadget::configuration(libk::as_bytes(descriptors),
                                                               speed == MxUsbSpeed::High);
         midix::usb::Configuration config{interfaces, endpoints, 4, 8, 0, 0, 0, 0, 0, 0};
         assert(length == 130 && midix::usb::parse_configuration(libk::as_bytes(descriptors, length),
-                                                               speed, &config));
+                                                                speed, &config));
         assert(config.interface_count == 4 && config.endpoint_count == 7);
         assert(endpoints[1].max_packet == (speed == MxUsbSpeed::High ? 512 : 64));
     }

@@ -20,7 +20,7 @@
 #include "midix/abi/protocols/nameservice.h"
 #include "mochi/va_layout.h"
 
-constexpr uint32_t kRingOrder    = MX_DEFAULT_RING_ORDER;
+constexpr uint32_t kRingOrder = MX_DEFAULT_RING_ORDER;
 constexpr uint32_t kMessageCount = 4096;
 constexpr bool kEmitBootMetrics = false;
 
@@ -39,12 +39,11 @@ static void try_console_log_counter(const char* key, uint64_t value) {
     mochi::log_counter(key, value);
 }
 
-static void resolve_pong(RingPage* request_ring, RingPage* reply_ring,
-                         CapHandle ns_doorbell, CapHandle ns_reply_doorbell) {
+static void resolve_pong(RingPage* request_ring, RingPage* reply_ring, CapHandle ns_doorbell,
+                         CapHandle ns_reply_doorbell) {
     MxNsResolveRequest req{};
     mochi::nameservice::copy_name(req.name, sizeof(req.name), "demo.pong");
-    while (!ring_push(request_ring, kRingOrder, MSG_NS_RESOLVE,
-                      &req, sizeof(req), ns_doorbell)) {
+    while (!ring_push(request_ring, kRingOrder, MSG_NS_RESOLVE, &req, sizeof(req), ns_doorbell)) {
         sys_yield();
     }
 
@@ -58,7 +57,8 @@ static void resolve_pong(RingPage* request_ring, RingPage* reply_ring,
             try_console_log("nameservice: resolve failed\n");
             mochi::park();
         }
-        if (slot.type != MSG_NS_RESOLVE_REPLY) continue;
+        if (slot.type != MSG_NS_RESOLVE_REPLY)
+            continue;
 
         MxEndpointDesc endpoint{};
         if (mochi::message_get(slot, &endpoint, MSG_NS_RESOLVE_REPLY)) {
@@ -72,10 +72,10 @@ static void resolve_pong(RingPage* request_ring, RingPage* reply_ring,
 
 extern "C" [[noreturn]] void _start() {
     const MxBootInfo* boot = mochi::boot::map();
-    const auto ipc = mochi::boot::map_endpoint(boot,
-        {"ipc.tx", kVaSendRing, "ipc.peer.db"},
-        {"ipc.rx", kVaRecvRing, "ipc.self.db"});
-    if (!ipc.valid()) mochi::boot::invalid_boot();
+    const auto ipc = mochi::boot::map_endpoint(boot, {"ipc.tx", kVaSendRing, "ipc.peer.db"},
+                                               {"ipc.rx", kVaRecvRing, "ipc.self.db"});
+    if (!ipc.valid())
+        mochi::boot::invalid_boot();
     auto* send_ring = ipc.tx_ring;
     auto* recv_ring = ipc.rx_ring;
     const auto pong_doorbell = ipc.tx_doorbell;
@@ -85,14 +85,15 @@ extern "C" [[noreturn]] void _start() {
         mochi::boot::invalid_boot();
     }
     const CapHandle done_doorbell = mochi::boot::require_handle(boot, "ipc.done");
-    const auto nameservice = mochi::boot::map_endpoint(boot,
-        {"ns.tx", kVaNsRequestRing, "ns.server.db"},
-        {"ns.rx", kVaNsReplyRing, "ns.reply.db"});
-    if (!nameservice.valid()) mochi::boot::invalid_boot();
+    const auto nameservice =
+        mochi::boot::map_endpoint(boot, {"ns.tx", kVaNsRequestRing, "ns.server.db"},
+                                  {"ns.rx", kVaNsReplyRing, "ns.reply.db"});
+    if (!nameservice.valid())
+        mochi::boot::invalid_boot();
     mochi::boot::ready(boot);
 
-    resolve_pong(nameservice.tx_ring, nameservice.rx_ring,
-                 nameservice.tx_doorbell, nameservice.rx_doorbell);
+    resolve_pong(nameservice.tx_ring, nameservice.rx_ring, nameservice.tx_doorbell,
+                 nameservice.rx_doorbell);
 
     RingSlot slot{};
     uint32_t total_sent = 0;
@@ -100,8 +101,8 @@ extern "C" [[noreturn]] void _start() {
 
     const uint32_t my_cpu = static_cast<uint32_t>(sys_thread_get_cpu());
     uint32_t cpu_query = 0;
-    while (!ring_push(send_ring, ipc_order, MSG_CPU_QUERY,
-                      &cpu_query, sizeof(cpu_query), pong_doorbell)) {
+    while (!ring_push(send_ring, ipc_order, MSG_CPU_QUERY, &cpu_query, sizeof(cpu_query),
+                      pong_doorbell)) {
         sys_yield();
     }
     ++total_sent;
@@ -120,8 +121,8 @@ extern "C" [[noreturn]] void _start() {
     }
 
     uint32_t hot_count = kMessageCount;
-    while (!ring_push(send_ring, ipc_order, MSG_HOT_START,
-                      &hot_count, sizeof(hot_count), pong_doorbell)) {
+    while (!ring_push(send_ring, ipc_order, MSG_HOT_START, &hot_count, sizeof(hot_count),
+                      pong_doorbell)) {
         sys_yield();
     }
     ++total_sent;
@@ -171,8 +172,8 @@ extern "C" [[noreturn]] void _start() {
 
     // Test B: force doorbell sleep/wake.
     uint32_t sleep_magic = 0x12345678;
-    while (!ring_push(send_ring, ipc_order, MSG_SLEEP_TEST_START,
-                      &sleep_magic, sizeof(sleep_magic), pong_doorbell)) {
+    while (!ring_push(send_ring, ipc_order, MSG_SLEEP_TEST_START, &sleep_magic, sizeof(sleep_magic),
+                      pong_doorbell)) {
         sys_yield();
     }
     ++total_sent;
@@ -204,8 +205,8 @@ extern "C" [[noreturn]] void _start() {
     }
 
     uint32_t sleep_seq = 0xCAFEBABE;
-    while (!ring_push(send_ring, ipc_order, MSG_SLEEP_TEST_PING,
-                      &sleep_seq, sizeof(sleep_seq), pong_doorbell)) {
+    while (!ring_push(send_ring, ipc_order, MSG_SLEEP_TEST_PING, &sleep_seq, sizeof(sleep_seq),
+                      pong_doorbell)) {
         sys_yield();
     }
     ++total_sent;
@@ -238,8 +239,7 @@ extern "C" [[noreturn]] void _start() {
                             ((ctx_after_hot - ctx_before_hot) * 1000ull) / kMessageCount);
     try_console_log_counter("metric.cross.core.ipc.syscalls.per.1k.msg",
                             ((ipc_after_hot - ipc_before_hot) * 1000ull) / kMessageCount);
-    try_console_log_counter("metric.cross.core.notify.calls",
-                            notify_after_hot - notify_before_hot);
+    try_console_log_counter("metric.cross.core.notify.calls", notify_after_hot - notify_before_hot);
 
     if (sys_cap_identify(done_doorbell) == kCapTypeDoorbell) {
         sys_notify(done_doorbell);

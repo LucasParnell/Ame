@@ -12,7 +12,7 @@ namespace mochi::svc {
 
 constexpr mx_u32_t kRegistryMagic = 0x53564352u; // 'SVCR'
 constexpr mx_u16_t kRegistryVersion = 1;
-constexpr mx_u32_t kMaxRegistryEntries = 24;
+constexpr mx_u32_t kMaxRegistryEntries = 64;
 
 constexpr mx_u32_t kStateSpawned = 1u << 0;
 constexpr mx_u32_t kStateBootPublished = 1u << 1;
@@ -39,7 +39,7 @@ struct RegistryPage {
     mx_u64_t reserved[6];
     RegistryEntry entries[kMaxRegistryEntries];
 };
-static_assert(sizeof(RegistryPage) <= 4096, "service registry must fit in one page");
+static_assert(sizeof(RegistryPage) <= 3 * 4096, "service registry must fit in three pages");
 
 inline mx_u64_t read_generation(const RegistryPage* page) {
     return __atomic_load_n(&page->generation, __ATOMIC_ACQUIRE);
@@ -49,20 +49,21 @@ inline mx_u64_t read_begin(const RegistryPage* page) {
     mx_u64_t gen = 0;
     do {
         gen = read_generation(page);
-        if (gen & 1u) asm volatile("yield" ::: "memory");
+        if (gen & 1u)
+            asm volatile("yield" ::: "memory");
     } while (gen & 1u);
     return gen;
 }
 
 inline bool read_retry(const RegistryPage* page, mx_u64_t begin_generation) {
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    return (begin_generation & 1u) ||
-           read_generation(page) != begin_generation;
+    return (begin_generation & 1u) || read_generation(page) != begin_generation;
 }
 
 inline void write_begin(RegistryPage* page) {
     mx_u64_t gen = __atomic_load_n(&page->generation, __ATOMIC_RELAXED);
-    if ((gen & 1u) == 0) ++gen;
+    if ((gen & 1u) == 0)
+        ++gen;
     __atomic_store_n(&page->generation, gen, __ATOMIC_RELEASE);
     // Publish odd before any following registry stores become visible.
     __atomic_thread_fence(__ATOMIC_RELEASE);
@@ -70,7 +71,8 @@ inline void write_begin(RegistryPage* page) {
 
 inline void write_end(RegistryPage* page) {
     mx_u64_t gen = __atomic_load_n(&page->generation, __ATOMIC_RELAXED);
-    if ((gen & 1u) == 0) ++gen;
+    if ((gen & 1u) == 0)
+        ++gen;
     __atomic_store_n(&page->generation, gen + 1u, __ATOMIC_RELEASE);
 }
 

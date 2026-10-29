@@ -13,4 +13,4 @@ struct ProvisionResult {
 // FF05 prepares a key frame. Provisioning itself does not call FF06 or invent
 // a key/HMAC. The real card's one-time PROGRAM_KEY command is issued at most once.
 ProvisionResult provision(volatile u8* request, const Storage& storage, Smc call);
-}
+} // namespace anne::rpmb_diag

@@ -29,13 +29,17 @@ constexpr u8 kDataDark = 1;
 constexpr u8 kFuncLight = 2;
 constexpr u8 kFuncDark = 3;
 
-inline bool is_function(u8 cell) { return cell >= kFuncLight; }
-inline bool is_dark_cell(u8 cell) { return (cell & 1u) != 0; }
+inline bool is_function(u8 cell) {
+    return cell >= kFuncLight;
+}
+inline bool is_dark_cell(u8 cell) {
+    return (cell & 1u) != 0;
+}
 
-u8 g_cells[kTotalCells];             // working matrix
-static u8 g_interleaved[kMaxCodewords];  // final codeword sequence (static: not on a faulting stack)
-u8 g_codewords[kMaxCodewords];       // message + EC codewords
-static constexpr u32 kMaxEcPerBlock = 30;   // ISO maximum for QR Model 2
+u8 g_cells[kTotalCells];                // working matrix
+static u8 g_interleaved[kMaxCodewords]; // final codeword sequence (static: not on a faulting stack)
+u8 g_codewords[kMaxCodewords];          // message + EC codewords
+static constexpr u32 kMaxEcPerBlock = 30; // ISO maximum for QR Model 2
 
 // The fixed buffers above are sized for the worst case; refuse to compile with a
 // spec table that would not fit them.
@@ -44,17 +48,19 @@ consteval bool ec_tables_are_bounded() {
         for (u32 l = 0; l < tables::kLevelCount; ++l) {
             u32 blocks = 0;
             for (u32 g = 0; g < tables::kEc[v][l].group_count; ++g) {
-                if (tables::kEc[v][l].groups[g].ec_bytes > kMaxEcPerBlock) return false;
+                if (tables::kEc[v][l].groups[g].ec_bytes > kMaxEcPerBlock)
+                    return false;
                 blocks += tables::kEc[v][l].groups[g].blocks;
             }
-            if (blocks > kMaxBlocks) return false;
+            if (blocks > kMaxBlocks)
+                return false;
         }
     }
     return true;
 }
 static_assert(ec_tables_are_bounded(), "QR EC tables exceed the fixed buffers");
-u8 g_ec[kMaxBlocks][30];             // per-block EC bytes (max EC per block = 30)
-u8 g_gen[30];                        // Reed-Solomon generator coefficients
+u8 g_ec[kMaxBlocks][30]; // per-block EC bytes (max EC per block = 30)
+u8 g_gen[30];            // Reed-Solomon generator coefficients
 
 // --- bit stream ------------------------------------------------------------
 
@@ -87,27 +93,34 @@ u8 gf_mul(u8 x, u8 y) {
 
 // Generator polynomial of `degree`: coefficients for all but the leading 1.
 void rs_generator(u32 degree) {
-    if (degree == 0 || degree > kMaxEcPerBlock) return; // unreachable: tables are static_asserted
-    for (u32 i = 0; i + 1 < degree; ++i) g_gen[i] = 0;
+    if (degree == 0 || degree > kMaxEcPerBlock)
+        return; // unreachable: tables are static_asserted
+    for (u32 i = 0; i + 1 < degree; ++i)
+        g_gen[i] = 0;
     g_gen[degree - 1] = 1;
     u8 root = 1;
     for (u32 i = 0; i < degree; ++i) {
         for (u32 j = 0; j < degree; ++j) {
             g_gen[j] = gf_mul(g_gen[j], root);
-            if (j + 1 < degree) g_gen[j] ^= g_gen[j + 1];
+            if (j + 1 < degree)
+                g_gen[j] ^= g_gen[j + 1];
         }
         root = gf_mul(root, 0x02);
     }
 }
 
 void rs_remainder(const u8* data, u32 len, u32 degree, u8* result) {
-    if (degree == 0 || degree > kMaxEcPerBlock) return; // unreachable: tables are static_asserted
-    for (u32 i = 0; i < degree; ++i) result[i] = 0;
+    if (degree == 0 || degree > kMaxEcPerBlock)
+        return; // unreachable: tables are static_asserted
+    for (u32 i = 0; i < degree; ++i)
+        result[i] = 0;
     for (u32 i = 0; i < len; ++i) {
         const u8 factor = static_cast<u8>(data[i] ^ result[0]);
-        for (u32 j = 0; j + 1 < degree; ++j) result[j] = result[j + 1];
+        for (u32 j = 0; j + 1 < degree; ++j)
+            result[j] = result[j + 1];
         result[degree - 1] = 0;
-        for (u32 j = 0; j < degree; ++j) result[j] ^= gf_mul(g_gen[j], factor);
+        for (u32 j = 0; j < degree; ++j)
+            result[j] ^= gf_mul(g_gen[j], factor);
     }
 }
 
@@ -124,15 +137,21 @@ constexpr u32 data_codewords(u32 version, Level level) {
 
 u8 level_code(Level level) {
     switch (level) {
-    case Level::L: return 1;
-    case Level::M: return 0;
-    case Level::Q: return 3;
-    case Level::H: return 2;
+    case Level::L:
+        return 1;
+    case Level::M:
+        return 0;
+    case Level::Q:
+        return 3;
+    case Level::H:
+        return 2;
     }
     return 0;
 }
 
-constexpr u32 char_count_bits(u32 version) { return version <= 9 ? 8u : 16u; }
+constexpr u32 char_count_bits(u32 version) {
+    return version <= 9 ? 8u : 16u;
+}
 
 // Largest payload any version/level can carry (version 40, level L).
 constexpr u32 kMaxDataBytes = data_codewords(kMaxVersion, Level::L);
@@ -140,7 +159,8 @@ constexpr u32 kMaxDataBytes = data_codewords(kMaxVersion, Level::L);
 // --- matrix helpers --------------------------------------------------------
 
 void set_function(u32 x, u32 y, u32 size, bool dark) {
-    if (x >= size || y >= size) return;
+    if (x >= size || y >= size)
+        return;
     g_cells[y * size + x] = dark ? kFuncDark : kFuncLight;
 }
 
@@ -154,14 +174,16 @@ void draw_finder(u32 cx, u32 cy, u32 size) {
             const int d = ax > ay ? ax : ay;
             const int x = static_cast<int>(cx) + dx;
             const int y = static_cast<int>(cy) + dy;
-            if (x < 0 || y < 0 || x >= static_cast<int>(size) || y >= static_cast<int>(size)) continue;
+            if (x < 0 || y < 0 || x >= static_cast<int>(size) || y >= static_cast<int>(size))
+                continue;
             set_function(static_cast<u32>(x), static_cast<u32>(y), size, d != 2 && d != 4);
         }
     }
 }
 
 void draw_function_patterns(u32 version, u32 size) {
-    for (u32 i = 0; i < kTotalCells; ++i) g_cells[i] = kDataLight;
+    for (u32 i = 0; i < kTotalCells; ++i)
+        g_cells[i] = kDataLight;
 
     // Finders + separators at three corners (drawn as function modules).
     draw_finder(3, 3, size);
@@ -188,9 +210,8 @@ void draw_function_patterns(u32 version, u32 size) {
             }
             for (int dy = -2; dy <= 2; ++dy) {
                 for (int dx = -2; dx <= 2; ++dx) {
-                    const int d = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy)
-                                      ? (dx < 0 ? -dx : dx)
-                                      : (dy < 0 ? -dy : dy);
+                    const int d = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx)
+                                                                            : (dy < 0 ? -dy : dy);
                     set_function(cx + dx, cy + dy, size, d != 1);
                 }
             }
@@ -213,18 +234,23 @@ void draw_function_patterns(u32 version, u32 size) {
 
 void draw_format_bits(Level level, u32 mask, u32 size) {
     const u16 bits = tables::kFormatInfo[(static_cast<u32>(level_code(level)) << 3) | mask];
-    for (u32 i = 0; i < 6; ++i) set_function(8, i, size, ((bits >> i) & 1u) != 0);
+    for (u32 i = 0; i < 6; ++i)
+        set_function(8, i, size, ((bits >> i) & 1u) != 0);
     set_function(8, 7, size, ((bits >> 6) & 1u) != 0);
     set_function(8, 8, size, ((bits >> 7) & 1u) != 0);
     set_function(7, 8, size, ((bits >> 8) & 1u) != 0);
-    for (u32 i = 9; i < 15; ++i) set_function(14 - i, 8, size, ((bits >> i) & 1u) != 0);
-    for (u32 i = 0; i < 8; ++i) set_function(size - 1 - i, 8, size, ((bits >> i) & 1u) != 0);
-    for (u32 i = 8; i < 15; ++i) set_function(8, size - 15 + i, size, ((bits >> i) & 1u) != 0);
+    for (u32 i = 9; i < 15; ++i)
+        set_function(14 - i, 8, size, ((bits >> i) & 1u) != 0);
+    for (u32 i = 0; i < 8; ++i)
+        set_function(size - 1 - i, 8, size, ((bits >> i) & 1u) != 0);
+    for (u32 i = 8; i < 15; ++i)
+        set_function(8, size - 15 + i, size, ((bits >> i) & 1u) != 0);
     set_function(8, size - 8, size, true);
 }
 
 void draw_version_bits(u32 version, u32 size) {
-    if (version < 7) return;
+    if (version < 7)
+        return;
     const u32 bits = tables::kVersionInfo[version - 1];
     for (u32 i = 0; i < 18; ++i) {
         const bool dark = ((bits >> i) & 1u) != 0;
@@ -238,14 +264,16 @@ void draw_version_bits(u32 version, u32 size) {
 void place_data(u32 size, u32 bit_count) {
     u32 bit = 0;
     for (int right = static_cast<int>(size) - 1; right >= 1; right -= 2) {
-        if (right == 6) right = 5; // skip the vertical timing column
+        if (right == 6)
+            right = 5; // skip the vertical timing column
         for (u32 vert = 0; vert < size; ++vert) {
             for (u32 j = 0; j < 2; ++j) {
                 const u32 x = static_cast<u32>(right - static_cast<int>(j));
                 const bool upward = ((static_cast<u32>(right) + 1u) & 2u) == 0;
                 const u32 y = upward ? size - 1u - vert : vert;
                 u8& cell = g_cells[y * size + x];
-                if (is_function(cell)) continue;
+                if (is_function(cell))
+                    continue;
                 bool dark = false;
                 if (bit < bit_count) {
                     dark = ((g_codewords[bit >> 3] >> (7u - (bit & 7u))) & 1u) != 0;
@@ -259,14 +287,22 @@ void place_data(u32 size, u32 bit_count) {
 
 bool mask_bit(u32 mask, u32 x, u32 y) {
     switch (mask) {
-    case 0: return ((y + x) % 2u) == 0;
-    case 1: return (y % 2u) == 0;
-    case 2: return (x % 3u) == 0;
-    case 3: return ((y + x) % 3u) == 0;
-    case 4: return ((y / 2u + x / 3u) % 2u) == 0;
-    case 5: return ((y * x) % 2u + (y * x) % 3u) == 0;
-    case 6: return (((y * x) % 2u + (y * x) % 3u) % 2u) == 0;
-    default: return (((y + x) % 2u + (y * x) % 3u) % 2u) == 0;
+    case 0:
+        return ((y + x) % 2u) == 0;
+    case 1:
+        return (y % 2u) == 0;
+    case 2:
+        return (x % 3u) == 0;
+    case 3:
+        return ((y + x) % 3u) == 0;
+    case 4:
+        return ((y / 2u + x / 3u) % 2u) == 0;
+    case 5:
+        return ((y * x) % 2u + (y * x) % 3u) == 0;
+    case 6:
+        return (((y * x) % 2u + (y * x) % 3u) % 2u) == 0;
+    default:
+        return (((y + x) % 2u + (y * x) % 3u) % 2u) == 0;
     }
 }
 
@@ -292,11 +328,13 @@ u32 penalty(u32 size) {
             if (is_dark_cell(g_cells[y * size + x]) == is_dark_cell(g_cells[y * size + x - 1])) {
                 ++run;
             } else {
-                if (run >= 5) score += 3u + (run - 5u);
+                if (run >= 5)
+                    score += 3u + (run - 5u);
                 run = 1;
             }
         }
-        if (run >= 5) score += 3u + (run - 5u);
+        if (run >= 5)
+            score += 3u + (run - 5u);
     }
     for (u32 x = 0; x < size; ++x) {
         u32 run = 1;
@@ -304,11 +342,13 @@ u32 penalty(u32 size) {
             if (is_dark_cell(g_cells[y * size + x]) == is_dark_cell(g_cells[(y - 1) * size + x])) {
                 ++run;
             } else {
-                if (run >= 5) score += 3u + (run - 5u);
+                if (run >= 5)
+                    score += 3u + (run - 5u);
                 run = 1;
             }
         }
-        if (run >= 5) score += 3u + (run - 5u);
+        if (run >= 5)
+            score += 3u + (run - 5u);
     }
 
     // Rule 2: 2x2 blocks of one colour.
@@ -341,13 +381,15 @@ u32 penalty(u32 size) {
                     for (u32 i = 0; i < 11 && match; ++i) {
                         const int cx = x + dx * static_cast<int>(i);
                         const int cy = y + dy * static_cast<int>(i);
-                        const bool dark = (cx >= 0 && cy >= 0 && cx < extent && cy < extent)
-                                              ? is_dark_cell(g_cells[static_cast<u32>(cy) * size +
-                                                                     static_cast<u32>(cx)])
-                                              : false; // quiet zone
+                        const bool dark =
+                            (cx >= 0 && cy >= 0 && cx < extent && cy < extent)
+                                ? is_dark_cell(
+                                      g_cells[static_cast<u32>(cy) * size + static_cast<u32>(cx)])
+                                : false; // quiet zone
                         match = (dark == (pattern[i] != 0));
                     }
-                    if (match) score += 40;
+                    if (match)
+                        score += 40;
                 }
             }
         }
@@ -356,7 +398,8 @@ u32 penalty(u32 size) {
     // Rule 4: deviation from 50% dark.
     u32 dark = 0;
     for (u32 i = 0; i < size * size; ++i) {
-        if (is_dark_cell(g_cells[i])) ++dark;
+        if (is_dark_cell(g_cells[i]))
+            ++dark;
     }
     const u32 total = size * size;
     const u32 percent = (dark * 100u) / total;
@@ -370,18 +413,22 @@ u32 penalty(u32 size) {
 u32 fit_version(u32 len, Level level) {
     // u64 arithmetic: `8u * len` would wrap for absurd lengths, and encode() must
     // never be told a payload fits when it cannot be written.
-    if (len > kMaxDataBytes) return 0;
+    if (len > kMaxDataBytes)
+        return 0;
     for (u32 version = 1; version <= kMaxVersion; ++version) {
         const u64 bits = 4ull + char_count_bits(version) + 8ull * len;
-        if (data_codewords(version, level) >= (bits + 7ull) / 8ull) return version;
+        if (data_codewords(version, level) >= (bits + 7ull) / 8ull)
+            return version;
     }
     return 0;
 }
 
 bool encode(const u8* data, u32 len, Level level, Code& out) {
-    if (!data && len != 0) return false;
+    if (!data && len != 0)
+        return false;
     const u32 version = fit_version(len, level);
-    if (version == 0) return false;
+    if (version == 0)
+        return false;
     const u32 size = 17u + 4u * version;
     const tables::EcSpec& spec = tables::kEc[version - 1][static_cast<u32>(level)];
 
@@ -392,22 +439,29 @@ bool encode(const u8* data, u32 len, Level level, Code& out) {
         const EcGroup& grp = spec.groups[g];
         data_cw += static_cast<u32>(grp.blocks) * grp.data_bytes;
         total_cw += static_cast<u32>(grp.blocks) * (grp.data_bytes + grp.ec_bytes);
-        if (grp.data_bytes > max_data_per_block) max_data_per_block = grp.data_bytes;
+        if (grp.data_bytes > max_data_per_block)
+            max_data_per_block = grp.data_bytes;
     }
-    if (total_cw > kMaxCodewords || data_cw > kMaxCodewords) return false;
+    if (total_cw > kMaxCodewords || data_cw > kMaxCodewords)
+        return false;
 
     // --- byte-mode bit stream, padded to the data-codeword capacity ---------
-    for (u32 i = 0; i < data_cw; ++i) g_codewords[i] = 0;
+    for (u32 i = 0; i < data_cw; ++i)
+        g_codewords[i] = 0;
     BitSink sink{g_codewords, data_cw * 8u};
     sink.put(0x4u, 4);                       // byte mode indicator
     sink.put(len, char_count_bits(version)); // character count
-    for (u32 i = 0; i < len; ++i) sink.put(data[i], 8);
+    for (u32 i = 0; i < len; ++i)
+        sink.put(data[i], 8);
     const u32 capacity_bits = data_cw * 8u;
     u32 terminator = capacity_bits > sink.bit_len ? capacity_bits - sink.bit_len : 0;
-    if (terminator > 4u) terminator = 4u;
+    if (terminator > 4u)
+        terminator = 4u;
     sink.put(0, terminator);
-    if (sink.bit_len > capacity_bits) return false; // cannot happen after fit_version
-    while (sink.bit_len % 8u != 0) sink.put(0, 1);
+    if (sink.bit_len > capacity_bits)
+        return false; // cannot happen after fit_version
+    while (sink.bit_len % 8u != 0)
+        sink.put(0, 1);
     for (u32 i = sink.bit_len / 8u, pad = 0; i < data_cw; ++i, ++pad) {
         g_codewords[i] = (pad % 2u == 0) ? 0xECu : 0x11u;
     }
@@ -419,7 +473,8 @@ bool encode(const u8* data, u32 len, Level level, Code& out) {
         u32 block = 0;
         for (u32 g = 0; g < spec.group_count; ++g) {
             for (u32 b = 0; b < spec.groups[g].blocks; ++b, ++block) {
-                if (block >= kMaxBlocks) return false;
+                if (block >= kMaxBlocks)
+                    return false;
                 rs_remainder(g_codewords + offset, spec.groups[g].data_bytes,
                              spec.groups[g].ec_bytes, g_ec[block]);
                 offset += spec.groups[g].data_bytes;
@@ -444,19 +499,23 @@ bool encode(const u8* data, u32 len, Level level, Code& out) {
         }
         for (u32 i = 0; i < max_data_per_block; ++i) {
             for (u32 b = 0; b < block; ++b) {
-                if (i < block_data[b]) interleaved[out_len++] = g_codewords[block_start[b] + i];
+                if (i < block_data[b])
+                    interleaved[out_len++] = g_codewords[block_start[b] + i];
             }
         }
         for (u32 i = 0; i < spec.groups[0].ec_bytes; ++i) {
-            for (u32 b = 0; b < block; ++b) interleaved[out_len++] = g_ec[b][i];
+            for (u32 b = 0; b < block; ++b)
+                interleaved[out_len++] = g_ec[b][i];
         }
-        if (out_len != total_cw) return false;
-        for (u32 i = 0; i < total_cw; ++i) g_codewords[i] = interleaved[i];
+        if (out_len != total_cw)
+            return false;
+        for (u32 i = 0; i < total_cw; ++i)
+            g_codewords[i] = interleaved[i];
     }
 
     // --- matrix ------------------------------------------------------------
     draw_function_patterns(version, size);
-    draw_format_bits(level, 0, size);       // reserve format areas before data
+    draw_format_bits(level, 0, size); // reserve format areas before data
     draw_version_bits(version, size);
     place_data(size, total_cw * 8u);
 
@@ -479,7 +538,8 @@ bool encode(const u8* data, u32 len, Level level, Code& out) {
     out.version = version;
     out.size = size;
     out.mask = best_mask;
-    for (u32 i = 0; i < kModuleBytes; ++i) out.modules[i] = 0;
+    for (u32 i = 0; i < kModuleBytes; ++i)
+        out.modules[i] = 0;
     for (u32 y = 0; y < size; ++y) {
         for (u32 x = 0; x < size; ++x) {
             if (is_dark_cell(g_cells[y * size + x])) {
@@ -492,7 +552,8 @@ bool encode(const u8* data, u32 len, Level level, Code& out) {
 }
 
 bool dark(const Code& code, u32 x, u32 y) {
-    if (x >= code.size || y >= code.size) return false;
+    if (x >= code.size || y >= code.size)
+        return false;
     const u32 bit = y * code.size + x;
     return ((code.modules[bit >> 3] >> (7u - (bit & 7u))) & 1u) != 0;
 }

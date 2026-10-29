@@ -14,9 +14,13 @@ static fpsimd::State observed[2];
     register u64 operation asm("x0") = 0x20;
     register const u64* data asm("x1") = args;
     asm volatile("hlt #0xf000" : "+r"(operation) : "r"(data) : "memory");
-    for (;;) asm volatile("wfe");
+    for (;;)
+        asm volatile("wfe");
 }
-static void require(bool condition, u64 code) { if (!condition) finish(code); }
+static void require(bool condition, u64 code) {
+    if (!condition)
+        finish(code);
+}
 static void check(const fpsimd::State& state, u64 seed, u32 fpcr, u32 fpsr, u64 code) {
     for (u32 i = 0; i < 32; ++i) {
         const auto expected = ((seed + i) & 255) * 0x0101010101010101ull;
@@ -48,24 +52,26 @@ extern "C" void simd_el2_test() {
         state.guest_cntp_cval = state.guest_cntv_cval = ~0ull;
         // Initial vCPU state is zero, just like freshly allocated production vCPUs.
     }
-    for (u32 round = 0; round < 64; ++round) for (u32 id = 0; id < 2; ++id) {
-        const auto host_seed = 1 + round;
-        test_simd_seed(host_seed, (round % 4) << 22, 0x1f);
-        vm_el2_run(&states[id]);
-        fpsimd::State host;
-        test_simd_capture(&host);
-        check(host, host_seed, (round % 4) << 22, 0x1f, 10);
-        require(states[id].exit_kind == 0 && states[id].exit_esr >> 26 == 0x16, 12);
-        if (!round) {
-            for (const auto& reg : observed[id].v) require(!reg[0] && !reg[1], 13);
-            require(!observed[id].fpcr && !observed[id].fpsr, 14);
-        } else {
-            check(observed[id], 128 + id * 32 + round - 1,
-                  ((round - 1 + id) % 4) << 22, 1u << ((round - 1) % 5), 15);
+    for (u32 round = 0; round < 64; ++round)
+        for (u32 id = 0; id < 2; ++id) {
+            const auto host_seed = 1 + round;
+            test_simd_seed(host_seed, (round % 4) << 22, 0x1f);
+            vm_el2_run(&states[id]);
+            fpsimd::State host;
+            test_simd_capture(&host);
+            check(host, host_seed, (round % 4) << 22, 0x1f, 10);
+            require(states[id].exit_kind == 0 && states[id].exit_esr >> 26 == 0x16, 12);
+            if (!round) {
+                for (const auto& reg : observed[id].v)
+                    require(!reg[0] && !reg[1], 13);
+                require(!observed[id].fpcr && !observed[id].fpsr, 14);
+            } else {
+                check(observed[id], 128 + id * 32 + round - 1, ((round - 1 + id) % 4) << 22,
+                      1u << ((round - 1) % 5), 15);
+            }
+            check(states[id].guest_fpsimd, 128 + id * 32 + round, ((round + id) % 4) << 22,
+                  1u << (round % 5), 17);
         }
-        check(states[id].guest_fpsimd, 128 + id * 32 + round,
-              ((round + id) % 4) << 22, 1u << (round % 5), 17);
-    }
     // CPACR_EL1 is guest-controlled. EL2 must still preserve vector state when
     // the guest has disabled FP access for itself.
     states[0].pc = reinterpret_cast<u64>(&simd_guest_no_fp);

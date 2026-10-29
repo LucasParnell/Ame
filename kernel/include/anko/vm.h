@@ -39,7 +39,6 @@ constexpr u32 kVgicBitmapWords = kVgicMaxIrqs / 32;
 
 constexpr u64 kDefaultGuestMidr = 0x410FD034ull; // ARM Cortex-A53 MIDR.
 
-
 constexpr u64 kGuestPhysMin = DANGO_RAM_BASE;
 constexpr u64 kGuestPhysMax = DANGO_RAM_BASE + DANGO_RAM_SIZE;
 constexpr u64 kDangoRamBase = DANGO_RAM_BASE;
@@ -512,10 +511,10 @@ struct SharedArena {
     PhysAddr host_phys_base;
     u64 size;
     u64 guest_pa_base;
-    u32 rights;                     // stage-2 access rights (READ/WRITE only)
+    u32 rights; // stage-2 access rights (READ/WRITE only)
     u32 flags;
-    u32 dma_perms;                  // device perms captured at registration
-    iommu::VmDmaClass dma_class;    // None until explicitly registered SharedGpu
+    u32 dma_perms;               // device perms captured at registration
+    iommu::VmDmaClass dma_class; // None until explicitly registered SharedGpu
     bool mapped_stage2;
     bool dead;
     u8 pad[1];
@@ -572,7 +571,8 @@ void metric_inc(VmDebugCounter id);
 class CallGuard {
     bool active_;
     u64 irq_;
-public:
+
+  public:
     explicit CallGuard(bool active);
     ~CallGuard();
     CallGuard(const CallGuard&) = delete;
@@ -583,14 +583,16 @@ void dispose_vcpu(void* target);
 void dispose_channel(void* target);
 void dispose_shared_arena(void* target);
 
-cap::Ref require_cap(Process& caller, CapHandle handle, CapType type,
-                      u32 need_rights, SysError* out_error);
-cap::Borrow<Vm> vm_from_cap(Process& caller, CapHandle vm_cap, u32 need_rights, SysError* out_error);
-cap::Borrow<Vcpu> vcpu_from_cap(Process& caller, CapHandle vcpu_cap, u32 need_rights, SysError* out_error);
-cap::Borrow<VmMemory> memory_from_cap(Process& caller, CapHandle memory_cap,
-                          u32 need_rights, SysError* out_error);
-cap::Borrow<VmChannel> channel_from_cap(Process& caller, CapHandle channel_cap,
-                            u32 need_rights, SysError* out_error);
+cap::Ref require_cap(Process& caller, CapHandle handle, CapType type, u32 need_rights,
+                     SysError* out_error);
+cap::Borrow<Vm> vm_from_cap(Process& caller, CapHandle vm_cap, u32 need_rights,
+                            SysError* out_error);
+cap::Borrow<Vcpu> vcpu_from_cap(Process& caller, CapHandle vcpu_cap, u32 need_rights,
+                                SysError* out_error);
+cap::Borrow<VmMemory> memory_from_cap(Process& caller, CapHandle memory_cap, u32 need_rights,
+                                      SysError* out_error);
+cap::Borrow<VmChannel> channel_from_cap(Process& caller, CapHandle channel_cap, u32 need_rights,
+                                        SysError* out_error);
 Vm* find_vm_by_id(u32 vm_id);
 Vm* owner_for_vcpu(Vcpu* vcpu);
 void refresh_vm_state(Vm* vm);
@@ -624,12 +626,12 @@ SysError inspect_vm(Process& caller, CapHandle vm_cap, VmInfo* out);
 
 CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
                         SysError* out_error);
-SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap,
-                    u64 guest_pa, u64 size, u32 rights);
+SysError map_memory(Process& caller, CapHandle vm_cap, CapHandle memory_cap, u64 guest_pa, u64 size,
+                    u32 rights);
 SysError unmap_memory(Process& caller, CapHandle vm_cap, u64 guest_pa, u64 size);
 SysError inspect_memory(Process& caller, CapHandle memory_cap, VmMemoryInfo* out);
-SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset,
-                      const void* src, u64 len);
+SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset, const void* src,
+                      u64 len);
 void destroy_memory_object(VmMemory* mem);
 
 // --- Phase L: dynamic shared arenas (vm_shared.cc) -------------------------
@@ -657,9 +659,8 @@ iommu::VmDmaClass shared_arena_dma_class(const SharedArena& shared);
 // other VM call, so these serialize with VM mutation and guest entry.
 cap::Borrow<SharedArena> shared_arena_from_cap(Process& caller, CapHandle shared_cap,
                                                u32 need_rights, SysError* out_error);
-CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle arena_cap,
-                               u64 guest_pa, u64 size, u32 rights, u32 flags,
-                               SysError* out_error);
+CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle arena_cap, u64 guest_pa,
+                               u64 size, u32 rights, u32 flags, SysError* out_error);
 SysError register_shared_memory_dma(Process& caller, CapHandle shared_cap, u32 perms);
 SysError inspect_shared_memory(Process& caller, CapHandle shared_cap, SharedArenaInfo* out);
 // VM retire / owner death: tear down every attachment bound to `vm` before its
@@ -676,23 +677,23 @@ struct SharedArenaStats {
 SharedArenaStats shared_arena_stats();
 
 CapHandle create_vcpu(Process& caller, CapHandle vm_cap, u64 flags, SysError* out_error);
-SysError set_vcpu_entry(Process& caller, CapHandle vcpu_cap, u64 entry_pc,
-                        u64 arg0, u64 arg1);
+SysError set_vcpu_entry(Process& caller, CapHandle vcpu_cap, u64 entry_pc, u64 arg0, u64 arg1);
 SysError inspect_vcpu(Process& caller, CapHandle vcpu_cap, VcpuInfo* out);
 SysError vcpu_bind_sched_context(Process& caller, CapHandle vcpu_cap, CapHandle sched_context_cap);
 SysError vcpu_set_affinity(Process& caller, CapHandle vcpu_cap, u64 core_mask, u32 home_cpu);
 SysError vcpu_kick(Process& caller, CapHandle vcpu_cap, u32 reason);
 SysError vcpu_inject_irq(Process& caller, CapHandle vcpu_cap, u32 irq);
 SysError vcpu_block_until_irq_or_timer(Process& caller, CapHandle vcpu_cap);
-SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budget, VcpuRunResult* out);
+SysError run_vcpu(Process& caller, CapHandle vcpu_cap, const VcpuRunBudget& budget,
+                  VcpuRunResult* out);
 
 CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags,
                          SysError* out_error);
-CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_kind,
-                           u32 rights, SysError* out_error);
+CapHandle channel_endpoint(Process& caller, CapHandle channel_cap, u32 endpoint_kind, u32 rights,
+                           SysError* out_error);
 SysError inspect_channel(Process& caller, CapHandle channel_cap, VmChannelInfo* out);
-SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
-                     u64 ipa, u64 reserved_size, u32 guest_irq);
+SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap, u64 ipa,
+                     u64 reserved_size, u32 guest_irq);
 // Record the VM's shared staging window (guest IPA + size) in the channel
 // descriptor. Validates alignment, size (against the VM's staging memory) and
 // non-overlap; no-op-safe E_INVALID until map_channel() has run.
@@ -723,7 +724,6 @@ inline bool channel_ring_full(const Ring& ring) {
 // before its storage is released, and clear the guest vector's vGIC pending
 // bit. CallGuard held by the caller. Safe to call for a vCPU with no owner VM.
 void channel_detach_vcpu(Vcpu& vcpu);
-
 
 // ===========================================================================
 // Phase D: VM device assignment (§6 device-assignment model, §7 interrupt

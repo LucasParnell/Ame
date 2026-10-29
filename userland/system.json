@@ -2,6 +2,10 @@
   "schema": 2,
   "resources": [
     {
+      "name": "charger.observe",
+      "boot": "charger.observe"
+    },
+    {
       "name": "emmc.dma",
       "boot": "emmc.dma"
     },
@@ -546,6 +550,11 @@
       "name": "fido2_prompt_ring",
       "kind": "ring",
       "order": 6
+    },
+    {
+      "name": "exec_image",
+      "kind": "arena",
+      "bytes": 262144
     }
   ],
   "checks": [
@@ -1552,6 +1561,15 @@
           "rights": [
             "wait"
           ]
+        },
+        {
+          "channel": "exec_image",
+          "name": "exec.arena",
+          "rights": [
+            "read",
+            "write",
+            "map"
+          ]
         }
       ]
     },
@@ -1797,6 +1815,13 @@
       "provides": [],
       "uses": [],
       "bindings": [
+        {
+          "boot": "charger.observe",
+          "name": "charger.observe",
+          "rights": [
+            "write"
+          ]
+        },
         {
           "channel": "i2c_power_b",
           "name": "i2c.tx",
@@ -2749,10 +2774,8 @@
       "bundle": "system",
       "principal": "native_trusted",
       "restart": "always",
-      "stage": "drivers",
-      "start_after": [
-        "usb.fn.bulk"
-      ],
+      "stage": "storage",
+      "start_after": [],
       "caps": [],
       "provides": [],
       "uses": [],
@@ -3041,6 +3064,7 @@
       "ui.input",
       "drv.blk.virtio",
       "io.fs",
+      "dev.apps",
       "msh",
       "app.hello",
       "ipc.profiler"
@@ -3520,6 +3544,15 @@
               "name": "apps.control.rx.db",
               "rights": [
                 "wait"
+              ]
+            },
+            {
+              "channel": "exec_image",
+              "name": "exec.arena",
+              "rights": [
+                "read",
+                "write",
+                "map"
               ]
             }
           ]

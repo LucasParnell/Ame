@@ -8,7 +8,7 @@ void capture(char c) {
     assert(count < sizeof(captured));
     captured[count++] = c;
 }
-}
+} // namespace
 
 int main() {
     // No MMIO access before binding, but a secondary diagnostic sink can work.

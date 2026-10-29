@@ -19,7 +19,7 @@ namespace {
 // naturally aligned accesses, so the revision (0x08) and header-type (0x0E)
 // bytes are read as part of their enclosing 32-bit word.
 constexpr u32 kCfgRevisionClass = 0x08; // [0x0B:0x08] revision + class code
-constexpr u32 kCfgHeaderWord = 0x0C;     // [0x0F:0x0C] cache/latency + header type
+constexpr u32 kCfgHeaderWord = 0x0C;    // [0x0F:0x0C] cache/latency + header type
 
 // USB xHCI class code: the one PCI function Ame drives natively, so its
 // bus-master enablement is left to drv.usb.xhci.
@@ -181,7 +181,8 @@ u32 enumerate(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap) {
     static PciFunctionInfo inventory[kMaxFunctions];
     static u32 count;
     static bool ready;
-    if (!ecam_base || !out || !cap) return 0;
+    if (!ecam_base || !out || !cap)
+        return 0;
     // Boot discovers this fixed QEMU topology before any native driver runs.
     // Re-probing BAR sizes later would temporarily relocate a live native BAR.
     if (!ready) {
@@ -191,17 +192,21 @@ u32 enumerate(PhysAddr ecam_base, PciFunctionInfo* out, u32 cap) {
     const u32 written = count < cap ? count : cap;
     for (u32 i = 0; i < written; ++i) {
         auto record = inventory[i];
-        record.command = cfg_read(ecam_base, record.bus, record.device, record.function, kRegCommand);
+        record.command =
+            cfg_read(ecam_base, record.bus, record.device, record.function, kRegCommand);
         record.bus_master = (record.command & kPciCmdBusMaster) != 0;
         record.memory_enabled = (record.command & kPciCmdMemoryEnable) != 0;
         for (u32 b = 0; b < kMaxBars; ++b) {
             auto& bar = record.bars[b];
-            if (!bar.size) continue;
-            const u32 low = cfg_read(ecam_base, record.bus, record.device, record.function, kRegBar0 + b * 4);
+            if (!bar.size)
+                continue;
+            const u32 low =
+                cfg_read(ecam_base, record.bus, record.device, record.function, kRegBar0 + b * 4);
             bar.base = low & (bar.type == BarType::Io ? ~3u : kBarAddrMask);
             if (bar.type == BarType::Mmio64 && b + 1 < kMaxBars) {
                 bar.base |= u64(cfg_read(ecam_base, record.bus, record.device, record.function,
-                                        kRegBar0 + (b + 1) * 4)) << 32;
+                                         kRegBar0 + (b + 1) * 4))
+                            << 32;
                 ++b;
             }
         }

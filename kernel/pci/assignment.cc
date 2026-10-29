@@ -103,8 +103,7 @@ bool find_function(PhysAddr ecam_base, u8 bus, u8 device, u8 function, PciFuncti
     return false;
 }
 
-bool assign_bars(PciFunctionInfo* info, PhysAddr window_base, u64 window_size,
-                 u64* cursor_inout) {
+bool assign_bars(PciFunctionInfo* info, PhysAddr window_base, u64 window_size, u64* cursor_inout) {
     if (!info || !cursor_inout || window_size == 0 || g_hw.ecam_base == 0) {
         return false;
     }
@@ -146,7 +145,9 @@ bool find_by_id(PhysAddr ecam_base, u16 vendor_id, u16 device_id, PciFunctionInf
     const u32 count = enumerate(ecam_base, functions, kMaxFunctions);
     for (u32 i = 0; i < count; ++i) {
         if (functions[i].vendor_id == vendor_id && functions[i].device_id == device_id) {
-            if (out) { *out = functions[i]; }
+            if (out) {
+                *out = functions[i];
+            }
             return true;
         }
     }

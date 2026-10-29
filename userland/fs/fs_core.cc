@@ -62,7 +62,8 @@ InodeState* live_inode(mx_u32_t inode_number) {
 }
 
 static PhysRefState* phys_ref(mx_u64_t phys_block) {
-    if (phys_block >= kMaxPhysBlocks) return nullptr;
+    if (phys_block >= kMaxPhysBlocks)
+        return nullptr;
     auto& ref = g_phys_refs[phys_block];
     return ref.used && ref.phys_block == phys_block ? &ref : nullptr;
 }
@@ -185,7 +186,8 @@ static mx_i32_t ensure_writable_block(InodeState& inode, mx_u64_t logical_block,
         if (rc != MX_OK) {
             return rc;
         }
-        libk::copy_exact(libk::as_bytes(g_data_blocks[new_phys]), libk::as_bytes(g_data_blocks[extent->phys_block]));
+        libk::copy_exact(libk::as_bytes(g_data_blocks[new_phys]),
+                         libk::as_bytes(g_data_blocks[extent->phys_block]));
         dec_phys_ref(extent->phys_block);
         extent->phys_block = new_phys;
         extent->generation = g_generation;
@@ -201,7 +203,8 @@ static mx_i32_t ensure_writable_block(InodeState& inode, mx_u64_t logical_block,
 
 InodeState* alloc_inode(mx_u16_t type, mx_u16_t inode_class, mx_u32_t parent_inode,
                         const char* name, mx_u8_t name_len) {
-    if (g_next_inode == 0 || name_len > kMaxName || (!name && name_len)) return nullptr;
+    if (g_next_inode == 0 || name_len > kMaxName || (!name && name_len))
+        return nullptr;
     for (mx_u32_t i = 0; i < kMaxInodes; ++i) {
         if (g_inodes[i].used) {
             continue;
@@ -225,11 +228,13 @@ InodeState* alloc_inode(mx_u16_t type, mx_u16_t inode_class, mx_u32_t parent_ino
 const InodeState* find_child(mx_u64_t snapshot_id, mx_u32_t parent_inode, const char* name,
                              mx_u8_t name_len) {
     const SnapshotState* snap = snapshot_id ? snapshot_by_id(snapshot_id) : nullptr;
-    if (snapshot_id && !snap) return nullptr;
+    if (snapshot_id && !snap)
+        return nullptr;
     const InodeState* table = snap ? snap->inodes : g_inodes;
     for (mx_u32_t i = 0; i < kMaxInodes; ++i) {
         const auto& inode = table[i];
-        if (inode.used && inode.parent_inode == parent_inode && name_eq(inode.name, name, name_len)) {
+        if (inode.used && inode.parent_inode == parent_inode &&
+            name_eq(inode.name, name, name_len)) {
             return &inode;
         }
     }
@@ -338,9 +343,12 @@ mx_i32_t write_bytes_unbounded(InodeState& inode, mx_u64_t offset, const mx_u8_t
     }
 
     mx_u64_t end = 0;
-    if (!data && len) return MX_ERR_INVALID;
-    if (!libk::checked_add(offset, len, &end)) return MX_ERR_OVERFLOW;
-    if (len == 0) return MX_OK;
+    if (!data && len)
+        return MX_ERR_INVALID;
+    if (!libk::checked_add(offset, len, &end))
+        return MX_ERR_OVERFLOW;
+    if (len == 0)
+        return MX_OK;
     mx_u32_t written = 0;
     while (written < len) {
         const mx_u64_t abs = offset + written;
@@ -424,7 +432,8 @@ void format_memory_fs() {
 
     // /tmp is created only in the in-memory table. It is the volatile mount: the
     // disk root stays read-only and never sees these inodes.
-    (void)alloc_inode(FS_INODE_DIR, FS_CLASS_USER_DATA, kRootInode, kTmpMountName, kTmpMountNameLen);
+    (void)alloc_inode(FS_INODE_DIR, FS_CLASS_USER_DATA, kRootInode, kTmpMountName,
+                      kTmpMountNameLen);
 
     // /data is the durable user volume. It always exists; whether it survives a
     // reboot depends on a writable disk region (see fs_durable.cc).
@@ -432,9 +441,8 @@ void format_memory_fs() {
                              kDataMountNameLen);
     g_data_inode = data ? data->inode_number : 0;
 
-    InodeState* hello =
-        alloc_inode(FS_INODE_FILE, FS_CLASS_CONTENT_STORE, kRootInode, kHelloName,
-                    static_cast<mx_u8_t>(str_len(kHelloName, sizeof(kHelloName))));
+    InodeState* hello = alloc_inode(FS_INODE_FILE, FS_CLASS_CONTENT_STORE, kRootInode, kHelloName,
+                                    static_cast<mx_u8_t>(str_len(kHelloName, sizeof(kHelloName))));
     if (hello) {
         init_file_content(*hello, kHelloData, static_cast<mx_u32_t>(sizeof(kHelloData) - 1));
     }

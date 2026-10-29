@@ -26,16 +26,19 @@ struct ServerSessions {
     // when publishing a generation, even if there is no request in any ring.
     // Only a compact column of live inputs participates in the sleep handshake.
     mx_status_t wait(CapHandle wake, uint64_t expected, uint64_t deadline = 0) const {
-        if (!directory || directory->count > MX_MAX_SESSIONS) return MX_ERR_BAD_PROTOCOL;
+        if (!directory || directory->count > MX_MAX_SESSIONS)
+            return MX_ERR_BAD_PROTOCOL;
         alignas(64) RingPage* incoming[MX_MAX_SESSIONS]{};
         for (uint32_t i = 0; i < directory->count; ++i)
             incoming[i] = live[i] ? endpoints[i].rx_ring : nullptr;
-        return InboxWait{incoming, directory->count, MX_DEFAULT_RING_ORDER, wake}.wait(expected, deadline);
+        return InboxWait{incoming, directory->count, MX_DEFAULT_RING_ORDER, wake}.wait(expected,
+                                                                                       deadline);
     }
 
     bool map(const MxBootInfo* boot, uint64_t directory_va = va::sessions::kDirectory) {
         auto cap = boot::handle(boot, "sessions");
-        if (!cap || mx_map_page(cap, directory_va, RIGHT_READ | RIGHT_WRITE)) return false;
+        if (!cap || mx_map_page(cap, directory_va, RIGHT_READ | RIGHT_WRITE))
+            return false;
         auto* candidate = reinterpret_cast<MxSessionDirectory*>(directory_va);
         if (candidate->magic != MX_SESSION_MAGIC || candidate->count > MX_MAX_SESSIONS) {
             (void)sys_unmap_page(directory_va);
@@ -48,7 +51,9 @@ struct ServerSessions {
     // The generation currently acknowledged for slot i. Handles opened for a
     // client are tagged with this value so a token minted before a restart can
     // never be replayed against the replacement client.
-    uint64_t generation_of(uint32_t i) const { return i < MX_MAX_SESSIONS ? generations[i] : 0; }
+    uint64_t generation_of(uint32_t i) const {
+        return i < MX_MAX_SESSIONS ? generations[i] : 0;
+    }
 
     // Peer liveness for slot i. sweep_process_caps() revokes a dead client's
     // process cap out of the server's table, so identify() fails once the
@@ -58,8 +63,9 @@ struct ServerSessions {
                sys_cap_identify(directory->slots[i].client) == MX_CAP_PROCESS;
     }
 
-    template<class Close> bool refresh(uint32_t i, Close close) {
-        if (!directory || i >= directory->count || i >= MX_MAX_SESSIONS) return false;
+    template <class Close> bool refresh(uint32_t i, Close close) {
+        if (!directory || i >= directory->count || i >= MX_MAX_SESSIONS)
+            return false;
         auto& slot = directory->slots[i];
         const auto generation = __atomic_load_n(&slot.generation, __ATOMIC_ACQUIRE);
         if (generation != generations[i]) {
@@ -72,25 +78,29 @@ struct ServerSessions {
             const uint64_t request_va = va::sessions::request(i);
             const uint64_t reply_va = va::sessions::reply(i);
             if (mapped[i]) {
-                (void)sys_unmap_page(request_va);
-                (void)sys_unmap_page(reply_va);
+                (void)unmap_ring(request_va, MX_DEFAULT_RING_ORDER);
+                (void)unmap_ring(reply_va, MX_DEFAULT_RING_ORDER);
                 mapped[i] = false;
             }
             endpoints[i] = {};
             live[i] = false;
             if (!generation || slot.order != MX_DEFAULT_RING_ORDER || !slot.client ||
-                !slot.request_doorbell || !slot.reply_doorbell) return false;
-            if (mx_map_page(slot.request_ring, request_va, RIGHT_READ | RIGHT_WRITE)) return false;
+                !slot.request_doorbell || !slot.reply_doorbell)
+                return false;
+            if (mx_map_page(slot.request_ring, request_va, RIGHT_READ | RIGHT_WRITE))
+                return false;
             if (mx_map_page(slot.reply_ring, reply_va, RIGHT_READ | RIGHT_WRITE)) {
-                (void)sys_unmap_page(request_va);
+                (void)unmap_ring(request_va, MX_DEFAULT_RING_ORDER);
                 return false;
             }
             mapped[i] = true;
             if (slot.write_arena) {
                 MxCapInfo info{};
                 if (mx_cap_info(slot.write_arena, &info) != MX_OK || info.type != MX_CAP_ARENA ||
-                    info.size != 65536 || mx_map_page(slot.write_arena, va::sessions::write_arena(i),
-                                                     RIGHT_READ | RIGHT_WRITE)) return false;
+                    info.size != 65536 ||
+                    mx_map_page(slot.write_arena, va::sessions::write_arena(i),
+                                RIGHT_READ | RIGHT_WRITE))
+                    return false;
                 write_mapped[i] = true;
                 libk::zero(reinterpret_cast<void*>(va::sessions::write_arena(i)), 65536);
             }
@@ -106,7 +116,10 @@ struct ServerSessions {
             live[i] = true;
             __atomic_store_n(&slot.acknowledged, generation, __ATOMIC_RELEASE);
         }
-        if (live[i] && !client_alive(i)) { close(i); live[i] = false; }
+        if (live[i] && !client_alive(i)) {
+            close(i);
+            live[i] = false;
+        }
         return live[i];
     }
 
@@ -114,11 +127,12 @@ struct ServerSessions {
     // closed until init publishes a new generation, which refresh() maps and
     // acknowledges. Endpoints are cleared but the fixed mapping is left for the
     // next generation to unmap before remapping, so no VA is leaked.
-    template<class Close> void drop(uint32_t i, Close close) {
-        if (i >= MX_MAX_SESSIONS) return;
+    template <class Close> void drop(uint32_t i, Close close) {
+        if (i >= MX_MAX_SESSIONS)
+            return;
         close(i);
         endpoints[i] = {};
         live[i] = false;
     }
 };
-}
+} // namespace mochi

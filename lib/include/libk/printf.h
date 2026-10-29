@@ -4,7 +4,7 @@
 
 namespace libk {
 
-using PutcharFn = void(*)(char);
+using PutcharFn = void (*)(char);
 
 // Register the character sink for printf/putchar (early UART, later a log ring).
 void set_putchar(PutcharFn fn);

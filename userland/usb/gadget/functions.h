@@ -41,8 +41,8 @@ inline bool service_functions(Runtime& r) {
             }
         }
         while (f.rx_pending) {
-            MxFunctionChunk chunk{r.function_generation, hid ? f.forwarded / 32 : 0, 0,
-                                  out_ep, 0, {}};
+            MxFunctionChunk chunk{
+                r.function_generation, hid ? f.forwarded / 32 : 0, 0, out_ep, 0, {}};
             const auto left = f.received - f.forwarded;
             chunk.length = left < MX_FUNCTION_INLINE_BYTES ? left : MX_FUNCTION_INLINE_BYTES;
             libk::copy_n(libk::as_bytes(chunk.data),

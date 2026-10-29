@@ -8,11 +8,17 @@ void vgic_pending_set(Vcpu&, u32 irq) {
     assert(irq == 48);
     ++injections;
 }
-void vcpu_wake_irq(Vcpu&) { ++wakes; }
+void vcpu_wake_irq(Vcpu&) {
+    ++wakes;
 }
+} // namespace vm
 namespace ipc {
-SysError notify_object(Doorbell* db) { assert(db); ++notifications; return E_OK; }
+SysError notify_object(Doorbell* db) {
+    assert(db);
+    ++notifications;
+    return E_OK;
 }
+} // namespace ipc
 
 int main() {
     static vm::Vm owner{};
@@ -30,7 +36,9 @@ int main() {
     owner.channels[0] = &channel;
     owner.channel_count = 1;
     auto call = [&](u64 fn, u64 id, u64 arg) {
-        cpu.el2.regs[0] = fn; cpu.el2.regs[1] = id; cpu.el2.regs[2] = arg;
+        cpu.el2.regs[0] = fn;
+        cpu.el2.regs[1] = id;
+        cpu.el2.regs[2] = arg;
         cpu.el2.pc = 0x1234;
         assert(vm::channel_hvc(cpu, owner));
         assert(cpu.el2.pc == 0x1234); // HVC return PC must not be advanced twice

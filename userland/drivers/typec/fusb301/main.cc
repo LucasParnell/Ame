@@ -32,13 +32,15 @@ extern "C" [[noreturn]] void _start() {
               static_cast<mx_u16_t>(mochi::driver::value(boot, "i2c.address"))};
     r->control = mochi::driver::link(
         boot, "typec", (mochi::va::native_driver::kLinks + mochi::va::native_driver::kLinkStride));
-    if (!r->control.valid()) mochi::driver::startup_failed(service, "typec link");
-    if (!r->bus.endpoint.valid()) mochi::driver::startup_failed(service, "i2c link");
+    if (!r->control.valid())
+        mochi::driver::startup_failed(service, "typec link");
+    if (!r->bus.endpoint.valid())
+        mochi::driver::startup_failed(service, "i2c link");
     mx_u8_t id = 0;
     if (!r->policy.configure(r->bus, mx_clock_ns(), id)) {
         char line[80];
-        const int length = libk::snprintf(line, sizeof(line), "device id=0x%02x",
-                                          static_cast<unsigned>(id));
+        const int length =
+            libk::snprintf(line, sizeof(line), "device id=0x%02x", static_cast<unsigned>(id));
         if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
             mochi::log_raw_marker(line);
         }
@@ -47,14 +49,16 @@ extern "C" [[noreturn]] void _start() {
     // The signed profile opts into automatic switching. An omitted binding
     // retains the peripheral-only policy for older/recovery descriptors.
     const bool device_only = mochi::driver::value(boot, "usb.device_only", 1) != 0;
-    mochi::log_raw_marker(device_only ? "typec: sink-only; source disabled\n"
-                                     : "typec: automatic; sink preferred, keyboard host enabled\n");
+    mochi::log_raw_marker(device_only
+                              ? "typec: sink-only; source disabled\n"
+                              : "typec: automatic; sink preferred, keyboard host enabled\n");
     mochi::boot::ready(boot);
     for (;;) {
         // FUSB301 requires at least 2 ms between selecting Sink and writing
         // UNATT_SNK. Schedule it; never busy-wait or block unrelated services.
         if (r->manual_at && mx_clock_ns() >= r->manual_at) {
-            if (!r->bus.write(4, 8)) r->reply.status = MX_ERR_FAULT;
+            if (!r->bus.write(4, 8))
+                r->reply.status = MX_ERR_FAULT;
             r->manual_at = 0;
             r->pending = true;
         }
@@ -90,16 +94,15 @@ extern "C" [[noreturn]] void _start() {
                     r->observed0 = bytes[0];
                     r->observed1 = bytes[1];
                     char line[96];
-                    const int length = libk::snprintf(line, sizeof(line),
-                                                      "drv.typec.fusb301: raw 0x%02x/0x%02x\n",
-                                                      static_cast<unsigned>(bytes[0]),
-                                                      static_cast<unsigned>(bytes[1]));
+                    const int length = libk::snprintf(
+                        line, sizeof(line), "drv.typec.fusb301: raw 0x%02x/0x%02x\n",
+                        static_cast<unsigned>(bytes[0]), static_cast<unsigned>(bytes[1]));
                     if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
                         mochi::log_raw_marker(line);
                     }
                 }
                 const auto decoded = r->policy.observe(r->bus, bytes[0], bytes[1], bytes[2],
-                                                        mx_clock_ns(), device_only);
+                                                       mx_clock_ns(), device_only);
                 r->reply.status = decoded.status;
                 r->reply.value = decoded.value;
                 r->reply.flags = decoded.flags;
@@ -107,7 +110,7 @@ extern "C" [[noreturn]] void _start() {
             r->pending = true;
         }
         mochi::driver::idle(&r->control, 1, r->control.rx_doorbell,
-                             r->manual_at ? r->manual_at : mx_clock_ns() + 50000000,
-                             r->manual_at ? 0u : 1u);
+                            r->manual_at ? r->manual_at : mx_clock_ns() + 50000000,
+                            r->manual_at ? 0u : 1u);
     }
 }

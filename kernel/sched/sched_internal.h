@@ -7,7 +7,7 @@
 
 namespace sched {
 
-inline constexpr u64 kIpcDrainQuantumNs = 100000ULL; // 100 us (IPC drain quantum)
+inline constexpr u64 kIpcDrainQuantumNs = 100000ULL;       // 100 us (IPC drain quantum)
 inline constexpr u32 kMaxPrincipalsLocal = kMaxPrincipals; // alias for clarity
 
 // --- Band / class policy (sched_class.cc) ----------------------------------
@@ -63,18 +63,18 @@ struct PrincipalDispatch {
     bool available;
 };
 PrincipalDispatch principal_dispatch(u32 pid);
-u32  principal_weight(u32 pid);
-u32  principal_generation(u32 pid);
+u32 principal_weight(u32 pid);
+u32 principal_generation(u32 pid);
 bool retain_principal(u32 pid);
 void principal_init_bootstrap();
 void principal_mirror_weights(u32 cpu_id);
 void account_current(Eki& e);
 void account_current_at(Eki& e, u64 now);
 void refill_principal_budgets();
-u64  fairness_max_lag();
-u64  principal_runtime(u32 pid);
-u64  principal_class_runtime(PrincipalClass class_);
-u32  allocate_principal(PrincipalClass class_, u32 weight, u64 budget_ns, u64 period_ns);
+u64 fairness_max_lag();
+u64 principal_runtime(u32 pid);
+u64 principal_class_runtime(PrincipalClass class_);
+u32 allocate_principal(PrincipalClass class_, u32 weight, u64 budget_ns, u64 period_ns);
 void release_principal(u32 principal_id);
 
 // --- SchedContext budgets (sched_context.cc) -------------------------------
@@ -82,6 +82,8 @@ void refill_sched_context_budgets();
 bool sched_context_available(SchedContext* ctx);
 bool charge_sched_context(SchedContext* ctx, u64 delta, u64 now);
 bool thread_budget_available(const Thread* t);
+u64 thread_runtime_deadline(const Thread* t, u64 now);
+u64 thread_refill_deadline(const Thread* t);
 
 // --- Handoff / reply / donation / IPC drain quantum (handoff.cc) -----------
 Thread* handoff_take_next(Eki& e);

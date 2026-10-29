@@ -12,7 +12,8 @@ constexpr mx_u8_t kSinkMode = 0x04, kDualRoleMode = 0x10;
 // Preserve VBUS even while unattached so residual/external power blocks boost.
 inline MxBoardReply decode(mx_u8_t status, mx_u8_t type) {
     MxBoardReply out{0, MX_OK, 0, (status & 8) ? MX_TYPEC_VBUS : 0u, 0};
-    if (!(status & 1)) return out;
+    if (!(status & 1))
+        return out;
     const auto cc = (status >> 4) & 3;
     const auto partner = type & 0x1b; // Reject accessory and ambiguous partners.
     if ((cc != 1 && cc != 2) || (partner != 8 && partner != 16)) {
@@ -27,8 +28,8 @@ inline MxBoardReply decode(mx_u8_t status, mx_u8_t type) {
 inline bool attached(const MxBoardReply& status, MxUsbRole role) {
     const auto cc = status.flags & kOrientation;
     return status.status == MX_OK && !status.reserved &&
-           status.value == static_cast<mx_u32_t>(role) &&
-           (status.flags & MX_TYPEC_ATTACHED) && (cc == MX_TYPEC_CC1 || cc == MX_TYPEC_CC2);
+           status.value == static_cast<mx_u32_t>(role) && (status.flags & MX_TYPEC_ATTACHED) &&
+           (cc == MX_TYPEC_CC1 || cc == MX_TYPEC_CC2);
 }
 
 inline bool can_start_source(const MxBoardReply& status, mx_u32_t expected_cc) {
@@ -52,16 +53,18 @@ struct SinkPreference {
     template <typename Bus> bool configure(Bus& bus, mx_u64_t now, mx_u8_t& id) {
         const mx_u8_t first = 1, modes = 2;
         mx_u8_t initial[3]{}, verified[2]{};
-        if (!bus.transaction(libk::as_bytes(&first, 1), libk::as_bytes(initial))) return false;
+        if (!bus.transaction(libk::as_bytes(&first, 1), libk::as_bytes(initial)))
+            return false;
         id = initial[0];
-        if (!id || id == 255) return false;
+        if (!id || id == 255)
+            return false;
         // Default USB advertisement, sink-biased DRP dwell, inherited IRQ mask.
         // Reserved control bits are written as zero.
-        const mx_u8_t image[] = {modes, kSinkMode,
-                                 static_cast<mx_u8_t>((initial[2] & 1) | 0x02)};
+        const mx_u8_t image[] = {modes, kSinkMode, static_cast<mx_u8_t>((initial[2] & 1) | 0x02)};
         if (!bus.transaction(libk::as_bytes(image), {}) ||
             !bus.transaction(libk::as_bytes(&modes, 1), libk::as_bytes(verified)) ||
-            (verified[0] & 0x3f) != kSinkMode || (verified[1] & 0x37) != image[2]) return false;
+            (verified[0] & 0x3f) != kSinkMode || (verified[1] & 0x37) != image[2])
+            return false;
         phase = Phase::SinkFirst;
         reported = MxUsbRole::Detached;
         deadline = now + kSinkPreferenceNs;
@@ -78,16 +81,17 @@ struct SinkPreference {
         return mode(bus, kSinkMode);
     }
     template <typename Bus>
-    MxBoardReply observe(Bus& bus, mx_u8_t status, mx_u8_t type, mx_u8_t interrupts,
-                         mx_u64_t now, bool device_only) {
+    MxBoardReply observe(Bus& bus, mx_u8_t status, mx_u8_t type, mx_u8_t interrupts, mx_u64_t now,
+                         bool device_only) {
         auto out = decode(status, type);
-        if (out.status != MX_OK) return out;
+        if (out.status != MX_OK)
+            return out;
         const auto role = static_cast<MxUsbRole>(out.value);
         // A latched detach catches unplug/replug between polls. Mode changes
         // also generate detach, so only rearm after an attachment was reported.
-        if (reported != MxUsbRole::Detached &&
-            ((interrupts & 2) || role != reported)) {
-            if (!begin(bus, now)) out.status = MX_ERR_FAULT;
+        if (reported != MxUsbRole::Detached && ((interrupts & 2) || role != reported)) {
+            if (!begin(bus, now))
+                out.status = MX_ERR_FAULT;
             out.value = 0;
             out.flags &= MX_TYPEC_VBUS;
             return out;
@@ -96,8 +100,7 @@ struct SinkPreference {
             reported = MxUsbRole::Device;
             return out;
         }
-        if (!device_only && phase == Phase::HostFallback &&
-            attached(out, MxUsbRole::Host)) {
+        if (!device_only && phase == Phase::HostFallback && attached(out, MxUsbRole::Host)) {
             reported = MxUsbRole::Host;
             return out;
         }
@@ -105,12 +108,15 @@ struct SinkPreference {
             if (mode(bus, kSinkMode)) {
                 phase = Phase::PreferSink;
                 deadline = now + kSinkPreferenceNs;
-            } else out.status = MX_ERR_FAULT;
+            } else
+                out.status = MX_ERR_FAULT;
         } else if (!device_only && !(out.flags & MX_TYPEC_VBUS) && now >= deadline &&
                    (phase == Phase::SinkFirst || phase == Phase::PreferSink)) {
             const auto next = phase == Phase::SinkFirst ? Phase::Seeking : Phase::HostFallback;
-            if (mode(bus, kDualRoleMode)) phase = next;
-            else out.status = MX_ERR_FAULT;
+            if (mode(bus, kDualRoleMode))
+                phase = next;
+            else
+                out.status = MX_ERR_FAULT;
         }
         out.value = 0;
         out.flags &= MX_TYPEC_VBUS;
@@ -125,9 +131,11 @@ struct StableRole {
     mx_u64_t since = 0;
     mx_u32_t candidate = 0, active = 0;
 
-    void reset() { candidate = active = 0; }
+    void reset() {
+        candidate = active = 0;
+    }
     MxUsbRole observe(const MxBoardReply& status, bool query_ok, bool device_only,
-                       MxUsbRole current, mx_u64_t now) {
+                      MxUsbRole current, mx_u64_t now) {
         const auto role = static_cast<MxUsbRole>(status.value);
         if (!query_ok || (role != MxUsbRole::Host && role != MxUsbRole::Device) ||
             !attached(status, role) || (device_only && role == MxUsbRole::Host) ||
@@ -142,11 +150,13 @@ struct StableRole {
             since = now;
         }
         if (current != MxUsbRole::Detached) {
-            if (active == signature && current == role) return current;
+            if (active == signature && current == role)
+                return current;
             active = 0;
             return MxUsbRole::Detached;
         }
-        if (now - since < kAttachStableNs) return MxUsbRole::Detached;
+        if (now - since < kAttachStableNs)
+            return MxUsbRole::Detached;
         active = signature;
         return role;
     }
@@ -160,12 +170,19 @@ struct SourceSession {
     mx_u64_t deadline = 0;
     mx_u32_t generation = 0;
     bool seen = false;
-    void begin(mx_u64_t now) { deadline = now + 1000000000ull; generation = 0; seen = false; }
+    void begin(mx_u64_t now) {
+        deadline = now + 1000000000ull;
+        generation = 0;
+        seen = false;
+    }
     bool keep(const MxBoardReply& port, bool query_ok, mx_u64_t now) {
         if (!query_ok || port.status != MX_OK || port.reserved ||
-            !(port.flags & MX_ROLE_HOST_ACTIVE)) return false;
-        if (!(port.flags & MX_ROLE_DATA_CONNECTED)) return !seen && now < deadline;
-        if (seen && port.value != generation) return false;
+            !(port.flags & MX_ROLE_HOST_ACTIVE))
+            return false;
+        if (!(port.flags & MX_ROLE_DATA_CONNECTED))
+            return !seen && now < deadline;
+        if (seen && port.value != generation)
+            return false;
         seen = true;
         generation = port.value;
         return true;

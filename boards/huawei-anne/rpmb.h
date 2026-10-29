@@ -34,8 +34,12 @@ struct KeyInfo {
     u64 error{};
     u32 counter{};
     u16 result{}, response{};
-    bool present() const { return !error && response == 0x0200 && result == 0; }
-    bool missing() const { return !error && response == 0x0200 && result == 7; }
+    bool present() const {
+        return !error && response == 0x0200 && result == 0;
+    }
+    bool missing() const {
+        return !error && response == 0x0200 && result == 7;
+    }
 };
 
 struct ConfigInfo {
@@ -76,7 +80,8 @@ constexpr ConfigInfo emmc_config(const EmmcInfo& info) {
         config.region_size[i] = info.region_size_mult[i];
         regions |= config.region_size[i];
     }
-    if (!regions) config.region_size[0] = info.size_mult;
+    if (!regions)
+        config.region_size[0] = info.size_mult;
     return config;
 }
 

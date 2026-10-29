@@ -3,19 +3,25 @@
 
 #include "midix/abi/types.h"
 
-struct alignas(64) MxRingHeadLine { mx_u64_t v; mx_u8_t pad[56]; };
-struct alignas(64) MxRingTailLine { mx_u64_t v; mx_u8_t pad[56]; };
+struct alignas(64) MxRingHeadLine {
+    mx_u64_t v;
+    mx_u8_t pad[56];
+};
+struct alignas(64) MxRingTailLine {
+    mx_u64_t v;
+    mx_u8_t pad[56];
+};
 struct alignas(64) MxRingFlagsLine {
     mx_u32_t receiver_about_to_sleep;
     mx_u32_t reserved0;
     mx_u64_t doorbell_counter_snapshot;
-    mx_u8_t  pad[48];
+    mx_u8_t pad[48];
 };
 struct alignas(64) MxRingSlot {
     mx_u32_t type;
     mx_u32_t length;
     mx_u64_t seq;
-    mx_u8_t  payload[48];
+    mx_u8_t payload[48];
 };
 // V2 uses the formerly reserved line. Zero remains the original slot protocol.
 // Credits have a distinct writer-owned line from receiver sleep requests.
@@ -25,8 +31,8 @@ struct alignas(64) MxRingSpaceLine {
     mx_u8_t pad[56];
 };
 struct MxRingPage {
-    MxRingHeadLine  head;
-    MxRingTailLine  tail;
+    MxRingHeadLine head;
+    MxRingTailLine tail;
     MxRingFlagsLine flags;
     MxRingSpaceLine space;
 };
@@ -44,7 +50,10 @@ constexpr mx_u32_t MX_DEFAULT_FRAMED_RING_ORDER = 7;
 constexpr mx_u32_t MX_RING_PACKED_FRAMES = 1u << 0;
 constexpr mx_u32_t MX_RING_WAIT_READABLE = 0;
 constexpr mx_u32_t MX_RING_WAIT_WRITABLE = 1;
-constexpr mx_u32_t MX_RING_ORDER_MIN = 4;  // kernel allocation bounds
+// Opt-in extension: a4 is the minimum free space. Without this bit a4 remains
+// ignored, preserving binaries using the original four-argument syscall.
+constexpr mx_u32_t MX_RING_WAIT_MIN_SPACE = 1u << 1;
+constexpr mx_u32_t MX_RING_ORDER_MIN = 4; // kernel allocation bounds
 constexpr mx_u32_t MX_RING_ORDER_MAX = 10;
 
 static_assert(MX_RING_HEADER_SIZE == sizeof(MxRingPage),
@@ -81,14 +90,21 @@ constexpr mx_size_t mx_ring_page_bytes(mx_u32_t order) {
            static_cast<mx_size_t>(mx_ring_capacity(order)) * sizeof(MxRingSlot);
 }
 
+// Native mappings use 4 KiB pages, including the header's extra page when the
+// data area is an exact page multiple. Return zero for invalid geometry.
+constexpr mx_size_t mx_ring_mapping_bytes(mx_u32_t order) {
+    return order < MX_RING_ORDER_MIN || order > MX_RING_ORDER_MAX
+               ? 0
+               : (mx_ring_page_bytes(order) + 4095) & ~mx_size_t{4095};
+}
+
 // First slot of a mapped ring page.
 inline MxRingSlot* mx_ring_slots(MxRingPage* page) {
-    return reinterpret_cast<MxRingSlot*>(reinterpret_cast<mx_u8_t*>(page) +
-                                         MX_RING_HEADER_SIZE);
+    return reinterpret_cast<MxRingSlot*>(reinterpret_cast<mx_u8_t*>(page) + MX_RING_HEADER_SIZE);
 }
 inline const MxRingSlot* mx_ring_slots(const MxRingPage* page) {
-    return reinterpret_cast<const MxRingSlot*>(
-        reinterpret_cast<const mx_u8_t*>(page) + MX_RING_HEADER_SIZE);
+    return reinterpret_cast<const MxRingSlot*>(reinterpret_cast<const mx_u8_t*>(page) +
+                                               MX_RING_HEADER_SIZE);
 }
 
 // Slot `index` (wrapped into the ring) of a mapped ring page.

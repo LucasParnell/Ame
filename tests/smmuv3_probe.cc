@@ -101,11 +101,12 @@ void test_tlbi() {
         assert((static_cast<u64>(n + 1) << s) >= pages);
         for (u64 first : {1ull, 31ull, 511ull, 4095ull}) {
             const auto command = make_cmd_tlbi_s2_ipa(2, first << 12, pages);
-            const u64 base = ((static_cast<u64>(command.w[3]) << 32) |
-                (command.w[2] & 0xfffff000u)) >> 12;
+            const u64 base =
+                ((static_cast<u64>(command.w[3]) << 32) | (command.w[2] & 0xfffff000u)) >> 12;
             const auto number = (command.w[0] >> 12) & 31u;
             const auto shift = (command.w[0] >> 20) & 31u;
-            assert(base <= first && base + (static_cast<u64>(number + 1) << shift) >= first + pages);
+            assert(base <= first &&
+                   base + (static_cast<u64>(number + 1) << shift) >= first + pages);
         }
     }
 }
@@ -131,14 +132,20 @@ struct UpdateModel {
     u32 calls = 0, fail_at = 0;
     bool old_cached = true, invalid_published = false, tlbi_pending = false;
     bool break_complete = false, payload_published = false, new_valid = false;
-    bool fail() { return ++calls == fail_at; }
+    bool fail() {
+        return ++calls == fail_at;
+    }
 };
 SysError update_publish(void* ctx, const Ste& entry) {
     auto& m = *static_cast<UpdateModel*>(ctx);
-    if (m.fail()) return E_FAULT;
+    if (m.fail())
+        return E_FAULT;
     if (!(entry.w[0] & 1u)) {
         m.invalid_published = true;
-        if (entry.w[4] == 5) { assert(m.break_complete); m.payload_published = true; }
+        if (entry.w[4] == 5) {
+            assert(m.break_complete);
+            m.payload_published = true;
+        }
     } else {
         assert(m.break_complete && m.payload_published && !m.old_cached);
         assert(entry.w[4] == 5 && entry.w[6] == 0x500000);
@@ -148,31 +155,40 @@ SysError update_publish(void* ctx, const Ste& entry) {
 }
 SysError update_submit(void* ctx, const Cmd& cmd) {
     auto& m = *static_cast<UpdateModel*>(ctx);
-    if (m.fail()) return E_FAULT;
+    if (m.fail())
+        return E_FAULT;
     const auto opcode = cmd.w[0] & 255u;
     assert(m.invalid_published);
     if (opcode == kCmdTlbiS12Vmall) {
-        assert(cmd.w[1] == 2 && !m.new_valid); m.tlbi_pending = true;
-    } else assert(opcode == kCmdCfgiSte && cmd.w[1] == 7);
+        assert(cmd.w[1] == 2 && !m.new_valid);
+        m.tlbi_pending = true;
+    } else
+        assert(opcode == kCmdCfgiSte && cmd.w[1] == 7);
     return E_OK;
 }
 SysError update_sync(void* ctx) {
     auto& m = *static_cast<UpdateModel*>(ctx);
-    if (m.fail()) return E_FAULT;
+    if (m.fail())
+        return E_FAULT;
     assert(m.tlbi_pending);
-    m.old_cached = false; m.break_complete = true; return E_OK;
+    m.old_cached = false;
+    m.break_complete = true;
+    return E_OK;
 }
 void test_ste_replacement_failures() {
     const auto next = make_ste_stage2(0x500000, 5, 25, kS2Sl0Level1, 4, true);
     for (u32 fail_at = 0; fail_at <= 8; ++fail_at) {
         auto entry = make_ste_stage2(0x400000, 2, 25, kS2Sl0Level1, 4, true);
-        UpdateModel model; model.fail_at = fail_at;
-        const auto rc = replace_ste(entry, next, 7,
-            {update_publish, update_submit, update_sync, &model});
+        UpdateModel model;
+        model.fail_at = fail_at;
+        const auto rc =
+            replace_ste(entry, next, 7, {update_publish, update_submit, update_sync, &model});
         assert(rc == (fail_at ? E_FAULT : E_OK));
         assert(model.calls == (fail_at ? fail_at : 8));
-        if (!fail_at) assert(model.new_valid && !model.old_cached);
-        if (fail_at <= 4 && fail_at) assert(!model.new_valid);
+        if (!fail_at)
+            assert(model.new_valid && !model.old_cached);
+        if (fail_at <= 4 && fail_at)
+            assert(!model.new_valid);
     }
 }
 

@@ -12,7 +12,7 @@ uint64_t gpud_object_id(uint64_t generation, uint32_t type, uint32_t index) {
            ((uint64_t)index & GPUD_OBJ_INDEX_MASK);
 }
 
-int gpud_object_index(uint64_t id, uint32_t type, uint64_t generation, uint32_t *index_out) {
+int gpud_object_index(uint64_t id, uint32_t type, uint64_t generation, uint32_t* index_out) {
     uint32_t index;
     if (id == 0) {
         return -1;
@@ -21,8 +21,7 @@ int gpud_object_index(uint64_t id, uint32_t type, uint64_t generation, uint32_t 
     if (index == 0) {
         return -1;
     }
-    if ((id & GPUD_OBJ_GEN_MASK) !=
-        ((generation << GPUD_OBJ_GEN_SHIFT) & GPUD_OBJ_GEN_MASK)) {
+    if ((id & GPUD_OBJ_GEN_MASK) != ((generation << GPUD_OBJ_GEN_SHIFT) & GPUD_OBJ_GEN_MASK)) {
         return -1;
     }
     if (((uint32_t)((id & GPUD_OBJ_TYPE_MASK) >> GPUD_OBJ_TYPE_SHIFT)) != (type & 0xFu)) {
@@ -49,8 +48,8 @@ int gpud_opcode_supported(uint32_t opcode) {
     }
 }
 
-int gpud_frame_decode(const struct dango_ring_slot *slot, uint32_t expected_opcode,
-                      uint32_t expected_bytes, const void **payload) {
+int gpud_frame_decode(const struct dango_ring_slot* slot, uint32_t expected_opcode,
+                      uint32_t expected_bytes, const void** payload) {
     if (!slot || slot->type != expected_opcode) {
         return -1;
     }
@@ -65,9 +64,9 @@ int gpud_frame_decode(const struct dango_ring_slot *slot, uint32_t expected_opco
     return 0;
 }
 
-void gpud_frame_reply(struct dango_ring_slot *slot, uint32_t opcode, uint64_t seq,
-                      const void *payload, uint32_t bytes) {
-    const unsigned char *src = (const unsigned char *)payload;
+void gpud_frame_reply(struct dango_ring_slot* slot, uint32_t opcode, uint64_t seq,
+                      const void* payload, uint32_t bytes) {
+    const unsigned char* src = (const unsigned char*)payload;
     uint32_t i;
     if (bytes > DANGO_RING_PAYLOAD_BYTES) {
         bytes = DANGO_RING_PAYLOAD_BYTES;
@@ -84,7 +83,7 @@ void gpud_frame_reply(struct dango_ring_slot *slot, uint32_t opcode, uint64_t se
     }
 }
 
-void gpud_frame_error(struct dango_ring_slot *slot, const struct dango_ring_slot *request,
+void gpud_frame_error(struct dango_ring_slot* slot, const struct dango_ring_slot* request,
                       int64_t status, uint64_t object_id, uint64_t generation, uint64_t detail) {
     struct MxGpuError error;
     error.status = status;
@@ -95,6 +94,5 @@ void gpud_frame_error(struct dango_ring_slot *slot, const struct dango_ring_slot
     error.flags = 0;
     error.reserved0 = 0;
     error.reserved1 = 0;
-    gpud_frame_reply(slot, GPU_ERROR, request ? request->seq : 0, &error,
-                     (uint32_t)sizeof(error));
+    gpud_frame_reply(slot, GPU_ERROR, request ? request->seq : 0, &error, (uint32_t)sizeof(error));
 }

@@ -12,7 +12,7 @@
 #include "midix/abi/ring.h"
 #include "midix/abi/protocols/blk.h"
 
-constexpr mx_u32_t MX_PROTOCOL_FS  = 0x46530000u; // 'FS\0\0'
+constexpr mx_u32_t MX_PROTOCOL_FS = 0x46530000u; // 'FS\0\0'
 constexpr mx_u16_t MX_FS_VERSION = 2;
 
 using fs_handle_t = mx_u32_t;
@@ -28,14 +28,14 @@ constexpr mx_u32_t FS_MAGIC = 0xFEED'FACEu;
 constexpr mx_u32_t FS_SUPERBLOCK_VERSION = 1;
 
 enum FsInodeType : mx_u16_t {
-    FS_INODE_FILE    = 1,
-    FS_INODE_DIR     = 2,
+    FS_INODE_FILE = 1,
+    FS_INODE_DIR = 2,
     FS_INODE_SYMLINK = 3,
 };
 
 enum FsInodeClass : mx_u16_t {
     FS_CLASS_CONTENT_STORE = 1,
-    FS_CLASS_USER_DATA     = 2,
+    FS_CLASS_USER_DATA = 2,
 };
 
 // Access describes this session-owned handle, never Unix owner/group bits.
@@ -49,15 +49,14 @@ enum FsAccess : mx_u32_t {
 };
 
 constexpr mx_u32_t fs_handle_access(mx_u16_t type, bool writable) {
-    return type == FS_INODE_DIR
-        ? FS_ACCESS_ENUMERATE | (writable ? FS_ACCESS_MODIFY : 0u)
-        : FS_ACCESS_READ | (writable ? FS_ACCESS_WRITE : 0u);
+    return type == FS_INODE_DIR ? FS_ACCESS_ENUMERATE | (writable ? FS_ACCESS_MODIFY : 0u)
+                                : FS_ACCESS_READ | (writable ? FS_ACCESS_WRITE : 0u);
 }
 
 enum FsExtentFlags : mx_u16_t {
-    FS_EXTENT_COLD   = 1u << 0,
+    FS_EXTENT_COLD = 1u << 0,
     FS_EXTENT_PINNED = 1u << 1,
-    FS_EXTENT_COW    = 1u << 2,
+    FS_EXTENT_COW = 1u << 2,
 };
 
 enum FsPhysExtentFlags : mx_u32_t {
@@ -69,7 +68,7 @@ enum FsSuperblockFlags : mx_u32_t {
 };
 
 enum FsOpenFlags : mx_u32_t {
-    FS_OPEN_READ  = 1u << 0,
+    FS_OPEN_READ = 1u << 0,
     FS_OPEN_WRITE = 1u << 1,
     FS_OPEN_CREATE = 1u << 2,
     FS_OPEN_TRUNC = 1u << 3,
@@ -78,7 +77,7 @@ enum FsOpenFlags : mx_u32_t {
 
 enum FsReadFlags : mx_u32_t {
     FS_READ_ZERO_COPY = 1u << 0,
-    FS_READ_DIRECT    = 1u << 1,
+    FS_READ_DIRECT = 1u << 1,
 };
 
 enum FsWriteFlags : mx_u32_t {
@@ -94,42 +93,42 @@ enum FsSnapshotLeafFlags : mx_u32_t {
 };
 
 enum FsPrefetchType : mx_u32_t {
-    FS_PREFETCH_SEQ    = 1,
+    FS_PREFETCH_SEQ = 1,
     FS_PREFETCH_RANDOM = 2,
     FS_PREFETCH_WARMUP = 3,
 };
 
 enum FsMsgType : mx_u32_t {
-    FS_OPEN               = 1,
-    FS_OPEN_REPLY         = 2,
-    FS_CLOSE              = 3,
-    FS_READ               = 4,
-    FS_READ_REPLY         = 5,
-    FS_WRITE              = 6,
-    FS_WRITE_REPLY        = 7,
-    FS_READDIR            = 8,
-    FS_READDIR_REPLY      = 9,
-    FS_MKDIR              = 10,
-    FS_MKDIR_REPLY        = 11,
-    FS_UNLINK             = 12,
-    FS_UNLINK_REPLY       = 13,
-    FS_RENAME             = 14,
-    FS_RENAME_REPLY       = 15,
-    FS_PROMOTE            = 16,
-    FS_PROMOTE_REPLY      = 17,
-    FS_SNAPSHOT           = 18,
-    FS_SNAPSHOT_REPLY     = 19,
-    FS_SNAPSHOT_MNT       = 20,
+    FS_OPEN = 1,
+    FS_OPEN_REPLY = 2,
+    FS_CLOSE = 3,
+    FS_READ = 4,
+    FS_READ_REPLY = 5,
+    FS_WRITE = 6,
+    FS_WRITE_REPLY = 7,
+    FS_READDIR = 8,
+    FS_READDIR_REPLY = 9,
+    FS_MKDIR = 10,
+    FS_MKDIR_REPLY = 11,
+    FS_UNLINK = 12,
+    FS_UNLINK_REPLY = 13,
+    FS_RENAME = 14,
+    FS_RENAME_REPLY = 15,
+    FS_PROMOTE = 16,
+    FS_PROMOTE_REPLY = 17,
+    FS_SNAPSHOT = 18,
+    FS_SNAPSHOT_REPLY = 19,
+    FS_SNAPSHOT_MNT = 20,
     FS_SNAPSHOT_MNT_REPLY = 21,
-    FS_SNAPSHOT_DROP      = 22,
-    FS_SYNC               = 23,
-    FS_SYNC_REPLY         = 24,
-    FS_PREFETCH           = 25,
-    FS_ERROR              = 26,
+    FS_SNAPSHOT_DROP = 22,
+    FS_SYNC = 23,
+    FS_SYNC_REPLY = 24,
+    FS_PREFETCH = 25,
+    FS_ERROR = 26,
     // Status-only replies that used to reuse FS_SYNC_REPLY. Appended so a
     // client waiting for an FS_SYNC_REPLY can never mistake a close/drop
     // acknowledgement for a sync result.
-    FS_CLOSE_REPLY        = 27,
+    FS_CLOSE_REPLY = 27,
     FS_SNAPSHOT_DROP_REPLY = 28,
 };
 
@@ -321,7 +320,7 @@ static_assert(sizeof(FsReaddirRequest) == 16, "FS readdir request size drift");
 
 enum FsReaddirFlags : mx_u8_t {
     FS_READDIR_HAS_ENTRY = 1u << 0,
-    FS_READDIR_EOF       = 1u << 1,
+    FS_READDIR_EOF = 1u << 1,
     FS_READDIR_TRUNCATED = 1u << 2,
 };
 
@@ -416,10 +415,10 @@ static_assert(sizeof(FsPrefetchHint) == 24, "FS prefetch hint size drift");
 
 enum JournalRecordType : mx_u32_t {
     JRN_EXTENT_ALLOC = 1,
-    JRN_EXTENT_FREE  = 2,
-    JRN_INODE_WRITE  = 3,
-    JRN_DIR_INSERT   = 4,
-    JRN_DIR_DELETE   = 5,
+    JRN_EXTENT_FREE = 2,
+    JRN_INODE_WRITE = 3,
+    JRN_DIR_INSERT = 4,
+    JRN_DIR_DELETE = 5,
     JRN_PHYS_REF_INC = 6,
     JRN_PHYS_REF_DEC = 7,
     JRN_METADATA_FRAGMENT = 8, // target/offset/length + metadata after-image (§7 FS_SPEC)

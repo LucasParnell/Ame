@@ -12,7 +12,9 @@
 #ifndef __ASSEMBLER__
 #include "anko/types.h"
 namespace kernel {
-constexpr u64 host_interrupt_state(u64 saved) { return saved | ANKO_HOST_FIQ_MASK; }
-constexpr u64 kInitialUserPstate = ANKO_HOST_FIQ_MASK;
+constexpr u64 host_interrupt_state(u64 saved) {
+    return saved | ANKO_HOST_FIQ_MASK;
 }
+constexpr u64 kInitialUserPstate = ANKO_HOST_FIQ_MASK;
+} // namespace kernel
 #endif

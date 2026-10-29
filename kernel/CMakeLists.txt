@@ -30,6 +30,11 @@ set(ANKO_SOURCES
     drivers/gic/gicv2.cc
     drivers/gic/irq_table.cc
     drivers/timer/generic_timer.cc
+    power/system.cc
+    power/accounting.cc
+    power/frequency.cc
+    power/thermal.cc
+    power/telemetry.cc
     platform/control.cc
     platform/hw_info.cc
     platform/probe.cc
@@ -60,6 +65,7 @@ set(ANKO_SOURCES
     # ---- Phase 3/4: scheduler + capabilities -------------------------------
     arch/arm64/context.S
     arch/arm64/fpsimd.S
+    arch/arm64/boot_crypto.S
     arch/arm64/psci.S
     sched/thread.cc
     sched/sched_class.cc
@@ -118,6 +124,9 @@ set(ANKO_SOURCES
 add_executable(anko ${ANKO_SOURCES})
 if(ANKO_BOARD STREQUAL "huawei-anne" OR ANKO_ANNE_DIAG_QEMU)
     target_sources(anko PRIVATE mm/boot_cache.cc arch/arm64/boot_cache.S)
+    if(ANKO_BOARD STREQUAL "huawei-anne" AND NOT ANKO_ANNE_DIAG_QEMU)
+        target_sources(anko PRIVATE power/anne/dvfs.cc)
+    endif()
     set(ANNE_MINIMAL_DIR ${CMAKE_SOURCE_DIR}/boards/huawei-anne/minimal)
     add_executable(anko-minimal EXCLUDE_FROM_ALL
         ${ANNE_MINIMAL_DIR}/entry.S ${ANNE_MINIMAL_DIR}/main.cc
@@ -141,10 +150,14 @@ if(ANKO_BOARD STREQUAL "huawei-anne" OR ANKO_ANNE_DIAG_QEMU)
     add_custom_command(TARGET anne-entry-probe POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:anne-entry-probe>
                 $<TARGET_FILE_DIR:anne-entry-probe>/anne-entry-probe.bin)
+    # Normally the signed system bundle. Point this at another .mxb (for example
+    # ipc-bench.mxb) to boot an isolated payload without touching system.mxb.
+    set(ANKO_BUNDLE_FILE "${CMAKE_BINARY_DIR}/system.mxb" CACHE FILEPATH
+        "Bundle image embedded into the kernel as boot.initrd")
     configure_file(${CMAKE_SOURCE_DIR}/boards/huawei-anne/native_bundle.S.in
         ${CMAKE_BINARY_DIR}/generated/anne_bundle.S @ONLY)
     set_source_files_properties(${CMAKE_BINARY_DIR}/generated/anne_bundle.S
-        PROPERTIES OBJECT_DEPENDS ${CMAKE_BINARY_DIR}/system.mxb)
+        PROPERTIES OBJECT_DEPENDS ${ANKO_BUNDLE_FILE})
     target_sources(anko PRIVATE ${CMAKE_BINARY_DIR}/generated/anne_bundle.S
         ${CMAKE_SOURCE_DIR}/boards/huawei-anne/native_log.cc
         ${CMAKE_SOURCE_DIR}/boards/huawei-anne/boot_diagnostics.cc

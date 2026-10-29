@@ -25,7 +25,8 @@ struct Out {
         }
     }
     void str(const char* s) {
-        for (; s && *s; ++s) ch(*s);
+        for (; s && *s; ++s)
+            ch(*s);
     }
     void hex16(u64 value) {
         static const char* digits = "0123456789abcdef";
@@ -48,20 +49,27 @@ struct Out {
             tmp[n++] = static_cast<char>('0' + (value % 10u));
             value /= 10u;
         } while (value != 0 && n < sizeof(tmp));
-        while (n) ch(tmp[--n]);
+        while (n)
+            ch(tmp[--n]);
     }
     void finish() {
-        if (cap != 0) buf[len] = '\0';
+        if (cap != 0)
+            buf[len] = '\0';
     }
-    u32 bytes() const { return len; }
+    u32 bytes() const {
+        return len;
+    }
 };
 
-const char* flag(bool value) { return value ? "1" : "0"; }
+const char* flag(bool value) {
+    return value ? "1" : "0";
+}
 
 // Bounded length of a NUL-terminated string (null-safe).
 static u32 slen(const char* s) {
     u32 n = 0;
-    while (s && s[n]) ++n;
+    while (s && s[n])
+        ++n;
     return n;
 }
 
@@ -74,7 +82,8 @@ void label(Out& out, const char* name) {
 void pad_key(Out& out, const char* name) {
     out.str(name);
     u32 n = 0;
-    while (name && name[n]) ++n;
+    while (name && name[n])
+        ++n;
     while (n < 6u) {
         out.ch(' ');
         ++n;
@@ -91,9 +100,9 @@ void write_register(Out& out, u32 index, u64 value) {
 
 } // namespace
 
-void capture_registers(Report& report, const u64* x, u64 sp, u64 elr, u64 spsr,
-                       u64 esr, u64 far) {
-    for (u32 i = 0; i < 31; ++i) report.regs.x[i] = x ? x[i] : 0;
+void capture_registers(Report& report, const u64* x, u64 sp, u64 elr, u64 spsr, u64 esr, u64 far) {
+    for (u32 i = 0; i < 31; ++i)
+        report.regs.x[i] = x ? x[i] : 0;
     report.regs.sp = sp;
     report.regs.elr = elr;
     report.regs.spsr = spsr;
@@ -107,7 +116,8 @@ void capture_backtrace(Report& report, u64 fp, u64 lo, u64 hi) {
         // Stay inside a caller-supplied window (kernel RAM) and require 8-byte
         // alignment: outside it a frame record cannot be trusted, and following
         // it could fault inside the panic handler.
-        if (fp < lo || fp + 16u > hi || (fp & 7u) != 0) break;
+        if (fp < lo || fp + 16u > hi || (fp & 7u) != 0)
+            break;
         const u64* record = reinterpret_cast<const u64*>(fp);
         const u64 next = record[0];
         report.trace[report.trace_count++] = record[1];
@@ -134,8 +144,8 @@ u32 format_caption(const Report& report, char* out, u32 cap, bool* truncated) {
         u64 value;
     };
     const Field exception_fields[] = {
-        {"esr", report.regs.esr},  {"far", report.regs.far}, {"elr", report.regs.elr},
-        {"spsr", report.regs.spsr}, {"sp", report.regs.sp},  {"fp", report.regs.x[29]},
+        {"esr", report.regs.esr},   {"far", report.regs.far}, {"elr", report.regs.elr},
+        {"spsr", report.regs.spsr}, {"sp", report.regs.sp},   {"fp", report.regs.x[29]},
         {"lr", report.regs.x[30]},
     };
     for (const Field& field : exception_fields) {
@@ -196,7 +206,8 @@ u32 format_caption(const Report& report, char* out, u32 cap, bool* truncated) {
     o.ch('\n');
 
     o.finish();
-    if (truncated) *truncated = o.truncated;
+    if (truncated)
+        *truncated = o.truncated;
     return o.bytes();
 }
 
@@ -277,7 +288,8 @@ u32 format_serial(const Report& report, char* out, u32 cap, bool* truncated) {
     o.str("--- system halted; reset to reboot ---\n");
 
     o.finish();
-    if (truncated) *truncated = o.truncated;
+    if (truncated)
+        *truncated = o.truncated;
     return o.bytes();
 }
 
@@ -303,27 +315,30 @@ struct ByteWriter {
         put((value >> 8) & 0xFFu);
     }
     void u32le(u32 value) {
-        for (int i = 0; i < 4; ++i) put((value >> (8 * i)) & 0xFFu);
+        for (int i = 0; i < 4; ++i)
+            put((value >> (8 * i)) & 0xFFu);
     }
     void u64le(u64 value) {
-        for (int i = 0; i < 8; ++i) put(static_cast<u32>((value >> (8 * i)) & 0xFFu));
+        for (int i = 0; i < 8; ++i)
+            put(static_cast<u32>((value >> (8 * i)) & 0xFFu));
     }
     void cstr(const char* s) {
-        for (; s && *s; ++s) put(static_cast<u32>(static_cast<u8>(*s)));
+        for (; s && *s; ++s)
+            put(static_cast<u32>(static_cast<u8>(*s)));
     }
 };
 
-const char kBase64Url[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const char kBase64Url[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 // Base64url, unpadded. Returns characters written.
 u32 base64url(const u8* in, u32 len, char* out, u32 cap) {
     u32 o = 0;
     u32 i = 0;
     while (i + 3u <= len) {
-        const u32 v = (static_cast<u32>(in[i]) << 16) |
-                      (static_cast<u32>(in[i + 1]) << 8) | static_cast<u32>(in[i + 2]);
-        if (o + 4u > cap) break;
+        const u32 v = (static_cast<u32>(in[i]) << 16) | (static_cast<u32>(in[i + 1]) << 8) |
+                      static_cast<u32>(in[i + 2]);
+        if (o + 4u > cap)
+            break;
         out[o++] = kBase64Url[(v >> 18) & 0x3F];
         out[o++] = kBase64Url[(v >> 12) & 0x3F];
         out[o++] = kBase64Url[(v >> 6) & 0x3F];
@@ -350,7 +365,8 @@ u32 pack_body(const Report& report, u8* out, u32 cap, bool* truncated) {
     const char* reason = report.reason ? report.reason : "";
     const u32 reason_len = slen(reason) > 255u ? 255u : slen(reason);
     w.put(reason_len);
-    for (u32 i = 0; i < reason_len; ++i) w.put(static_cast<u32>(static_cast<u8>(reason[i])));
+    for (u32 i = 0; i < reason_len; ++i)
+        w.put(static_cast<u32>(static_cast<u8>(reason[i])));
 
     w.u64le(report.regs.esr);
     w.u64le(report.regs.far);
@@ -361,12 +377,13 @@ u32 pack_body(const Report& report, u8* out, u32 cap, bool* truncated) {
     w.u64le(report.regs.x[30]);
 
     w.put(kQrRegisterCount);
-    for (u32 i = 0; i < kQrRegisterCount; ++i) w.u64le(report.regs.x[i]);
+    for (u32 i = 0; i < kQrRegisterCount; ++i)
+        w.u64le(report.regs.x[i]);
 
-    const u32 frames =
-        report.trace_count < kQrBacktrace ? report.trace_count : kQrBacktrace;
+    const u32 frames = report.trace_count < kQrBacktrace ? report.trace_count : kQrBacktrace;
     w.put(frames);
-    for (u32 i = 0; i < frames; ++i) w.u64le(report.trace[i]);
+    for (u32 i = 0; i < frames; ++i)
+        w.u64le(report.trace[i]);
 
     u32 flags = 0;
     if (report.hw.present) {
@@ -386,9 +403,11 @@ u32 pack_body(const Report& report, u8* out, u32 cap, bool* truncated) {
     const char* build = report.build ? report.build : "";
     const u32 build_len = slen(build) > 255u ? 255u : slen(build);
     w.put(build_len);
-    for (u32 i = 0; i < build_len; ++i) w.put(static_cast<u32>(static_cast<u8>(build[i])));
+    for (u32 i = 0; i < build_len; ++i)
+        w.put(static_cast<u32>(static_cast<u8>(build[i])));
 
-    if (truncated) *truncated = w.over;
+    if (truncated)
+        *truncated = w.over;
     return w.over ? 0 : w.len;
 }
 
@@ -402,8 +421,10 @@ u32 format_url(const Report& report, char* out, u32 cap, bool* truncated) {
     bool body_truncated = false;
     const u32 body_len = pack_body(report, body, sizeof(body), &body_truncated);
     if (body_len == 0) {
-        if (truncated) *truncated = true;
-        if (cap) out[0] = '\0';
+        if (truncated)
+            *truncated = true;
+        if (cap)
+            out[0] = '\0';
         return 0;
     }
 
@@ -414,20 +435,23 @@ u32 format_url(const Report& report, char* out, u32 cap, bool* truncated) {
     ByteWriter h{blob, sizeof(blob)};
     h.put('A');
     h.put('P');
-    h.put(1);                                  // version
-    h.put(use_lzma ? 1u : 0u);                 // flags: bit0 = LZMA
+    h.put(1);                  // version
+    h.put(use_lzma ? 1u : 0u); // flags: bit0 = LZMA
     h.u16le(body_len);
     const u8* payload = use_lzma ? comp : body;
     const u32 payload_len = use_lzma ? comp_len : body_len;
-    for (u32 i = 0; i < payload_len; ++i) h.put(payload[i]);
+    for (u32 i = 0; i < payload_len; ++i)
+        h.put(payload[i]);
 
     Out o{out, cap};
     o.str(kQrUrlPrefix);
     u32 written = o.bytes();
     const u32 room = cap > written ? cap - written : 0u;
     written += base64url(blob, h.len, out + written, room);
-    if (written < cap) out[written] = '\0';
-    if (truncated) *truncated = body_truncated || h.over || written >= cap;
+    if (written < cap)
+        out[written] = '\0';
+    if (truncated)
+        *truncated = body_truncated || h.over || written >= cap;
     return written;
 }
 

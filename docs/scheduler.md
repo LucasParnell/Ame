@@ -109,8 +109,8 @@ only budget-limited work waits for a timer or event, then retries selection.
 
 Slices are derived from band target latency, thread weight, and the number of
 queued peers, with 0.5 ms minimum granularity and band-specific maxima. The
-current generic timer checks at about 10 ms, so these are scheduling targets,
-not sub-millisecond timing guarantees. Budgets can overshoot by the accounting
+generic timer arms the earliest local scheduling, refill or IPC-wait deadline,
+alongside separate 10 ms maintenance. Budgets can overshoot by the accounting
 checkpoint interval, including simultaneous execution on several CPUs.
 
 ## IPC credit and handoff

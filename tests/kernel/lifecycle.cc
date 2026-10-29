@@ -16,7 +16,7 @@ static constexpr uint64_t kModeVmWorker = 1;
 
 // Scratch arena the parent uses to materialise a synthetic failing image.
 static constexpr uint64_t kFixtureArenaVa = 0x32000000ull;
-static constexpr uint64_t kFixtureArenaSize = 0x2000ull; // two pages: the image is 8 KiB
+static constexpr uint64_t kFixtureArenaSize = 0x2000ull;  // two pages: the image is 8 KiB
 static constexpr uint64_t kFixtureCodeVa = 0x14000000ull; // child executable segment
 // Deliberately adjacent to the code segment so the partial map shares its
 // first level-3 table with an already-mapped page; unwinding must prune only
@@ -152,12 +152,16 @@ static uint64_t build_oversized_image(uint8_t* buffer) {
     segments[1].flags = MX_IMAGE_SEG_ZERO_FILL;
     static_assert(kSegmentSize == 64);
 
-    (void)libk::copy_n(libk::as_bytes(buffer, kHeaderSize), libk::as_bytes(&header, kHeaderSize), kHeaderSize);
-    (void)libk::copy_n(libk::as_bytes(buffer + kHeaderSize, sizeof(segments)), libk::as_bytes(segments, sizeof(segments)), sizeof(segments));
+    (void)libk::copy_n(libk::as_bytes(buffer, kHeaderSize), libk::as_bytes(&header, kHeaderSize),
+                       kHeaderSize);
+    (void)libk::copy_n(libk::as_bytes(buffer + kHeaderSize, sizeof(segments)),
+                       libk::as_bytes(segments, sizeof(segments)), sizeof(segments));
 
     const uint32_t crc = integrity::crc32c_zero_field(
         buffer, kImageSize, __builtin_offsetof(MxImageHeader, image_crc32c), sizeof(uint32_t));
-    (void)libk::copy_n(libk::as_bytes(buffer + __builtin_offsetof(MxImageHeader, image_crc32c), sizeof(crc)), libk::as_bytes(&crc, sizeof(crc)), sizeof(crc));
+    (void)libk::copy_n(
+        libk::as_bytes(buffer + __builtin_offsetof(MxImageHeader, image_crc32c), sizeof(crc)),
+        libk::as_bytes(&crc, sizeof(crc)), sizeof(crc));
     return kImageSize;
 }
 
@@ -189,43 +193,49 @@ static void page_table_failure_mid_map(long objects, long pages) {
 // success, otherwise a negative stage tag.
 static long populate_vm(CapHandle vm, CapHandle* out_endpoint) {
     auto memory = sys_vm_memory_create(vm, 64 * 1024, 0);
-    if (memory <= 0) return -2;
+    if (memory <= 0)
+        return -2;
     if (sys_vm_memory_map(vm, static_cast<CapHandle>(memory), 0x40000000ull, 64 * 1024,
                           RIGHT_READ | RIGHT_WRITE) != 0) {
         return -3;
     }
     auto vcpu = sys_vcpu_create(vm, 0);
-    if (vcpu <= 0) return -4;
-    if (sys_vcpu_set_entry(static_cast<CapHandle>(vcpu), 0x40000000ull, 0, 0) != 0) return -5;
+    if (vcpu <= 0)
+        return -4;
+    if (sys_vcpu_set_entry(static_cast<CapHandle>(vcpu), 0x40000000ull, 0, 0) != 0)
+        return -5;
     auto channel = sys_vm_channel_create(vm, 6, 0);
-    if (channel <= 0) return -6;
+    if (channel <= 0)
+        return -6;
     // Guest-visible rings must reject overlap/invalid geometry and must be
     // reclaimed after both explicit VM destruction and owner death below.
     const auto ch = static_cast<CapHandle>(channel);
     const auto cpu = static_cast<CapHandle>(vcpu);
     const auto inspect = sys_cap_dup(ch, RIGHT_VM_CHANNEL_INSPECT);
-    if (inspect <= 0 ||
-        sys_vm_channel_map(inspect, cpu, 0x48000000, 0x20000, 48) >= 0 ||
+    if (inspect <= 0 || sys_vm_channel_map(inspect, cpu, 0x48000000, 0x20000, 48) >= 0 ||
         sys_vm_channel_notify(inspect) >= 0 ||
         sys_vm_channel_endpoint(inspect, 0, RIGHT_READ | RIGHT_MAP) > 0 ||
-        sys_vm_channel_endpoint(inspect, 1, RIGHT_WRITE | RIGHT_MAP) > 0) return -11;
+        sys_vm_channel_endpoint(inspect, 1, RIGHT_WRITE | RIGHT_MAP) > 0)
+        return -11;
     sys_cap_revoke(inspect);
     if (sys_vm_channel_map(ch, cpu, 0x40000000, 0x20000, 48) >= 0 ||
         sys_vm_channel_map(ch, cpu, 0x48000001, 0x20000, 48) >= 0 ||
         sys_vm_channel_map(ch, cpu, 0x48000000, 0x1000, 48) >= 0 ||
-        sys_vm_channel_map(ch, cpu, 0x48000000, 0x20000, 16) >= 0 ||
-        sys_vm_channel_notify(ch) >= 0) return -9;
+        sys_vm_channel_map(ch, cpu, 0x48000000, 0x20000, 16) >= 0 || sys_vm_channel_notify(ch) >= 0)
+        return -9;
     if (sys_vm_channel_map(ch, cpu, 0x48000000, 0x20000, 48) != 0 ||
-        sys_vm_channel_map(ch, cpu, 0x49000000, 0x20000, 49) >= 0 ||
-        sys_vm_channel_notify(ch) != 0) return -10;
+        sys_vm_channel_map(ch, cpu, 0x49000000, 0x20000, 49) >= 0 || sys_vm_channel_notify(ch) != 0)
+        return -10;
     auto ring = sys_vm_channel_endpoint(static_cast<CapHandle>(channel), 0,
                                         RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
-    if (ring <= 0) return -7;
-    if (sys_vm_channel_endpoint(static_cast<CapHandle>(channel), 2,
-                                RIGHT_NOTIFY | RIGHT_WAIT) <= 0) {
+    if (ring <= 0)
+        return -7;
+    if (sys_vm_channel_endpoint(static_cast<CapHandle>(channel), 2, RIGHT_NOTIFY | RIGHT_WAIT) <=
+        0) {
         return -8;
     }
-    if (out_endpoint) *out_endpoint = static_cast<CapHandle>(ring);
+    if (out_endpoint)
+        *out_endpoint = static_cast<CapHandle>(ring);
     return 0;
 }
 
@@ -255,15 +265,13 @@ static void vm_owner_death(long objects, long pages) {
     auto& root_entry = child_boot->entries[0];
     root_entry.type = MX_BOOT_ENTRY_HANDLE;
     (void)libk::copy_n(libk::as_bytes(root_entry.name, 8), libk::as_bytes("vm.root", 8), 8);
-    root_entry.handle = sys_cap_grant(child.process,
-                                      mochi::boot::require_handle(boot_info, "vm.root"),
-                                      RIGHT_VM_CREATE);
+    root_entry.handle = sys_cap_grant(
+        child.process, mochi::boot::require_handle(boot_info, "vm.root"), RIGHT_VM_CREATE);
     auto& parent_entry = child_boot->entries[1];
     parent_entry.type = MX_BOOT_ENTRY_HANDLE;
     (void)libk::copy_n(libk::as_bytes(parent_entry.name, 7), libk::as_bytes("parent", 7), 7);
-    parent_entry.handle = sys_cap_grant(child.process,
-                                        mochi::boot::require_handle(boot_info, "self"),
-                                        RIGHT_READ | RIGHT_SPAWN);
+    parent_entry.handle = sys_cap_grant(
+        child.process, mochi::boot::require_handle(boot_info, "self"), RIGHT_READ | RIGHT_SPAWN);
     auto& result_entry = child_boot->entries[2];
     result_entry.type = MX_BOOT_ENTRY_ARENA;
     (void)libk::copy_n(libk::as_bytes(result_entry.name, 7), libk::as_bytes("result", 7), 7);
@@ -322,8 +330,7 @@ static void vm_explicit_destroy(long objects, long pages) {
     check(!sys_vm_destroy(vmh), "owner vm destroy");
     settle(objects, pages);
     check(sys_debug_counter(kCounterVmCreated) == created_before + 2, "explicit vm counted");
-    check(sys_debug_counter(kCounterVmDestroyed) == destroyed_before + 2,
-          "explicit vm reclaimed");
+    check(sys_debug_counter(kCounterVmDestroyed) == destroyed_before + 2, "explicit vm reclaimed");
     check(sys_cap_identify(vmh) < 0 && sys_cap_identify(endpoint) < 0,
           "destroyed vm and endpoint capabilities are stale");
     print("explicit vm destroy: reclaimed once\n");
@@ -347,9 +354,8 @@ static void channel_lifecycle(long objects, long pages) {
     check(vm > 0, "channel vm create");
     const auto vmh = static_cast<CapHandle>(vm);
     auto memory = sys_vm_memory_create(vmh, 64 * 1024, 0);
-    check(memory > 0 &&
-              !sys_vm_memory_map(vmh, static_cast<CapHandle>(memory), 0x40000000ull, 64 * 1024,
-                                 RIGHT_READ | RIGHT_WRITE),
+    check(memory > 0 && !sys_vm_memory_map(vmh, static_cast<CapHandle>(memory), 0x40000000ull,
+                                           64 * 1024, RIGHT_READ | RIGHT_WRITE),
           "channel vm memory");
     auto vcpu = sys_vcpu_create(vmh, 0);
     check(vcpu > 0 && !sys_vcpu_set_entry(static_cast<CapHandle>(vcpu), 0x40000000ull, 0, 0),
@@ -459,8 +465,7 @@ static void channel_lifecycle(long objects, long pages) {
             if (sys_map_page(result, 0x30010000, RIGHT_READ | RIGHT_WRITE) != 0) {
                 status = -9;
             } else {
-                auto shared = sys_cap_grant(parent, endpoint,
-                                            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
+                auto shared = sys_cap_grant(parent, endpoint, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
                 if (shared <= 0) {
                     status = -10;
                 } else {
@@ -489,7 +494,8 @@ extern "C" [[noreturn]] void _start() {
     check(!sys_map_page(archive, 0x20000000, RIGHT_READ), "bundle mapping");
     bundle.data = reinterpret_cast<const uint8_t*>(0x20000000);
     bundle.size = mochi::boot::find(boot, "boot.initrd")->aux0;
-    (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)), libk::as_bytes(bundle.data, sizeof(bundle.header)), sizeof(bundle.header));
+    (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)),
+                       libk::as_bytes(bundle.data, sizeof(bundle.header)), sizeof(bundle.header));
     print("lifecycle regression started\n");
 
     // The kernel raised a spare SPI at boot and delivered it to a doorbell;

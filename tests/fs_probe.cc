@@ -11,29 +11,47 @@ static unsigned fail_block = 128;
 static unsigned flushes;
 static mx_u32_t flushed_states[3];
 static bool mounted = true;
-bool disk_mounted() { return mounted; }
+bool disk_mounted() {
+    return mounted;
+}
 bool disk_read_block(mx_u64_t block, mx_u8_t* out) {
-    if (block >= 128 || (++reads[block] == 3 && block == fail_block)) return false;
+    if (block >= 128 || (++reads[block] == 3 && block == fail_block))
+        return false;
     return libk::copy_exact(libk::as_bytes(out, kBlockSize), libk::as_bytes(disk[block]));
 }
 bool disk_write_block(mx_u64_t block, const mx_u8_t* data) {
-    return block < 128 && libk::copy_exact(libk::as_bytes(disk[block]), libk::as_bytes(data, kBlockSize));
+    return block < 128 &&
+           libk::copy_exact(libk::as_bytes(disk[block]), libk::as_bytes(data, kBlockSize));
 }
 mx_i32_t disk_flush() {
     assert(flushes < 3);
     flushed_states[flushes++] = reinterpret_cast<const DurableHeader*>(disk[0])->state;
     return MX_OK;
 }
-bool disk_durable_region(mx_u64_t* start, mx_u64_t* count) { *start = 0; *count = 128; return true; }
-bool disk_inode(mx_u32_t, InodeLeafEntry*) { return false; }
-bool disk_dir_lookup(const InodeLeafEntry&, mx_u32_t, const char*, mx_u8_t, InodeLeafEntry*) { return false; }
-fs_handle_t alloc_disk_handle(const InodeLeafEntry&) { return 0; }
-mx_i32_t disk_read_file(const OpenHandle&, mx_u64_t, mx_u32_t, FsReadReply*) { return MX_ERR_NOT_FOUND; }
-mx_i32_t disk_readdir(const OpenHandle&, const FsReaddirRequest&, FsReaddirReply*) { return MX_ERR_NOT_FOUND; }
+bool disk_durable_region(mx_u64_t* start, mx_u64_t* count) {
+    *start = 0;
+    *count = 128;
+    return true;
+}
+bool disk_inode(mx_u32_t, InodeLeafEntry*) {
+    return false;
+}
+bool disk_dir_lookup(const InodeLeafEntry&, mx_u32_t, const char*, mx_u8_t, InodeLeafEntry*) {
+    return false;
+}
+fs_handle_t alloc_disk_handle(const InodeLeafEntry&) {
+    return 0;
+}
+mx_i32_t disk_read_file(const OpenHandle&, mx_u64_t, mx_u32_t, FsReadReply*) {
+    return MX_ERR_NOT_FOUND;
+}
+mx_i32_t disk_readdir(const OpenHandle&, const FsReaddirRequest&, FsReaddirReply*) {
+    return MX_ERR_NOT_FOUND;
+}
 
 static InodeState* file(const char* name) {
-    auto* inode = alloc_inode(FS_INODE_FILE, FS_CLASS_USER_DATA, g_data_inode, name,
-                             libk::str::length(name));
+    auto* inode =
+        alloc_inode(FS_INODE_FILE, FS_CLASS_USER_DATA, g_data_inode, name, libk::str::length(name));
     assert(inode);
     return inode;
 }
@@ -45,7 +63,10 @@ static void sync() {
     libk::zero(reads);
 }
 static void rename_guards() {
-    struct Storage { RingPage page; RingSlot slots[2]; } storage{};
+    struct Storage {
+        RingPage page;
+        RingSlot slots[2];
+    } storage{};
     mochi::fs::Server server{{&storage.page, &storage.page, 1, 1, 1}, 100};
     auto* inode = file("old");
     const auto parent = alloc_handle(g_data_inode, 0, false);
@@ -76,7 +97,10 @@ static void rename_guards() {
 static void access_guards() {
     format_memory_fs();
     mounted = false;
-    struct Storage { RingPage page; RingSlot slots[2]; } storage{};
+    struct Storage {
+        RingPage page;
+        RingSlot slots[2];
+    } storage{};
     mochi::fs::Server server{{&storage.page, &storage.page, 1, 1, 1}, 100};
     auto open = [&](fs_handle_t parent, const char* name, mx_u32_t flags) {
         FsOpenRequest request{};
@@ -98,11 +122,45 @@ static void access_guards() {
     const auto read_only = alloc_handle(g_data_inode, 0, true);
     const auto restricted_child = open(read_only, "child", FS_OPEN_READ);
     assert(restricted_child.status == MX_OK && restricted_child.access == FS_ACCESS_ENUMERATE);
-    assert(open(restricted_child.handle, "forbidden", FS_OPEN_CREATE | FS_OPEN_WRITE).status != MX_OK);
+    assert(open(restricted_child.handle, "forbidden", FS_OPEN_CREATE | FS_OPEN_WRITE).status !=
+           MX_OK);
     const auto writable = open(data.handle, "file", FS_OPEN_CREATE | FS_OPEN_WRITE);
     assert(writable.status == MX_OK && writable.access == (FS_ACCESS_READ | FS_ACCESS_WRITE));
     const auto read = open(data.handle, "file", FS_OPEN_READ);
     assert(read.status == MX_OK && read.access == FS_ACCESS_READ);
+    // The volatile backend must accept the same bounded upload protocol as
+    // the disk volume, including payloads larger than its former 32 KiB cap.
+    static mx_u8_t upload[FS_TRANSFER_MAX];
+    libk::fill(libk::as_bytes(upload), 0x5a);
+    g_transfers[g_session].write = upload;
+    g_transfers[g_session].write_token = 77;
+    FsWriteRequest bulk{};
+    bulk.handle = writable.handle;
+    bulk.length = sizeof(upload);
+    bulk.flags = FS_WRITE_ZERO_COPY;
+    libk::write_le<mx_u64_t>(libk::as_bytes(bulk.payload, 8), 77);
+    auto write = [&] {
+        RingSlot request{}, response{};
+        mochi::message_put(&request, FS_WRITE, bulk);
+        handle_write(server, request);
+        assert(ring_pop(&storage.page, 1, &response));
+        FsWriteReply reply{};
+        assert(mochi::message_get(response, &reply, FS_WRITE_REPLY));
+        return reply;
+    };
+    assert(write().bytes_written == sizeof(upload));
+    auto* stored = live_inode(handle_state(writable.handle)->inode_number);
+    assert(stored->size == sizeof(upload));
+    const auto* last = find_extent_const(*stored, sizeof(upload) / kBlockSize - 1);
+    assert(last && g_data_blocks[last->phys_block][kBlockSize - 1] == 0x5a);
+    bulk.payload[0] = 78;
+    assert(write().status == MX_ERR_INVALID);
+    bulk.payload[0] = 77;
+    bulk.handle = read.handle;
+    assert(write().status == MX_ERR_PERM);
+    bulk.handle = writable.handle;
+    libk::write_le<mx_u64_t>(libk::as_bytes(bulk.payload + 8, 8), FS_TRANSFER_MAX);
+    assert(write().status == MX_ERR_INVALID);
     assert(open(kRootHandle, kHelloName, FS_OPEN_WRITE).status == MX_ERR_PERM);
 
     // A snapshot root's /data is the captured directory, never the live mount.

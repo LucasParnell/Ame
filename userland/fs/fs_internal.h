@@ -56,7 +56,7 @@ constexpr mx_u32_t kRootInode = 1;
 constexpr fs_handle_t kRootHandle = 1; // index 1 of g_handles / g_handle_generations
 constexpr mx_u32_t kMaxInodes = 64;
 constexpr mx_u32_t kMaxHandles = 64;
-constexpr mx_u32_t kMaxExtentsPerInode = 8;
+constexpr mx_u32_t kMaxExtentsPerInode = 64; // 256 KiB executable in the volatile backend
 constexpr mx_u32_t kMaxPhysBlocks = 256;
 constexpr mx_u32_t kMaxSnapshots = 8;
 constexpr mx_u32_t kMaxName = 47;
@@ -164,11 +164,15 @@ extern mx_u32_t g_data_inode;
 extern mx_u32_t g_session;
 extern mx_u64_t g_session_generation;
 extern mochi::store::State g_volume;
-struct FsTransfer { mx_handle_t peer, write_token; mx_u8_t* write; };
+struct FsTransfer {
+    mx_handle_t peer, write_token;
+    mx_u8_t* write;
+};
 extern FsTransfer g_transfers[];
 void close_transfer_session(mx_u32_t session);
 mx_i32_t volume_read(const OpenHandle&, const FsReadRequest&, FsReadReply&);
 mx_i32_t volume_write(const OpenHandle&, const FsWriteRequest&);
+mx_i32_t write_request_data(const FsWriteRequest&, const mx_u8_t*&);
 
 // ---------------------------------------------------------------------------
 // Small freestanding helpers, shared by every module.
@@ -179,8 +183,7 @@ static inline mx_u32_t str_len(const char* s, mx_u32_t limit) {
 
 // Compare a terminated inode name to a counted protocol name.
 static inline bool name_eq(const char* a, const char* b, mx_u8_t b_len) {
-    return b_len <= kMaxName && a && b &&
-           libk::str::length_n(a, b_len + 1) == b_len &&
+    return b_len <= kMaxName && a && b && libk::str::length_n(a, b_len + 1) == b_len &&
            libk::str::equal_n(a, b, b_len);
 }
 

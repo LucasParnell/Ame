@@ -5,7 +5,10 @@
 #include "mochi/arena.h"
 
 static int failures = 0;
-static void check(bool cond) { if (!cond) ++failures; }
+static void check(bool cond) {
+    if (!cond)
+        ++failures;
+}
 
 struct Pair {
     unsigned int x;

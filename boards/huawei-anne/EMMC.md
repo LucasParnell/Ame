@@ -6,7 +6,7 @@ physical handset; see the userdata installation below. This filesystem check
 does not establish a working Anne secure-firmware request producer or a
 returning FF06, and does not validate native eMMC writes.
 
-`kernel/drivers/emmc/sdhci.cc` implements synchronous PIO for the Arasan SDHCI
+`shared/drivers/emmc/sdhci.cc` implements synchronous PIO/ADMA2 for the Arasan SDHCI
 controller at `0xff390000`. The captured running DTB identifies this controller
 as `arasan,sdhci`; the separate DesignWare controllers serve SD/SDIO.
 
@@ -15,6 +15,9 @@ offsets and RPMB command sequences were checked against Huawei's pinned
 [SDHCI driver](https://github.com/hisi-oss/android_kernel_huawei_hi6250-8/blob/65e545cbaa11d132e243287b150146bc2a51c45e/drivers/mmc/host/sdhci-of-arasan.c)
 and [RPMB driver](https://github.com/hisi-oss/android_kernel_huawei_hi6250-8/blob/65e545cbaa11d132e243287b150146bc2a51c45e/drivers/mmc/card/hisi_rpmb.c).
 These sources are references; no Linux implementation is linked into Ame.
+
+The 200 MHz figure is the vendor driver's nominal input. Live PLL readback
+on this handset gives approximately 196 MHz; see the clock audit below.
 
 ## Interface
 
@@ -32,22 +35,22 @@ if (anne::emmc::prepare(config)) {
 }
 ```
 
-`read`/`write` address only the user area, in 512-byte sectors, with 1–32 sectors
+`read`/`write` address only the user area, in 512-byte sectors, with 1–128 sectors
 per call. Bounds use the card's EXT_CSD sector count. Boot partitions are not
 exposed. `status` copies EXT_CSD and the last failure (error, command index,
 SDHCI interrupt bits and R1 status) without card I/O. APIs belong in kernel
 thread/syscall context, with IRQs enabled; they are not a filesystem/block IPC
 service. There is no automatic initialization or card access during boot.
 
-Initialization takes over a bootloader-powered controller, retains the power
+Fallback initialization takes over a bootloader-powered controller, retains the power
 and signal-voltage selection, disables DMA/host IRQ signals, configures the
 legacy Arasan PHY, and re-enumerates with CMD0/1/2/3/7/8 at 400 kHz and one bit.
-It then runs at at most 12.5 MHz. The native wrapper assumes the reference's
-200 MHz input; a different bootloader source rate must be measured and supplied
-to `Driver::initialize`. SoC clock gates, pinmux and regulators must already be
-enabled. It does not perform full cold power-up, voltage switching, high-speed
-tuning, DMA or command queueing. Byte-addressed cards and native 4K sectors are
-rejected.
+It then runs at at most 26 MHz. The userland block service obtains the actual
+input rate through the board platform capability. SoC clock gates, pinmux and
+regulators must already be enabled. It does not perform full cold power-up,
+voltage switching, fresh high-speed tuning or command queueing. Byte-addressed
+cards and native 4K sectors are rejected. A validated HS400 handoff retains the
+bootloader's faster bus instead of taking this fallback; see the audit below.
 
 Each transfer checks controller errors before completion, checks R1 errors,
 and polls CMD13 until READY/TRAN. User-area writes flush an enabled card cache.

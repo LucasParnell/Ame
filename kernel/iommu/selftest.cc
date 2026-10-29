@@ -414,7 +414,8 @@ void smmuv3_selftest_if_testdev() {
 #else // !ANKO_BUILD_DEV
 
 namespace iommu {
-void smmuv3_selftest_if_testdev() {}
+void smmuv3_selftest_if_testdev() {
+}
 } // namespace iommu
 
 #endif

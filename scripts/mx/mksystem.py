@@ -65,10 +65,20 @@ def main(argv: list[str]) -> int:
     build_dir = args.build_dir.resolve()
     manifest = build_manifest(build_dir, args.descriptor.resolve(), args.profile)
     args.manifest_output.parent.mkdir(parents=True, exist_ok=True)
-    args.manifest_output.write_text(
-        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
+    text = json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+
+    def _unique_pairs(pairs):
+        seen = set()
+        for key, _ in pairs:
+            if key in seen:
+                raise SystemExit(f"duplicate key in boot manifest: {key}")
+            seen.add(key)
+        return dict(pairs)
+
+    # init parses this manifest without the duplicate-key scan, so the property
+    # it would have checked is enforced here instead.
+    json.loads(text, object_pairs_hook=_unique_pairs)
+    args.manifest_output.write_text(text, encoding="utf-8")
 
     userland_dir = build_dir / "userland"
     (userland_dir / "manifest.v0").write_text(legacy_view(manifest), encoding="utf-8")

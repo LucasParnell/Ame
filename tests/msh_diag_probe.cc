@@ -4,15 +4,22 @@
 #include "mochi/syscall.h"
 // The diagnostic parser also compiles the native sacrificial-call commands.
 // Host report tests do not create threads or execute firmware calls.
-inline int64_t sys_thread_get_cpu() { return 0; }
-inline void sys_thread_exit(int32_t) {}
+inline int64_t sys_thread_get_cpu() {
+    return 0;
+}
+inline void sys_thread_exit(int32_t) {
+}
 static unsigned host_thread_creates;
 inline int64_t sys_thread_create(CapHandle, uint64_t, uint64_t, uint32_t) {
     ++host_thread_creates;
     return MX_ERR_NOT_IMPLEMENTED;
 }
-inline int64_t sys_thread_set_affinity(CapHandle, uint64_t) { return MX_ERR_NOT_IMPLEMENTED; }
-inline int64_t sys_thread_resume(CapHandle) { return MX_ERR_NOT_IMPLEMENTED; }
+inline int64_t sys_thread_set_affinity(CapHandle, uint64_t) {
+    return MX_ERR_NOT_IMPLEMENTED;
+}
+inline int64_t sys_thread_resume(CapHandle) {
+    return MX_ERR_NOT_IMPLEMENTED;
+}
 static unsigned revoked;
 #include "../userland/msh/msh_diag.cc"
 
@@ -33,29 +40,35 @@ static unsigned pumped;
 static int64_t read_diag(uint64_t request, uint64_t index, void* out, uint64_t size) {
     assert(size && size <= MX_DIAG_READ_MAX);
     ++reads;
-    if (fail_read) return MX_ERR_NOT_IMPLEMENTED;
+    if (fail_read)
+        return MX_ERR_NOT_IMPLEMENTED;
     if (request == MX_DIAG_RUNTIME) {
         MxDiagRuntimeBatch batch{};
         batch.version = MX_DIAG_VERSION;
         batch.first_pid = index;
         batch.next_pid = index + MX_DIAG_RUNTIME_ROWS <= MX_DIAG_PROCESS_LIMIT
-            ? index + MX_DIAG_RUNTIME_ROWS : 0;
+                             ? index + MX_DIAG_RUNTIME_ROWS
+                             : 0;
         batch.sampled_ns = host_now;
         batch.online_mask = 0xff;
         const bool after = host_now >= 1000000000;
         if (index == 1) {
             for (unsigned pid = 1; pid <= 7; ++pid) {
-                if (pid == 6 && after) continue;
+                if (pid == 6 && after)
+                    continue;
                 auto& row = batch.rows[batch.count++];
                 row.pid = pid;
                 row.identity = ((pid == 3 && after ? 2ull : 1ull) << 32) | pid;
                 row.runtime_ns = 100 + host_now / (pid == 2 ? 10 : 100);
-                if (pid == 4 && after) row.runtime_ns = 0;
-                if (pid == 5 && after) row.flags = 1;
+                if (pid == 4 && after)
+                    row.runtime_ns = 0;
+                if (pid == 5 && after)
+                    row.flags = 1;
                 std::strcpy(row.name, pid == 2 ? "busy" : "quiet");
             }
         }
-        if (bad_runtime_batch) batch.count = MX_DIAG_RUNTIME_ROWS + 1;
+        if (bad_runtime_batch)
+            batch.count = MX_DIAG_RUNTIME_ROWS + 1;
         std::memcpy(out, &batch, sizeof(batch));
         return sizeof(batch);
     }
@@ -85,12 +98,16 @@ static int64_t read_diag(uint64_t request, uint64_t index, void* out, uint64_t s
     }
     if (request == MX_DIAG_EL3) {
         if (index == 29) {
-            if (!el3_available) return MX_ERR_NOT_IMPLEMENTED;
+            if (!el3_available)
+                return MX_ERR_NOT_IMPLEMENTED;
             const auto action = static_cast<MxDiagEl3Rpmb*>(out)->action;
             if (pump_mode && action == MX_RPMB_COMPLETE) {
                 ++pumped;
                 ++rpmb_model.completed_events;
-                if (emit_next) { ++rpmb_model.events; emit_next = false; }
+                if (emit_next) {
+                    ++rpmb_model.events;
+                    emit_next = false;
+                }
             }
             auto info = rpmb_model;
             info.version = bad_version ? 99 : MX_DIAG_VERSION;
@@ -124,36 +141,68 @@ static int64_t read_diag(uint64_t request, uint64_t index, void* out, uint64_t s
         return sizeof(info);
     }
     assert(request == MX_DIAG_BOOT_LOG);
-    if (early_eof) return 0;
+    if (early_eof)
+        return 0;
     assert(index < retained.size());
     const size_t count = std::min<size_t>(size, retained.size() - index);
     std::memcpy(out, retained.data() + index, count);
-    if (grow_log) retained.append("new record\n");
+    if (grow_log)
+        retained.append("new record\n");
     return count;
 }
-bool streq(const char* a, const char* b) { return libk::str::equal(a, b); }
+bool streq(const char* a, const char* b) {
+    return libk::str::equal(a, b);
+}
 void put_bytes(const char* p, uint32_t n) {
-    if (drop_output_once) { drop_output_once = false; g.output_failed = true; return; }
+    if (drop_output_once) {
+        drop_output_once = false;
+        g.output_failed = true;
+        return;
+    }
     output.append(p, n);
 }
-void put(const char* p) { output.append(p); }
-void putln(const char* p) { put(p); put("\r\n"); }
-int cmd_bootinfo(int, char**) { ++resources; return 0; }
-int cmd_cap(int, char**) { ++resources; return 0; }
-int cmd_ring(int, char**) { ++resources; return 0; }
-int cmd_doorbell(int, char**) { ++resources; return 0; }
-int cmd_svc(int, char**) { ++resources; return 0; }
+void put(const char* p) {
+    output.append(p);
+}
+void putln(const char* p) {
+    put(p);
+    put("\r\n");
+}
+int cmd_bootinfo(int, char**) {
+    ++resources;
+    return 0;
+}
+int cmd_cap(int, char**) {
+    ++resources;
+    return 0;
+}
+int cmd_ring(int, char**) {
+    ++resources;
+    return 0;
+}
+int cmd_doorbell(int, char**) {
+    ++resources;
+    return 0;
+}
+int cmd_svc(int, char**) {
+    ++resources;
+    return 0;
+}
 
 static int run(const char* argument = nullptr) {
-    output.clear(); reads = resources = 0;
+    output.clear();
+    reads = resources = 0;
     char command[] = "diag";
     char* argv[] = {command, const_cast<char*>(argument)};
     return cmd_diag(argument ? 2 : 1, argv);
 }
-static bool contains(const char* p) { return output.find(p) != std::string::npos; }
+static bool contains(const char* p) {
+    return output.find(p) != std::string::npos;
+}
 
 static int run_rpmb(const char* action, const char* cpu = nullptr) {
-    output.clear(); reads = resources = 0;
+    output.clear();
+    reads = resources = 0;
     char command[] = "diag", name[] = "el3-rpmb";
     char* argv[] = {command, name, const_cast<char*>(action), const_cast<char*>(cpu)};
     return cmd_diag(cpu ? 4 : action ? 3 : 2, argv);
@@ -161,13 +210,17 @@ static int run_rpmb(const char* action, const char* cpu = nullptr) {
 
 int main() {
     host_on_debug_read = read_diag;
-    host_on_cap_revoke = [](CapHandle) -> mx_status_t { ++revoked; return MX_OK; };
+    host_on_cap_revoke = [](CapHandle) -> mx_status_t {
+        ++revoked;
+        return MX_OK;
+    };
     // Real hardware may expose EL2 while firmware hands the kernel EL1.
     assert(run("el2") == 0 && contains("el2.hardware_field=1\r\n"));
     assert(contains("cpu0 online=1 mpidr=0x0 boot_entry_el=1 monitor_ready=0"));
     assert(contains("cpu7 online=0 mpidr=0x0 boot_entry_el=0 monitor_ready=0"));
     assert(resources == 0 && reads == 9);
-    entry_el = 2; monitor = 1;
+    entry_el = 2;
+    monitor = 1;
     assert(run("el2") == 0 && contains("boot_entry_el=2 monitor_ready=1"));
     assert(contains("host.current_el=1")); // Host drops to EL1 after monitor install.
     assert(run("el3") == 0 && contains("el3.shared_base=0x34a21000\r\n"));
@@ -190,7 +243,8 @@ int main() {
     el3_available = true;
     done_aborted = 1;
     assert(run("el3-done") == 1 && contains("aborted before the call"));
-    done_aborted = 0; done_result = 0xff01;
+    done_aborted = 0;
+    done_result = 0xff01;
     assert(run("el3-done") == 1);
     fail_read = true;
     output.clear();
@@ -214,11 +268,14 @@ int main() {
     assert(run("el2") == 0); // A fresh report clears an older transport failure.
     fail_read = true;
     assert(run() == 1 && contains("diagnostics unavailable") && resources == 0);
-    fail_read = false; bad_version = true;
+    fail_read = false;
+    bad_version = true;
     assert(run() == 1 && reads == 1);
-    bad_version = false; early_eof = true;
+    bad_version = false;
+    early_eof = true;
     assert(run("log") == 1 && contains("read incomplete"));
-    early_eof = false; capacity = 0;
+    early_eof = false;
+    capacity = 0;
     assert(run("log") == 0 && contains("unavailable on this board") && reads == 1);
     capacity = retained.size();
     assert(run("log") == 0 && contains("capacity reached"));
@@ -268,16 +325,22 @@ int main() {
     rpmb_model.events = 1;
     auto& worker = rpmb_workers[1];
     worker.cancel = 0;
-    host_on_wait = []() -> int64_t { rpmb_workers[1].cancel = 1; return MX_OK; };
+    host_on_wait = []() -> int64_t {
+        rpmb_workers[1].cancel = 1;
+        return MX_OK;
+    };
     assert(rpmb_serve(worker) == 0 && pumped == 2 && revoked == 1);
     assert(host_wait_deadline == host_now + 1000000 && worker.wake == kNullCap);
     worker.cancel = 0;
     rpmb_model.events += 2;
-    assert(rpmb_serve(worker) == -static_cast<int64_t>(MX_RPMB_AMBIGUOUS_REQUEST) && pumped == 2 && revoked == 2);
+    assert(rpmb_serve(worker) == -static_cast<int64_t>(MX_RPMB_AMBIGUOUS_REQUEST) && pumped == 2 &&
+           revoked == 2);
     rpmb_model.events = rpmb_model.completed_events;
     host_on_wait = []() -> int64_t {
-        if (!pumped) ++rpmb_model.events;
-        else rpmb_workers[1].cancel = 1;
+        if (!pumped)
+            ++rpmb_model.events;
+        else
+            rpmb_workers[1].cancel = 1;
         return MX_OK;
     };
     pumped = 0;

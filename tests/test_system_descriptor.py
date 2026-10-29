@@ -22,7 +22,10 @@ class SystemDescriptor(unittest.TestCase):
         self.assertEqual(switch['checks'], [])
         self.assertNotIn('dango.manager', mksystem.legacy_view(switch))
         self.assertEqual(policy.check_manifest(switch), [])
-        self.assertEqual(len(self.manifest['services']), 17)
+        self.assertEqual(len(self.manifest['services']), 19)
+        apps = next(s for s in self.manifest['services'] if s['name'] == 'dev.apps')
+        self.assertEqual(apps['uses'], [])
+        self.assertEqual(apps['start_after'], [])
 
     def test_anne_bootstrap_profile_does_not_require_el2_or_qemu_devices(self):
         anne = policy.load_profile(self.path, 'huawei-anne')

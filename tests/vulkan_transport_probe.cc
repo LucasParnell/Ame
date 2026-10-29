@@ -43,13 +43,15 @@ struct FrameQueue {
     mx_u32_t head = 0;
     mx_u32_t tail = 0;
     bool push(const MxVkFrame& frame) {
-        if (head - tail >= kCap) return false;
+        if (head - tail >= kCap)
+            return false;
         slots[head % kCap] = frame;
         ++head;
         return true;
     }
     bool pop(MxVkFrame* out) {
-        if (tail == head) return false;
+        if (tail == head)
+            return false;
         *out = slots[tail % kCap];
         ++tail;
         return true;
@@ -67,19 +69,24 @@ struct Rig {
 
 bool rig_push(void* ctx, const MxVkFrame& slot) {
     auto* rig = static_cast<Rig*>(ctx);
-    if (!rig->request.push(slot)) return false;
+    if (!rig->request.push(slot))
+        return false;
     // The service runs "concurrently": pump every queued request through the
     // broker now, so the reply is ready before the client pops.
     MxVkFrame request{};
     while (rig->request.pop(&request)) {
         MxVkFrame reply{};
-        if (!rig->broker->handle(rig->client_id, request, &reply)) return false;
-        if (!rig->reply.push(reply)) return false;
+        if (!rig->broker->handle(rig->client_id, request, &reply))
+            return false;
+        if (!rig->reply.push(reply))
+            return false;
     }
     return true;
 }
 
-bool rig_pop(void* ctx, MxVkFrame* out) { return static_cast<Rig*>(ctx)->reply.pop(out); }
+bool rig_pop(void* ctx, MxVkFrame* out) {
+    return static_cast<Rig*>(ctx)->reply.pop(out);
+}
 bool rig_wait(void* ctx) {
     (void)ctx;
     return true; // replies are already queued by rig_push
@@ -129,19 +136,22 @@ struct RefBackend {
 
     Map* find(mx_u64_t session_id) {
         for (auto& m : maps) {
-            if (m.used && m.session_id == session_id) return &m;
+            if (m.used && m.session_id == session_id)
+                return &m;
         }
         return nullptr;
     }
 
     static void fill(mx_u8_t* dst, mx_u64_t size, mx_u32_t value) {
-        for (mx_u64_t i = 0; i < size; ++i) dst[i] = static_cast<mx_u8_t>(value >> ((i & 3) * 8));
+        for (mx_u64_t i = 0; i < size; ++i)
+            dst[i] = static_cast<mx_u8_t>(value >> ((i & 3) * 8));
     }
 
     // A right triangle with vertices (0,0), (w-1,0), (0,h-1): interior points
     // satisfy x*(h-1) + y*(w-1) < (w-1)*(h-1).
     void raster_triangle(mx_u8_t* target, mx_u32_t color) {
-        if (rt_w == 0 || rt_h == 0) return;
+        if (rt_w == 0 || rt_h == 0)
+            return;
         const mx_u64_t a = rt_w - 1;
         const mx_u64_t b = rt_h - 1;
         for (mx_u32_t y = 0; y < rt_h; ++y) {
@@ -159,19 +169,23 @@ struct RefBackend {
 
     mx_status_t execute(mx_u64_t session_id, mx_u32_t command_offset, mx_u32_t command_bytes) {
         Map* map = find(session_id);
-        if (!map || !map->arena) return MX_ERR_NOT_FOUND;
-        if ((mx_u64_t)command_offset + command_bytes > map->bytes) return MX_ERR_INVALID;
+        if (!map || !map->arena)
+            return MX_ERR_NOT_FOUND;
+        if ((mx_u64_t)command_offset + command_bytes > map->bytes)
+            return MX_ERR_INVALID;
         const mx_u8_t* base = map->arena;
         mx_u32_t off = 0;
         while (off + sizeof(MxVkCommandHeader) <= command_bytes) {
-            const auto* header = reinterpret_cast<const MxVkCommandHeader*>(base + command_offset + off);
+            const auto* header =
+                reinterpret_cast<const MxVkCommandHeader*>(base + command_offset + off);
             if (header->size < sizeof(MxVkCommandHeader) || header->size > command_bytes - off) {
                 return MX_ERR_BAD_PROTOCOL;
             }
             switch (header->opcode) {
             case VK_CMD_FILL_BUFFER: {
                 const auto* cmd = reinterpret_cast<const MxVkCmdFillBuffer*>(header);
-                if (cmd->dest_arena_offset + cmd->offset + cmd->size > map->bytes) return MX_ERR_INVALID;
+                if (cmd->dest_arena_offset + cmd->offset + cmd->size > map->bytes)
+                    return MX_ERR_INVALID;
                 fill(map->arena + cmd->dest_arena_offset + cmd->offset, cmd->size, cmd->value);
                 break;
             }
@@ -223,7 +237,8 @@ bool ref_open(void* ctx, mx_u64_t session_id, mx_u32_t client_id, mx_u32_t arena
             break;
         }
     }
-    if (!slot || client_id >= MX_VK_SESSION_MAX_SESSIONS) return false;
+    if (!slot || client_id >= MX_VK_SESSION_MAX_SESSIONS)
+        return false;
     slot->used = true;
     slot->session_id = session_id;
     slot->client_id = client_id;
@@ -232,14 +247,15 @@ bool ref_open(void* ctx, mx_u64_t session_id, mx_u32_t client_id, mx_u32_t arena
     // if the broker (testing quota capping) granted more.
     slot->bytes = arena_bytes < kArenaBytes ? arena_bytes : kArenaBytes;
     slot->last_sync = 0;
-    *flags_out = MX_VK_SESSION_FLAG_ARENA_READY | MX_VK_SESSION_FLAG_VULKAN_LIVE |
-                 MX_VK_SESSION_FLAG_WSI;
+    *flags_out =
+        MX_VK_SESSION_FLAG_ARENA_READY | MX_VK_SESSION_FLAG_VULKAN_LIVE | MX_VK_SESSION_FLAG_WSI;
     return true;
 }
 
 void ref_close(void* ctx, mx_u64_t session_id) {
     auto* ref = static_cast<RefBackend*>(ctx);
-    if (auto* m = ref->find(session_id)) *m = RefBackend::Map{};
+    if (auto* m = ref->find(session_id))
+        *m = RefBackend::Map{};
 }
 
 mx_status_t ref_submit(void* ctx, mx_u64_t session_id, mx_u32_t command_offset,
@@ -247,15 +263,18 @@ mx_status_t ref_submit(void* ctx, mx_u64_t session_id, mx_u32_t command_offset,
     auto* ref = static_cast<RefBackend*>(ctx);
     ++ref->submit_calls;
     const mx_status_t rc = ref->execute(session_id, command_offset, command_bytes);
-    if (mx_err(rc)) return rc;
-    if (auto* m = ref->find(session_id)) m->last_sync = sync_id;
+    if (mx_err(rc))
+        return rc;
+    if (auto* m = ref->find(session_id))
+        m->last_sync = sync_id;
     return MX_OK;
 }
 
 mx_status_t ref_sync_wait(void* ctx, mx_u64_t session_id, mx_u64_t sync_id, mx_u64_t /*timeout*/) {
     auto* ref = static_cast<RefBackend*>(ctx);
     RefBackend::Map* m = ref->find(session_id);
-    if (!m) return MX_ERR_NOT_FOUND;
+    if (!m)
+        return MX_ERR_NOT_FOUND;
     return sync_id <= m->last_sync ? MX_OK : MX_ERR_BUSY;
 }
 
@@ -265,10 +284,13 @@ mx_status_t ref_present(void* ctx, mx_u64_t session_id, mx_u64_t /*swapchain_id*
     auto* ref = static_cast<RefBackend*>(ctx);
     ++ref->present_calls;
     RefBackend::Map* m = ref->find(session_id);
-    if (!m || !m->arena) return MX_ERR_NOT_FOUND;
+    if (!m || !m->arena)
+        return MX_ERR_NOT_FOUND;
     mx_u32_t copied = image_bytes;
-    if (copied > MX_VK_SHARED_BUFFER_MAX_BYTES) copied = MX_VK_SHARED_BUFFER_MAX_BYTES;
-    if (image_offset + copied > m->bytes) return MX_ERR_INVALID;
+    if (copied > MX_VK_SHARED_BUFFER_MAX_BYTES)
+        copied = MX_VK_SHARED_BUFFER_MAX_BYTES;
+    if (image_offset + copied > m->bytes)
+        return MX_ERR_INVALID;
     // The bounded copy into the Dango shared buffer (spec §15.4).
     memcpy(ref->shared, m->arena + image_offset, copied);
     ref->shared_bytes = copied;
@@ -339,7 +361,8 @@ int main() {
     assert(src.arena_offset >= MX_VK_COMMAND_REGION_BYTES);
 
     // The client writes host-visible memory directly through its arena view.
-    for (mx_u32_t i = 0; i < 256; ++i) src.ptr[i] = static_cast<mx_u8_t>((i * 7 + 3) & 0xFF);
+    for (mx_u32_t i = 0; i < 256; ++i)
+        src.ptr[i] = static_cast<mx_u8_t>((i * 7 + 3) & 0xFF);
 
     CommandRecorder& recorder = a.recorder();
     // 0xABABABAB fills every byte with 0xAB (the pattern is a 32-bit word).
@@ -354,7 +377,8 @@ int main() {
     assert(recorder.empty()); // consumed by the submit
     assert(a.sync_wait(1, 0, &status) && status == MX_OK);
     // Offscreen validation: the fill landed and the copy carried it through.
-    for (mx_u32_t i = 0; i < 64; ++i) assert(dst.ptr[i] == 0xAB);
+    for (mx_u32_t i = 0; i < 64; ++i)
+        assert(dst.ptr[i] == 0xAB);
     for (mx_u32_t i = 64; i < 256; ++i) {
         assert(dst.ptr[i] == static_cast<mx_u8_t>((i * 7 + 3) & 0xFF));
     }
@@ -365,8 +389,8 @@ int main() {
     assert(a.surface_create(64, 64, MX_GPU_PIXFMT_XRGB8888, &surface) && surface != 0);
     mx_u64_t swapchain = 0;
     mx_u32_t image_bytes = 0;
-    assert(a.swapchain_create(surface, /*image_count=*/2, /*stride=*/64 * 4,
-                              MX_GPU_PIXFMT_XRGB8888, &swapchain, &image_bytes) &&
+    assert(a.swapchain_create(surface, /*image_count=*/2, /*stride=*/64 * 4, MX_GPU_PIXFMT_XRGB8888,
+                              &swapchain, &image_bytes) &&
            swapchain != 0 && image_bytes == 64 * 4 * 64);
 
     mx_u32_t image_index = 0;

@@ -52,7 +52,7 @@ struct VulkanBackend {
 };
 
 class VulkanSessionBroker {
-public:
+  public:
     static constexpr mx_u32_t kMaxSessions = MX_VK_SESSION_MAX_SESSIONS;
     static constexpr mx_u32_t kMaxObjects = MX_VK_SESSION_MAX_OBJECTS;
     static constexpr mx_u32_t kMaxOutstanding = MX_VK_SESSION_MAX_OUTSTANDING;
@@ -76,19 +76,31 @@ public:
     // protocol error; any error inside this protocol is reported as a
     // VK_SESSION_ERROR reply and still returns true.
     bool handle(mx_u32_t client_id, const MxVkFrame& request, MxVkFrame* reply) {
-        if (!reply || !mx_vk_is_opcode(request.type)) return false;
+        if (!reply || !mx_vk_is_opcode(request.type))
+            return false;
         switch (request.type) {
-        case VK_SESSION_OPEN: return on_open(client_id, request, reply);
-        case VK_SESSION_CLOSE: return on_close(client_id, request, reply);
-        case VK_SESSION_ALLOC: return on_alloc(client_id, request, reply);
-        case VK_SESSION_FREE: return on_free(client_id, request, reply);
-        case VK_SESSION_SUBMIT: return on_submit(client_id, request, reply);
-        case VK_SESSION_SYNC_WAIT: return on_sync_wait(client_id, request, reply);
-        case VK_SESSION_SURFACE_CREATE: return on_surface_create(client_id, request, reply);
-        case VK_SESSION_SURFACE_DESTROY: return on_surface_destroy(client_id, request, reply);
-        case VK_SESSION_SWAPCHAIN_CREATE: return on_swapchain_create(client_id, request, reply);
-        case VK_SESSION_SWAPCHAIN_ACQUIRE: return on_swapchain_acquire(client_id, request, reply);
-        case VK_SESSION_SWAPCHAIN_PRESENT: return on_swapchain_present(client_id, request, reply);
+        case VK_SESSION_OPEN:
+            return on_open(client_id, request, reply);
+        case VK_SESSION_CLOSE:
+            return on_close(client_id, request, reply);
+        case VK_SESSION_ALLOC:
+            return on_alloc(client_id, request, reply);
+        case VK_SESSION_FREE:
+            return on_free(client_id, request, reply);
+        case VK_SESSION_SUBMIT:
+            return on_submit(client_id, request, reply);
+        case VK_SESSION_SYNC_WAIT:
+            return on_sync_wait(client_id, request, reply);
+        case VK_SESSION_SURFACE_CREATE:
+            return on_surface_create(client_id, request, reply);
+        case VK_SESSION_SURFACE_DESTROY:
+            return on_surface_destroy(client_id, request, reply);
+        case VK_SESSION_SWAPCHAIN_CREATE:
+            return on_swapchain_create(client_id, request, reply);
+        case VK_SESSION_SWAPCHAIN_ACQUIRE:
+            return on_swapchain_acquire(client_id, request, reply);
+        case VK_SESSION_SWAPCHAIN_PRESENT:
+            return on_swapchain_present(client_id, request, reply);
         default:
             // A reply/error opcode sent as a request, or an unknown opcode in
             // the range: refuse it rather than guess.
@@ -99,19 +111,24 @@ public:
     // Introspection for tests and counters (never used on the request path).
     mx_u32_t session_count() const {
         mx_u32_t n = 0;
-        for (mx_u32_t i = 0; i < kMaxSessions; ++i) n += sessions_[i].used ? 1u : 0u;
+        for (mx_u32_t i = 0; i < kMaxSessions; ++i)
+            n += sessions_[i].used ? 1u : 0u;
         return n;
     }
     bool session_stats(mx_u32_t index, mx_u32_t* objects, mx_u32_t* outstanding,
                        mx_u32_t* watermark) const {
-        if (index >= kMaxSessions || !sessions_[index].used) return false;
-        if (objects) *objects = sessions_[index].object_count;
-        if (outstanding) *outstanding = sessions_[index].outstanding_count;
-        if (watermark) *watermark = sessions_[index].watermark;
+        if (index >= kMaxSessions || !sessions_[index].used)
+            return false;
+        if (objects)
+            *objects = sessions_[index].object_count;
+        if (outstanding)
+            *outstanding = sessions_[index].outstanding_count;
+        if (watermark)
+            *watermark = sessions_[index].watermark;
         return true;
     }
 
-private:
+  private:
     struct MemoryObject {
         bool used = false;
         mx_u64_t id = 0;
@@ -173,8 +190,8 @@ private:
         mx_u32_t swapchain[kMaxSwapchains]{};
     };
 
-    static mx_u64_t issue_id(mx_u64_t generation, mx_u32_t type, mx_u32_t session,
-                              mx_u32_t index, mx_u32_t& incarnation) {
+    static mx_u64_t issue_id(mx_u64_t generation, mx_u32_t type, mx_u32_t session, mx_u32_t index,
+                             mx_u32_t& incarnation) {
         return mx_vk_object_id_with_incarnation(
             mx_vk_object_id_make(generation, type, session, index), incarnation++);
     }
@@ -208,7 +225,8 @@ private:
 
     Session* free_session_slot() {
         for (mx_u32_t i = 0; i < kMaxSessions; ++i) {
-            if (!sessions_[i].used && incarnations_[i].session <= MX_VK_OBJECT_MAX_INCARNATION) return &sessions_[i];
+            if (!sessions_[i].used && incarnations_[i].session <= MX_VK_OBJECT_MAX_INCARNATION)
+                return &sessions_[i];
         }
         return nullptr;
     }
@@ -220,7 +238,8 @@ private:
                                   &index) != 0) {
             return nullptr;
         }
-        if (index > kMaxObjects) return nullptr;
+        if (index > kMaxObjects)
+            return nullptr;
         MemoryObject& obj = s.objects[index - 1];
         return (obj.used && obj.id == memory_id) ? &obj : nullptr;
     }
@@ -231,7 +250,8 @@ private:
                                   &index) != 0) {
             return nullptr;
         }
-        if (index > kMaxSwapchains) return nullptr;
+        if (index > kMaxSwapchains)
+            return nullptr;
         Swapchain& sc = s.swapchains[index - 1];
         return (sc.used && sc.id == swapchain_id) ? &sc : nullptr;
     }
@@ -242,7 +262,8 @@ private:
                                   &index) != 0) {
             return nullptr;
         }
-        if (index > kMaxSurfaces) return nullptr;
+        if (index > kMaxSurfaces)
+            return nullptr;
         Surface& sf = s.surfaces[index - 1];
         return (sf.used && sf.id == surface_id) ? &sf : nullptr;
     }
@@ -250,13 +271,16 @@ private:
     // Allocate `size` bytes from the session arena and return the offset, or
     // fail if the arena is exhausted. Command-region bytes are never handed out.
     bool arena_alloc(Session& s, mx_u32_t size, mx_u32_t alignment, mx_u64_t* offset_out) {
-        if (alignment && (alignment & (alignment - 1)) != 0) return false;
-        const mx_u32_t align = alignment < MX_VK_SESSION_ARENA_ALIGNMENT
-            ? MX_VK_SESSION_ARENA_ALIGNMENT : alignment;
-        const mx_u32_t start = s.watermark < kCommandRegionBytes ? kCommandRegionBytes : s.watermark;
+        if (alignment && (alignment & (alignment - 1)) != 0)
+            return false;
+        const mx_u32_t align =
+            alignment < MX_VK_SESSION_ARENA_ALIGNMENT ? MX_VK_SESSION_ARENA_ALIGNMENT : alignment;
+        const mx_u32_t start =
+            s.watermark < kCommandRegionBytes ? kCommandRegionBytes : s.watermark;
         mx_u64_t base = 0;
-        if (!libk::checked_align_up(start, align, &base) || size == 0 ||
-            base > s.arena_bytes || size > s.arena_bytes - base) return false;
+        if (!libk::checked_align_up(start, align, &base) || size == 0 || base > s.arena_bytes ||
+            size > s.arena_bytes - base)
+            return false;
         *offset_out = base;
         s.watermark = base + size;
         return true;
@@ -265,8 +289,7 @@ private:
     // --- reply builders -----------------------------------------------------
     template <typename T>
     bool reply_with(MxVkFrame* reply, const MxVkFrame& request, mx_u32_t opcode, const T& msg) {
-        static_assert(sizeof(T) <= MX_VK_SESSION_INLINE_PAYLOAD,
-                      "reply must fit one ring payload");
+        static_assert(sizeof(T) <= MX_VK_SESSION_INLINE_PAYLOAD, "reply must fit one ring payload");
         mx_vk_slot_encode(reply, opcode, request.seq, &msg, sizeof(T));
         return true;
     }
@@ -292,32 +315,33 @@ private:
                          ((mx_u64_t)req.major << 16) | req.minor);
         }
         Session* slot = free_session_slot();
-        if (!slot) return error(reply, request, MX_ERR_BUSY, 0, kMaxSessions);
+        if (!slot)
+            return error(reply, request, MX_ERR_BUSY, 0, kMaxSessions);
 
         // Grant at most the ABI quotas, whatever the client asked for.
         mx_u32_t arena = (mx_u32_t)(req.arena_bytes > MX_VK_SESSION_MAX_ARENA_BYTES
                                         ? MX_VK_SESSION_MAX_ARENA_BYTES
                                         : req.arena_bytes);
-        const mx_u32_t min_arena =
-            libk::align_up(kCommandRegionBytes + MX_VK_SESSION_ARENA_ALIGNMENT,
-                     MX_VK_SESSION_ARENA_ALIGNMENT);
-        if (arena < min_arena) arena = min_arena;
-        mx_u32_t max_objects = req.max_objects == 0 || req.max_objects > kMaxObjects
-                                   ? kMaxObjects
-                                   : req.max_objects;
+        const mx_u32_t min_arena = libk::align_up(
+            kCommandRegionBytes + MX_VK_SESSION_ARENA_ALIGNMENT, MX_VK_SESSION_ARENA_ALIGNMENT);
+        if (arena < min_arena)
+            arena = min_arena;
+        mx_u32_t max_objects =
+            req.max_objects == 0 || req.max_objects > kMaxObjects ? kMaxObjects : req.max_objects;
         mx_u32_t max_outstanding = req.max_outstanding == 0 || req.max_outstanding > kMaxOutstanding
                                        ? kMaxOutstanding
                                        : req.max_outstanding;
 
         const mx_u32_t index = (mx_u32_t)(slot - sessions_) + 1u;
-        const mx_u64_t session_id = issue_id(boot_generation_, MX_VK_OBJECT_SESSION, 0,
-                                               index, incarnations_[index - 1].session);
+        const mx_u64_t session_id = issue_id(boot_generation_, MX_VK_OBJECT_SESSION, 0, index,
+                                             incarnations_[index - 1].session);
         mx_u32_t backend_flags = 0;
         const bool backend_ok =
             backend_.open == nullptr ||
             backend_.open(backend_.ctx, session_id, client_id, arena, &backend_flags);
 
-        if (!backend_ok) return error(reply, request, MX_ERR_SERVICE_UNAVAILABLE, 0, 0);
+        if (!backend_ok)
+            return error(reply, request, MX_ERR_SERVICE_UNAVAILABLE, 0, 0);
 
         *slot = Session{};
         slot->used = true;
@@ -353,9 +377,11 @@ private:
             return error(reply, request, MX_ERR_BAD_PROTOCOL, 0, request.length);
         }
         Session* s = find_session(client_id, req.session_id);
-        if (!s) return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
+        if (!s)
+            return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
         const mx_u64_t session_id = s->id;
-        if (backend_.close) backend_.close(backend_.ctx, session_id);
+        if (backend_.close)
+            backend_.close(backend_.ctx, session_id);
         *s = Session{};
         MxVkSessionCloseReply rep{};
         rep.status = MX_OK;
@@ -370,7 +396,8 @@ private:
             return error(reply, request, MX_ERR_BAD_PROTOCOL, req.session_id, request.length);
         }
         Session* s = find_session(client_id, req.session_id);
-        if (!s) return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
+        if (!s)
+            return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
         if ((s->flags & MX_VK_SESSION_FLAG_ARENA_READY) == 0) {
             // No arena is mapped for this session, so no allocation can be
             // honoured: refuse instead of handing out offsets into nothing.
@@ -383,15 +410,18 @@ private:
         if (s->object_count >= s->max_objects) {
             return error(reply, request, MX_ERR_NOMEM, s->id, s->max_objects);
         }
-        if (req.size > 0xFFFFFFFFull) return error(reply, request, MX_ERR_OVERFLOW, s->id, req.size);
+        if (req.size > 0xFFFFFFFFull)
+            return error(reply, request, MX_ERR_OVERFLOW, s->id, req.size);
         mx_u32_t index = 0;
         for (mx_u32_t i = 0; i < kMaxObjects; ++i) {
-            if (!s->objects[i].used && incarnations_[s->index - 1].memory[i] <= MX_VK_OBJECT_MAX_INCARNATION) {
+            if (!s->objects[i].used &&
+                incarnations_[s->index - 1].memory[i] <= MX_VK_OBJECT_MAX_INCARNATION) {
                 index = i + 1;
                 break;
             }
         }
-        if (index == 0) return error(reply, request, MX_ERR_NOMEM, s->id, 0);
+        if (index == 0)
+            return error(reply, request, MX_ERR_NOMEM, s->id, 0);
 
         const mx_u32_t size = (mx_u32_t)req.size;
         mx_u64_t offset = 0;
@@ -414,8 +444,9 @@ private:
         rep.arena_offset = offset;
         rep.size = size;
         rep.memory_type = req.memory_type;
-        rep.alignment = req.alignment < MX_VK_SESSION_ARENA_ALIGNMENT ? MX_VK_SESSION_ARENA_ALIGNMENT
-                                                                     : req.alignment;
+        rep.alignment = req.alignment < MX_VK_SESSION_ARENA_ALIGNMENT
+                            ? MX_VK_SESSION_ARENA_ALIGNMENT
+                            : req.alignment;
         rep.flags = MX_VK_MEMORY_FLAG_MAPPED;
         return reply_with(reply, request, VK_SESSION_ALLOC_REPLY, rep);
     }
@@ -426,11 +457,14 @@ private:
             return error(reply, request, MX_ERR_BAD_PROTOCOL, req.session_id, request.length);
         }
         Session* s = find_session(client_id, req.session_id);
-        if (!s) return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
+        if (!s)
+            return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
         MemoryObject* obj = find_memory(*s, req.memory_id);
-        if (!obj) return error(reply, request, MX_ERR_NOT_FOUND, s->id, req.memory_id);
+        if (!obj)
+            return error(reply, request, MX_ERR_NOT_FOUND, s->id, req.memory_id);
         for (const auto& swapchain : s->swapchains) {
-            if (!swapchain.used) continue;
+            if (!swapchain.used)
+                continue;
             for (mx_u32_t i = 0; i < swapchain.image_count; ++i) {
                 if (swapchain.images[i].memory_id == obj->id) {
                     return error(reply, request, MX_ERR_BUSY, s->id, obj->id);
@@ -438,7 +472,8 @@ private:
             }
         }
         *obj = MemoryObject{};
-        if (s->object_count > 0) --s->object_count;
+        if (s->object_count > 0)
+            --s->object_count;
         MxVkSessionFreeReply rep{};
         rep.status = MX_OK;
         rep.memory_id = req.memory_id;
@@ -451,7 +486,8 @@ private:
             return error(reply, request, MX_ERR_BAD_PROTOCOL, req.session_id, request.length);
         }
         Session* s = find_session(client_id, req.session_id);
-        if (!s) return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
+        if (!s)
+            return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
         // Bound the command range to the command region, not merely the arena.
         if (req.command_bytes == 0 || req.command_bytes > kCommandRegionBytes ||
             req.command_offset >= kCommandRegionBytes ||
@@ -470,11 +506,13 @@ private:
         }
         const mx_u64_t sync_id = req.sync_id;
         for (mx_u32_t i = 0; sync_id && i < s->outstanding_count; ++i) {
-            if (s->outstanding_ids[i] == sync_id) return error(reply, request, MX_ERR_BUSY, s->id, sync_id);
+            if (s->outstanding_ids[i] == sync_id)
+                return error(reply, request, MX_ERR_BUSY, s->id, sync_id);
         }
-        const mx_status_t rc = backend_.submit(backend_.ctx, s->id, req.command_offset,
-                                               req.command_bytes, sync_id);
-        if (mx_err(rc)) return error(reply, request, rc, s->id, req.command_bytes);
+        const mx_status_t rc =
+            backend_.submit(backend_.ctx, s->id, req.command_offset, req.command_bytes, sync_id);
+        if (mx_err(rc))
+            return error(reply, request, rc, s->id, req.command_bytes);
         if (sync_id != 0 && s->outstanding_count < kMaxOutstanding) {
             s->outstanding_ids[s->outstanding_count++] = sync_id;
         }
@@ -494,7 +532,8 @@ private:
             return error(reply, request, MX_ERR_BAD_PROTOCOL, req.session_id, request.length);
         }
         Session* s = find_session(client_id, req.session_id);
-        if (!s) return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
+        if (!s)
+            return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
         mx_status_t status = MX_ERR_NOT_FOUND;
         bool tracked = false;
         for (mx_u32_t i = 0; i < s->outstanding_count; ++i) {
@@ -533,7 +572,8 @@ private:
             return error(reply, request, MX_ERR_BAD_PROTOCOL, req.session_id, request.length);
         }
         Session* s = find_session(client_id, req.session_id);
-        if (!s) return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
+        if (!s)
+            return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
         if ((s->flags & MX_VK_SESSION_FLAG_WSI) == 0) {
             return error(reply, request, MX_ERR_SERVICE_UNAVAILABLE, s->id, 0);
         }
@@ -542,12 +582,14 @@ private:
         }
         mx_u32_t index = 0;
         for (mx_u32_t i = 0; i < kMaxSurfaces; ++i) {
-            if (!s->surfaces[i].used && incarnations_[s->index - 1].surface[i] <= MX_VK_OBJECT_MAX_INCARNATION) {
+            if (!s->surfaces[i].used &&
+                incarnations_[s->index - 1].surface[i] <= MX_VK_OBJECT_MAX_INCARNATION) {
                 index = i + 1;
                 break;
             }
         }
-        if (index == 0) return error(reply, request, MX_ERR_NOMEM, s->id, 0);
+        if (index == 0)
+            return error(reply, request, MX_ERR_NOMEM, s->id, 0);
         Surface& sf = s->surfaces[index - 1];
         sf.used = true;
         sf.id = issue_id(boot_generation_, MX_VK_OBJECT_SURFACE, s->index, index,
@@ -572,9 +614,11 @@ private:
             return error(reply, request, MX_ERR_BAD_PROTOCOL, req.session_id, request.length);
         }
         Session* s = find_session(client_id, req.session_id);
-        if (!s) return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
+        if (!s)
+            return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
         Surface* sf = find_surface(*s, req.surface_id);
-        if (!sf) return error(reply, request, MX_ERR_NOT_FOUND, s->id, req.surface_id);
+        if (!sf)
+            return error(reply, request, MX_ERR_NOT_FOUND, s->id, req.surface_id);
         // A surface with a live swapchain cannot be destroyed out from under it.
         for (mx_u32_t i = 0; i < kMaxSwapchains; ++i) {
             if (s->swapchains[i].used && s->swapchains[i].surface_id == req.surface_id) {
@@ -582,7 +626,8 @@ private:
             }
         }
         *sf = Surface{};
-        if (s->surface_count > 0) --s->surface_count;
+        if (s->surface_count > 0)
+            --s->surface_count;
         MxVkSurfaceDestroyReply rep{};
         rep.status = MX_OK;
         rep.surface_id = req.surface_id;
@@ -595,14 +640,17 @@ private:
             return error(reply, request, MX_ERR_BAD_PROTOCOL, req.session_id, request.length);
         }
         Session* s = find_session(client_id, req.session_id);
-        if (!s) return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
+        if (!s)
+            return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
         Surface* sf = find_surface(*s, req.surface_id);
-        if (!sf) return error(reply, request, MX_ERR_NOT_FOUND, s->id, req.surface_id);
+        if (!sf)
+            return error(reply, request, MX_ERR_NOT_FOUND, s->id, req.surface_id);
         if (req.image_count == 0 || req.image_count > kMaxImages ||
             s->swapchain_count >= kMaxSwapchains) {
             return error(reply, request, MX_ERR_INVALID, s->id, req.image_count);
         }
-        if (req.stride < static_cast<mx_u64_t>(sf->width) * sizeof(mx_u32_t) || req.stride > 0xFFFFFFFFu / sf->height) {
+        if (req.stride < static_cast<mx_u64_t>(sf->width) * sizeof(mx_u32_t) ||
+            req.stride > 0xFFFFFFFFu / sf->height) {
             return error(reply, request, MX_ERR_INVALID, s->id, req.stride);
         }
         const mx_u64_t image_bytes64 = (mx_u64_t)req.stride * sf->height;
@@ -614,12 +662,14 @@ private:
 
         mx_u32_t sc_index = 0;
         for (mx_u32_t i = 0; i < kMaxSwapchains; ++i) {
-            if (!s->swapchains[i].used && incarnations_[s->index - 1].swapchain[i] <= MX_VK_OBJECT_MAX_INCARNATION) {
+            if (!s->swapchains[i].used &&
+                incarnations_[s->index - 1].swapchain[i] <= MX_VK_OBJECT_MAX_INCARNATION) {
                 sc_index = i + 1;
                 break;
             }
         }
-        if (sc_index == 0) return error(reply, request, MX_ERR_NOMEM, s->id, 0);
+        if (sc_index == 0)
+            return error(reply, request, MX_ERR_NOMEM, s->id, 0);
         // Every check that can fail runs before anything is committed, so a
         // create can never half-succeed and leak arena bytes or object slots.
         if (s->object_count + req.image_count > s->max_objects) {
@@ -630,9 +680,12 @@ private:
         }
         mx_u32_t free_objects = 0;
         for (mx_u32_t i = 0; i < kMaxObjects; ++i) {
-            if (!s->objects[i].used && incarnations_[s->index - 1].memory[i] <= MX_VK_OBJECT_MAX_INCARNATION) ++free_objects;
+            if (!s->objects[i].used &&
+                incarnations_[s->index - 1].memory[i] <= MX_VK_OBJECT_MAX_INCARNATION)
+                ++free_objects;
         }
-        if (free_objects < req.image_count) return error(reply, request, MX_ERR_NOMEM, s->id, 0);
+        if (free_objects < req.image_count)
+            return error(reply, request, MX_ERR_NOMEM, s->id, 0);
         mx_u64_t first_offset = 0;
         if (!arena_alloc(*s, (mx_u32_t)total, MX_VK_SESSION_ARENA_ALIGNMENT, &first_offset)) {
             return error(reply, request, MX_ERR_NOMEM, s->id, s->arena_bytes);
@@ -649,12 +702,14 @@ private:
             // Each image has a memory id; the swapchain owns its lifetime.
             mx_u32_t obj_index = 0;
             for (mx_u32_t k = 0; k < kMaxObjects; ++k) {
-                if (!s->objects[k].used && incarnations_[s->index - 1].memory[k] <= MX_VK_OBJECT_MAX_INCARNATION) {
+                if (!s->objects[k].used &&
+                    incarnations_[s->index - 1].memory[k] <= MX_VK_OBJECT_MAX_INCARNATION) {
                     obj_index = k + 1;
                     break;
                 }
             }
-            if (obj_index == 0) return error(reply, request, MX_ERR_NOMEM, s->id, 0);
+            if (obj_index == 0)
+                return error(reply, request, MX_ERR_NOMEM, s->id, 0);
             MemoryObject& obj = s->objects[obj_index - 1];
             obj.used = true;
             obj.id = issue_id(boot_generation_, MX_VK_OBJECT_MEMORY, s->index, obj_index,
@@ -687,9 +742,11 @@ private:
             return error(reply, request, MX_ERR_BAD_PROTOCOL, req.session_id, request.length);
         }
         Session* s = find_session(client_id, req.session_id);
-        if (!s) return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
+        if (!s)
+            return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
         Swapchain* sc = find_swapchain(*s, req.swapchain_id);
-        if (!sc) return error(reply, request, MX_ERR_NOT_FOUND, s->id, req.swapchain_id);
+        if (!sc)
+            return error(reply, request, MX_ERR_NOT_FOUND, s->id, req.swapchain_id);
         // Skip images still owned by the client. Exhaustion is backpressure.
         mx_u32_t index = sc->next_image;
         mx_u32_t checked = 0;
@@ -697,7 +754,8 @@ private:
             index = (index + 1) % sc->image_count;
             ++checked;
         }
-        if (checked == sc->image_count) return error(reply, request, MX_ERR_BUSY, s->id, sc->id);
+        if (checked == sc->image_count)
+            return error(reply, request, MX_ERR_BUSY, s->id, sc->id);
         sc->next_image = (index + 1) % sc->image_count;
         SwapchainImage& img = sc->images[index];
         img.acquired = 1;
@@ -718,21 +776,25 @@ private:
             return error(reply, request, MX_ERR_BAD_PROTOCOL, req.session_id, request.length);
         }
         Session* s = find_session(client_id, req.session_id);
-        if (!s) return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
+        if (!s)
+            return error(reply, request, MX_ERR_NOT_FOUND, req.session_id, 0);
         Swapchain* sc = find_swapchain(*s, req.swapchain_id);
-        if (!sc) return error(reply, request, MX_ERR_NOT_FOUND, s->id, req.swapchain_id);
+        if (!sc)
+            return error(reply, request, MX_ERR_NOT_FOUND, s->id, req.swapchain_id);
         if (req.image_index >= sc->image_count) {
             return error(reply, request, MX_ERR_INVALID, s->id, req.image_index);
         }
         SwapchainImage& img = sc->images[req.image_index];
-        if (!img.acquired) return error(reply, request, MX_ERR_INVALID, s->id, req.image_index);
+        if (!img.acquired)
+            return error(reply, request, MX_ERR_INVALID, s->id, req.image_index);
         if (backend_.present == nullptr) {
             return error(reply, request, MX_ERR_SERVICE_UNAVAILABLE, s->id, 0);
         }
         mx_u32_t copied = 0;
         const mx_status_t rc = backend_.present(backend_.ctx, s->id, sc->id, req.image_index,
                                                 img.arena_offset, img.size, &copied);
-        if (mx_err(rc)) return error(reply, request, rc, s->id, img.size);
+        if (mx_err(rc))
+            return error(reply, request, rc, s->id, img.size);
         if (copied > img.size || copied > MX_VK_SHARED_BUFFER_MAX_BYTES) {
             return error(reply, request, MX_ERR_BAD_PROTOCOL, s->id, copied);
         }

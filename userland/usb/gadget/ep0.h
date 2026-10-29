@@ -28,7 +28,8 @@ inline void setup(Runtime& r, const MxDeviceEvent& event) {
     // Descriptor discovery and HID SET_IDLE are handled without spawning FIDO.
     if (s.request_type == 0x81 && s.request == 6 && s.index == 3 &&
         (s.value == 0x2200 || s.value == 0x2100)) {
-        const auto descriptor = s.value == 0x2200 ? fido_report_descriptor() : fido_hid_descriptor();
+        const auto descriptor =
+            s.value == 0x2200 ? fido_report_descriptor() : fido_hid_descriptor();
         libk::copy_n(libk::slice(r.payload, 512, 512), descriptor, descriptor.size);
         reply_data(r, descriptor.size);
         return;
@@ -137,7 +138,8 @@ inline void completion(Runtime& r, const MxDeviceEvent& done) {
         return;
     }
     const auto endpoint = done.endpoint & 15;
-    if (endpoint != 1 && endpoint != 2 && endpoint != 4 && endpoint != 5 && endpoint != 6) return;
+    if (endpoint != 1 && endpoint != 2 && endpoint != 4 && endpoint != 5 && endpoint != 6)
+        return;
     const auto index = endpoint == 6 ? 2u : endpoint >= 4 ? 1u : 0u;
     auto& f = r.functions[index];
     if (done.endpoint & 128) {

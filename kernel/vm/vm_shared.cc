@@ -105,8 +105,8 @@ bool shared_rights_valid(u32 rights) {
 }
 
 bool dma_perms_valid(u32 perms) {
-    const u32 mask = static_cast<u32>(iommu::DmaPerm::Read) |
-                     static_cast<u32>(iommu::DmaPerm::Write);
+    const u32 mask =
+        static_cast<u32>(iommu::DmaPerm::Read) | static_cast<u32>(iommu::DmaPerm::Write);
     return perms != 0 && (perms & ~mask) == 0;
 }
 
@@ -114,7 +114,8 @@ bool dma_perms_valid(u32 perms) {
 
 SysError shared_arena_create(Vm* vm, Arena* arena, object::Record* arena_record, u64 guest_pa,
                              u64 size, u32 rights, u32 flags, SharedArena** out) {
-    if (out) *out = nullptr;
+    if (out)
+        *out = nullptr;
     if (!vm || !arena || !arena_record) {
         return E_INVALID;
     }
@@ -216,7 +217,8 @@ SysError shared_arena_create(Vm* vm, Arena* arena, object::Record* arena_record,
                    shared->shared_id, shared->owner_vm_id,
                    static_cast<unsigned long long>(guest_pa),
                    static_cast<unsigned long long>(size));
-    if (out) *out = shared;
+    if (out)
+        *out = shared;
     return E_OK;
 }
 
@@ -335,7 +337,8 @@ cap::Borrow<SharedArena> shared_arena_from_cap(Process& caller, CapHandle shared
     cap::Ref e = require_cap(caller, shared_cap, CAP_VM_SHARED, need_rights, out_error);
     auto* shared = e ? static_cast<SharedArena*>(e->target) : nullptr;
     if (!shared || !shared->lifetime) {
-        if (out_error) *out_error = E_DEAD;
+        if (out_error)
+            *out_error = E_DEAD;
         note_error();
         return nullptr;
     }
@@ -346,20 +349,21 @@ cap::Borrow<SharedArena> shared_arena_from_cap(Process& caller, CapHandle shared
         (void)shared_arena_teardown(shared);
     }
     if (shared->dead) {
-        if (out_error) *out_error = E_DEAD;
+        if (out_error)
+            *out_error = E_DEAD;
         note_error();
         return nullptr;
     }
     return cap::Borrow<SharedArena>(e);
 }
 
-CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle arena_cap,
-                               u64 guest_pa, u64 size, u32 rights, u32 flags,
-                               SysError* out_error) {
+CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle arena_cap, u64 guest_pa,
+                               u64 size, u32 rights, u32 flags, SysError* out_error) {
     SysError rc = E_OK;
     auto vm = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
     if (!vm) {
-        if (out_error) *out_error = rc;
+        if (out_error)
+            *out_error = rc;
         return kNullCap;
     }
 
@@ -367,12 +371,14 @@ CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle aren
     // VA-only registration is rejected by shared_arena_create (no phys_base).
     cap::Ref arena_e = require_cap(caller, arena_cap, CAP_ARENA, RIGHT_MAP, &rc);
     if (!arena_e) {
-        if (out_error) *out_error = rc;
+        if (out_error)
+            *out_error = rc;
         return kNullCap;
     }
     auto* arena = static_cast<Arena*>(arena_e->target);
     if (!arena) {
-        if (out_error) *out_error = E_NOTFOUND;
+        if (out_error)
+            *out_error = E_NOTFOUND;
         note_error();
         return kNullCap;
     }
@@ -381,7 +387,8 @@ CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle aren
     rc = shared_arena_create(vm.get(), arena, arena_e->object, guest_pa, size, rights, flags,
                              &shared);
     if (rc != E_OK) {
-        if (out_error) *out_error = rc;
+        if (out_error)
+            *out_error = rc;
         note_error();
         return kNullCap;
     }
@@ -392,11 +399,13 @@ CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle aren
         // Never leave a half-attached region behind: drop the creator reference,
         // which tears the mapping down and releases both retained records.
         object::release(shared->lifetime);
-        if (out_error) *out_error = E_OVERFLOW;
+        if (out_error)
+            *out_error = E_OVERFLOW;
         note_error();
         return kNullCap;
     }
-    if (out_error) *out_error = E_OK;
+    if (out_error)
+        *out_error = E_OK;
     return cap_h;
 }
 

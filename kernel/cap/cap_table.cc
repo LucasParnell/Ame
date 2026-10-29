@@ -21,9 +21,13 @@ namespace cap {
 // mismatches). Monotonic; surfaced by the panic report.
 static u64 g_denials = 0;
 
-static void note_denial() { __atomic_add_fetch(&g_denials, 1ull, __ATOMIC_RELAXED); }
+static void note_denial() {
+    __atomic_add_fetch(&g_denials, 1ull, __ATOMIC_RELAXED);
+}
 
-u64 denial_count() { return __atomic_load_n(&g_denials, __ATOMIC_RELAXED); }
+u64 denial_count() {
+    return __atomic_load_n(&g_denials, __ATOMIC_RELAXED);
+}
 
 static u32 sanitize_rights(CapType type, u32 rights) {
     if ((rights & RIGHT_MAP) && (rights & RIGHT_WRITE) && (rights & RIGHT_EXEC)) {
@@ -53,15 +57,19 @@ static u32 nospec_index(u32 idx, u32 limit) {
 // Preserve the rotating slot policy while examining at most 17 bitmap words,
 // rather than scanning up to 1024 separate capability cache lines.
 static u32 free_slot(const CapTable& table) {
-    if (table.used_count == kCapTableSize) return kCapTableSize;
+    if (table.used_count == kCapTableSize)
+        return kCapTableSize;
     const u32 start = table.next_free;
     const u32 first = start / 64, bit = start % 64;
     for (u32 step = 0; step <= kCapBitmapWords; ++step) {
         const u32 word = (first + step) % kCapBitmapWords;
         u64 free = ~table.occupied[word];
-        if (!step) free &= ~0ull << bit;
-        else if (step == kCapBitmapWords) free &= ~(~0ull << bit);
-        if (free) return word * 64 + __builtin_ctzll(free);
+        if (!step)
+            free &= ~0ull << bit;
+        else if (step == kCapBitmapWords)
+            free &= ~(~0ull << bit);
+        if (free)
+            return word * 64 + __builtin_ctzll(free);
     }
     return kCapTableSize;
 }
@@ -78,7 +86,8 @@ static CapHandle alloc_locked(CapTable& table, CapType type, void* target, u32 r
 
     {
         const u32 idx = free_slot(table);
-        if (idx == kCapTableSize) return kNullCap;
+        if (idx == kCapTableSize)
+            return kNullCap;
         CapEntry& e = table.entries[idx];
         ANKO_ASSERT(e.type_tag == CAP_NULL);
 
@@ -88,8 +97,10 @@ static CapHandle alloc_locked(CapTable& table, CapType type, void* target, u32 r
         }
 
         object::Record* record = cached;
-        if (record) object::retain(record);
-        else record = object::acquire(target);
+        if (record)
+            object::retain(record);
+        else
+            record = object::acquire(target);
         if (!record) {
             return kNullCap;
         }
@@ -149,6 +160,36 @@ Ref lookup_any(CapTable& table, CapHandle handle) {
     return Ref(e);
 }
 
+bool lookup_many(CapTable& table, const LookupRequest* requests, Ref* out, u32 count) {
+    constexpr u32 kMaxBorrow = 8;
+    if (!requests || !out || !count || count > kMaxBorrow)
+        return false;
+    for (u32 i = 0; i < count; ++i)
+        if (out[i])
+            return false;
+    const CapEntry* entries[kMaxBorrow];
+    kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
+    for (u32 i = 0; i < count; ++i) {
+        const auto& request = requests[i];
+        const u32 index = cap_index(request.handle);
+        if (index >= kCapTableSize) {
+            note_denial();
+            return false;
+        }
+        const auto& entry = table.entries[nospec_index(index, kCapTableSize)];
+        if (!entry.target || entry.type_tag == CAP_NULL || !entry.generation ||
+            entry.generation != cap_generation(request.handle) || entry.type_tag != request.type ||
+            (entry.rights_mask & request.rights) != request.rights) {
+            note_denial();
+            return false;
+        }
+        entries[i] = &entry;
+    }
+    for (u32 i = 0; i < count; ++i)
+        out[i] = Ref(*entries[i]);
+    return true;
+}
+
 static u32 next_generation(u32 g) {
     ++g;
     if (g == 0) {
@@ -201,7 +242,8 @@ static void clear_matching(CapTable& table, void* target, bool all) {
                 const u32 bit = __builtin_ctzll(occupied);
                 occupied &= occupied - 1;
                 CapEntry& e = table.entries[word * 64 + bit];
-                if (!all && e.target != target) continue;
+                if (!all && e.target != target)
+                    continue;
                 records[count++] = e.object;
                 e.generation = next_generation(e.generation);
                 clear_entry(e);
@@ -209,12 +251,14 @@ static void clear_matching(CapTable& table, void* target, bool all) {
                 --table.used_count;
             }
         }
-        for (u32 i = 0; i < count; ++i) object::release(records[i]);
+        for (u32 i = 0; i < count; ++i)
+            object::release(records[i]);
     }
 }
 
 void revoke_target(CapTable& table, void* target) {
-    if (target) clear_matching(table, target, false);
+    if (target)
+        clear_matching(table, target, false);
 }
 
 void clear(CapTable& table) {
@@ -253,8 +297,8 @@ CapHandle dup(CapTable& table, CapHandle src, u32 rights_mask) {
     if (new_rights == 0) {
         return kNullCap;
     }
-    return alloc_locked(table, static_cast<CapType>(src_e->type_tag), src_e->target,
-                         new_rights, src_e->object);
+    return alloc_locked(table, static_cast<CapType>(src_e->type_tag), src_e->target, new_rights,
+                        src_e->object);
 }
 
 } // namespace cap

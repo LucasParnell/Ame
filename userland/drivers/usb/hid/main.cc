@@ -6,6 +6,7 @@
 #include "mochi/va_layout.h"
 using namespace mochi::va::hid;
 #include "mochi/log.h"
+#include "libk/str.h"
 #include "mochi/boot_log.h"
 #include "mochi/message.h"
 #include "mochi/input.h"
@@ -437,11 +438,22 @@ extern "C" [[noreturn]] void _start() {
     g->next_id = mx_clock_ns();
     g->generation = g->next_id ? g->next_id : 1;
     if (!g->host.valid() || g->payload.size < kLedOffset + kReportStride || !g->input.valid() ||
-        !g->leds.valid() || !call(MX_USB_HOST_WATCH, {})) {
+        !g->leds.valid()) {
         mochi::boot::invalid_boot();
     }
+    // Ready before subscribing: io.usb spends its first milliseconds enumerating
+    // existing devices, and a WATCH issued now would queue behind that work.
     mochi::log_raw_marker("drv.usb.hid: ready\n");
     mochi::boot::ready(boot);
+    const uint64_t watch_started = mx_clock_ns();
+    bool watched = call(MX_USB_HOST_WATCH, {});
+    {
+        char line[80];
+        libk::str::Buffer b(line);
+        b.format("drv.usb.hid: watch ok=%u wait_ns=%llu", watched ? 1u : 0u,
+                 static_cast<unsigned long long>(mx_clock_ns() - watch_started));
+        mochi::log_raw_marker(line);
+    }
     mochi::SpscEndpoint readers[2]{};
     readers[0] = g->host;
     readers[1].rx_ring = g->leds.ring;

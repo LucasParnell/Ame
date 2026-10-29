@@ -23,11 +23,11 @@ static PrincipalSchedState g_principal_sched[kMaxPrincipalsLocal]{};
 // Separate from PrincipalSchedState so its 64-byte layout contract is intact.
 struct alignas(64) IpcPolicyCell {
     u64 parks;
-    u32 budget;      // 0 = park immediately
-    u32 generation;  // bumped on every accepted set
-    u8  _pad0[48];
+    u32 budget;     // 0 = park immediately
+    u32 generation; // bumped on every accepted set
+    u8 _pad0[48];
     u64 wakes;
-    u8  _pad1[56];
+    u8 _pad1[56];
 };
 static_assert(sizeof(IpcPolicyCell) == 128 && alignof(IpcPolicyCell) == 64);
 static IpcPolicyCell g_ipc_policy[kMaxPrincipalsLocal]{};
@@ -41,12 +41,16 @@ static u32 g_principal_references[kMaxPrincipalsLocal]{};
 // every tick. Relaxed stores/loads permit concurrent diagnostics without a
 // read-modify-write on the charging path. Lifecycle clears a column only after
 // the final process/context reference has gone, so it has no charging writer.
-struct alignas(64) CpuRuntime { u64 principal[kMaxPrincipalsLocal]; u64 busy_ns; };
+struct alignas(64) CpuRuntime {
+    u64 principal[kMaxPrincipalsLocal];
+    u64 busy_ns;
+};
 static CpuRuntime g_runtime[kMaxCpus]{};
 
 static u64 published_policy(u32 pid) {
     return pid < kMaxPrincipalsLocal
-        ? __atomic_load_n(&g_principal_sched[pid].dispatch, __ATOMIC_ACQUIRE) : 0;
+               ? __atomic_load_n(&g_principal_sched[pid].dispatch, __ATOMIC_ACQUIRE)
+               : 0;
 }
 
 bool principal_allocated(u32 pid) {
@@ -59,12 +63,14 @@ bool principal_throttled(u32 pid) {
 
 PrincipalDispatch principal_dispatch(u32 pid) {
     const u64 policy = published_policy(pid);
-    if (!policy) return {0, NICE_0_WEIGHT, false};
+    if (!policy)
+        return {0, NICE_0_WEIGHT, false};
     auto& ps = g_principal_sched[pid];
     // The caller owns a process/context reference for this ID, keeping policy
     // immutable. Unbudgeted work needs neither a clock read nor a shared RMW.
-    const bool available = !ps.budget_ns || ps.budget_window.charge(
-        0, sched_clock_ns(), ps.period_ns).used_ns < ps.budget_ns;
+    const bool available =
+        !ps.budget_ns ||
+        ps.budget_window.charge(0, sched_clock_ns(), ps.period_ns).used_ns < ps.budget_ns;
     return {static_cast<u32>(policy >> 32), static_cast<u32>(policy), available};
 }
 
@@ -78,17 +84,78 @@ u32 principal_generation(u32 pid) {
 }
 
 bool thread_budget_available(const Thread* t) {
-    if (!t) return false;
+    if (!t)
+        return false;
     const auto policy = principal_dispatch(t->principal_id);
     return (!t->principal_generation || t->principal_generation == policy.generation) &&
-        policy.available && sched_context_available(t->sched_context);
+           policy.available && sched_context_available(t->sched_context);
+}
+
+// Immutable budget policy is pinned by the thread. Snapshots commit usage and
+// period start together; only configured budgets need paired atomic reads.
+static u64 add_deadline(u64 a, u64 b) {
+    return b > ~u64{0} - a ? ~u64{0} : a + b;
+}
+u64 thread_runtime_deadline(const Thread* t, u64 now) {
+    u64 earliest = 0;
+    const auto consider = [&](const BudgetWindow& window, u64 budget) {
+        if (!budget)
+            return;
+        const auto used = window.snapshot().used_ns;
+        const u64 deadline = add_deadline(now, used < budget ? budget - used : 1);
+        if (!earliest || deadline < earliest)
+            earliest = deadline;
+    };
+    if (t->principal_id < kMaxPrincipalsLocal) {
+        const auto& principal = g_principal_sched[t->principal_id];
+        consider(principal.budget_window, principal.budget_ns);
+    }
+    if (t->sched_context)
+        consider(t->sched_context->budget_window, t->sched_context->budget_ns);
+    return earliest;
+}
+u64 thread_refill_deadline(const Thread* t) {
+    u64 ready = 0;
+    const auto consider = [&](const BudgetWindow& window, u64 budget, u64 period) {
+        if (!budget)
+            return;
+        const auto state = window.snapshot();
+        if (state.used_ns >= budget) {
+            const u64 deadline = add_deadline(state.period_start_ns, period);
+            if (deadline > ready)
+                ready = deadline;
+        }
+    };
+    if (t->principal_id < kMaxPrincipalsLocal) {
+        const auto& principal = g_principal_sched[t->principal_id];
+        consider(principal.budget_window, principal.budget_ns, principal.period_ns);
+    }
+    if (t->sched_context)
+        consider(t->sched_context->budget_window, t->sched_context->budget_ns,
+                 t->sched_context->period_ns);
+    return ready;
+}
+
+static u64 weighted_runtime(u64 elapsed, u32 weight) {
+    // Common native weights avoid A53 integer division without reciprocal
+    // approximation or cumulative fairness drift.
+    if (weight == NICE_0_WEIGHT)
+        return elapsed;
+    if (weight == 2 * NICE_0_WEIGHT)
+        return elapsed >> 1;
+    if (weight == NICE_0_WEIGHT / 2)
+        return elapsed << 1;
+    return elapsed * NICE_0_WEIGHT / weight;
 }
 
 bool retain_principal(u32 pid) {
-    if (!pid) return true;
-    if (pid >= kMaxPrincipalsLocal) return false;
+    if (!pid)
+        return true;
+    if (pid >= kMaxPrincipalsLocal)
+        return false;
     kernel::LockGuard guard(g_principal_lock);
-    if (!principal_allocated(pid)) return false;
+    if (!principal_allocated(pid))
+        return false;
     ++g_principal_references[pid];
     return true;
 }
@@ -99,39 +166,47 @@ void principal_init_bootstrap() {
     auto& ps = g_principal_sched[0];
     ps.class_ = PRINCIPAL_KERNEL;
     ps.budget_window.reset(sched_clock_ns());
-    for (auto& cpu : g_runtime) __atomic_store_n(&cpu.principal[0], 0, __ATOMIC_RELAXED);
+    for (auto& cpu : g_runtime)
+        __atomic_store_n(&cpu.principal[0], 0, __ATOMIC_RELAXED);
     __atomic_store_n(&ps.dispatch, (1ull << 32) | NICE_0_WEIGHT, __ATOMIC_RELEASE);
 }
 
 // Mirror principal weights into one CPU's per-principal entities.
 void ipc_note_park(u32 id) {
-    if (id >= kMaxPrincipalsLocal) return;
+    if (id >= kMaxPrincipalsLocal)
+        return;
     __atomic_add_fetch(&g_ipc_policy[id].parks, 1, __ATOMIC_RELAXED);
 }
 
 void ipc_note_wake(u32 id) {
-    if (id >= kMaxPrincipalsLocal) return;
+    if (id >= kMaxPrincipalsLocal)
+        return;
     __atomic_add_fetch(&g_ipc_policy[id].wakes, 1, __ATOMIC_RELAXED);
 }
 
 u32 ipc_poll_budget(u32 id) {
-    return id < kMaxPrincipalsLocal ? __atomic_load_n(&g_ipc_policy[id].budget, __ATOMIC_RELAXED) : 0;
+    return id < kMaxPrincipalsLocal ? __atomic_load_n(&g_ipc_policy[id].budget, __ATOMIC_RELAXED)
+                                    : 0;
 }
 
 u32 ipc_poll_budget_set(u32 id, u32 budget) {
-    if (id >= kMaxPrincipalsLocal) return 0;
-    if (budget > kIpcPollBudgetMax) budget = kIpcPollBudgetMax;
+    if (id >= kMaxPrincipalsLocal)
+        return 0;
+    if (budget > kIpcPollBudgetMax)
+        budget = kIpcPollBudgetMax;
     __atomic_store_n(&g_ipc_policy[id].budget, budget, __ATOMIC_RELEASE);
     __atomic_add_fetch(&g_ipc_policy[id].generation, 1, __ATOMIC_RELAXED);
     return budget;
 }
 
 u64 ipc_park_count(u32 id) {
-    return id < kMaxPrincipalsLocal ? __atomic_load_n(&g_ipc_policy[id].parks, __ATOMIC_RELAXED) : 0;
+    return id < kMaxPrincipalsLocal ? __atomic_load_n(&g_ipc_policy[id].parks, __ATOMIC_RELAXED)
+                                    : 0;
 }
 
 u64 ipc_wake_count(u32 id) {
-    return id < kMaxPrincipalsLocal ? __atomic_load_n(&g_ipc_policy[id].wakes, __ATOMIC_RELAXED) : 0;
+    return id < kMaxPrincipalsLocal ? __atomic_load_n(&g_ipc_policy[id].wakes, __ATOMIC_RELAXED)
+                                    : 0;
 }
 
 void principal_mirror_weights(u32 cpu_id) {
@@ -150,22 +225,24 @@ static void account_owned(Eki& e, Thread* t, u64 now) {
     t->runtime_ns += delta;
     auto& busy = g_runtime[e.cpu_id].busy_ns;
     __atomic_store_n(&busy, __atomic_load_n(&busy, __ATOMIC_RELAXED) + delta, __ATOMIC_RELAXED);
-    if (t->owner) __atomic_add_fetch(&t->owner->runtime_ns, delta, __ATOMIC_RELAXED);
+    if (t->owner)
+        __atomic_add_fetch(&t->owner->runtime_ns, delta, __ATOMIC_RELAXED);
 
     const u32 pid = t->principal_id;
-    if (pid >= kMaxPrincipalsLocal) return;
+    if (pid >= kMaxPrincipalsLocal)
+        return;
     auto& runtime = g_runtime[e.cpu_id].principal[pid];
     __atomic_store_n(&runtime, __atomic_load_n(&runtime, __ATOMIC_RELAXED) + delta,
                      __ATOMIC_RELAXED);
     auto& ps = g_principal_sched[pid];
-    const bool exhausted = ps.budget_ns && ps.budget_window.charge(
-        delta, now, ps.period_ns).used_ns >= ps.budget_ns;
+    const bool exhausted =
+        ps.budget_ns && ps.budget_window.charge(delta, now, ps.period_ns).used_ns >= ps.budget_ns;
     PrincipalEntity& pe = e.principal_entities[pid];
     // A queued/running thread pins immutable principal policy. Reuse the
     // station's generation-checked weight instead of rereading a shared line.
     if (!t->principal_generation || pe.generation != t->principal_generation)
         pe.weight = principal_weight(pid);
-    const u64 principal_delta = pe.weight == NICE_0_WEIGHT ? delta : delta * NICE_0_WEIGHT / pe.weight;
+    const u64 principal_delta = weighted_runtime(delta, pe.weight);
     // This shared clock orders every band containing the principal. Legacy
     // per-band clocks and a second runtime total had no selection/metric reader;
     // keep the authoritative totals above and the clocks used by the picker.
@@ -173,18 +250,26 @@ static void account_owned(Eki& e, Thread* t, u64 now) {
     // A principal may have threads in several bands. Every heap containing it
     // uses the same service clock, so all of those positions need repair.
     for (u32 b = 1; b < NUM_BANDS; ++b)
-        if (pe.in_queue[b]) fpq_resift(band_for(e, static_cast<SchedBand>(b)), &pe);
+        if (pe.in_queue[b])
+            fpq_resift(band_for(e, static_cast<SchedBand>(b)), &pe);
 
     const u32 tw = t->sched.weight ? t->sched.weight : NICE_0_WEIGHT;
-    t->vruntime_ns += tw == NICE_0_WEIGHT ? delta : delta * NICE_0_WEIGHT / tw;
+    t->vruntime_ns += weighted_runtime(delta, tw);
     u64 minimum = t->vruntime_ns;
     for (u32 b = 1; b < NUM_BANDS; ++b) {
         if (auto* queued = ftq_peek_min(band_threads(e, pe, static_cast<SchedBand>(b)))) {
             const u64 key = effective_key(queued);
-            if (key < minimum) minimum = key;
+            if (key < minimum)
+                minimum = key;
         }
     }
-    if (minimum > pe.thread_min_vruntime_ns) pe.thread_min_vruntime_ns = minimum;
+    if (e.direct_ready && e.direct_ready->principal_id == pid) {
+        const auto key = effective_key(e.direct_ready);
+        if (key < minimum)
+            minimum = key;
+    }
+    if (minimum > pe.thread_min_vruntime_ns)
+        pe.thread_min_vruntime_ns = minimum;
 
     const u64 credit = t->wake_credit_ns > 0 ? static_cast<u64>(t->wake_credit_ns) : 0;
     t->wake_credit_ns = static_cast<i64>(credit > delta ? credit - delta : 0);
@@ -195,7 +280,8 @@ static void account_owned(Eki& e, Thread* t, u64 now) {
 
 static void account_current_owned_at(Eki& e, u64 now) {
     Thread* t = e.current;
-    if (!t || t == e.idle) return;
+    if (!t || t == e.idle)
+        return;
     if (t->state == TS_RUNNING) {
         // Wakers and context binders cannot change a running thread. Its owner
         // can charge without acquiring a lock that those remote paths may hold.
@@ -238,7 +324,8 @@ void refill_principal_budgets() {
 // Principal allocation lifecycle
 // ---------------------------------------------------------------------------
 u32 allocate_principal(PrincipalClass class_, u32 weight, u64 budget_ns, u64 period_ns) {
-    if (budget_ns && (!period_ns || budget_ns > period_ns)) return 0;
+    if (budget_ns && (!period_ns || budget_ns > period_ns))
+        return 0;
     kernel::LockGuard guard(g_principal_lock);
     u32 id = 0;
     for (u32 scan = 0; scan < kMaxPrincipalsLocal - 1; ++scan) {
@@ -249,27 +336,33 @@ u32 allocate_principal(PrincipalClass class_, u32 weight, u64 budget_ns, u64 per
             break;
         }
     }
-    if (id == 0) return 0;
+    if (id == 0)
+        return 0;
     PrincipalSchedState& ps = g_principal_sched[id];
     ps.class_ = class_;
     g_principal_references[id] = 1;
     u32 generation = ++g_principal_generations[id];
-    if (!generation) generation = ++g_principal_generations[id];
+    if (!generation)
+        generation = ++g_principal_generations[id];
     ps.budget_ns = budget_ns;
     ps.period_ns = period_ns;
     ps.budget_window.reset(sched_clock_ns());
-    for (auto& cpu : g_runtime) __atomic_store_n(&cpu.principal[id], 0, __ATOMIC_RELAXED);
+    for (auto& cpu : g_runtime)
+        __atomic_store_n(&cpu.principal[id], 0, __ATOMIC_RELAXED);
     const u64 policy = static_cast<u64>(generation) << 32 | (weight ? weight : NICE_0_WEIGHT);
     __atomic_store_n(&ps.dispatch, policy, __ATOMIC_RELEASE);
     return id;
 }
 
 void release_principal(u32 id) {
-    if (id == 0 || id >= kMaxPrincipalsLocal) return;
+    if (id == 0 || id >= kMaxPrincipalsLocal)
+        return;
     kernel::LockGuard guard(g_principal_lock);
-    if (!g_principal_references[id] || --g_principal_references[id]) return;
+    if (!g_principal_references[id] || --g_principal_references[id])
+        return;
     __atomic_store_n(&g_principal_sched[id].dispatch, 0, __ATOMIC_RELEASE);
-    if (id < g_next_principal_id) g_next_principal_id = id;
+    if (id < g_next_principal_id)
+        g_next_principal_id = id;
     // Per-CPU entities belong to their CPU. Enqueue notices a new generation
     // and resets an empty local entity; teardown never clears a peer's heaps.
 }
@@ -285,9 +378,11 @@ u64 busy_runtime_ns() {
 }
 
 u64 principal_runtime(u32 pid) {
-    if (pid >= kMaxPrincipalsLocal) return 0;
+    if (pid >= kMaxPrincipalsLocal)
+        return 0;
     const u64 policy = published_policy(pid);
-    if (!policy) return 0;
+    if (!policy)
+        return 0;
     u64 total = 0;
     for (auto& cpu : g_runtime)
         total += __atomic_load_n(&cpu.principal[pid], __ATOMIC_RELAXED);
@@ -312,10 +407,13 @@ u64 fairness_max_lag() {
     bool any = false;
     for (u32 i = 0; i < kMaxPrincipalsLocal; ++i) {
         const u64 rt = principal_runtime(i);
-        if (!rt) continue;
+        if (!rt)
+            continue;
         any = true;
-        if (rt < min_v) min_v = rt;
-        if (rt > max_v) max_v = rt;
+        if (rt < min_v)
+            min_v = rt;
+        if (rt > max_v)
+            max_v = rt;
     }
     return any ? (max_v - min_v) : 0;
 }

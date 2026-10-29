@@ -1,6 +1,7 @@
 #pragma once
 
 #include "midix/abi/types.h"
+#include "libk/sha256.h"
 
 namespace integrity {
 using u8 = mx_u8_t;
@@ -15,14 +16,23 @@ constexpr usize kSha256Size = 32;
 struct Progress {
     void (*step)(void*) = nullptr;
     void* context = nullptr;
-    void poll() const { if (step) step(context); }
+    void poll() const {
+        if (step)
+            step(context);
+    }
 };
-u32 crc32c(const u8* data, usize size, Progress progress = {});
+struct Backend {
+    libk::Sha256Compress sha256_blocks = nullptr;
+    u32 (*crc32c_update)(u32, libk::const_bytes) = nullptr;
+};
+
+u32 crc32c(const u8* data, usize size, Progress progress = {}, const Backend* backend = nullptr);
 // Treat the mathematical zero range as clipped to the input, including when
 // zero_offset + zero_size would overflow usize. Input storage is never modified.
 u32 crc32c_zero_field(const u8* data, usize size, usize zero_offset, usize zero_size,
-                     Progress progress = {});
-void sha256(const u8* data, usize size, u8 out[kSha256Size], Progress progress = {});
+                      Progress progress = {}, const Backend* backend = nullptr);
+void sha256(const u8* data, usize size, u8 out[kSha256Size], Progress progress = {},
+            const Backend* backend = nullptr);
 bool bytes_equal(const u8* a, const u8* b, usize size);
 
 } // namespace integrity

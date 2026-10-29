@@ -127,7 +127,8 @@ static void vkd_handle(struct gpud_channel* channel, const struct dango_ring_slo
     }
     case VK_SESSION_SWAPCHAIN_PRESENT: {
         MxVkSwapchainPresentRequest req;
-        if (mx_vk_slot_decode(request, VK_SESSION_SWAPCHAIN_PRESENT, (uint32_t)sizeof(req), &req) != 0) {
+        if (mx_vk_slot_decode(request, VK_SESSION_SWAPCHAIN_PRESENT, (uint32_t)sizeof(req), &req) !=
+            0) {
             vkd_error(channel, request, MX_ERR_BAD_PROTOCOL, 0, request->length);
             return;
         }
@@ -142,7 +143,8 @@ static void vkd_handle(struct gpud_channel* channel, const struct dango_ring_slo
         rep.swapchain_id = req.swapchain_id;
         rep.copied_bytes = copied;
         rep.image_index = req.image_index;
-        vkd_reply(channel, VK_SESSION_SWAPCHAIN_PRESENT_REPLY, request, &rep, (uint32_t)sizeof(rep));
+        vkd_reply(channel, VK_SESSION_SWAPCHAIN_PRESENT_REPLY, request, &rep,
+                  (uint32_t)sizeof(rep));
         break;
     }
     case VK_SESSION_CLOSE: {

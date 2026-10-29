@@ -1,17 +1,23 @@
 // Exercises the production session and resource owner against actual Ame
 // processes and the physical allocator, without depending on a USB controller.
-#include "../../userland/apps/resources.h"
+#include "../../userland/apps/session.h"
+#include "mochi/app_process.h"
+#include "mochi/driver.h"
 #include "midix/format/bundle.h"
 
 namespace {
 midix::format::Bundle bundle;
-mochi::apps::Session<mochi::apps::Resources>* session;
+mochi::apps::Session<mochi::app::Process>* session;
+const char* phase = "streaming";
+mx_handle_t cleanup_wake;
 void check(bool value, const char* what) {
-    if (value) return;
+    if (value)
+        return;
     sys_debug_puts("APP STREAM TEST FAILED: ", 24);
     sys_debug_puts(what, libk::str::length(what));
     sys_debug_puts("\n", 1);
-    for (;;) mx_yield();
+    for (;;)
+        mx_yield();
 }
 const mx_u8_t* image(const char* name, mx_u64_t& size) {
     MxBundleObject object{};
@@ -35,35 +41,49 @@ void upload(const mx_u8_t* data, mx_u64_t size) {
         mx_u8_t bytes[56]{};
         libk::write_le<mx_u32_t>(libk::as_bytes(bytes, 4), off);
         libk::copy_exact(libk::as_bytes(bytes + 4, count), libk::as_bytes(data + off, count));
-        check(request(midix::apps::kData, libk::as_bytes(bytes, count + 4)) == MX_OK, "upload data");
+        check(request(midix::apps::kData, libk::as_bytes(bytes, count + 4)) == MX_OK,
+              "upload data");
         off += count;
     }
 }
 void settle(mx_i64_t objects, mx_i64_t pages) {
+    // The kernel retains a thread's most recent wait source until its next
+    // wait. Return to the fixture-owned source before measuring child teardown.
+    mx_doorbell_wait_until(cleanup_wake, mx_doorbell_read(cleanup_wake), mx_clock_ns() + 1'000'000);
     const auto deadline = mx_clock_ns() + 2'000'000'000ull;
     while (mx_clock_ns() < deadline) {
-        if (sys_debug_counter(200) == objects && sys_debug_counter(201) == pages) return;
+        if (sys_debug_counter(200) == objects && sys_debug_counter(201) == pages)
+            return;
         mx_yield();
     }
+    char line[192];
+    const auto n = libk::snprintf(
+        line, sizeof(line), "cleanup phase=%s objects=%lld/%lld pages=%lld/%lld\n", phase,
+        static_cast<long long>(sys_debug_counter(200)), static_cast<long long>(objects),
+        static_cast<long long>(sys_debug_counter(201)), static_cast<long long>(pages));
+    if (n > 0)
+        sys_debug_puts(line, n);
     check(false, "objects or pages leaked");
 }
-}
+} // namespace
 extern "C" [[noreturn]] void _start() {
     const auto* boot = mochi::boot::map();
     auto arena = mochi::make_state(0x31000000, 16384);
-    session = arena.alloc<mochi::apps::Session<mochi::apps::Resources>>();
+    session = arena.alloc<mochi::apps::Session<mochi::app::Process>>();
     check(session != nullptr, "test state arena");
-    session->resources.supervisor = mochi::boot::require_handle(boot, "supervisor");
-    session->resources.cpu_count = mochi::driver::value(boot, "cpu.count", 1);
-    session->resources.cpu_mask = mochi::driver::value(boot, "cpu.mask", 1);
-    check(sys_map_page(mochi::boot::require_handle(boot, "boot.initrd"), 0x24000000, RIGHT_READ) == 0,
+    check(session->resources.configure(boot) == MX_OK, "app launcher configuration");
+    check(sys_map_page(mochi::boot::require_handle(boot, "boot.initrd"), 0x24000000, RIGHT_READ) ==
+              0,
           "bundle map");
     bundle.data = reinterpret_cast<const mx_u8_t*>(0x24000000);
     bundle.size = mochi::boot::find(boot, "boot.initrd")->aux0;
     libk::copy_exact(libk::as_bytes(&bundle.header, sizeof(bundle.header)),
-                    libk::as_bytes(bundle.data, sizeof(bundle.header)));
+                     libk::as_bytes(bundle.data, sizeof(bundle.header)));
     mx_u64_t size = 0;
     const auto* test = image("app.stream-test", size);
+    const auto made_wake = sys_doorbell_create();
+    check(made_wake > 0, "cleanup wake allocation");
+    cleanup_wake = made_wake;
     const auto objects = sys_debug_counter(200), pages = sys_debug_counter(201);
     check(session->start(mx_clock_ns()) == MX_OK, "start session");
     for (mx_u32_t cycle = 0; cycle < 10; ++cycle) {
@@ -72,7 +92,8 @@ extern "C" [[noreturn]] void _start() {
         check(session->resources.upload_count == 0, "upload arenas retained after launch");
         const auto deadline = mx_clock_ns() + 2'000'000'000ull;
         while (session->state != midix::apps::Ready && mx_clock_ns() < deadline) {
-            session->tick(mx_clock_ns()); mx_yield();
+            session->tick(mx_clock_ns());
+            mx_yield();
         }
         check(session->state == midix::apps::Ready && session->exit_code == 0, "app exit status");
         settle(objects, pages);
@@ -89,23 +110,64 @@ extern "C" [[noreturn]] void _start() {
     session->cancel(true);
     const auto deadline = mx_clock_ns() + 2'000'000'000ull;
     while (session->state != midix::apps::Closed && mx_clock_ns() < deadline) {
-        session->tick(mx_clock_ns()); mx_yield();
+        session->tick(mx_clock_ns());
+        mx_yield();
     }
     check(session->state == midix::apps::Closed, "cancel did not finish");
+    settle(objects, pages);
+    // Public app API: a failed wiring call cannot resume a partially prepared
+    // child, and cancelling it reclaims exactly the original object/page set.
+    static mochi::app::Process child;
+    phase = "failed wiring";
+    check(child.configure(boot, nullptr, 1) == MX_OK, "configure public launcher");
+    mochi::app::SpawnOptions options{};
+    options.self_image = false;
+    check(child.spawn({busy, size}, options) == MX_OK, "prepare suspended app");
+    check(child.share_ring("bad.ring", 0, 6) != MX_OK, "invalid ring grant accepted");
+    check(child.resume() != MX_OK, "resumed after failed wiring");
+    child.cancel_and_wait();
+    settle(objects, pages);
+    phase = "wait deadline";
+    check(child.spawn({busy, size}, options) == MX_OK && child.resume() == MX_OK,
+          "start timed app");
+    mx_i32_t code = 0;
+    check(child.wait(&code, mx_clock_ns() + 1'000'000) == MX_ERR_WOULD_BLOCK && child.has_child(),
+          "deadline lost child ownership");
+    child.cancel_and_wait();
+    settle(objects, pages);
+    // A failed worker cancels its peer; the group consumes both exit events,
+    // drains output and drops both children's resources before reporting done.
+    static mochi::app::Process pair[2];
+    phase = "failed worker group";
+    const auto wake = sys_doorbell_create();
+    check(wake > 0, "group wake");
+    options.output_wake = wake;
+    for (mx_u32_t i = 0; i < 2; ++i)
+        check(pair[i].configure(boot, nullptr, i + 2) == MX_OK, "configure app group");
+    mx_u64_t bad_size = 0;
+    const auto* needs_snapshot = image("app.stream-test", bad_size);
+    check(pair[0].spawn({needs_snapshot, bad_size}, options) == MX_OK &&
+              pair[1].spawn({busy, size}, options) == MX_OK,
+          "prepare app group");
+    check(pair[1].resume() == MX_OK && pair[0].resume() == MX_OK, "start app group");
+    check(mochi::app::wait_all(pair, 2, wake, &code) == MX_OK && code == MX_ERR_BAD_PROTOCOL &&
+              !pair[0].has_child() && !pair[1].has_child(),
+          "failed worker group cleanup");
+    sys_cap_revoke(wake);
     settle(objects, pages);
     // Delegated supervisors have separate exit streams; ephemeral children
     // cannot outlive them or strand a PID after a supervisor crash.
     for (mx_u32_t cycle = 0; cycle < 4; ++cycle) {
         const char parent_name[32] = "test.stream-supervisor";
         const char child_name[32] = "test.stream-child";
-        auto parent = sys_spawn(busy, size, 2, session->resources.supervisor,
-                                MX_SPAWN_SUSPENDED, parent_name);
+        auto parent = sys_spawn(busy, size, 2, session->resources.supervisor, MX_SPAWN_SUSPENDED,
+                                parent_name);
         check(parent.value > 0 && parent.detail > 0, "spawn supervisor");
         check(sys_supervisor_delegate(0, parent.value) < 0, "ambient delegation accepted");
         const auto delegated = sys_supervisor_delegate(session->resources.supervisor, parent.value);
         check(delegated > 0, "delegate supervision");
         auto child = sys_spawn(busy, size, 2, delegated,
-            MX_SPAWN_SUSPENDED | MX_SPAWN_KILL_WITH_SUPERVISOR, child_name);
+                               MX_SPAWN_SUSPENDED | MX_SPAWN_KILL_WITH_SUPERVISOR, child_name);
         check(child.value > 0 && child.detail > 0, "spawn supervised child");
         check(sys_supervisor_delegate(session->resources.supervisor, child.value) < 0,
               "delegation crossed supervisor boundary");
@@ -116,7 +178,10 @@ extern "C" [[noreturn]] void _start() {
         bool reaped = false;
         while (mx_clock_ns() < wait_until) {
             const auto event = sys_supervisor_poll(session->resources.supervisor);
-            if (event.value > 0) { reaped = true; break; }
+            if (event.value > 0) {
+                reaped = true;
+                break;
+            }
             mx_yield();
         }
         check(reaped, "supervisor exit not acknowledged");
@@ -128,13 +193,17 @@ extern "C" [[noreturn]] void _start() {
     // Newly allocated storage must not retain a prior session's scratch data.
     for (mx_u32_t cycle = 0; cycle < 4; ++cycle) {
         const auto cap = sys_arena_create(16384, 0);
-        check(cap > 0 && sys_map_page(cap, 0x32000000, RIGHT_READ | RIGHT_WRITE) == 0, "scratch map");
-        check(libk::is_zero(libk::as_bytes(reinterpret_cast<void*>(0x32000000), 16384)), "dirty freed pages");
+        check(cap > 0 && sys_map_page(cap, 0x32000000, RIGHT_READ | RIGHT_WRITE) == 0,
+              "scratch map");
+        check(libk::is_zero(libk::as_bytes(reinterpret_cast<void*>(0x32000000), 16384)),
+              "dirty freed pages");
         libk::fill(libk::as_bytes(reinterpret_cast<void*>(0x32000000), 16384), 0xa5);
-        for (mx_u64_t off = 0; off < 16384; off += 4096) sys_unmap_page(0x32000000 + off);
+        for (mx_u64_t off = 0; off < 16384; off += 4096)
+            sys_unmap_page(0x32000000 + off);
         sys_cap_revoke(cap);
         settle(objects, pages);
     }
     sys_debug_puts("app streaming kernel regression passed\n", 39);
-    for (;;) mx_yield();
+    for (;;)
+        mx_yield();
 }

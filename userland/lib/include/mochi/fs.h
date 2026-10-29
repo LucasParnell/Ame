@@ -11,8 +11,7 @@
 namespace mochi::fs {
 
 // Inline names reserve one byte for NUL; the wire length excludes it.
-template <mx_size_t N>
-static inline mx_u8_t copy_inline_name(char (&dst)[N], const char* src) {
+template <mx_size_t N> static inline mx_u8_t copy_inline_name(char (&dst)[N], const char* src) {
     static_assert(N - 1 <= 0xFF, "inline name length must fit its wire field");
     return static_cast<mx_u8_t>(libk::str::copy_into(dst, N, src));
 }
@@ -26,7 +25,9 @@ struct Client {
         const auto cap = mochi::boot::handle(boot, "fs.write.arena");
         MxCapInfo info{};
         if (!cap || mx_cap_info(cap, &info) != MX_OK || info.type != MX_CAP_ARENA ||
-            info.size != FS_TRANSFER_MAX || mx_map_page(cap, address, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) return false;
+            info.size != FS_TRANSFER_MAX ||
+            mx_map_page(cap, address, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK)
+            return false;
         write_cap = cap;
         write_buffer = reinterpret_cast<mx_u8_t*>(address);
         return true;
@@ -36,25 +37,28 @@ struct Client {
         return ep.valid();
     }
 
-    bool try_open(mx_u32_t parent_inode, const char* name, mx_u32_t flags,
-                  FsOpenReply* out) const {
+    bool try_open(mx_u32_t parent_inode, const char* name, mx_u32_t flags, FsOpenReply* out) const {
         FsOpenRequest req{};
-        if (!name || libk::str::length_n(name, sizeof(req.name)) >= sizeof(req.name)) return false;
+        if (!name || libk::str::length_n(name, sizeof(req.name)) >= sizeof(req.name))
+            return false;
         req.parent_inode = parent_inode;
         req.flags = flags;
         req.name_len = copy_inline_name(req.name, name);
-        if (!ep.try_send(FS_OPEN, &req, sizeof(req))) return false;
+        if (!ep.try_send(FS_OPEN, &req, sizeof(req)))
+            return false;
         return wait_open_reply(out);
     }
 
     bool wait_open(mx_u32_t parent_inode, const char* name, mx_u32_t flags,
                    FsOpenReply* out) const {
         FsOpenRequest req{};
-        if (!name || libk::str::length_n(name, sizeof(req.name)) >= sizeof(req.name)) return false;
+        if (!name || libk::str::length_n(name, sizeof(req.name)) >= sizeof(req.name))
+            return false;
         req.parent_inode = parent_inode;
         req.flags = flags;
         req.name_len = copy_inline_name(req.name, name);
-        if (!ep.send_spinning(FS_OPEN, &req, sizeof(req))) return false;
+        if (!ep.send_spinning(FS_OPEN, &req, sizeof(req)))
+            return false;
         return wait_open_reply(out);
     }
 
@@ -62,36 +66,41 @@ struct Client {
         return ep.try_send(FS_CLOSE, &handle, sizeof(handle));
     }
 
-    bool try_read(fs_handle_t handle, mx_u64_t offset, mx_u32_t length,
-                  FsReadReply* out) const {
+    bool try_read(fs_handle_t handle, mx_u64_t offset, mx_u32_t length, FsReadReply* out) const {
         FsReadRequest req{};
         req.handle = handle;
         req.offset = offset;
         req.length = length;
-        if (!ep.try_send(FS_READ, &req, sizeof(req))) return false;
+        if (!ep.try_send(FS_READ, &req, sizeof(req)))
+            return false;
         return wait_read_reply(out);
     }
 
-    bool try_write(fs_handle_t handle, mx_u64_t offset, const void* data,
-                   mx_u32_t length, FsWriteReply* out) const {
+    bool try_write(fs_handle_t handle, mx_u64_t offset, const void* data, mx_u32_t length,
+                   FsWriteReply* out) const {
         FsWriteRequest req{};
         req.handle = handle;
         req.offset = offset;
         req.length = length;
-        if ((!data && length) || length > FS_TRANSFER_MAX) return false;
+        if ((!data && length) || length > FS_TRANSFER_MAX)
+            return false;
         if (length > FS_INLINE_WRITE_MAX) {
-            if (!write_cap || !write_buffer) return false;
+            if (!write_cap || !write_buffer)
+                return false;
             libk::copy_exact(libk::as_bytes(write_buffer, length), libk::as_bytes(data, length));
             req.flags = FS_WRITE_ZERO_COPY;
             (void)libk::write_le<mx_u64_t>(libk::as_bytes(req.payload, 8), write_cap);
-        } else if (data) (void)libk::copy_n(libk::as_bytes(req.payload), libk::as_bytes(data, length), length);
-        if (!ep.try_send(FS_WRITE, &req, sizeof(req))) return false;
+        } else if (data)
+            (void)libk::copy_n(libk::as_bytes(req.payload), libk::as_bytes(data, length), length);
+        if (!ep.try_send(FS_WRITE, &req, sizeof(req)))
+            return false;
         return wait_write_reply(out);
     }
 
     bool try_promote(fs_handle_t handle, FsPromoteReply* out) const {
         FsPromoteRequest req{handle, 0};
-        if (!ep.try_send(FS_PROMOTE, &req, sizeof(req))) return false;
+        if (!ep.try_send(FS_PROMOTE, &req, sizeof(req)))
+            return false;
         return wait_promote_reply(out);
     }
 
@@ -100,21 +109,21 @@ struct Client {
         req.flags = flags;
         const auto n = libk::str::length_n(label, sizeof(req.label));
         (void)libk::copy_n(libk::as_bytes(req.label), libk::as_bytes(label, n), n);
-        if (!ep.try_send(FS_SNAPSHOT, &req, sizeof(req))) return false;
+        if (!ep.try_send(FS_SNAPSHOT, &req, sizeof(req)))
+            return false;
         return wait_snapshot_reply(out);
     }
 
-    bool try_snapshot_mount(mx_u64_t snapshot_id, mx_u32_t flags,
-                            FsSnapshotMntReply* out) const {
+    bool try_snapshot_mount(mx_u64_t snapshot_id, mx_u32_t flags, FsSnapshotMntReply* out) const {
         FsSnapshotMntRequest req{};
         req.snapshot_id = snapshot_id;
         req.flags = flags;
-        if (!ep.try_send(FS_SNAPSHOT_MNT, &req, sizeof(req))) return false;
+        if (!ep.try_send(FS_SNAPSHOT_MNT, &req, sizeof(req)))
+            return false;
         return wait_snapshot_mount_reply(out);
     }
 
-    bool try_prefetch(fs_handle_t handle, mx_u32_t type,
-                      mx_u64_t offset, mx_u32_t length) const {
+    bool try_prefetch(fs_handle_t handle, mx_u32_t type, mx_u64_t offset, mx_u32_t length) const {
         FsPrefetchHint hint{};
         hint.handle = handle;
         hint.type = type;
@@ -124,7 +133,8 @@ struct Client {
     }
 
     bool try_sync(mx_i32_t* out_status) const {
-        if (!ep.try_send(FS_SYNC, nullptr, 0)) return false;
+        if (!ep.try_send(FS_SYNC, nullptr, 0))
+            return false;
         return wait_status_reply(FS_SYNC_REPLY, out_status);
     }
 
@@ -134,7 +144,7 @@ struct Client {
 
     bool wait_read_reply(FsReadReply* out) const {
         return wait_reply(FS_READ_REPLY, out) &&
-            out->length_read <= (out->arena_cap ? FS_READ_ARENA_MAX : sizeof(out->inline_data));
+               out->length_read <= (out->arena_cap ? FS_READ_ARENA_MAX : sizeof(out->inline_data));
     }
 
     // Consume an immutable arena reply before issuing another request. The
@@ -142,26 +152,38 @@ struct Client {
     // must be released before the filesystem can reuse its cache page.
     bool read_bytes(fs_handle_t handle, mx_u64_t offset, void* data, mx_u32_t length,
                     mx_u32_t* received, mx_vaddr_t arena_va = 0x2f000000) const {
-        if (!received || (!data && length) || offset > ~mx_u64_t{0} - length) return false;
+        if (!received || (!data && length) || offset > ~mx_u64_t{0} - length)
+            return false;
         *received = 0;
         while (*received < length) {
             const auto remaining = length - *received;
             FsReadReply reply{};
             if (!try_read(handle, offset + *received,
-                          remaining > FS_READ_ARENA_MAX ? FS_READ_ARENA_MAX : remaining, &reply) || reply.status != MX_OK) return false;
-            if (!reply.length_read) return true;
+                          remaining > FS_READ_ARENA_MAX ? FS_READ_ARENA_MAX : remaining, &reply) ||
+                reply.status != MX_OK)
+                return false;
+            if (!reply.length_read)
+                return true;
             if (reply.arena_cap) {
                 MxCapInfo info{};
-                const bool valid = mx_cap_info(reply.arena_cap, &info) == MX_OK && info.type == MX_CAP_ARENA &&
-                    info.size == FS_READ_ARENA_MAX && !(info.rights & MX_RIGHT_WRITE);
-                const bool mapped = valid && mx_map_page(reply.arena_cap, arena_va, MX_RIGHT_READ) == MX_OK;
-                if (mapped) libk::copy_exact(libk::as_bytes(static_cast<mx_u8_t*>(data) + *received, reply.length_read),
-                                             libk::as_bytes(reinterpret_cast<const void*>(arena_va), reply.length_read));
-                if (mapped) (void)sys_unmap_page(arena_va);
+                const bool valid = mx_cap_info(reply.arena_cap, &info) == MX_OK &&
+                                   info.type == MX_CAP_ARENA && info.size == FS_READ_ARENA_MAX &&
+                                   !(info.rights & MX_RIGHT_WRITE);
+                const bool mapped =
+                    valid && mx_map_page(reply.arena_cap, arena_va, MX_RIGHT_READ) == MX_OK;
+                if (mapped)
+                    libk::copy_exact(
+                        libk::as_bytes(static_cast<mx_u8_t*>(data) + *received, reply.length_read),
+                        libk::as_bytes(reinterpret_cast<const void*>(arena_va), reply.length_read));
+                if (mapped)
+                    (void)sys_unmap_page(arena_va);
                 (void)sys_cap_revoke(reply.arena_cap);
-                if (!mapped) return false;
-            } else libk::copy_exact(libk::as_bytes(static_cast<mx_u8_t*>(data) + *received, reply.length_read),
-                                    libk::as_bytes(reply.inline_data, reply.length_read));
+                if (!mapped)
+                    return false;
+            } else
+                libk::copy_exact(
+                    libk::as_bytes(static_cast<mx_u8_t*>(data) + *received, reply.length_read),
+                    libk::as_bytes(reply.inline_data, reply.length_read));
             *received += reply.length_read;
         }
         return true;
@@ -188,18 +210,19 @@ struct Client {
         while (ep.wait_recv(&slot)) {
             mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_BAD_PROTOCOL);
             if ((slot.type == type || slot.type == FS_ERROR) && message_get(slot, &status)) {
-                if (out) *out = status;
+                if (out)
+                    *out = status;
                 return true;
             }
         }
         return false;
     }
 
-    template <typename T>
-    bool wait_reply(mx_u32_t type, T* out) const {
+    template <typename T> bool wait_reply(mx_u32_t type, T* out) const {
         RingSlot slot{};
         while (ep.wait_recv(&slot)) {
-            if (message_get(slot, out, type)) return true;
+            if (message_get(slot, out, type))
+                return true;
             mx_i32_t status = static_cast<mx_i32_t>(MX_ERR_BAD_PROTOCOL);
             if (message_get(slot, &status, FS_ERROR)) {
                 if (out) {
@@ -237,13 +260,12 @@ struct Server {
         return ep.wait_recv(out);
     }
 
-    bool send_payload(const RingSlot& req, mx_u32_t type,
-                      const void* payload, mx_u32_t len) const {
+    bool send_payload(const RingSlot& req, mx_u32_t type, const void* payload, mx_u32_t len) const {
         (void)req;
-        if (!reply_ok) return false;
-        reply_ok = (reply_deadline_ns != 0)
-                       ? ep.send_bounded(type, payload, len, reply_deadline_ns)
-                       : ep.send_spinning(type, payload, len);
+        if (!reply_ok)
+            return false;
+        reply_ok = (reply_deadline_ns != 0) ? ep.send_bounded(type, payload, len, reply_deadline_ns)
+                                            : ep.send_spinning(type, payload, len);
         return reply_ok;
     }
 
@@ -264,29 +286,30 @@ struct BlkClient {
         return ep.valid();
     }
 
-    bool request(mx_u32_t type, mx_u64_t sector, mx_u32_t sector_count,
-                 mx_handle_t arena_cap, mx_u32_t arena_offset,
-                 BlkReply* out, mx_u64_t deadline_ns = 0) const {
+    bool request(mx_u32_t type, mx_u64_t sector, mx_u32_t sector_count, mx_handle_t arena_cap,
+                 mx_u32_t arena_offset, BlkReply* out, mx_u64_t deadline_ns = 0) const {
         BlkRequest req{};
         req.type = type;
         req.sector = sector;
         req.sector_count = sector_count;
         req.arena_cap = arena_cap;
         req.arena_offset = arena_offset;
-        if (!out) return false;
-        const bool sent = deadline_ns
-            ? ep.send_bounded(type, &req, sizeof(req), deadline_ns)
-            : ep.send_spinning(type, &req, sizeof(req));
-        if (!sent) return false;
+        if (!out)
+            return false;
+        const bool sent = deadline_ns ? ep.send_bounded(type, &req, sizeof(req), deadline_ns)
+                                      : ep.send_spinning(type, &req, sizeof(req));
+        if (!sent)
+            return false;
         RingSlot slot{};
         for (;;) {
-            if (ep.try_recv(&slot)) {
-                if (message_get(slot, out, BLK_REPLY)) return true;
-                if (deadline_ns != 0 && mx_clock_ns() >= deadline_ns) return false;
-                continue;
-            }
-            if (deadline_ns == 0 || mx_clock_ns() >= deadline_ns) return false;
-            sys_yield();
+            const bool received =
+                deadline_ns ? ep.recv_bounded(&slot, deadline_ns) : ep.try_recv(&slot);
+            if (!received)
+                return false;
+            if (message_get(slot, out, BLK_REPLY))
+                return true;
+            if (deadline_ns != 0 && mx_clock_ns() >= deadline_ns)
+                return false;
         }
     }
 };

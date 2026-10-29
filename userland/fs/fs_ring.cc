@@ -18,7 +18,6 @@
 #include "mochi/sessions.h"
 #include "mochi/fs_private.h"
 
-
 static mochi::ServerSessions g_sessions;
 
 static void handle_slot(const mochi::fs::Server& fs, const RingSlot& slot) {
@@ -118,8 +117,10 @@ extern "C" [[noreturn]] void _start() {
             g_transfers[i].peer = g_sessions.directory->slots[i].client;
             g_transfers[i].write_token = __atomic_load_n(
                 &g_sessions.directory->slots[i].client_write_arena, __ATOMIC_ACQUIRE);
-            g_transfers[i].write = g_sessions.directory->slots[i].write_arena ?
-                reinterpret_cast<mx_u8_t*>(mochi::va::sessions::write_arena(i)) : nullptr;
+            g_transfers[i].write =
+                g_sessions.directory->slots[i].write_arena
+                    ? reinterpret_cast<mx_u8_t*>(mochi::va::sessions::write_arena(i))
+                    : nullptr;
             const mochi::fs::Server fs{g_sessions.endpoints[i],
                                        mx_clock_ns() + mochi::kSessionReplyTimeoutNs};
             RingSlot slot{};
@@ -128,7 +129,8 @@ extern "C" [[noreturn]] void _start() {
                 if (!(g_sessions.directory->slots[i].reserved & MX_SESSION_FIDO2_PRIVATE) &&
                     mochi::fs::private_state_request(slot)) {
                     (void)fs.send_error(slot, MX_ERR_PERM);
-                } else handle_slot(fs, slot);
+                } else
+                    handle_slot(fs, slot);
                 progress = true;
                 if (!fs.reply_ok) {
                     break;

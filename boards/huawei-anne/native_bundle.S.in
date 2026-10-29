@@ -4,7 +4,7 @@
 .global anne_bundle_start
 .global anne_bundle_end
 anne_bundle_start:
-.incbin "@CMAKE_BINARY_DIR@/system.mxb"
+.incbin "@ANKO_BUNDLE_FILE@"
 anne_bundle_end:
 // Keep the final mapped page separate from other kernel data.
 .balign 4096

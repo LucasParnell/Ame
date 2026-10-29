@@ -143,7 +143,7 @@ warning about uncertainty, not a formal significance test.
 
 ## Transport and diagnostic details
 
-Ame uses the production Mochi SPSC ring and doorbell library, with a 128-slot
+Ame uses the production Mochi SPSC ring and doorbell library, with a 256-slot
 framed ring and a 48-byte inline payload. Larger messages use copied packed
 records, with a single sequence/type/length header and wrap-safe payload copies.
 A 4096-byte message requires 65 cursor units and fits in one publication.
@@ -235,3 +235,51 @@ Use it for other OS adapters too. Port `benchmarks/ipc/linux.cc`'s small backend
 interface to the other OS while retaining `workload.h`, allocation/validation,
 clock and placement semantics. Missing facilities should produce explicit skips
 or null diagnostics, not silently different work.
+
+
+### Running the benchmark as an app on P20 Lite
+
+The existing `/data/apps/bench.ipc` is stored on the handset's filesystem.
+The boot installer has been removed: init does not stage a payload and
+`dev.apps` does no application-file comparison, installation, or sync at boot.
+The app is no longer embedded in `system.mxb`. The standalone executable can
+still be built explicitly with `cmake --build BUILD --target ipc_bench_app`.
+
+From msh, run `/data/apps/bench.ipc`, or `cd /data/apps` followed by
+`./bench.ipc`. The USB container also accepts `userland/bench.ipc.mxi` through
+`scripts/anne/app-stream.py` after `container start`. Both launchers supply the
+same image snapshot and scoped supervisor contract. The benchmark spawns its
+two workers, relays their separate output rings, waits for both exits, and
+returns to the launcher. Worker failure kills its peer and returns an error.
+Ordinary app bootstraps use unhinted doorbells; the isolated trusted bootstrap
+retains its handoff scheduling hints.
+
+App runs report `diagnostic_scope: shared_system`: kernel counters include
+other services. Isolated runs retain `isolated_system`. Regression comparison
+and pooling reject mismatched scopes. App runs are useful for correctness and
+loaded-system measurements; use the isolated bundle for the isolated baseline.
+
+The full-system Cortex-A53 regression uses a prepopulated disk image and verifies malformed-image
+rejection, two consecutive launches, all payload sizes, partial stream windows,
+same-CPU and different-CPU placement, and complete parsed results:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_app_system.py' -v
+```
+
+The test substitutes a headless harness for msh and links the production
+`msh_fs.cc` exec code against `/ame/userland/bin/bench.ipc.mxi`. The host prepares
+the filesystem before boot; the guest has no installer. It covers one and four
+CPUs, including cross-core spin cases.
+The handset release build is compile-checked; this does not establish physical
+P20 Lite runtime validation.
+
+The app and isolated adapters use the same `FramedChannel` API. Capacity defaults
+to seven maximum-size records (order 9); `--ring-order` selects an explicit
+capacity experiment. `app::ChannelPair` creates scoped handoff doorbells for its
+controlled workers, so app runs can use bounded same-core request/reply handoff.
+See [the IPC API guide](IPC_OPTIMIZATIONS.md) for ownership and bulk diagnostics.
+The adapter opts into complete-record receive batching; payload generation,
+validation, ACK window and workload hash are unchanged. This follow-up patchset
+has passed native same-core benchmarking; cross-core and full regression
+validation remain outstanding. See [its scope](IPC_NEXT_PATCHSET.md).

@@ -133,8 +133,7 @@ static void barrier() {
 }
 
 static mx_u64_t dma_phys(const void* ptr) {
-    return g_dma_phys + (reinterpret_cast<mx_u64_t>(ptr) -
-                         reinterpret_cast<mx_u64_t>(g_dma_base));
+    return g_dma_phys + (reinterpret_cast<mx_u64_t>(ptr) - reinterpret_cast<mx_u64_t>(g_dma_base));
 }
 
 static volatile mx_u32_t* reg32(mx_u32_t off) {
@@ -172,8 +171,7 @@ static void virtio_add_status(mx_u32_t status) {
 
 static void virtio_fail() {
     if (g_mmio) {
-        mmio_write32(VIRTIO_MMIO_STATUS,
-                     mmio_read32(VIRTIO_MMIO_STATUS) | VIRTIO_STATUS_FAILED);
+        mmio_write32(VIRTIO_MMIO_STATUS, mmio_read32(VIRTIO_MMIO_STATUS) | VIRTIO_STATUS_FAILED);
     }
     g_blk_ready = false;
 }
@@ -191,11 +189,13 @@ static bool virtio_queue_init() {
     }
 
     const mx_u32_t queue_max = mmio_read32(VIRTIO_MMIO_QUEUE_NUM_MAX);
-    if (queue_max < kQueueSize) return false;
+    if (queue_max < kQueueSize)
+        return false;
 
     if (g_legacy_transport) {
         mx_u8_t* queue = static_cast<mx_u8_t*>(g_dma_arena.alloc_zeroed(8192, 4096));
-        if (!queue) return false;
+        if (!queue)
+            return false;
         const mx_u64_t avail_offset = sizeof(VringDesc) * kQueueSize;
         const mx_u64_t used_offset = 4096;
         g_desc = reinterpret_cast<VringDesc*>(queue);
@@ -203,13 +203,14 @@ static bool virtio_queue_init() {
         g_used = reinterpret_cast<VringUsed*>(queue + used_offset);
         mmio_write32(VIRTIO_MMIO_QUEUE_NUM, kQueueSize);
         mmio_write32(VIRTIO_MMIO_QUEUE_ALIGN, 4096);
-        mmio_write32(VIRTIO_MMIO_QUEUE_PFN,
-                     static_cast<mx_u32_t>(dma_phys(queue) >> 12));
+        mmio_write32(VIRTIO_MMIO_QUEUE_PFN, static_cast<mx_u32_t>(dma_phys(queue) >> 12));
     } else {
-        g_desc = static_cast<VringDesc*>(g_dma_arena.alloc_zeroed(sizeof(VringDesc) * kQueueSize, 16));
+        g_desc =
+            static_cast<VringDesc*>(g_dma_arena.alloc_zeroed(sizeof(VringDesc) * kQueueSize, 16));
         g_avail = static_cast<VringAvail*>(g_dma_arena.alloc_zeroed(sizeof(VringAvail), 16));
         g_used = static_cast<VringUsed*>(g_dma_arena.alloc_zeroed(sizeof(VringUsed), 16));
-        if (!g_desc || !g_avail || !g_used) return false;
+        if (!g_desc || !g_avail || !g_used)
+            return false;
         mmio_write32(VIRTIO_MMIO_QUEUE_NUM, kQueueSize);
         mmio_write64_pair(VIRTIO_MMIO_QUEUE_DESC_LOW, dma_phys(g_desc));
         mmio_write64_pair(VIRTIO_MMIO_QUEUE_DRIVER_LOW, dma_phys(g_avail));
@@ -217,10 +218,12 @@ static bool virtio_queue_init() {
         mmio_write32(VIRTIO_MMIO_QUEUE_READY, 1);
     }
 
-    g_req_hdr = static_cast<VirtioBlkHeader*>(g_dma_arena.alloc_zeroed(sizeof(VirtioBlkHeader), 16));
+    g_req_hdr =
+        static_cast<VirtioBlkHeader*>(g_dma_arena.alloc_zeroed(sizeof(VirtioBlkHeader), 16));
     g_req_status = static_cast<mx_u8_t*>(g_dma_arena.alloc_zeroed(1, 1));
     if (g_dma_arena.used() > BLK_DMA_CLIENT_OFFSET ||
-        !g_dma_arena.alloc(BLK_DMA_CLIENT_OFFSET - g_dma_arena.used(), 1)) return false;
+        !g_dma_arena.alloc(BLK_DMA_CLIENT_OFFSET - g_dma_arena.used(), 1))
+        return false;
     void* data_region = g_dma_arena.alloc_zeroed(kBlkSectorSize * 8, kBlkSectorSize);
     if (!g_desc || !g_avail || !g_used || !g_req_hdr || !g_req_status || !data_region) {
         return false;
@@ -239,8 +242,8 @@ static bool virtio_queue_init() {
     return true;
 }
 
-static mx_i32_t virtio_submit(mx_u32_t type, mx_u64_t sector,
-                              mx_u64_t data_offset, mx_u32_t byte_count) {
+static mx_i32_t virtio_submit(mx_u32_t type, mx_u64_t sector, mx_u64_t data_offset,
+                              mx_u32_t byte_count) {
     if (!g_blk_ready && type != VIRTIO_BLK_T_FLUSH) {
         return static_cast<mx_i32_t>(MX_ERR_SERVICE_UNAVAILABLE);
     }
@@ -273,7 +276,8 @@ static mx_i32_t virtio_submit(mx_u32_t type, mx_u64_t sector,
         g_desc[1].addr = g_dma_phys + data_offset;
         g_desc[1].len = byte_count;
         g_desc[1].flags = VRING_DESC_F_NEXT;
-        if (type == VIRTIO_BLK_T_IN) g_desc[1].flags |= VRING_DESC_F_WRITE;
+        if (type == VIRTIO_BLK_T_IN)
+            g_desc[1].flags |= VRING_DESC_F_WRITE;
         g_desc[1].next = 2;
     }
 
@@ -292,8 +296,10 @@ static mx_i32_t virtio_submit(mx_u32_t type, mx_u64_t sector,
 
     for (mx_u32_t spin = 0; spin < kVirtioWaitSpins; ++spin) {
         barrier();
-        if (g_used->idx != g_used_idx) break;
-        if ((spin & 0x3FFu) == 0) mx_yield();
+        if (g_used->idx != g_used_idx)
+            break;
+        if ((spin & 0x3FFu) == 0)
+            mx_yield();
     }
     barrier();
     if (g_used->idx == g_used_idx) {
@@ -319,7 +325,8 @@ static mx_i32_t virtio_submit(mx_u32_t type, mx_u64_t sector,
 }
 
 static bool virtio_init() {
-    if (!g_mmio || !g_dma_base || g_dma_size == 0) return false;
+    if (!g_mmio || !g_dma_base || g_dma_size == 0)
+        return false;
     const mx_u32_t version = mmio_read32(VIRTIO_MMIO_VERSION);
     if (version == 1) {
         g_legacy_transport = true;
@@ -333,11 +340,13 @@ static bool virtio_init() {
 
     mmio_write32(VIRTIO_MMIO_STATUS, 0);
     for (mx_u32_t spin = 0; spin < 1024; ++spin) {
-        if (mmio_read32(VIRTIO_MMIO_STATUS) == 0) break;
+        if (mmio_read32(VIRTIO_MMIO_STATUS) == 0)
+            break;
         mx_yield();
     }
 
-    if (mmio_read32(VIRTIO_MMIO_STATUS) != 0) return false;
+    if (mmio_read32(VIRTIO_MMIO_STATUS) != 0)
+        return false;
 
     virtio_add_status(VIRTIO_STATUS_ACKNOWLEDGE);
     virtio_add_status(VIRTIO_STATUS_DRIVER);
@@ -379,9 +388,9 @@ static bool virtio_init() {
 }
 
 static void virtio_self_test_read() {
-    if (!g_blk_ready || g_capacity_sectors == 0) return;
-    const mx_i32_t rc =
-        virtio_submit(VIRTIO_BLK_T_IN, 0, g_io_data_offset, kBlkSectorSize);
+    if (!g_blk_ready || g_capacity_sectors == 0)
+        return;
+    const mx_i32_t rc = virtio_submit(VIRTIO_BLK_T_IN, 0, g_io_data_offset, kBlkSectorSize);
     if (rc == MX_OK) {
         mochi::log_raw_marker("drv.blk.virtio: BLK read OK\n");
     } else {
@@ -391,14 +400,14 @@ static void virtio_self_test_read() {
 
 static bool virtio_blk_present(const MxBootInfo* boot) {
     const mx_handle_t mmio = mochi::boot::handle(boot, "virtio.blk.mmio");
-    if (mmio == MX_NULL_HANDLE) return false;
+    if (mmio == MX_NULL_HANDLE)
+        return false;
     if (mx_map_mmio(mmio, kVaVirtioMmio, MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) {
         mochi::log_raw_marker("drv.blk.virtio: mmio map failed\n");
         return false;
     }
     for (mx_u32_t off = 0; off < kVirtioMmioScanSize; off += kVirtioMmioSlotSize) {
-        volatile auto* regs =
-            reinterpret_cast<volatile mx_u32_t*>(kVaVirtioMmio + off);
+        volatile auto* regs = reinterpret_cast<volatile mx_u32_t*>(kVaVirtioMmio + off);
         const mx_u32_t magic = regs[VIRTIO_MMIO_MAGIC / sizeof(mx_u32_t)];
         const mx_u32_t device = regs[VIRTIO_MMIO_DEVICE_ID / sizeof(mx_u32_t)];
         if (magic == 0x74726976u && device == 2) {
@@ -410,8 +419,7 @@ static bool virtio_blk_present(const MxBootInfo* boot) {
     return false;
 }
 
-static void handle_request(const mochi::fs::BlkServer& blk, const RingSlot& slot,
-                           bool dma_ready) {
+static void handle_request(const mochi::fs::BlkServer& blk, const RingSlot& slot, bool dma_ready) {
     BlkRequest req{};
     if (!mochi::message_get(slot, &req)) {
         (void)blk.send_reply(static_cast<mx_i32_t>(MX_ERR_BAD_PROTOCOL), 0);
@@ -440,8 +448,7 @@ static void handle_request(const mochi::fs::BlkServer& blk, const RingSlot& slot
             (void)blk.send_reply(static_cast<mx_i32_t>(MX_ERR_SERVICE_UNAVAILABLE), 0);
         } else if (!dma_ready) {
             (void)blk.send_reply(static_cast<mx_i32_t>(MX_ERR_SERVICE_UNAVAILABLE), 0);
-        } else if (req.sector_count == 0 ||
-                   req.sector_count > (0xFFFF'FFFFu / kBlkSectorSize)) {
+        } else if (req.sector_count == 0 || req.sector_count > (0xFFFF'FFFFu / kBlkSectorSize)) {
             (void)blk.send_reply(static_cast<mx_i32_t>(MX_ERR_INVALID), 0);
         } else if (g_capacity_sectors != 0 &&
                    (req.sector > g_capacity_sectors ||
@@ -467,9 +474,9 @@ extern "C" [[noreturn]] void _start() {
     MxBootInfo* boot = mochi::boot::map(kVaBootInfo);
     (void)mochi::log_map_from_boot(boot, kVaLogRing, "drv.blk.virtio");
 
-    const mochi::fs::BlkServer blk{mochi::boot::map_endpoint(
-        boot, {"blk.reply.ring", kVaReplyRing, "blk.reply.doorbell"},
-        {"blk.req.ring", kVaReqRing, "blk.req.doorbell"})};
+    const mochi::fs::BlkServer blk{
+        mochi::boot::map_endpoint(boot, {"blk.reply.ring", kVaReplyRing, "blk.reply.doorbell"},
+                                  {"blk.req.ring", kVaReqRing, "blk.req.doorbell"})};
 
     const bool device_present = virtio_blk_present(boot);
     if (device_present) {

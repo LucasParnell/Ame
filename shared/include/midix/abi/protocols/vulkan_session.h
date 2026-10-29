@@ -84,21 +84,21 @@ typedef struct MxVkCmdDraw MxVkCmdDraw;
 
 enum MxVulkanSessionOpcode {
     // --- Session lifecycle -------------------------------------------------
-    VK_SESSION_OPEN = 0x564B5301u,           // Open -> OPEN_REPLY
+    VK_SESSION_OPEN = 0x564B5301u, // Open -> OPEN_REPLY
     VK_SESSION_OPEN_REPLY = 0x564B5302u,
-    VK_SESSION_CLOSE = 0x564B5303u,          // Close -> CLOSE_REPLY
+    VK_SESSION_CLOSE = 0x564B5303u, // Close -> CLOSE_REPLY
     VK_SESSION_CLOSE_REPLY = 0x564B5304u,
 
     // --- Host-visible memory ----------------------------------------------
-    VK_SESSION_ALLOC = 0x564B5305u,          // Alloc -> ALLOC_REPLY
+    VK_SESSION_ALLOC = 0x564B5305u, // Alloc -> ALLOC_REPLY
     VK_SESSION_ALLOC_REPLY = 0x564B5306u,
-    VK_SESSION_FREE = 0x564B5307u,           // Free -> FREE_REPLY
+    VK_SESSION_FREE = 0x564B5307u, // Free -> FREE_REPLY
     VK_SESSION_FREE_REPLY = 0x564B5308u,
 
     // --- Bounded command submission + sync --------------------------------
-    VK_SESSION_SUBMIT = 0x564B5309u,         // Submit -> SUBMIT_REPLY
+    VK_SESSION_SUBMIT = 0x564B5309u, // Submit -> SUBMIT_REPLY
     VK_SESSION_SUBMIT_REPLY = 0x564B530Au,
-    VK_SESSION_SYNC_WAIT = 0x564B530Bu,      // SyncWait -> SYNC_WAIT_REPLY
+    VK_SESSION_SYNC_WAIT = 0x564B530Bu, // SyncWait -> SYNC_WAIT_REPLY
     VK_SESSION_SYNC_WAIT_REPLY = 0x564B530Cu,
 
     // --- WSI: surface / swapchain (spec §15.3–§15.6) ----------------------
@@ -147,8 +147,8 @@ enum MxVulkanSessionOpcode {
 
 // The per-session arena: one shared window holding the command region and every
 // host-visible allocation. Both ends bound it from here.
-#define MX_VK_SESSION_DEFAULT_ARENA_BYTES (1u << 20)  // 1 MiB
-#define MX_VK_SESSION_MAX_ARENA_BYTES (16u << 20)     // 16 MiB
+#define MX_VK_SESSION_DEFAULT_ARENA_BYTES (1u << 20) // 1 MiB
+#define MX_VK_SESSION_MAX_ARENA_BYTES (16u << 20)    // 16 MiB
 #define MX_VK_SESSION_ARENA_ALIGNMENT 256u
 
 // The command region is the head of the arena: a bounded byte stream of
@@ -222,20 +222,23 @@ enum MxVkObjectType {
 #define MX_VK_OBJECT_SESSION_BITS 4
 #define MX_VK_OBJECT_INDEX_MASK ((1ull << MX_VK_OBJECT_INDEX_BITS) - 1ull)
 #define MX_VK_OBJECT_TYPE_SHIFT MX_VK_OBJECT_INDEX_BITS
-#define MX_VK_OBJECT_TYPE_MASK (((1ull << MX_VK_OBJECT_TYPE_BITS) - 1ull) << MX_VK_OBJECT_TYPE_SHIFT)
+#define MX_VK_OBJECT_TYPE_MASK                                                                     \
+    (((1ull << MX_VK_OBJECT_TYPE_BITS) - 1ull) << MX_VK_OBJECT_TYPE_SHIFT)
 #define MX_VK_OBJECT_SESSION_SHIFT (MX_VK_OBJECT_INDEX_BITS + MX_VK_OBJECT_TYPE_BITS)
-#define MX_VK_OBJECT_SESSION_MASK \
+#define MX_VK_OBJECT_SESSION_MASK                                                                  \
     (((1ull << MX_VK_OBJECT_SESSION_BITS) - 1ull) << MX_VK_OBJECT_SESSION_SHIFT)
 // The 12 bits between the session and boot-generation fields distinguish
 // reused table slots. A saturated slot must be retired, never wrapped.
 #define MX_VK_OBJECT_INCARNATION_BITS 12
-#define MX_VK_OBJECT_INCARNATION_SHIFT (MX_VK_OBJECT_INDEX_BITS + MX_VK_OBJECT_TYPE_BITS + MX_VK_OBJECT_SESSION_BITS)
+#define MX_VK_OBJECT_INCARNATION_SHIFT                                                             \
+    (MX_VK_OBJECT_INDEX_BITS + MX_VK_OBJECT_TYPE_BITS + MX_VK_OBJECT_SESSION_BITS)
 #define MX_VK_OBJECT_MAX_INCARNATION ((1u << MX_VK_OBJECT_INCARNATION_BITS) - 1u)
-#define MX_VK_OBJECT_GENERATION_SHIFT (MX_VK_OBJECT_INCARNATION_SHIFT + MX_VK_OBJECT_INCARNATION_BITS)
+#define MX_VK_OBJECT_GENERATION_SHIFT                                                              \
+    (MX_VK_OBJECT_INCARNATION_SHIFT + MX_VK_OBJECT_INCARNATION_BITS)
 
 // 1-based index; 0 is never a valid object slot.
-static inline mx_u64_t mx_vk_object_id_make(mx_u64_t generation, mx_u32_t type,
-                                            mx_u32_t session, mx_u32_t index) {
+static inline mx_u64_t mx_vk_object_id_make(mx_u64_t generation, mx_u32_t type, mx_u32_t session,
+                                            mx_u32_t index) {
     return (((generation & 0xFFFFFFFFull) << MX_VK_OBJECT_GENERATION_SHIFT)) |
            (((mx_u64_t)session << MX_VK_OBJECT_SESSION_SHIFT) & MX_VK_OBJECT_SESSION_MASK) |
            (((mx_u64_t)type << MX_VK_OBJECT_TYPE_SHIFT) & MX_VK_OBJECT_TYPE_MASK) |
@@ -252,7 +255,7 @@ static inline mx_u64_t mx_vk_object_id_with_incarnation(mx_u64_t id, mx_u32_t in
 // and store the 1-based index. Returns 0 on success, -1 on a stale, mistyped,
 // cross-session or null id.
 static inline int mx_vk_object_id_check(mx_u64_t id, mx_u32_t type, mx_u64_t generation,
-                                        mx_u32_t session, mx_u32_t *index_out) {
+                                        mx_u32_t session, mx_u32_t* index_out) {
     const mx_u32_t index = (mx_u32_t)(id & MX_VK_OBJECT_INDEX_MASK);
     const mx_u32_t id_type = (mx_u32_t)((id & MX_VK_OBJECT_TYPE_MASK) >> MX_VK_OBJECT_TYPE_SHIFT);
     const mx_u32_t id_session =
@@ -262,7 +265,8 @@ static inline int mx_vk_object_id_check(mx_u64_t id, mx_u32_t type, mx_u64_t gen
         id_generation != (generation & 0xFFFFFFFFull)) {
         return -1;
     }
-    if (index_out) *index_out = index;
+    if (index_out)
+        *index_out = index;
     return 0;
 }
 
@@ -282,11 +286,11 @@ MX_STATIC_ASSERT(MX_VK_SESSION_MAX_SESSIONS <= ((1u << MX_VK_OBJECT_SESSION_BITS
 struct MxVkSessionOpenRequest {
     mx_u16_t major;
     mx_u16_t minor;
-    mx_u32_t flags;         // MxVulkanSessionFlags (request: must be 0 today)
-    mx_u64_t arena_bytes;   // requested arena, capped at MX_VK_SESSION_MAX_ARENA_BYTES
-    mx_u32_t max_objects;   // requested object table, capped at MAX_OBJECTS
+    mx_u32_t flags;           // MxVulkanSessionFlags (request: must be 0 today)
+    mx_u64_t arena_bytes;     // requested arena, capped at MX_VK_SESSION_MAX_ARENA_BYTES
+    mx_u32_t max_objects;     // requested object table, capped at MAX_OBJECTS
     mx_u32_t max_outstanding; // requested in-flight submits, capped at MAX_OUTSTANDING
-    mx_u32_t client_id;     // native client identity the broker pins the session to
+    mx_u32_t client_id;       // native client identity the broker pins the session to
     mx_u32_t reserved0;
 };
 MX_STATIC_ASSERT(sizeof(struct MxVkSessionOpenRequest) <= MX_VK_SESSION_INLINE_PAYLOAD,
@@ -295,13 +299,13 @@ MX_STATIC_ASSERT(sizeof(struct MxVkSessionOpenRequest) == 32, "VK_SESSION_OPEN s
 
 struct MxVkSessionOpenReply {
     mx_status_t status;
-    mx_u64_t session_id;       // opaque; echoes the client_id in its id layout
+    mx_u64_t session_id; // opaque; echoes the client_id in its id layout
     mx_u64_t boot_generation;
-    mx_u64_t arena_id;         // Dango shared window id backing the arena
-    mx_u32_t arena_bytes;      // granted (>= command region, <= max)
-    mx_u32_t max_objects;      // granted
-    mx_u32_t max_outstanding;  // granted
-    mx_u32_t flags;            // MxVulkanSessionFlags
+    mx_u64_t arena_id;        // Dango shared window id backing the arena
+    mx_u32_t arena_bytes;     // granted (>= command region, <= max)
+    mx_u32_t max_objects;     // granted
+    mx_u32_t max_outstanding; // granted
+    mx_u32_t flags;           // MxVulkanSessionFlags
 };
 MX_STATIC_ASSERT(sizeof(struct MxVkSessionOpenReply) <= MX_VK_SESSION_INLINE_PAYLOAD,
                  "VK_SESSION_OPEN reply must fit one payload");
@@ -330,10 +334,10 @@ MX_STATIC_ASSERT(sizeof(struct MxVkSessionCloseReply) == 24, "VK_SESSION_CLOSE r
 struct MxVkSessionAllocRequest {
     mx_u64_t session_id;
     mx_u64_t size;
-    mx_u32_t alignment;    // 0 => the arena default
-    mx_u32_t memory_type;  // MxVkMemoryType
-    mx_u32_t usage;        // client-defined usage mask (opaque to the appliance)
-    mx_u32_t flags;        // MxVkMemoryFlags
+    mx_u32_t alignment;   // 0 => the arena default
+    mx_u32_t memory_type; // MxVkMemoryType
+    mx_u32_t usage;       // client-defined usage mask (opaque to the appliance)
+    mx_u32_t flags;       // MxVkMemoryFlags
 };
 MX_STATIC_ASSERT(sizeof(struct MxVkSessionAllocRequest) <= MX_VK_SESSION_INLINE_PAYLOAD,
                  "VK_SESSION_ALLOC must fit one payload");
@@ -341,10 +345,10 @@ MX_STATIC_ASSERT(sizeof(struct MxVkSessionAllocRequest) == 32, "VK_SESSION_ALLOC
 
 struct MxVkSessionAllocReply {
     mx_status_t status;
-    mx_u64_t memory_id;      // opaque, boot/session-scoped
+    mx_u64_t memory_id; // opaque, boot/session-scoped
     mx_u64_t boot_generation;
-    mx_u64_t arena_offset;   // byte offset into the session arena
-    mx_u32_t size;           // granted size (rounded up to alignment)
+    mx_u64_t arena_offset; // byte offset into the session arena
+    mx_u32_t size;         // granted size (rounded up to alignment)
     mx_u32_t memory_type;
     mx_u32_t alignment;
     mx_u32_t flags;
@@ -407,7 +411,8 @@ struct MxVkSessionSyncWaitRequest {
 };
 MX_STATIC_ASSERT(sizeof(struct MxVkSessionSyncWaitRequest) <= MX_VK_SESSION_INLINE_PAYLOAD,
                  "VK_SESSION_SYNC_WAIT must fit one payload");
-MX_STATIC_ASSERT(sizeof(struct MxVkSessionSyncWaitRequest) == 32, "VK_SESSION_SYNC_WAIT size drift");
+MX_STATIC_ASSERT(sizeof(struct MxVkSessionSyncWaitRequest) == 32,
+                 "VK_SESSION_SYNC_WAIT size drift");
 
 struct MxVkSessionSyncWaitReply {
     mx_status_t status; // MX_OK signalled; MX_ERR_BUSY not yet; MX_ERR_DEAD lost
@@ -425,7 +430,7 @@ struct MxVkSurfaceCreateRequest {
     mx_u64_t session_id;
     mx_u32_t width;
     mx_u32_t height;
-    mx_u32_t format;   // MxGpuPixelFormat (reused value type; single home)
+    mx_u32_t format; // MxGpuPixelFormat (reused value type; single home)
     mx_u32_t flags;
 };
 MX_STATIC_ASSERT(sizeof(struct MxVkSurfaceCreateRequest) <= MX_VK_SESSION_INLINE_PAYLOAD,
@@ -469,7 +474,7 @@ struct MxVkSwapchainCreateRequest {
     mx_u32_t image_count; // capped at MX_VK_SWAPCHAIN_MAX_IMAGES
     mx_u32_t stride;      // bytes per row of a swapchain image
     mx_u32_t pixel_format;
-    mx_u32_t flags;       // MxVkSwapchainFlags
+    mx_u32_t flags; // MxVkSwapchainFlags
 };
 MX_STATIC_ASSERT(sizeof(struct MxVkSwapchainCreateRequest) <= MX_VK_SESSION_INLINE_PAYLOAD,
                  "VK_SESSION_SWAPCHAIN_CREATE must fit one payload");
@@ -503,8 +508,8 @@ MX_STATIC_ASSERT(sizeof(struct MxVkSwapchainAcquireRequest) == 32,
 struct MxVkSwapchainAcquireReply {
     mx_status_t status;
     mx_u64_t swapchain_id;
-    mx_u64_t image_id;      // opaque memory object backing the acquired image
-    mx_u64_t arena_offset;  // image bytes inside the session arena
+    mx_u64_t image_id;     // opaque memory object backing the acquired image
+    mx_u64_t arena_offset; // image bytes inside the session arena
     mx_u32_t image_index;
     mx_u32_t image_bytes;
 };
@@ -520,7 +525,7 @@ struct MxVkSwapchainPresentRequest {
     mx_u64_t session_id;
     mx_u64_t swapchain_id;
     mx_u32_t image_index;
-    mx_u32_t flags;        // MxVkPresentFlags
+    mx_u32_t flags;         // MxVkPresentFlags
     MxGpuDamageRect damage; // valid for a bounded (non-full-frame) present
 };
 MX_STATIC_ASSERT(sizeof(struct MxVkSwapchainPresentRequest) <= MX_VK_SESSION_INLINE_PAYLOAD,
@@ -544,8 +549,8 @@ MX_STATIC_ASSERT(sizeof(struct MxVkSwapchainPresentReply) == 32,
 struct MxVkSessionError {
     mx_status_t status;
     mx_u64_t session_id;
-    mx_u64_t detail;  // request-specific (0 when none)
-    mx_u32_t opcode;  // the request opcode the service refused
+    mx_u64_t detail; // request-specific (0 when none)
+    mx_u32_t opcode; // the request opcode the service refused
     mx_u32_t reserved0;
 };
 MX_STATIC_ASSERT(sizeof(struct MxVkSessionError) <= MX_VK_SESSION_INLINE_PAYLOAD,
@@ -578,12 +583,12 @@ MX_STATIC_ASSERT(sizeof(struct MxVkCommandHeader) == 16, "command header size dr
 enum MxVkCommandOpcode {
     VK_CMD_NONE = 0,
     VK_CMD_PIPELINE_BARRIER = 1,
-    VK_CMD_FILL_BUFFER = 2,  // vkCmdFillBuffer
-    VK_CMD_COPY_BUFFER = 3,  // vkCmdCopyBuffer
-    VK_CMD_DISPATCH = 4,     // vkCmdDispatch
+    VK_CMD_FILL_BUFFER = 2, // vkCmdFillBuffer
+    VK_CMD_COPY_BUFFER = 3, // vkCmdCopyBuffer
+    VK_CMD_DISPATCH = 4,    // vkCmdDispatch
     VK_CMD_BIND_VERTEX_BUFFER = 5,
     VK_CMD_BIND_RENDER_TARGET = 6, // bind the draw target (a bound framebuffer)
-    VK_CMD_DRAW = 7,         // vkCmdDraw into the bound render target
+    VK_CMD_DRAW = 7,               // vkCmdDraw into the bound render target
 };
 
 struct MxVkCmdFillBuffer {
@@ -670,12 +675,12 @@ MX_STATIC_ASSERT(sizeof(MxVkFrame) == 64, "Vulkan session frame must be one ring
 // C/C++ compatible, so the native client, the GPU service broker and the guest
 // dango-vkd all frame messages through the same two functions.
 
-static inline void mx_vk_slot_encode(MxVkFrame *slot, mx_u32_t opcode, mx_u64_t seq,
-                                     const void *payload, mx_u32_t bytes) {
+static inline void mx_vk_slot_encode(MxVkFrame* slot, mx_u32_t opcode, mx_u64_t seq,
+                                     const void* payload, mx_u32_t bytes) {
     slot->type = opcode;
     slot->length = bytes;
     slot->seq = seq;
-    const mx_u8_t *src = (const mx_u8_t *)payload;
+    const mx_u8_t* src = (const mx_u8_t*)payload;
     for (mx_u32_t i = 0; i < MX_VK_SESSION_INLINE_PAYLOAD; ++i) {
         slot->payload[i] = (payload && i < bytes) ? src[i] : (mx_u8_t)0;
     }
@@ -683,13 +688,13 @@ static inline void mx_vk_slot_encode(MxVkFrame *slot, mx_u32_t opcode, mx_u64_t 
 
 // Confirm `slot` is a request of `expected_opcode` with exactly `expected_bytes`
 // of payload, then copy the payload out. Returns 0 on success, -1 otherwise.
-static inline int mx_vk_slot_decode(const MxVkFrame *slot, mx_u32_t expected_opcode,
-                                    mx_u32_t expected_bytes, void *out) {
+static inline int mx_vk_slot_decode(const MxVkFrame* slot, mx_u32_t expected_opcode,
+                                    mx_u32_t expected_bytes, void* out) {
     if (slot->type != expected_opcode || slot->length != expected_bytes ||
         expected_bytes > MX_VK_SESSION_INLINE_PAYLOAD) {
         return -1;
     }
-    mx_u8_t *dst = (mx_u8_t *)out;
+    mx_u8_t* dst = (mx_u8_t*)out;
     for (mx_u32_t i = 0; i < expected_bytes; ++i) {
         dst[i] = slot->payload[i];
     }
@@ -707,17 +712,28 @@ static inline int mx_vk_is_opcode(mx_u32_t opcode) {
 // Every opcode value is unique; enumerated in one place so a copy/paste
 // duplicate or a renumbered opcode fails the build in every translation unit.
 constexpr mx_u32_t kMxVkOpcodeValues[] = {
-    VK_SESSION_OPEN,           VK_SESSION_OPEN_REPLY,
-    VK_SESSION_CLOSE,          VK_SESSION_CLOSE_REPLY,
-    VK_SESSION_ALLOC,          VK_SESSION_ALLOC_REPLY,
-    VK_SESSION_FREE,           VK_SESSION_FREE_REPLY,
-    VK_SESSION_SUBMIT,         VK_SESSION_SUBMIT_REPLY,
-    VK_SESSION_SYNC_WAIT,      VK_SESSION_SYNC_WAIT_REPLY,
-    VK_SESSION_SURFACE_CREATE, VK_SESSION_SURFACE_CREATE_REPLY,
-    VK_SESSION_SURFACE_DESTROY, VK_SESSION_SURFACE_DESTROY_REPLY,
-    VK_SESSION_SWAPCHAIN_CREATE, VK_SESSION_SWAPCHAIN_CREATE_REPLY,
-    VK_SESSION_SWAPCHAIN_ACQUIRE, VK_SESSION_SWAPCHAIN_ACQUIRE_REPLY,
-    VK_SESSION_SWAPCHAIN_PRESENT, VK_SESSION_SWAPCHAIN_PRESENT_REPLY,
+    VK_SESSION_OPEN,
+    VK_SESSION_OPEN_REPLY,
+    VK_SESSION_CLOSE,
+    VK_SESSION_CLOSE_REPLY,
+    VK_SESSION_ALLOC,
+    VK_SESSION_ALLOC_REPLY,
+    VK_SESSION_FREE,
+    VK_SESSION_FREE_REPLY,
+    VK_SESSION_SUBMIT,
+    VK_SESSION_SUBMIT_REPLY,
+    VK_SESSION_SYNC_WAIT,
+    VK_SESSION_SYNC_WAIT_REPLY,
+    VK_SESSION_SURFACE_CREATE,
+    VK_SESSION_SURFACE_CREATE_REPLY,
+    VK_SESSION_SURFACE_DESTROY,
+    VK_SESSION_SURFACE_DESTROY_REPLY,
+    VK_SESSION_SWAPCHAIN_CREATE,
+    VK_SESSION_SWAPCHAIN_CREATE_REPLY,
+    VK_SESSION_SWAPCHAIN_ACQUIRE,
+    VK_SESSION_SWAPCHAIN_ACQUIRE_REPLY,
+    VK_SESSION_SWAPCHAIN_PRESENT,
+    VK_SESSION_SWAPCHAIN_PRESENT_REPLY,
     VK_SESSION_ERROR,
 };
 
@@ -736,16 +752,18 @@ MX_STATIC_ASSERT(mx_vk_opcodes_unique(), "Vulkan session opcode values must be u
 
 // Every command opcode is unique too, and never VK_CMD_NONE (0).
 constexpr mx_u32_t kMxVkCommandValues[] = {
-    VK_CMD_PIPELINE_BARRIER, VK_CMD_FILL_BUFFER, VK_CMD_COPY_BUFFER,
-    VK_CMD_DISPATCH, VK_CMD_BIND_VERTEX_BUFFER, VK_CMD_BIND_RENDER_TARGET, VK_CMD_DRAW,
+    VK_CMD_PIPELINE_BARRIER,   VK_CMD_FILL_BUFFER,        VK_CMD_COPY_BUFFER, VK_CMD_DISPATCH,
+    VK_CMD_BIND_VERTEX_BUFFER, VK_CMD_BIND_RENDER_TARGET, VK_CMD_DRAW,
 };
 
 constexpr bool mx_vk_commands_unique() {
     constexpr mx_size_t count = sizeof(kMxVkCommandValues) / sizeof(kMxVkCommandValues[0]);
     for (mx_size_t i = 0; i < count; ++i) {
-        if (kMxVkCommandValues[i] == VK_CMD_NONE) return false;
+        if (kMxVkCommandValues[i] == VK_CMD_NONE)
+            return false;
         for (mx_size_t j = i + 1; j < count; ++j) {
-            if (kMxVkCommandValues[i] == kMxVkCommandValues[j]) return false;
+            if (kMxVkCommandValues[i] == kMxVkCommandValues[j])
+                return false;
         }
     }
     return true;

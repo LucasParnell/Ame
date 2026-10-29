@@ -207,7 +207,8 @@ def run_ame(args):
                '-DCMAKE_TOOLCHAIN_FILE=' + str(ROOT / 'scripts/build/toolchain-aarch64.cmake'),
                '-DCMAKE_BUILD_TYPE=' + args.build_type, '-DANKO_BOARD=qemu-virt',
                '-DANKO_BUILD_DEV=ON', '-DDANGO_BUILD_LINUX_ARTIFACTS=OFF', '-DAME_IPC_BENCH_SERVER_CPU=0',
-               f'-DAME_IPC_BENCH_REFERENCE_FRAMING={int(args.reference_framing)}']
+               f'-DAME_IPC_BENCH_REFERENCE_FRAMING={int(args.reference_framing)}',
+               f'-DAME_IPC_BENCH_RING_ORDER={args.ring_order}']
     for key, value in config.items():
         suffix = 'SPIN' if key == 'include_spin' else key.upper()
         command.append(f'-DAME_IPC_BENCH_{suffix}={int(value)}')
@@ -219,21 +220,26 @@ def run_ame(args):
                     'benchmark build configuration mismatch')
     common_hash = digest(ROOT / 'benchmarks/ipc/workload.h')
     packed = not args.reference_framing and 'kFramePacked' in (ROOT / 'userland/lib/include/mochi/framed_ring.h').read_text()
+    ring_order = 6 if args.reference_framing else (args.ring_order or 9)
     metadata = {**host_metadata(), 'os': 'Ame', 'execution_kind': 'qemu-tcg',
                 'machine_id': args.machine_id, 'isa': 'aarch64', 'cpu_model': args.cpu,
                 'cpus': args.cpus, 'worker_cpus': min(2, args.cpus), 'memory_mib': 512, 'entry_el': 2,
                 'qemu_version': version(['qemu-system-aarch64', '--version']),
                 'qemu_acceleration': 'TCG default (no KVM); guest timer values are not physical CPU cycles',
                 'framing_implementation': 'slotwise_reference' if args.reference_framing else ('mochi_packed' if packed else 'mochi_batched'),
-                'framing_max_publication_slots': 1 if args.reference_framing else (128 if packed else 16),
+                'receive_protocol': 'compatible' if args.reference_framing else 'complete_records',
+                'local_credit_release_slots': None if args.reference_framing else (1 << ring_order) // 4,
+                'framing_max_publication_slots': 1 if args.reference_framing else ((1 << ring_order) if packed else 16),
                 'ring_library_sha256': digest(ROOT / 'userland/lib/include/mochi/ring.h'),
                 'framing_library_sha256': digest(ROOT / 'userland/lib/include/mochi/framed_ring.h'),
+                'channel_library_sha256': digest(ROOT / 'userland/lib/include/mochi/framed_channel.h'),
+                'app_ipc_library_sha256': digest(ROOT / 'userland/lib/include/mochi/app_ipc.h'),
                 'reference_library_sha256': digest(ROOT / 'benchmarks/ipc/slotwise_reference.h'),
                 'adapter_sha256': digest(ROOT / 'benchmarks/ipc/ame.cc'), 'kernel_sha256': digest(build / 'kernel/anko.bin'),
                 'build_type': cache['CMAKE_BUILD_TYPE'], 'benchmark_optimization': '-O2',
                 'compiler': version([cache.get('AARCH64_GXX') if cache.get('AARCH64_GXX', '').endswith('g++') else cache.get('CLANGXX_BIN', 'clang++'), '--version']),
                 'configure_command': command, 'development_kernel': True,
-                'ring_order': 7 if packed else 6, 'inline_slot_payload_bytes': 48,
+                'ring_order': ring_order, 'inline_slot_payload_bytes': 48,
                 'transport_framing': 'copied packed records; legacy FIRST/LAST fallback' if packed else 'FIRST/LAST native ring slots; copied reassembly for logical payloads over 48 bytes',
                 'tx_backpressure': 'cursor/credit wait in blocking mode; CPU relax in spin mode' if packed else 'yield when full in blocking mode; CPU relax in spin mode',
                 'adaptive_poll_max_iterations': int(cache.get('AME_IPC_BENCH_POLL_BUDGET', '64')) if packed else 0,
@@ -310,6 +316,8 @@ def parser():
                               help='kernel compiler configuration; Release by default')
             item.add_argument('--reference-framing', action='store_true',
                               help='slot-by-slot transport control with the current wait/wake fix')
+            item.add_argument('--ring-order', type=int, choices=(0, 7, 8, 9, 10), default=0,
+                              help='bulk ring capacity experiment; 0 chooses geometry for seven 4 KiB records')
             item.add_argument('--placement', choices=('both', 'same_cpu', 'different_cpu'), default='both')
             item.add_argument('--cpus', type=int, choices=(1, 2, 4), default=2)
             item.add_argument('--jobs', type=int, default=4)

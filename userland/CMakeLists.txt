@@ -433,11 +433,20 @@ add_custom_target(mochi_system ALL
         ${CMAKE_BINARY_DIR}/manifest.json
         ${CMAKE_CURRENT_BINARY_DIR}/manifest.v0)
 
-# Regression processes are built explicitly and never included in system.mxb.
-if(ANKO_BUILD_DEV)
+# On-demand USB workload for physical DVFS validation; no production bundle entry.
+function(add_power_load_probe)
+    mochi_service(test.power_load ${CMAKE_SOURCE_DIR}/tests/kernel/power_load.cc 0x12400000)
+    set_target_properties(test.power_load PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    add_custom_target(power_load_probe DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/test.power_load.mxi)
+endfunction()
+add_power_load_probe()
+
+# Standalone app target, available for explicit builds and USB streaming.
+# It is excluded from normal builds and never embedded in system.mxb.
+function(add_ipc_benchmark)
     # Isolated IPC workload, built on demand. Kernel optimization is controlled
     # by the chosen build tree; the benchmark loop uses the same -O2 as Linux.
-    foreach(pair ITERATIONS WARMUP SAMPLES ROUNDS WINDOW PAYLOAD_MASK SPIN SERVER_CPU REFERENCE_FRAMING POLL_BUDGET ADAPTIVE)
+    foreach(pair ITERATIONS WARMUP SAMPLES ROUNDS WINDOW PAYLOAD_MASK SPIN SERVER_CPU REFERENCE_FRAMING POLL_BUDGET ADAPTIVE RING_ORDER)
         if(NOT DEFINED AME_IPC_BENCH_${pair})
             if(pair STREQUAL "ITERATIONS")
                 set(AME_IPC_BENCH_${pair} 1024 CACHE STRING "IPC benchmark parameter")
@@ -473,9 +482,51 @@ if(ANKO_BUILD_DEV)
         ${CMAKE_SOURCE_DIR}/benchmarks/ipc/workload.h)
     target_compile_definitions(bench.ipc PRIVATE IPC_BENCH_CONTRACT_SHA256="${AME_IPC_CONTRACT_HASH}")
     target_compile_options(bench.ipc PRIVATE -O2)
-    foreach(pair ITERATIONS WARMUP SAMPLES ROUNDS WINDOW PAYLOAD_MASK SPIN SERVER_CPU REFERENCE_FRAMING POLL_BUDGET ADAPTIVE)
+    foreach(pair ITERATIONS WARMUP SAMPLES ROUNDS WINDOW PAYLOAD_MASK SPIN SERVER_CPU REFERENCE_FRAMING POLL_BUDGET ADAPTIVE RING_ORDER)
         target_compile_definitions(bench.ipc PRIVATE AME_IPC_BENCH_${pair}=${AME_IPC_BENCH_${pair}})
     endforeach()
+endfunction()
+add_ipc_benchmark()
+add_custom_target(ipc_bench_app DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/bench.ipc.mxi)
+
+mochi_service(bench.ipc.loan ${CMAKE_SOURCE_DIR}/benchmarks/ipc/loans.cc 0x13200000)
+set_target_properties(bench.ipc.loan PROPERTIES EXCLUDE_FROM_ALL TRUE)
+target_compile_options(bench.ipc.loan PRIVATE -O2)
+foreach(pair ITERATIONS WARMUP ROUNDS WINDOW SERVER_CPU)
+    target_compile_definitions(bench.ipc.loan PRIVATE AME_IPC_BENCH_${pair}=${AME_IPC_BENCH_${pair}})
+endforeach()
+add_custom_target(ipc_loan_app DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/bench.ipc.loan.mxi)
+
+mochi_service(bench.ipc.components ${CMAKE_SOURCE_DIR}/benchmarks/ipc/components.cc 0x13200000)
+set_target_properties(bench.ipc.components PROPERTIES EXCLUDE_FROM_ALL TRUE)
+target_compile_options(bench.ipc.components PRIVATE -O2)
+add_custom_target(ipc_components DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/bench.ipc.components.mxi)
+
+# Regression bundles are built explicitly and never included in system.mxb.
+if(ANKO_BUILD_DEV)
+    mochi_service(test.app_terminal ${CMAKE_SOURCE_DIR}/tests/kernel/app_terminal.cc 0x10E00000)
+    set_target_properties(test.app_terminal PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/app-terminal.mxb
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test/package-app-system.py ${CMAKE_BINARY_DIR} --terminal
+        DEPENDS mochi_system ${CMAKE_BINARY_DIR}/system.mxb
+            ${CMAKE_CURRENT_BINARY_DIR}/test.app_terminal.mxi
+            ${CMAKE_CURRENT_BINARY_DIR}/bench.ipc.mxi
+            ${CMAKE_SOURCE_DIR}/scripts/test/package-app-system.py
+        VERBATIM)
+    add_custom_target(app_terminal_regressions DEPENDS ${CMAKE_BINARY_DIR}/app-terminal.mxb)
+    mochi_service(test.app_system ${CMAKE_SOURCE_DIR}/tests/kernel/app_system.cc 0x10F00000
+        msh/msh_fs.cc msh/msh_io.cc)
+    target_compile_options(test.app_system PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(test.app_system PRIVATE -Wl,--gc-sections)
+    set_target_properties(test.app_system PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/app-system.mxb
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test/package-app-system.py ${CMAKE_BINARY_DIR}
+        DEPENDS mochi_system ${CMAKE_BINARY_DIR}/system.mxb
+            ${CMAKE_CURRENT_BINARY_DIR}/test.app_system.mxi
+            ${CMAKE_CURRENT_BINARY_DIR}/bench.ipc.mxi
+            ${CMAKE_SOURCE_DIR}/scripts/test/package-app-system.py
+        VERBATIM)
+    add_custom_target(app_system_regressions DEPENDS ${CMAKE_BINARY_DIR}/app-system.mxb)
     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/ipc-bench.mxb
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test/package-ipc-bench.py ${CMAKE_BINARY_DIR}
         DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/bench.ipc.mxi

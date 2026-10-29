@@ -68,21 +68,25 @@ SysError register_native_dma_arena(IommuDeviceId device, PhysAddr base, u64 size
         return E_INVALID;
     }
     const auto* backend = backend_for(device);
-    if (!backend) return E_NOTIMPL;
+    if (!backend)
+        return E_NOTIMPL;
     kernel::LockGuard guard(g_native_lock);
     NativeOwner* native = nullptr;
     for (u32 i = 0; i < kMaxNativeOwners; ++i) {
         auto& owner = g_owners[i];
         if (owner.used && owner.device.segment == device.segment &&
-            owner.device.requester_or_stream_id == device.requester_or_stream_id) native = &owner;
+            owner.device.requester_or_stream_id == device.requester_or_stream_id)
+            native = &owner;
         for (u32 j = 0; j < owner.arena_count; ++j) {
             const auto& arena = owner.arenas[j];
             if (base < arena.base + arena.size && arena.base < base + size) {
                 if (owner.device.segment == device.segment &&
                     owner.device.requester_or_stream_id == device.requester_or_stream_id &&
                     arena.base == base && arena.size == size) {
-                    if (owner.failed || !owner.domain || domain_state(*owner.domain) != DomainState::Active ||
-                        stream_domain(device) != owner.domain) return E_FAULT;
+                    if (owner.failed || !owner.domain ||
+                        domain_state(*owner.domain) != DomainState::Active ||
+                        stream_domain(device) != owner.domain)
+                        return E_FAULT;
                     return E_OK;
                 }
                 return E_PERM;
@@ -91,18 +95,24 @@ SysError register_native_dma_arena(IommuDeviceId device, PhysAddr base, u64 size
     }
     if (!native) {
         for (u32 i = 0; i < kMaxNativeOwners; ++i) {
-            if (g_owners[i].used) continue;
+            if (g_owners[i].used)
+                continue;
             native = &g_owners[i];
             *native = {};
             native->used = true;
             native->device = device;
-            if (g_next_identity == ~0ull) { native->used = false; return E_OVERFLOW; }
+            if (g_next_identity == ~0ull) {
+                native->used = false;
+                return E_OVERFLOW;
+            }
             native->identity = g_next_identity++;
             break;
         }
     }
-    if (!native || native->arena_count == kMaxNativeArenas) return E_OVERFLOW;
-    if (native->failed) return E_FAULT;
+    if (!native || native->arena_count == kMaxNativeArenas)
+        return E_OVERFLOW;
+    if (native->failed)
+        return E_FAULT;
 
     IommuOwnerOps owner{};
     owner.query = native_owner_query;
@@ -139,7 +149,8 @@ SysError register_native_dma_arena(IommuDeviceId device, PhysAddr base, u64 size
         return rc;
     }
 
-    if (stream_domain(device) == native->domain) return E_OK;
+    if (stream_domain(device) == native->domain)
+        return E_OK;
     rc = domain_attach(*native->domain, device);
     if (rc != E_OK) {
         native->failed = true;
@@ -158,7 +169,8 @@ SysError unregister_native_dma_arenas(IommuDeviceId device) {
     kernel::LockGuard guard(g_native_lock);
     for (auto& owner : g_owners) {
         if (!owner.used || owner.device.segment != device.segment ||
-            owner.device.requester_or_stream_id != device.requester_or_stream_id) continue;
+            owner.device.requester_or_stream_id != device.requester_or_stream_id)
+            continue;
         if (owner.domain) {
             if (domain_destroy(owner.domain) != E_OK) {
                 owner.failed = true;

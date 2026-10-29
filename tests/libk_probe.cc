@@ -15,7 +15,8 @@
 static int failures = 0;
 
 static void check(bool cond) {
-    if (!cond) ++failures;
+    if (!cond)
+        ++failures;
 }
 
 int main() {
@@ -26,11 +27,13 @@ int main() {
     check(libk::copy(libk::as_bytes(dst, 4), libk::as_bytes(src, 8)) == 4);
     check(dst[0] == 1 && dst[3] == 4 && dst[4] == 0);
     check(libk::copy_exact(libk::as_bytes(dst, 8), libk::as_bytes(src, 8)));
-    for (int i = 0; i < 8; ++i) check(dst[i] == src[i]);
+    for (int i = 0; i < 8; ++i)
+        check(dst[i] == src[i]);
     check(!libk::copy_exact(libk::as_bytes(dst, 4), libk::as_bytes(src, 8)));
 
     libk::fill(libk::as_bytes(dst, 8), 0xAB);
-    for (int i = 0; i < 8; ++i) check(dst[i] == 0xAB);
+    for (int i = 0; i < 8; ++i)
+        check(dst[i] == 0xAB);
 
     check(libk::copy_n(libk::as_bytes(dst, 8), libk::as_bytes(src, 8), 8));
     check(!libk::copy_n(libk::as_bytes(dst, 2), libk::as_bytes(src, 8), 8)); // dst too small
@@ -59,18 +62,37 @@ int main() {
     libk::fill({nullptr, 8}, 0); // invalid direct view must not dereference null
     check(libk::copy_n({}, {}, 0));
     check(libk::zero(dst));
-    for (auto byte : dst) check(byte == 0);
-    struct Record { unsigned char tag; std::uint32_t count; } record;
+    for (auto byte : dst)
+        check(byte == 0);
+    struct Record {
+        unsigned char tag;
+        std::uint32_t count;
+    } record;
     libk::fill(libk::as_bytes(&record, sizeof(record)), 0xAB);
     check(libk::zero(record));
     const auto* representation = reinterpret_cast<const unsigned char*>(&record);
-    for (std::size_t i = 0; i < sizeof(record); ++i) check(representation[i] == 0);
+    for (std::size_t i = 0; i < sizeof(record); ++i)
+        check(representation[i] == 0);
     libk::fill(libk::as_bytes(dst), 0xAB);
     check(libk::zero(libk::slice(libk::as_bytes(dst), 2, 3)));
     check(dst[1] == 0xAB && dst[2] == 0 && dst[4] == 0 && dst[5] == 0xAB);
     check(libk::zero(dst + 5, 2) && dst[5] == 0 && dst[6] == 0 && dst[7] == 0xAB);
     check(!libk::zero(nullptr, 1));
     check(libk::zero(nullptr, 0));
+
+    alignas(8) unsigned char left[19]{}, right[19]{};
+    check(libk::equal({}, {}));
+    check(!libk::equal({nullptr, 1}, {nullptr, 1}));
+    check(!libk::equal(libk::as_bytes(left, 18), libk::as_bytes(right)));
+    for (unsigned i = 0; i < sizeof(left); ++i) {
+        right[i] = 1;
+        check(!libk::equal(libk::as_bytes(left), libk::as_bytes(right)));
+        right[i] = 0;
+    }
+    check(libk::equal(libk::as_bytes(left), libk::as_bytes(right)));
+    check(libk::equal(libk::as_bytes(left + 1, 18), libk::as_bytes(right + 1, 18)));
+    right[18] = 1;
+    check(!libk::equal(libk::as_bytes(left + 1, 18), libk::as_bytes(right + 1, 18)));
 
     // --- str ---------------------------------------------------------------
     check(libk::str::length("hello") == 5);
@@ -121,14 +143,18 @@ int main() {
     alignas(8) unsigned char move[64];
     for (unsigned count = 0; count <= 32; ++count) {
         for (unsigned shift = 1; shift <= 16; ++shift) {
-            for (unsigned i = 0; i < sizeof(move); ++i) move[i] = i;
+            for (unsigned i = 0; i < sizeof(move); ++i)
+                move[i] = i;
             check(libk::move_n(libk::as_bytes(move + shift, sizeof(move) - shift),
                                libk::as_bytes(move), count));
-            for (unsigned i = 0; i < count; ++i) check(move[shift + i] == i);
-            for (unsigned i = 0; i < sizeof(move); ++i) move[i] = i;
+            for (unsigned i = 0; i < count; ++i)
+                check(move[shift + i] == i);
+            for (unsigned i = 0; i < sizeof(move); ++i)
+                move[i] = i;
             check(libk::move_n(libk::as_bytes(move),
                                libk::as_bytes(move + shift, sizeof(move) - shift), count));
-            for (unsigned i = 0; i < count; ++i) check(move[i] == shift + i);
+            for (unsigned i = 0; i < count; ++i)
+                check(move[i] == shift + i);
         }
     }
     check(!libk::move_n(libk::as_bytes(move, 1), libk::as_bytes(move), 2));

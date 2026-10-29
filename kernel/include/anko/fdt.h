@@ -8,18 +8,27 @@
 namespace fdt {
 
 // Token types (FDT spec §5.4).
-constexpr u32 kMagic     = 0xD00D'FEEDu;
+constexpr u32 kMagic = 0xD00D'FEEDu;
 constexpr u32 kBeginNode = 1;
-constexpr u32 kEndNode   = 2;
-constexpr u32 kProp      = 3;
-constexpr u32 kNop       = 4;
-constexpr u32 kEnd       = 9;
+constexpr u32 kEndNode = 2;
+constexpr u32 kProp = 3;
+constexpr u32 kNop = 4;
+constexpr u32 kEnd = 9;
 
 // Frequently consumed properties are classified once per strings-block offset,
 // rather than compared against the same literals for every node and consumer.
 // Unknown properties still carry their original name (notably /aliases keys).
 enum class Property : u8 {
-    Unknown, Compatible, Reg, Ranges, Status, Width, Height, Stride, Format, StdoutPath,
+    Unknown,
+    Compatible,
+    Reg,
+    Ranges,
+    Status,
+    Width,
+    Height,
+    Stride,
+    Format,
+    StdoutPath,
 };
 
 // Callbacks for fdt::walk(). begin_node/end_node and one property callback
@@ -35,6 +44,9 @@ struct Callbacks {
     void (*prop)(void* ctx, const char* name, const u8* data, u32 len, u32 depth);
     void (*property)(void* ctx, Property id, const char* name, const u8* data, u32 len,
                      u32 depth) = nullptr;
+    // Pure name predicate, cached by string offset for this walk. Filtering
+    // suppresses callbacks only; every property and name is still validated.
+    bool (*filter)(const char* name, u32 length) = nullptr;
 };
 
 // Walk the structure section of a DTB blob, delivering events to cb.
@@ -43,6 +55,7 @@ bool walk(const u8* dtb, const Callbacks& cb, usize available = 0);
 
 // Walk the DTB memory reservation block.  The callback receives each non-zero
 // [address, size] pair and may return false to abort the walk.
-bool walk_memreserve(const u8* dtb, void* ctx, bool (*entry)(void* ctx, u64 address, u64 size), usize available = 0);
+bool walk_memreserve(const u8* dtb, void* ctx, bool (*entry)(void* ctx, u64 address, u64 size),
+                     usize available = 0);
 
 } // namespace fdt

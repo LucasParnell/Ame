@@ -38,15 +38,18 @@ constexpr uint32_t kWaitSpins = 200000;
 alignas(4096) unsigned char g_arena_mem[4096];
 
 static bool nameservice_resolve(const mochi::SpscEndpoint& ns, const char* name) {
-    if (!mochi::nameservice::try_resolve_request(ns, name)) return false;
+    if (!mochi::nameservice::try_resolve_request(ns, name))
+        return false;
     RingSlot slot{};
     for (uint32_t spins = 0; spins < kWaitSpins; ++spins) {
         if (ns.try_recv(&slot)) {
             MxEndpointDesc endpoint{};
             if (mochi::message_get(slot, &endpoint, MSG_NS_RESOLVE_REPLY)) {
-                return endpoint.magic == MX_ENDPOINT_MAGIC && endpoint.version == MX_ENDPOINT_VERSION;
+                return endpoint.magic == MX_ENDPOINT_MAGIC &&
+                       endpoint.version == MX_ENDPOINT_VERSION;
             }
-            if (slot.type == MSG_NS_ERROR) return false;
+            if (slot.type == MSG_NS_ERROR)
+                return false;
         }
         sys_yield();
     }
@@ -56,7 +59,8 @@ static bool nameservice_resolve(const mochi::SpscEndpoint& ns, const char* name)
 static uint32_t fs_root_entry_count(const mochi::SpscEndpoint& fs) {
     FsReaddirRequest req{};
     req.handle = kRootHandle;
-    if (!fs.send_spinning(FS_READDIR, &req, sizeof(req))) return 0;
+    if (!fs.send_spinning(FS_READDIR, &req, sizeof(req)))
+        return 0;
     RingSlot slot{};
     for (uint32_t spins = 0; spins < kWaitSpins; ++spins) {
         if (fs.try_recv(&slot)) {
@@ -64,7 +68,8 @@ static uint32_t fs_root_entry_count(const mochi::SpscEndpoint& fs) {
             if (mochi::message_get(slot, &reply, FS_READDIR_REPLY)) {
                 return reply.status == MX_OK ? reply.entry_count : 0;
             }
-            if (slot.type == FS_ERROR) return 0;
+            if (slot.type == FS_ERROR)
+                return 0;
         }
         sys_yield();
     }
@@ -86,7 +91,8 @@ extern "C" [[noreturn]] void _start() {
     if (sys_arena_register(reinterpret_cast<uint64_t>(g_arena_mem), sizeof(g_arena_mem), 0) < 0) {
         mochi::log_write(mochi::LogLevel::Error, "arena registration failed\n");
         mx_exit(MX_ERR_NOMEM);
-        while (true) mx_yield();
+        while (true)
+            mx_yield();
     }
     mochi::Arena arena(g_arena_mem, sizeof(g_arena_mem));
     if (char* line = arena.alloc<char>(64)) {
@@ -96,17 +102,17 @@ extern "C" [[noreturn]] void _start() {
 
     // Declared `uses` session: nameservice.  Resolve a peer, then log whether
     // the round trip succeeded.  Failure is reported, not fatal.
-    const auto ns = mochi::boot::map_endpoint(boot,
-        {"ns.tx", kVaNsTx, "ns.server.db"}, {"ns.rx", kVaNsRx, "ns.reply.db"});
+    const auto ns = mochi::boot::map_endpoint(boot, {"ns.tx", kVaNsTx, "ns.server.db"},
+                                              {"ns.rx", kVaNsRx, "ns.reply.db"});
     const bool ns_wired = ns.valid();
     mochi::log_raw_marker(ns_wired && nameservice_resolve(ns, "io.fs")
-        ? "nameservice: resolved io.fs\n"
-        : "nameservice: session unavailable\n");
+                              ? "nameservice: resolved io.fs\n"
+                              : "nameservice: session unavailable\n");
 
     // Declared `uses` session: io.fs.  Enumerate the root directory.
-    const auto fs_session = mochi::boot::map_endpoint(boot,
-        {"fs.cmd.ring", kVaFsTx, "fs.cmd.doorbell"},
-        {"fs.reply.ring", kVaFsRx, "fs.reply.doorbell"});
+    const auto fs_session =
+        mochi::boot::map_endpoint(boot, {"fs.cmd.ring", kVaFsTx, "fs.cmd.doorbell"},
+                                  {"fs.reply.ring", kVaFsRx, "fs.reply.doorbell"});
     if (fs_session.valid()) {
         mochi::log_counter("metric.app.hello.root.entries", fs_root_entry_count(fs_session));
     } else {

@@ -14,6 +14,10 @@ constexpr mx_size_t kMaxObjectNameSize = 100;
 constexpr mx_size_t kMaxTrustedKeys = 8;
 constexpr mx_u64_t kManifestSchemaVersion = 2;
 
+mx_u64_t timestamp(VerifyProfile* profile) {
+    return profile && profile->clock_ns ? profile->clock_ns() : 0;
+}
+
 struct ManifestEnvelope {
     MxSignedManifestHeader header{};
     const mx_u8_t* body = nullptr;
@@ -50,7 +54,8 @@ bool hash_matches_json(json::Value value, const mx_u8_t expected[MX_SHA256_SIZE]
     return true;
 }
 
-const char* validate_bundle_header(const Bundle& bundle, integrity::Progress progress) {
+const char* validate_bundle_header(const Bundle& bundle, integrity::Progress progress,
+                                   const integrity::Backend* backend) {
     const auto& header = bundle.header;
     if (header.magic != MX_BUNDLE_MAGIC || header.version != MX_BUNDLE_VERSION ||
         header.header_size != sizeof(header)) {
@@ -83,8 +88,9 @@ const char* validate_bundle_header(const Bundle& bundle, integrity::Progress pro
         return "invalid manifest range";
     }
 
-    const mx_u32_t checksum = integrity::crc32c_zero_field(
-        bundle.data, bundle.size, kBundleChecksumOffset, sizeof(header.bundle_crc32c), progress);
+    const mx_u32_t checksum =
+        integrity::crc32c_zero_field(bundle.data, bundle.size, kBundleChecksumOffset,
+                                     sizeof(header.bundle_crc32c), progress, backend);
     if (checksum != header.bundle_crc32c) {
         return "bundle checksum mismatch";
     }
@@ -126,10 +132,10 @@ const char* read_manifest_envelope(const Bundle& bundle, ManifestEnvelope& envel
 
 const mx_u8_t* find_trusted_key(const ManifestEnvelope& envelope,
                                 const mx_u8_t (*trusted_keys)[MX_ED25519_PUBLIC_KEY_SIZE],
-                                mx_size_t key_count) {
+                                mx_size_t key_count, const integrity::Backend* backend) {
     for (mx_size_t index = 0; index < key_count; ++index) {
         mx_u8_t key_id[MX_SHA256_SIZE];
-        integrity::sha256(trusted_keys[index], MX_ED25519_PUBLIC_KEY_SIZE, key_id);
+        integrity::sha256(trusted_keys[index], MX_ED25519_PUBLIC_KEY_SIZE, key_id, {}, backend);
         if (integrity::bytes_equal(key_id, envelope.header.public_key_id, sizeof(key_id))) {
             return trusted_keys[index];
         }
@@ -139,21 +145,28 @@ const mx_u8_t* find_trusted_key(const ManifestEnvelope& envelope,
 
 const char* authenticate_manifest(const ManifestEnvelope& envelope,
                                   const mx_u8_t (*trusted_keys)[MX_ED25519_PUBLIC_KEY_SIZE],
-                                  mx_size_t key_count) {
+                                  mx_size_t key_count, VerifyProfile* profile,
+                                  const integrity::Backend* backend) {
+    const auto started = timestamp(profile);
     mx_u8_t digest[MX_SHA256_SIZE];
-    integrity::sha256(envelope.body, envelope.header.body_size, digest);
+    integrity::sha256(envelope.body, envelope.header.body_size, digest, {}, backend);
     if (!integrity::bytes_equal(digest, envelope.header.body_sha256, sizeof(digest))) {
         return "manifest digest mismatch";
     }
 
-    const mx_u8_t* public_key = find_trusted_key(envelope, trusted_keys, key_count);
+    const mx_u8_t* public_key = find_trusted_key(envelope, trusted_keys, key_count, backend);
     if (!public_key) {
         return "manifest key is not trusted";
     }
+    const auto signature_started = timestamp(profile);
+    if (profile)
+        profile->manifest_hash_ns = signature_started - started;
     if (!verify_ed25519_signature(envelope.signature, public_key, envelope.body,
                                   envelope.header.body_size)) {
         return "manifest signature rejected";
     }
+    if (profile)
+        profile->signature_ns = timestamp(profile) - signature_started;
     return nullptr;
 }
 
@@ -190,12 +203,22 @@ bool has_duplicate_name(const Bundle& bundle, mx_u32_t index, const char* name) 
 }
 
 bool object_digest_matches(const Bundle& bundle, const MxBundleObject& entry,
-                           integrity::Progress progress) {
+                           integrity::Progress progress, VerifyProfile* profile,
+                           const integrity::Backend* backend) {
     const mx_u8_t* payload = bundle.data + entry.offset;
     mx_u8_t digest[MX_SHA256_SIZE];
-    integrity::sha256(payload, entry.size, digest, progress);
-    return integrity::bytes_equal(digest, entry.sha256, sizeof(digest)) &&
-           integrity::crc32c(payload, entry.size, progress) == entry.crc32c;
+    const auto started = timestamp(profile);
+    integrity::sha256(payload, entry.size, digest, progress, backend);
+    const auto hashed = timestamp(profile);
+    if (profile)
+        profile->object_sha_ns += hashed - started;
+
+    if (!integrity::bytes_equal(digest, entry.sha256, sizeof(digest)))
+        return false;
+    const auto checksum = integrity::crc32c(payload, entry.size, progress, backend);
+    if (profile)
+        profile->object_crc_ns += timestamp(profile) - hashed;
+    return checksum == entry.crc32c;
 }
 
 bool catalog_entry_matches(json::Value catalog, mx_u32_t index, const MxBundleObject& entry,
@@ -216,7 +239,8 @@ bool catalog_entry_matches(json::Value catalog, mx_u32_t index, const MxBundleOb
 }
 
 const char* validate_object_catalog(const Bundle& bundle, json::Value catalog,
-                                    integrity::Progress progress) {
+                                    integrity::Progress progress, VerifyProfile* profile,
+                                    const integrity::Backend* backend) {
     const auto& header = bundle.header;
     mx_u64_t previous_end = header.string_table_offset + header.string_table_size;
 
@@ -236,7 +260,7 @@ const char* validate_object_catalog(const Bundle& bundle, json::Value catalog,
         if (has_duplicate_name(bundle, index, name)) {
             return "duplicate object";
         }
-        if (!object_digest_matches(bundle, entry, progress)) {
+        if (!object_digest_matches(bundle, entry, progress, profile, backend)) {
             return "object digest mismatch";
         }
 
@@ -304,7 +328,8 @@ bool object(const Bundle& bundle, mx_u32_t index, MxBundleObject& entry, const c
 
 const char* verify_bundle(const mx_u8_t* data, mx_size_t size,
                           const mx_u8_t (*trusted_keys)[MX_ED25519_PUBLIC_KEY_SIZE],
-                          mx_size_t key_count, Bundle& out, integrity::Progress progress) {
+                          mx_size_t key_count, Bundle& out, integrity::Progress progress,
+                          VerifyProfile* profile, const integrity::Backend* backend) {
     out = {};
     if (!data || size < sizeof(MxBundleHeader)) {
         return "truncated bundle";
@@ -318,15 +343,19 @@ const char* verify_bundle(const mx_u8_t* data, mx_size_t size,
     candidate.size = size;
     libk::memcpy(&candidate.header, data, sizeof(candidate.header));
     progress.poll();
-    if (const char* error = validate_bundle_header(candidate, progress)) {
+    auto started = timestamp(profile);
+    if (const char* error = validate_bundle_header(candidate, progress, backend)) {
         return error;
     }
+    if (profile)
+        profile->header_ns = timestamp(profile) - started;
 
     ManifestEnvelope envelope;
     if (const char* error = read_manifest_envelope(candidate, envelope)) {
         return error;
     }
-    if (const char* error = authenticate_manifest(envelope, trusted_keys, key_count)) {
+    if (const char* error =
+            authenticate_manifest(envelope, trusted_keys, key_count, profile, backend)) {
         return error;
     }
     progress.poll();
@@ -334,12 +363,20 @@ const char* verify_bundle(const mx_u8_t* data, mx_size_t size,
     candidate.manifest = reinterpret_cast<const char*>(envelope.body);
     candidate.manifest_size = envelope.header.body_size;
     json::Value catalog;
+    started = timestamp(profile);
     if (const char* error = read_signed_catalog(candidate, catalog)) {
         return error;
     }
-    if (const char* error = validate_object_catalog(candidate, catalog, progress)) {
+    if (profile)
+        profile->json_ns = timestamp(profile) - started;
+
+    started = timestamp(profile);
+    if (const char* error =
+            validate_object_catalog(candidate, catalog, progress, profile, backend)) {
         return error;
     }
+    if (profile)
+        profile->objects_ns = timestamp(profile) - started;
 
     // Publish the view only after its signature and every object have passed.
     out = candidate;
@@ -347,11 +384,13 @@ const char* verify_bundle(const mx_u8_t* data, mx_size_t size,
 }
 
 bool find_object(const Bundle& bundle, const char* wanted, MxBundleObject& out) {
-    if (!wanted || bundle.header.object_count > kMaxObjects) return false;
+    if (!wanted || bundle.header.object_count > kMaxObjects)
+        return false;
     for (mx_u32_t i = 0; i < bundle.header.object_count; ++i) {
         MxBundleObject candidate{};
         const char* name = nullptr;
-        if (!object(bundle, i, candidate, name)) return false;
+        if (!object(bundle, i, candidate, name))
+            return false;
         if (libk::str::equal(name, wanted)) {
             out = candidate;
             return true;

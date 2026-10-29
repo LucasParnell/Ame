@@ -19,7 +19,7 @@ static_assert(demo_ping::kVaRecvRing + ring_span <= demo_ping::kVaConsoleRing);
 static_assert(demo_ping::kVaConsoleRing + ring_span <= demo_ping::kVaNsRequestRing);
 static_assert(demo_pong::kVaRecvRing + ring_span <= demo_pong::kVaSendRing);
 static_assert(demo_pong::kVaSendRing + ring_span <= demo_pong::kVaLogRing);
-}
+} // namespace
 // Exercise production IPC helpers with deterministic syscall callbacks.
 #include <cassert>
 #include <cstddef>
@@ -57,14 +57,21 @@ void reset() {
 void parked_service() {
     reset();
     struct Blocked {};
-    host_on_doorbell_create = [](mx_handle_t* out) -> mx_status_t { *out = 17; return MX_OK; };
+    host_on_doorbell_create = [](mx_handle_t* out) -> mx_status_t {
+        *out = 17;
+        return MX_OK;
+    };
     host_notifies = 9;
     host_on_wait = []() -> mx_i64_t {
         assert(host_wait_expected == 9 && host_yields == 0);
         throw Blocked{}; // the real syscall would leave this thread blocked
     };
     bool blocked = false;
-    try { mochi::park(); } catch (Blocked) { blocked = true; }
+    try {
+        mochi::park();
+    } catch (Blocked) {
+        blocked = true;
+    }
     assert(blocked && host_yields == 0);
     reset();
 }
@@ -76,7 +83,8 @@ void session_waits() {
         RingSlot slots[1u << MX_DEFAULT_RING_ORDER]{};
     };
     static SessionStorage active{}, stale{};
-    active = {}; stale = {};
+    active = {};
+    stale = {};
     MxSessionDirectory directory{};
     directory.count = 2;
     mochi::ServerSessions sessions{};
@@ -104,7 +112,10 @@ void session_waits() {
     };
     assert(sessions.wait(1, 6) == MX_OK);
     assert(input.try_push_msg(kType, 23u));
-    host_on_wait = []() -> mx_i64_t { assert(false); return MX_ERR_DEAD; };
+    host_on_wait = []() -> mx_i64_t {
+        assert(false);
+        return MX_ERR_DEAD;
+    };
     assert(sessions.wait(1, 7) == MX_OK);
     directory.count = MX_MAX_SESSIONS + 1;
     assert(sessions.wait(1, 7) == MX_ERR_BAD_PROTOCOL);
@@ -125,7 +136,10 @@ void inbox_wait_races() {
 
     // A queued request skips the syscall; waiting must not consume its payload.
     assert(last.try_push_msg(kType, 73u));
-    host_on_wait = []() -> mx_i64_t { assert(false); return MX_ERR_DEAD; };
+    host_on_wait = []() -> mx_i64_t {
+        assert(false);
+        return MX_ERR_DEAD;
+    };
     assert(inbox.wait(0) == MX_OK && last.depth() == 1);
     RingSlot slot{};
     assert(last.try_pop(&slot));
@@ -133,13 +147,15 @@ void inbox_wait_races() {
     // A publication after the final head check claims a sleep flag and changes
     // the expected counter. Every ring, including the last one, must be armed.
     host_on_wait = []() -> mx_i64_t {
-        for (const auto* page : inbox_rings) assert(page->flags.receiver_about_to_sleep == 1);
+        for (const auto* page : inbox_rings)
+            assert(page->flags.receiver_about_to_sleep == 1);
         assert((mochi::Ring{inbox_rings[7], kOrder, 1}.try_push_msg(kType, 91u)));
         assert(host_notifies != host_wait_expected);
         return MX_OK;
     };
     assert(inbox.wait(0) == MX_OK && last.depth() == 1);
-    for (const auto* page : inbox_rings) assert(!page->flags.receiver_about_to_sleep);
+    for (const auto* page : inbox_rings)
+        assert(!page->flags.receiver_about_to_sleep);
     assert(last.try_pop(&slot));
 
     // Exit/session publication is independent of ring flags. Its notification
@@ -157,7 +173,8 @@ void inbox_wait_races() {
     // remap these addresses immediately after the caller regains control.
     host_on_wait = []() -> mx_i64_t { return MX_ERR_DEAD; };
     assert(inbox.wait(host_notifies) == MX_ERR_DEAD);
-    for (const auto* page : inbox_rings) assert(!page->flags.receiver_about_to_sleep);
+    for (const auto* page : inbox_rings)
+        assert(!page->flags.receiver_about_to_sleep);
 
     // Inactive sessions and zero-client servers still wait for lifecycle events.
     inbox_rings[3] = nullptr;
@@ -181,6 +198,46 @@ mx_i64_t wake_and_enqueue() {
     return MX_OK;
 }
 
+void bounded_receive() {
+    reset();
+    RingSlot slot{};
+    enqueue();
+    host_on_wait = []() -> mx_i64_t {
+        assert(false);
+        return MX_ERR_DEAD;
+    };
+    assert(ring.pop_bounded(&slot, 100));
+    // Publication between the empty check and arming must avoid sleeping.
+    host_on_read = enqueue;
+    assert(ring.pop_bounded(&slot, 100));
+    assert(!storage.page.flags.receiver_about_to_sleep);
+    host_on_read = nullptr;
+    // A spurious wake must re-arm; publication just before parking notifies.
+    static unsigned waits;
+    waits = 0;
+    host_on_wait = []() -> mx_i64_t {
+        assert(host_wait_deadline == 100);
+        assert(storage.page.flags.receiver_about_to_sleep == 1);
+        if (++waits == 2) {
+            enqueue();
+            assert(host_notifies != host_wait_expected);
+        }
+        return MX_OK;
+    };
+    assert(ring.pop_bounded(&slot, 100) && waits == 2);
+    assert(!storage.page.flags.receiver_about_to_sleep && !host_yields);
+    host_on_wait = nullptr;
+    assert(!ring.pop_bounded(&slot, 100) && host_now == 100);
+    assert(!storage.page.flags.receiver_about_to_sleep);
+    // A reply already queued at the deadline still belongs to this request.
+    enqueue();
+    assert(ring.pop_bounded(&slot, 100));
+    host_on_wait = []() -> mx_i64_t { return MX_ERR_DEAD; };
+    assert(!ring.pop_bounded(&slot, 200));
+    assert(!storage.page.flags.receiver_about_to_sleep && !host_yields);
+    reset();
+}
+
 void invalid_and_full() {
     reset();
     const mochi::Ring missing{};
@@ -196,7 +253,8 @@ void invalid_and_full() {
     assert(ring.push_bytes(kType, nullptr, 1) == 0);
     assert(host_yields == 0 && ring.depth() == 0);
 
-    for (unsigned i = 0; i < ring.capacity(); ++i) enqueue();
+    for (unsigned i = 0; i < ring.capacity(); ++i)
+        enqueue();
     assert(!ring.push_msg(kType, 7u, 0) && host_yields == 0);
     assert(!ring.push_msg(kType, 7u, 2) && host_yields == 2);
     host_on_yield = drain_one;
@@ -207,7 +265,8 @@ void invalid_and_full() {
 void byte_runs_and_wrap() {
     reset();
     uint8_t data[MX_RING_INLINE_PAYLOAD * 5 + 7];
-    for (unsigned i = 0; i < sizeof(data); ++i) data[i] = static_cast<uint8_t>(i);
+    for (unsigned i = 0; i < sizeof(data); ++i)
+        data[i] = static_cast<uint8_t>(i);
     const unsigned prefix = MX_RING_INLINE_PAYLOAD * ring.capacity();
     assert(ring.push_bytes(kType, data, sizeof(data)) == prefix);
     assert(host_yields == 0);
@@ -215,13 +274,16 @@ void byte_runs_and_wrap() {
     for (unsigned i = 0; i < ring.capacity(); ++i) {
         assert(ring.try_pop(&slot));
         assert(slot.seq == i && slot.length == MX_RING_INLINE_PAYLOAD);
-        for (unsigned j = 0; j < slot.length; ++j) assert(slot.payload[j] == data[i * slot.length + j]);
+        for (unsigned j = 0; j < slot.length; ++j)
+            assert(slot.payload[j] == data[i * slot.length + j]);
     }
     assert(ring.push_bytes(kType, data + prefix, sizeof(data) - prefix) == sizeof(data) - prefix);
     assert(ring.try_pop(&slot) && slot.length == MX_RING_INLINE_PAYLOAD);
     assert(ring.try_pop(&slot) && slot.length == 7);
-    for (unsigned j = 0; j < 7; ++j) assert(slot.payload[j] == data[prefix + MX_RING_INLINE_PAYLOAD + j]);
-    for (unsigned j = 7; j < MX_RING_INLINE_PAYLOAD; ++j) assert(slot.payload[j] == 0);
+    for (unsigned j = 0; j < 7; ++j)
+        assert(slot.payload[j] == data[prefix + MX_RING_INLINE_PAYLOAD + j]);
+    for (unsigned j = 7; j < MX_RING_INLINE_PAYLOAD; ++j)
+        assert(slot.payload[j] == 0);
     storage.page.head.v = storage.page.tail.v = ~mx_u64_t{0};
     enqueue();
     uint32_t out = 0;
@@ -280,7 +342,8 @@ void protocol_replies() {
     assert(decoded.magic == desc.magic);
 
     const mochi::Channel channel{endpoint};
-    for (unsigned i = 0; i < ring.capacity(); ++i) assert(endpoint.tx().try_push_msg(kType, 1u));
+    for (unsigned i = 0; i < ring.capacity(); ++i)
+        assert(endpoint.tx().try_push_msg(kType, 1u));
     uint32_t out = 0;
     assert(!channel.call(kType, 1u, kType, &out, 2));
     assert(host_yields == 2); // deadline bounds the send as well as the receive
@@ -302,7 +365,8 @@ void usb_transfer_hot_path() {
     mochi::usb::TransferServer server;
     static_cast<mochi::SpscEndpoint&>(server) = {&reply.page, &storage.page, kOrder, 2, 1};
     const MxUsbSubmit request{99, 1, 2, 8, 16, 1000, 0, 0};
-    for (unsigned i = 0; i < ring.capacity(); ++i) assert(client.try_submit(request));
+    for (unsigned i = 0; i < ring.capacity(); ++i)
+        assert(client.try_submit(request));
     assert(!client.try_submit(request));
     assert(host_yields == 0 && host_notifies == 0);
     RingSlot slot{};
@@ -326,7 +390,9 @@ void cold_driver_bindings() {
     boot.version = MX_BOOT_VERSION;
     auto add = [&](const char* name, mx_u32_t type, mx_handle_t cap, mx_u64_t value = 0) {
         auto& entry = boot.entries[boot.entry_count++];
-        entry.type = type; entry.handle = cap; entry.aux0 = value;
+        entry.type = type;
+        entry.handle = cap;
+        entry.aux0 = value;
         libk::str::copy_into(entry.name, sizeof(entry.name), name);
     };
     add("i2c.0.tx", MX_BOOT_ENTRY_RING, 11, 6);
@@ -347,7 +413,10 @@ void cold_driver_bindings() {
     assert(!mochi::driver::link(&boot, "i2c.0", 0x1b300000).valid());
     host_on_cap_info = [](CapHandle cap, MxCapInfo* info) -> mx_status_t {
         assert(cap == 15);
-        *info = {}; info->type = MX_CAP_MMIO; info->attr = MX_MMIO_DEVICE_nGnRnE; info->size = 4096;
+        *info = {};
+        info->type = MX_CAP_MMIO;
+        info->attr = MX_MMIO_DEVICE_nGnRnE;
+        info->size = 4096;
         return MX_OK;
     };
     host_on_map_mmio = [](CapHandle cap, mx_vaddr_t va, mx_rights_t rights) -> mx_status_t {
@@ -362,51 +431,86 @@ void cold_driver_bindings() {
     // maintenance contract these drivers do not implement.
     static MxCapInfo dma{};
     static unsigned maps;
-    dma = {}; dma.type = MX_CAP_ARENA; dma.attr = MX_ARENA_MEMORY_NONCACHEABLE;
-    dma.size = 4096; dma.base = 0x40000000;
+    dma = {};
+    dma.type = MX_CAP_ARENA;
+    dma.attr = MX_ARENA_MEMORY_NONCACHEABLE;
+    dma.size = 4096;
+    dma.base = 0x40000000;
     maps = 0;
-    host_on_cap_info = [](CapHandle, MxCapInfo* out) -> mx_status_t { *out = dma; return MX_OK; };
-    host_on_map_page = [](CapHandle, mx_vaddr_t, mx_rights_t) -> mx_status_t { ++maps; return MX_OK; };
+    host_on_cap_info = [](CapHandle, MxCapInfo* out) -> mx_status_t {
+        *out = dma;
+        return MX_OK;
+    };
+    host_on_map_page = [](CapHandle, mx_vaddr_t, mx_rights_t) -> mx_status_t {
+        ++maps;
+        return MX_OK;
+    };
     MxCapInfo output{};
     assert(mochi::driver::map_dma(&boot, "i2c.mmio", 0x20000000, &output) && maps == 1);
     assert(output.base == dma.base && output.size == 4096);
     output.size = 73;
     dma.attr = 0;
     assert(!mochi::driver::map_dma(&boot, "i2c.mmio", 0x20000000, &output));
-    dma.attr = MX_ARENA_MEMORY_NONCACHEABLE; dma.type = MX_CAP_MMIO;
+    dma.attr = MX_ARENA_MEMORY_NONCACHEABLE;
+    dma.type = MX_CAP_MMIO;
     assert(!mochi::driver::map_dma(&boot, "i2c.mmio", 0x20000000, &output));
-    dma.type = MX_CAP_ARENA; dma.size = 0;
+    dma.type = MX_CAP_ARENA;
+    dma.size = 0;
     assert(!mochi::driver::map_dma(&boot, "i2c.mmio", 0x20000000, &output));
     dma.size = 4096;
-    host_on_map_page = [](CapHandle, mx_vaddr_t, mx_rights_t) -> mx_status_t { return MX_ERR_NOMEM; };
+    host_on_map_page = [](CapHandle, mx_vaddr_t, mx_rights_t) -> mx_status_t {
+        return MX_ERR_NOMEM;
+    };
     assert(!mochi::driver::map_dma(&boot, "i2c.mmio", 0x20000000, &output));
     assert(maps == 1 && output.size == 73);
-    host_on_map_page = nullptr; host_on_cap_info = nullptr;
+    host_on_map_page = nullptr;
+    host_on_cap_info = nullptr;
 }
 } // namespace
+
+static void receive_status() {
+    reset();
+    auto receiver = ring;
+    receiver.handle = 42;
+    mx_status_t status = MX_OK;
+    RingSlot slot{};
+    host_on_wait_ring = [](CapHandle, CapHandle, mx_u64_t, mx_u32_t) -> mx_i64_t {
+        return MX_ERR_BUSY;
+    };
+    assert(!receiver.wait_pop(&slot, &status) && status == MX_ERR_BUSY);
+    assert(!storage.page.flags.receiver_about_to_sleep);
+    storage.page.head.v = receiver.capacity() + 1;
+    assert(!receiver.wait_pop(&slot, &status) && status == MX_ERR_BAD_PROTOCOL);
+    host_on_wait_ring = nullptr;
+    reset();
+    assert(receiver.try_push_msg(kType, 17u));
+    assert(receiver.wait_pop(&slot, &status) && status == MX_OK);
+}
 
 static void batches() {
     reset();
     RingSlot frames[6]{}, out[6]{};
-    for (uint32_t i=0;i<6;++i) {
-        assert(mochi::message_put(&frames[i],kType,i));
-        frames[i].seq=700+i;
-        for (uint32_t j=4;j<MX_RING_INLINE_PAYLOAD;++j) frames[i].payload[j]=0xaa;
+    for (uint32_t i = 0; i < 6; ++i) {
+        assert(mochi::message_put(&frames[i], kType, i));
+        frames[i].seq = 700 + i;
+        for (uint32_t j = 4; j < MX_RING_INLINE_PAYLOAD; ++j)
+            frames[i].payload[j] = 0xaa;
     }
-    storage.page.head.v=storage.page.tail.v=~uint64_t{0}-1;
+    storage.page.head.v = storage.page.tail.v = ~uint64_t{0} - 1;
     ring.publish_sleep(0);
-    assert(ring.try_push_frames(frames,6)==4 && host_notifies==1);
-    assert(ring.try_pop_batch(out,3)==3);
-    for (uint32_t i=0;i<3;++i) {
-        uint32_t value=99;
-        assert(mochi::message_get(out[i],&value,kType) && value==i && out[i].seq==700+i);
-        for (uint32_t j=4;j<MX_RING_INLINE_PAYLOAD;++j) assert(out[i].payload[j]==0);
+    assert(ring.try_push_frames(frames, 6) == 4 && host_notifies == 1);
+    assert(ring.try_pop_batch(out, 3) == 3);
+    for (uint32_t i = 0; i < 3; ++i) {
+        uint32_t value = 99;
+        assert(mochi::message_get(out[i], &value, kType) && value == i && out[i].seq == 700 + i);
+        for (uint32_t j = 4; j < MX_RING_INLINE_PAYLOAD; ++j)
+            assert(out[i].payload[j] == 0);
     }
-    frames[1].length=49;
-    assert(ring.try_push_frames(frames,3)==1);
-    assert(ring.try_pop_batch(out,6)==2 && out[0].seq==703 && out[1].seq==700);
-    assert(!ring.try_pop_batch(out,0) && !ring.try_push_frames(nullptr,1));
-    assert(!ring.try_pop_batch(nullptr,1));
+    frames[1].length = 49;
+    assert(ring.try_push_frames(frames, 3) == 1);
+    assert(ring.try_pop_batch(out, 6) == 2 && out[0].seq == 703 && out[1].seq == 700);
+    assert(!ring.try_pop_batch(out, 0) && !ring.try_push_frames(nullptr, 1));
+    assert(!ring.try_pop_batch(nullptr, 1));
 
     // A peer cannot publish more than capacity, including across cursor wrap.
     reset();
@@ -430,8 +534,10 @@ int main() {
     invalid_and_full();
     byte_runs_and_wrap();
     batches();
+    receive_status();
     inbox_wait_races();
     sleep_and_typed_reads();
+    bounded_receive();
     protocol_replies();
     usb_transfer_hot_path();
     cold_driver_bindings();

@@ -55,6 +55,19 @@ class Transport:
         return data
 
 class AppStream(unittest.TestCase):
+    def test_stdout_survives_a_slow_parent(self):
+        with tempfile.TemporaryDirectory(prefix='ame-app-stdout-') as work:
+            output = str(Path(work) / 'probe')
+            result = subprocess.run(['clang++', '-std=c++23', '-O1', '-g',
+                '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
+                '-I' + str(ROOT / 'tests/mochi_host'),
+                '-I' + str(ROOT / 'shared/include'),
+                '-I' + str(ROOT / 'userland/lib/include'), '-idirafter', str(ROOT / 'lib/include'),
+                str(ROOT / 'tests/app_stdout_probe.cc'), '-o', output], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([output], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_session_lifecycle_under_sanitizers(self):
         with tempfile.TemporaryDirectory(prefix='ame-app-stream-') as work:
             output = str(Path(work) / 'probe')

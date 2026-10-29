@@ -50,7 +50,8 @@ static void k_fill_pattern(uint32_t* fb, uint32_t width, uint32_t height, uint32
         uint32_t* row = fb + (unsigned long)y * stride;
         for (uint32_t x = 0; x < width; ++x) {
             uint32_t bar = (uint32_t)(((unsigned long)x * 4) / width);
-            if (bar > 3) bar = 3;
+            if (bar > 3)
+                bar = 3;
             row[x] = k_bars[bar];
         }
     }
@@ -69,7 +70,8 @@ static int k_fail(const char* stage) {
 
 int dango_kms_test(void) {
     long fd = mx_openat(MX_AT_FDCWD, DANGO_DEV_DRM_CARD0, MX_O_RDWR, 0);
-    if (fd < 0) return k_fail("open card0");
+    if (fd < 0)
+        return k_fail("open card0");
     /* A primary node grants master to its first opener; make it explicit so a
      * stale fd elsewhere cannot leave the modeset silently unprivileged. */
     (void)mx_ioctl((int)fd, DRM_IOCTL_SET_MASTER, 0);
@@ -121,13 +123,19 @@ int dango_kms_test(void) {
         mx_zero(&conn, sizeof(conn));
         conn.connector_id = connector_ids[c];
         /* First pass: counts + state. */
-        if (mx_ioctl((int)fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn) < 0) continue;
-        if (c == 0) { diag_connection = conn.connection; diag_modes = conn.count_modes; }
+        if (mx_ioctl((int)fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn) < 0)
+            continue;
+        if (c == 0) {
+            diag_connection = conn.connection;
+            diag_modes = conn.count_modes;
+        }
         /* A headless QEMU display backend can leave the connector status
          * "unknown" (2) even though EDID modes exist; a modeset only needs
          * modes, so gate on modes rather than on the reported status. */
-        if (conn.count_modes == 0) continue;
-        if (count_crtcs == 0) continue;
+        if (conn.count_modes == 0)
+            continue;
+        if (count_crtcs == 0)
+            continue;
 
         uint32_t modes_cap = conn.count_modes < K_MAX_MODES ? conn.count_modes : K_MAX_MODES;
         struct drm_mode_modeinfo modes[K_MAX_MODES];
@@ -141,8 +149,10 @@ int dango_kms_test(void) {
         conn.count_props = 0;
         conn.encoders_ptr = 0;
         conn.count_encoders = 0;
-        if (mx_ioctl((int)fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn) < 0) continue;
-        if (conn.count_modes == 0) continue;
+        if (mx_ioctl((int)fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn) < 0)
+            continue;
+        if (conn.count_modes == 0)
+            continue;
         /* Preferred mode is returned first. */
         mode = modes[0];
         conn_id = conn.connector_id;

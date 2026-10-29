@@ -15,16 +15,16 @@
 
 namespace drivers::fwcfg {
 
-constexpr PhysAddr kFwCfgBase   = 0x0902'0000ull;
-constexpr u32 kOffData          = 0x00;
-constexpr u32 kOffSelector      = 0x08;
-constexpr u32 kOffDmaHigh       = 0x10;
-constexpr u32 kOffDmaLow        = 0x14;
+constexpr PhysAddr kFwCfgBase = 0x0902'0000ull;
+constexpr u32 kOffData = 0x00;
+constexpr u32 kOffSelector = 0x08;
+constexpr u32 kOffDmaHigh = 0x10;
+constexpr u32 kOffDmaLow = 0x14;
 
 // fw_cfg DMA control bits.
-constexpr u32 kDmaCtlError  = 0x01;
+constexpr u32 kDmaCtlError = 0x01;
 constexpr u32 kDmaCtlSelect = 0x08;
-constexpr u32 kDmaCtlWrite  = 0x10;
+constexpr u32 kDmaCtlWrite = 0x10;
 
 // fw_cfg file directory key.
 constexpr u16 kKeyFileDir = 0x0019;
@@ -39,35 +39,37 @@ static_assert(sizeof(FwCfgDmaAccess) == 16);
 
 // fw_cfg file directory entry.
 struct FwCfgFile {
-    u32  size;    // big-endian
-    u16  select;  // big-endian selector key
-    u16  reserved;
+    u32 size;   // big-endian
+    u16 select; // big-endian selector key
+    u16 reserved;
     char name[56];
 };
 static_assert(sizeof(FwCfgFile) == 64);
 
 // QEMU ramfb config blob written to "etc/ramfb" — all big-endian.
 struct RamFbConfig {
-    u64 addr;    // guest-physical address of pixel buffer
-    u32 fourcc;  // 0x34325258 = XR24 = XRGB8888
+    u64 addr;   // guest-physical address of pixel buffer
+    u32 fourcc; // 0x34325258 = XR24 = XRGB8888
     u32 flags;
     u32 width;
     u32 height;
-    u32 stride;  // bytes per row
+    u32 stride; // bytes per row
 } __attribute__((packed));
 static_assert(sizeof(RamFbConfig) == 28);
 
 // ---------------------------------------------------------------------------
 // Byte-swap helpers
 // ---------------------------------------------------------------------------
-static u16 bswap16(u16 v) { return static_cast<u16>((v >> 8) | (v << 8)); }
+static u16 bswap16(u16 v) {
+    return static_cast<u16>((v >> 8) | (v << 8));
+}
 static u32 bswap32(u32 v) {
-    return ((v & 0xFFu) << 24) | (((v >> 8) & 0xFFu) << 16) |
-           (((v >> 16) & 0xFFu) << 8)  |  ((v >> 24) & 0xFFu);
+    return ((v & 0xFFu) << 24) | (((v >> 8) & 0xFFu) << 16) | (((v >> 16) & 0xFFu) << 8) |
+           ((v >> 24) & 0xFFu);
 }
 static u64 bswap64(u64 v) {
     return (static_cast<u64>(bswap32(static_cast<u32>(v))) << 32) |
-            static_cast<u64>(bswap32(static_cast<u32>(v >> 32)));
+           static_cast<u64>(bswap32(static_cast<u32>(v >> 32)));
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +88,7 @@ static u8 read_data_byte() {
 }
 
 static u32 read_be32() {
-    u32 v  = static_cast<u32>(read_data_byte()) << 24;
+    u32 v = static_cast<u32>(read_data_byte()) << 24;
     v |= static_cast<u32>(read_data_byte()) << 16;
     v |= static_cast<u32>(read_data_byte()) << 8;
     v |= static_cast<u32>(read_data_byte());
@@ -94,7 +96,7 @@ static u32 read_be32() {
 }
 
 static u16 read_be16() {
-    u16 v  = static_cast<u16>(read_data_byte()) << 8;
+    u16 v = static_cast<u16>(read_data_byte()) << 8;
     v |= static_cast<u16>(read_data_byte());
     return v;
 }
@@ -103,7 +105,7 @@ static u16 read_be16() {
 // High word written first; writing low word triggers DMA.
 static void trigger_dma(PhysAddr dma_phys) {
     const u32 high = static_cast<u32>(dma_phys >> 32);
-    const u32 low  = static_cast<u32>(dma_phys);
+    const u32 low = static_cast<u32>(dma_phys);
     asm volatile("dsb sy" ::: "memory");
     *reinterpret_cast<volatile u32*>(kFwCfgBase + kOffDmaHigh) = bswap32(high);
     asm volatile("dsb sy" ::: "memory");
@@ -123,23 +125,31 @@ bool write_ramfb(PhysAddr pixel_phys, u32 width, u32 height) {
         return false;
     }
 
-    u16 ramfb_key  = 0;
+    u16 ramfb_key = 0;
     u32 ramfb_size = 0;
     bool found = false;
 
     for (u32 i = 0; i < count; ++i) {
-        const u32 fsize   = read_be32();
-        const u16 fkey    = read_be16();
+        const u32 fsize = read_be32();
+        const u16 fkey = read_be16();
         (void)read_be16(); // reserved
         char name[56]{};
-        for (u32 c = 0; c < 56; ++c) name[c] = static_cast<char>(read_data_byte());
+        for (u32 c = 0; c < 56; ++c)
+            name[c] = static_cast<char>(read_data_byte());
         if (!found) {
             const char* want = "etc/ramfb";
             bool match = true;
             for (u32 c = 0; want[c] && c < 56; ++c) {
-                if (name[c] != want[c]) { match = false; break; }
+                if (name[c] != want[c]) {
+                    match = false;
+                    break;
+                }
             }
-            if (match) { ramfb_key = fkey; ramfb_size = fsize; found = true; }
+            if (match) {
+                ramfb_key = fkey;
+                ramfb_size = fsize;
+                found = true;
+            }
         }
     }
 
@@ -154,22 +164,26 @@ bool write_ramfb(PhysAddr pixel_phys, u32 width, u32 height) {
 
     // Step 2: build RamFbConfig in a fresh physical page.
     const PhysAddr cfg_phys = mm::alloc_page();
-    if (!cfg_phys) return false;
-    auto* cfg    = reinterpret_cast<RamFbConfig*>(cfg_phys);
-    cfg->addr    = bswap64(static_cast<u64>(pixel_phys));
-    cfg->fourcc  = bswap32(0x34325258u); // XR24 / XRGB8888
-    cfg->flags   = 0;
-    cfg->width   = bswap32(width);
-    cfg->height  = bswap32(height);
-    cfg->stride  = bswap32(width * 4u);
+    if (!cfg_phys)
+        return false;
+    auto* cfg = reinterpret_cast<RamFbConfig*>(cfg_phys);
+    cfg->addr = bswap64(static_cast<u64>(pixel_phys));
+    cfg->fourcc = bswap32(0x34325258u); // XR24 / XRGB8888
+    cfg->flags = 0;
+    cfg->width = bswap32(width);
+    cfg->height = bswap32(height);
+    cfg->stride = bswap32(width * 4u);
     asm volatile("dsb sy" ::: "memory");
 
     // Step 3: build DMA descriptor in a fresh physical page.
     const PhysAddr dma_phys = mm::alloc_page();
-    if (!dma_phys) { mm::free_page(cfg_phys); return false; }
-    auto* dma    = reinterpret_cast<FwCfgDmaAccess*>(dma_phys);
+    if (!dma_phys) {
+        mm::free_page(cfg_phys);
+        return false;
+    }
+    auto* dma = reinterpret_cast<FwCfgDmaAccess*>(dma_phys);
     dma->control = bswap32((static_cast<u32>(ramfb_key) << 16) | kDmaCtlSelect | kDmaCtlWrite);
-    dma->length  = bswap32(sizeof(RamFbConfig));
+    dma->length = bswap32(sizeof(RamFbConfig));
     dma->address = bswap64(static_cast<u64>(cfg_phys));
     asm volatile("dsb sy" ::: "memory");
 
@@ -179,10 +193,16 @@ bool write_ramfb(PhysAddr pixel_phys, u32 width, u32 height) {
     bool ok = false;
     for (u32 i = 0; i < 1000000; ++i) {
         asm volatile("dsb sy" ::: "memory");
-        const u32 status = bswap32(
-            *reinterpret_cast<volatile u32*>(dma_phys)); // read control field
-        if (status == 0) { ok = true; break; }
-        if (status & kDmaCtlError) { ok = false; break; }
+        const u32 status =
+            bswap32(*reinterpret_cast<volatile u32*>(dma_phys)); // read control field
+        if (status == 0) {
+            ok = true;
+            break;
+        }
+        if (status & kDmaCtlError) {
+            ok = false;
+            break;
+        }
         asm volatile("yield" ::: "memory");
     }
 

@@ -29,5 +29,6 @@ extern "C" [[noreturn]] void boot_main(uint64_t dtb_phys) {
     // TODO: step 4 — call kernel_main(info)
 
     // Unreachable placeholder
-    while (true) {}
+    while (true) {
+    }
 }

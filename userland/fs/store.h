@@ -13,10 +13,10 @@ constexpr u32 kBlock = 4096, kEntries = 63, kDepth = 8, kPages = 96, kBatch = 16
               kReserve = 32;
 constexpr u32 kDataRoot = 0x80000000u;
 struct Io {
-    void *context;
-    bool (*read)(void *, u64, u32, void *);
-    bool (*write)(void *, u64, u32, const void *);
-    bool (*flush)(void *);
+    void* context;
+    bool (*read)(void*, u64, u32, void*);
+    bool (*write)(void*, u64, u32, const void*);
+    bool (*flush)(void*);
 };
 struct State {
     Io io{};
@@ -33,18 +33,24 @@ struct State {
     alignas(4096) u8 lookup[kBlock]{}, data[kBlock]{}, journal[kBlock]{};
     alignas(4096) u8 batch[kBatch][kBlock]{};
 };
+// Optional cold mount timing; no clock calls or counters on ordinary operations.
+struct MountProfile {
+    u64 (*clock_ns)() = nullptr;
+    u64 reset_ns{}, checkpoint_ns{}, recovery_ns{}, tail_ns{};
+    u32 recovery_records{}, recovery_home_blocks{}, recovery_reused_blocks{};
+};
 // mount replays only a completely validated committed journal. No automatic
 // formatting, and any ambiguous I/O poisons writes until a fresh mount.
-bool mount(State &, Io);
-bool inode(State &, u32, InodeLeafEntry &);
-mx_i32_t lookup(State &, u32, const char *, u8, InodeLeafEntry &);
-mx_i32_t create(State &, u32, const char *, u8, u16, InodeLeafEntry &);
-mx_i32_t read(State &, u32, u64, void *, u32, u32 &);
-mx_i32_t write(State &, u32, u64, const void *, u32);
-mx_i32_t truncate(State &, u32);
-mx_i32_t unlink(State &, u32, const char *, u8);
-mx_i32_t rename(State &, u32, const char *, u8, u32, const char *, u8);
-mx_i32_t readdir(State &, u32, u32, DirLeafEntry &, bool &);
-mx_i32_t sync(State &);
-mx_i32_t promote(State &, u32, InodeLeafEntry &);
+bool mount(State&, Io, MountProfile* profile = nullptr);
+bool inode(State&, u32, InodeLeafEntry&);
+mx_i32_t lookup(State&, u32, const char*, u8, InodeLeafEntry&);
+mx_i32_t create(State&, u32, const char*, u8, u16, InodeLeafEntry&);
+mx_i32_t read(State&, u32, u64, void*, u32, u32&);
+mx_i32_t write(State&, u32, u64, const void*, u32);
+mx_i32_t truncate(State&, u32);
+mx_i32_t unlink(State&, u32, const char*, u8);
+mx_i32_t rename(State&, u32, const char*, u8, u32, const char*, u8);
+mx_i32_t readdir(State&, u32, u32, DirLeafEntry&, bool&);
+mx_i32_t sync(State&);
+mx_i32_t promote(State&, u32, InodeLeafEntry&);
 } // namespace mochi::store

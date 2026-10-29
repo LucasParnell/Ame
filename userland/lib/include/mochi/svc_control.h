@@ -14,13 +14,17 @@ using namespace midix::svcctl;
 // whole body — no slot handling, no byte copies.
 struct Client : Channel {
     bool request(mx_u32_t type, const char* name, Reply* out) const {
-        if (!valid() || !out) return false;
+        if (!valid() || !out)
+            return false;
         Request req{};
-        if (!libk::str::copy_exact_fit(req.name, sizeof(req.name), name)) return false;
-        if (!send(type, req)) return false;
+        if (!libk::str::copy_exact_fit(req.name, sizeof(req.name), name))
+            return false;
+        if (!send(type, req))
+            return false;
         MxRingSlot slot{};
         for (;;) {
-            if (!wait_recv(&slot)) return false;
+            if (!wait_recv(&slot))
+                return false;
             if ((slot.type == kReply || slot.type == kError) && slot.length >= sizeof(Reply)) {
                 return message_get(slot, out, 0);
             }
@@ -30,7 +34,8 @@ struct Client : Channel {
 
 struct Server : Channel {
     bool send_reply(mx_i32_t status, mx_u32_t state) const {
-        if (!valid()) return false;
+        if (!valid())
+            return false;
         const Reply reply{status, state};
         const mx_u32_t type = status == MX_OK ? kReply : kError;
         return send(type, reply);

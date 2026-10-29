@@ -7,14 +7,17 @@ struct Bus {
     unsigned calls = 0, fail_at = 0, feeds = 0, clears = 0;
     bool transaction(libk::const_bytes out, libk::bytes in) {
         assert(out.size == 1 && out.data[0] == 0x06 && in.size == 7);
-        if (++calls == fail_at) return false;
-        for (unsigned i = 0; i < in.size; ++i) in.data[i] = 0;
+        if (++calls == fail_at)
+            return false;
+        for (unsigned i = 0; i < in.size; ++i)
+            in.data[i] = 0;
         in.data[0] = status;
         in.data[6] = faults;
         return true;
     }
     bool write(mx_u8_t reg, mx_u8_t value) {
-        if (++calls == fail_at) return false;
+        if (++calls == fail_at)
+            return false;
         if (reg == 0x0c) {
             assert(value && !(value & ~0x1c));
             faults &= ~value;
@@ -26,7 +29,35 @@ struct Bus {
         return true;
     }
 };
+struct ChargeBus {
+    mx_u8_t config = 0xb5;
+    bool fail = false;
+    bool read(mx_u8_t reg, mx_u8_t& value) {
+        assert(reg == 0x90);
+        value = config;
+        return !fail;
+    }
+    bool update(mx_u8_t reg, mx_u8_t mask, mx_u8_t bits) {
+        assert(reg == 0x90 && mask == 0x20);
+        if (fail)
+            return false;
+        config = (config & ~mask) | bits;
+        return true;
+    }
+};
 int main() {
+    ChargeBus charging;
+    ChargeHandoff handoff;
+    assert(handoff.suspend(charging) && charging.config == 0x95);
+    assert(handoff.suspend(charging) && handoff.restore); // Renewal keeps original state.
+    charging.fail = true;
+    assert(!handoff.resume(charging) && handoff.active);
+    charging.fail = false;
+    assert(handoff.resume(charging) && charging.config == 0xb5);
+    charging.config = 0x95;
+    assert(handoff.suspend(charging) && !handoff.restore);
+    assert(handoff.resume(charging) && charging.config == 0x95); // No invented charge enable.
+
     // Ramp-up UVP/SCP is latched while the actual boost output is now healthy.
     for (unsigned faults = 0; faults < 256; ++faults) {
         Bus bus;
@@ -53,13 +84,15 @@ int main() {
         bus.faults = 0x14;
         bus.fail_at = fail_at;
         const auto health = maintain_source(bus, true);
-        const SourceFailure expected[] = {SourceFailure::Read, SourceFailure::Clear, SourceFailure::Feed};
+        const SourceFailure expected[] = {SourceFailure::Read, SourceFailure::Clear,
+                                          SourceFailure::Feed};
         assert(health.failure == expected[fail_at - 1] && !bus.feeds);
     }
     Bus recovered;
     recovered.faults = 0x08; // Actual phone failure: healthy boost + latched OCP.
     assert(maintain_source(recovered, true).ok());
-    for (unsigned second = 0; second < 60; ++second) assert(maintain_source(recovered).ok());
+    for (unsigned second = 0; second < 60; ++second)
+        assert(maintain_source(recovered).ok());
     assert(recovered.feeds == 61 && recovered.clears == 1 && !recovered.faults);
     recovered.faults = 0x08;
     assert(maintain_source(recovered).failure == SourceFailure::HardFault);

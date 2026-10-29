@@ -19,8 +19,8 @@
 
 namespace {
 
-constexpr uint64_t kGuardInitialised = 1;   // byte 0
-constexpr uint64_t kGuardInProgress = 1ull << 8;    // byte 1
+constexpr uint64_t kGuardInitialised = 1;        // byte 0
+constexpr uint64_t kGuardInProgress = 1ull << 8; // byte 1
 
 inline void cpu_relax() {
     __asm__ __volatile__("yield" ::: "memory");
@@ -36,7 +36,8 @@ int __cxa_guard_acquire(uint64_t* guard) {
     auto* flags = guard;
     for (;;) {
         const uint64_t state = __atomic_load_n(flags, __ATOMIC_ACQUIRE);
-        if ((state & kGuardInitialised) != 0) return 0;
+        if ((state & kGuardInitialised) != 0)
+            return 0;
         if ((state & kGuardInProgress) != 0) {
             cpu_relax();
             continue;

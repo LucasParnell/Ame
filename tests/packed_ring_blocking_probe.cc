@@ -7,7 +7,10 @@
 #include <mutex>
 #include <thread>
 
-struct Storage { RingPage page{}; RingSlot slots[128]{}; } storage;
+struct Storage {
+    RingPage page{};
+    RingSlot slots[128]{};
+} storage;
 static std::mutex lock;
 static std::condition_variable progress;
 
@@ -20,7 +23,8 @@ int main() {
         progress.notify_all();
         return MX_OK;
     };
-    host_on_wait_ring = [](CapHandle handle, CapHandle db, uint64_t cursor, uint32_t direction) -> mx_i64_t {
+    host_on_wait_ring = [](CapHandle handle, CapHandle db, uint64_t cursor,
+                           uint32_t direction) -> mx_i64_t {
         assert(handle == 9 && db == (direction ? 2 : 1));
         std::unique_lock guard(lock);
         const bool ready = progress.wait_for(guard, std::chrono::seconds(3), [&] {
@@ -35,12 +39,14 @@ int main() {
         alignas(16) uint8_t bytes[4096];
         for (unsigned n = 0; n < count; ++n) {
             const unsigned length = n % 3 == 0 ? 4096 : n % 257;
-            for (unsigned i = 0; i < length; ++i) bytes[i] = static_cast<uint8_t>(n + i * 31);
+            for (unsigned i = 0; i < length; ++i)
+                bytes[i] = static_cast<uint8_t>(n + i * 31);
             mochi::FrameWriter writer(17, n, bytes, length);
             for (;;) {
                 const auto result = writer.push(ring);
                 assert(result != mochi::FrameProgress::Invalid);
-                if (result == mochi::FrameProgress::Complete) break;
+                if (result == mochi::FrameProgress::Complete)
+                    break;
                 if (result == mochi::FrameProgress::Blocked)
                     assert(ring.wait_writable(writer.required_space(ring), 64));
             }
@@ -52,12 +58,15 @@ int main() {
         for (;;) {
             const auto result = reader.pop(ring);
             assert(result != mochi::FrameProgress::Invalid);
-            if (result == mochi::FrameProgress::Complete) break;
-            if (result == mochi::FrameProgress::Blocked) assert(ring.wait_readable(64));
+            if (result == mochi::FrameProgress::Complete)
+                break;
+            if (result == mochi::FrameProgress::Blocked)
+                assert(ring.wait_readable(64));
         }
         const unsigned length = n % 3 == 0 ? 4096 : n % 257;
         assert(reader.sequence() == n && reader.type() == 17 && reader.size() == length);
-        for (unsigned i = 0; i < length; ++i) assert(bytes[i] == static_cast<uint8_t>(n + i * 31));
+        for (unsigned i = 0; i < length; ++i)
+            assert(bytes[i] == static_cast<uint8_t>(n + i * 31));
     }
     producer.join();
     assert(storage.page.head.v == storage.page.tail.v && host_yields == 0);

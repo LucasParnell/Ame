@@ -49,30 +49,37 @@ u64 truncated_count();
 
 } // namespace anko::log
 
-#define ANKO_LOG_TRACE(component, msg) \
-    ::anko::log::write(::anko::log::Level::Trace, component, msg)
-#define ANKO_LOG_DEBUG(component, msg) \
-    ::anko::log::write(::anko::log::Level::Debug, component, msg)
-#define ANKO_LOG_INFO(component, msg) \
-    ::anko::log::write(::anko::log::Level::Info, component, msg)
-#define ANKO_LOG_WARN(component, msg) \
-    ::anko::log::write(::anko::log::Level::Warn, component, msg)
-#define ANKO_LOG_ERROR(component, msg) \
-    ::anko::log::write(::anko::log::Level::Error, component, msg)
-#define ANKO_LOG_FATAL(component, msg) \
-    ::anko::log::write(::anko::log::Level::Fatal, component, msg)
+#define ANKO_LOG_TRACE(component, msg) ::anko::log::write(::anko::log::Level::Trace, component, msg)
+#define ANKO_LOG_DEBUG(component, msg) ::anko::log::write(::anko::log::Level::Debug, component, msg)
+#define ANKO_LOG_INFO(component, msg) ::anko::log::write(::anko::log::Level::Info, component, msg)
+#define ANKO_LOG_WARN(component, msg) ::anko::log::write(::anko::log::Level::Warn, component, msg)
+#define ANKO_LOG_ERROR(component, msg) ::anko::log::write(::anko::log::Level::Error, component, msg)
+#define ANKO_LOG_FATAL(component, msg) ::anko::log::write(::anko::log::Level::Fatal, component, msg)
 
-#define ANKO_LOGF_TRACE(component, fmt, ...) \
+#define ANKO_LOGF_TRACE(component, fmt, ...)                                                       \
     ::anko::log::writef(::anko::log::Level::Trace, component, fmt, ##__VA_ARGS__)
-#define ANKO_LOGF_DEBUG(component, fmt, ...) \
+#define ANKO_LOGF_DEBUG(component, fmt, ...)                                                       \
     ::anko::log::writef(::anko::log::Level::Debug, component, fmt, ##__VA_ARGS__)
-#define ANKO_LOGF_INFO(component, fmt, ...) \
+#define ANKO_LOGF_INFO(component, fmt, ...)                                                        \
     ::anko::log::writef(::anko::log::Level::Info, component, fmt, ##__VA_ARGS__)
-#define ANKO_LOGF_WARN(component, fmt, ...) \
+#define ANKO_LOGF_WARN(component, fmt, ...)                                                        \
     ::anko::log::writef(::anko::log::Level::Warn, component, fmt, ##__VA_ARGS__)
-#define ANKO_LOGF_ERROR(component, fmt, ...) \
+#define ANKO_LOGF_ERROR(component, fmt, ...)                                                       \
     ::anko::log::writef(::anko::log::Level::Error, component, fmt, ##__VA_ARGS__)
-#define ANKO_LOGF_FATAL(component, fmt, ...) \
+
+// Bring-up chatter that only a development build wants: per-CPU entry detail,
+// phase dumps and other lines that are useful when something is broken and pure
+// cost otherwise. Evaluating the arguments is retained so release builds still
+// type-check the call sites.
+#if defined(ANKO_BUILD_DEV)
+#define ANKO_LOGF_VERBOSE(component, fmt, ...) ANKO_LOGF_INFO(component, fmt, ##__VA_ARGS__)
+#else
+#define ANKO_LOGF_VERBOSE(component, fmt, ...)                                                     \
+    do {                                                                                           \
+        (void)sizeof(fmt);                                                                         \
+    } while (0)
+#endif
+#define ANKO_LOGF_FATAL(component, fmt, ...)                                                       \
     ::anko::log::writef(::anko::log::Level::Fatal, component, fmt, ##__VA_ARGS__)
 
 #define ANKO_LOG_RAW(msg) ::anko::log::raw(msg)

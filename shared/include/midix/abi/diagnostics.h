@@ -3,6 +3,7 @@
 // research operations can also modify shared memory. CPU capability and
 // ownership of the EL2 monitor are separate.
 #include "midix/abi/types.h"
+#include "midix/abi/power.h"
 
 constexpr mx_u32_t MX_DIAG_VERSION = 1;
 constexpr mx_u64_t MX_DIAG_READ_MAX = 1024;
@@ -16,9 +17,10 @@ enum MxDiagRequest : mx_u64_t {
     // registration canary; index 2 = read-only window reconnaissance; index 3 =
     // legacy completion probe (index 3) now returns NOT_IMPLEMENTED: Linux
     // requires a completed storage operation and defines no callback guard.
-    MX_DIAG_EL3 = 3,      // indices 0..MAX_INDEX; 29/30 = notification-backed RPMB lifecycle
-    MX_DIAG_HEALTH = 5,   // index=0, MxDiagHealth; read-only console telemetry
-    MX_DIAG_RUNTIME = 4,  // index=first PID (1..limit), MxDiagRuntimeBatch
+    MX_DIAG_EL3 = 3,     // indices 0..MAX_INDEX; 29/30 = notification-backed RPMB lifecycle
+    MX_DIAG_POWER = 6,   // index=0, MxPowerSnapshot
+    MX_DIAG_HEALTH = 5,  // index=0, MxDiagHealth; read-only console telemetry
+    MX_DIAG_RUNTIME = 4, // index=first PID (1..limit), MxDiagRuntimeBatch
 };
 
 enum MxDiagBoard : mx_u32_t {
@@ -107,7 +109,7 @@ struct MxDiagEl3 {
     mx_u64_t bl31_base;
     mx_u64_t bl31_size;
     mx_u64_t callback_offset_from_request; // Legacy ABI field; zero on Hi6250.
-    mx_u64_t callback_address; // Linux defines no callback in rpmb_request.
+    mx_u64_t callback_address;             // Linux defines no callback in rpmb_request.
     mx_u64_t call_count[4];
     mx_u64_t uid[4];
     mx_u64_t service_version[4];
@@ -118,23 +120,38 @@ struct MxDiagEl3 {
 static_assert(sizeof(MxDiagEl3) == 168);
 
 enum MxDiagRpmbAction : mx_u32_t {
-    MX_RPMB_STATUS, MX_RPMB_ARM, MX_RPMB_COUNTER, MX_RPMB_COMPLETE, MX_RPMB_RELEASE,
+    MX_RPMB_STATUS,
+    MX_RPMB_ARM,
+    MX_RPMB_COUNTER,
+    MX_RPMB_COMPLETE,
+    MX_RPMB_RELEASE,
     MX_RPMB_ARM_EMMC,
     MX_RPMB_PROVISION_KEY,
     MX_RPMB_KEY_STATUS,
 };
 enum MxDiagRpmbResult : mx_u32_t {
-    MX_RPMB_OK, MX_RPMB_BUSY, MX_RPMB_NO_REQUEST, MX_RPMB_REGISTRATION_FAILED,
-    MX_RPMB_AMBIGUOUS_REQUEST, MX_RPMB_STALE_REQUEST, MX_RPMB_ALREADY_CALLED,
-    MX_RPMB_COMPLETION_FAILED, MX_RPMB_BAD_ACTION,
+    MX_RPMB_OK,
+    MX_RPMB_BUSY,
+    MX_RPMB_NO_REQUEST,
+    MX_RPMB_REGISTRATION_FAILED,
+    MX_RPMB_AMBIGUOUS_REQUEST,
+    MX_RPMB_STALE_REQUEST,
+    MX_RPMB_ALREADY_CALLED,
+    MX_RPMB_COMPLETION_FAILED,
+    MX_RPMB_BAD_ACTION,
     MX_RPMB_STORAGE_UNAVAILABLE,
     MX_RPMB_PROVISION_FAILED,
-    MX_RPMB_ALREADY_PROVISIONED, MX_RPMB_PROVISION_UNCERTAIN,
+    MX_RPMB_ALREADY_PROVISIONED,
+    MX_RPMB_PROVISION_UNCERTAIN,
     MX_RPMB_KEY_QUERY_FAILED,
 };
 enum MxRpmbProvisionStage : mx_u64_t {
-    MX_RPMB_PROVISION_IDLE, MX_RPMB_PROVISION_PREFLIGHT, MX_RPMB_PROVISION_GET_FRAME,
-    MX_RPMB_PROVISION_WAIT_FRAME, MX_RPMB_PROVISION_PROGRAM, MX_RPMB_PROVISION_VERIFY,
+    MX_RPMB_PROVISION_IDLE,
+    MX_RPMB_PROVISION_PREFLIGHT,
+    MX_RPMB_PROVISION_GET_FRAME,
+    MX_RPMB_PROVISION_WAIT_FRAME,
+    MX_RPMB_PROVISION_PROGRAM,
+    MX_RPMB_PROVISION_VERIFY,
     MX_RPMB_PROVISION_DONE,
 };
 // Index 29. Only action is input; all other fields are kernel observations.
@@ -184,7 +201,7 @@ static_assert(sizeof(MxDiagEl3Recon) == 264);
 // returns NOT_IMPLEMENTED without touching the request window or calling BL31.
 struct MxDiagEl3Done {
     mx_u32_t version;
-    mx_u32_t aborted; // 0 = call made; 1 = registration failed; 2 = guard refused
+    mx_u32_t aborted;    // 0 = call made; 1 = registration failed; 2 = guard refused
     mx_u64_t registered; // REQUEST_ADDR raw x0
     mx_u64_t slot_pre;
     mx_u64_t status_pre;
@@ -305,7 +322,10 @@ struct MxDiagEl3Cc {
     mx_u32_t version;
     mx_u32_t aborted;
     mx_u64_t x1;
-    mx_u64_t r0; mx_u64_t r1; mx_u64_t r2; mx_u64_t r3;
+    mx_u64_t r0;
+    mx_u64_t r1;
+    mx_u64_t r2;
+    mx_u64_t r3;
     mx_u64_t crumb_stage;
 };
 static_assert(sizeof(MxDiagEl3Cc) == 56);
@@ -314,9 +334,16 @@ static_assert(sizeof(MxDiagEl3Cc) == 56);
 struct MxDiagEl3Cc2 {
     mx_u32_t version;
     mx_u32_t aborted;
-    mx_u64_t a; mx_u64_t b;
-    mx_u64_t ra0; mx_u64_t ra1; mx_u64_t ra2; mx_u64_t ra3;
-    mx_u64_t rb0; mx_u64_t rb1; mx_u64_t rb2; mx_u64_t rb3;
+    mx_u64_t a;
+    mx_u64_t b;
+    mx_u64_t ra0;
+    mx_u64_t ra1;
+    mx_u64_t ra2;
+    mx_u64_t ra3;
+    mx_u64_t rb0;
+    mx_u64_t rb1;
+    mx_u64_t rb2;
+    mx_u64_t rb3;
     mx_u64_t crumb_stage;
 };
 static_assert(sizeof(MxDiagEl3Cc2) == 96);
@@ -373,13 +400,13 @@ static_assert(sizeof(MxDiagEl3Teeos) == 48);
 // catch for exactly one load; a denied address reports instead of resetting.
 struct MxDiagEl3Rprobe {
     mx_u32_t version;
-    mx_u32_t ok;        // 1 = read completed, 0 = fault was caught
-    mx_u64_t addr;      // in
-    mx_u64_t value;     // out when ok
-    mx_u64_t esr;       // out when !ok — fault status
-    mx_u64_t far;       // out when !ok — faulting address
-    mx_u64_t elr;       // out when !ok — faulting PC
-    mx_u64_t faults;    // out — faults observed during the read
+    mx_u32_t ok;     // 1 = read completed, 0 = fault was caught
+    mx_u64_t addr;   // in
+    mx_u64_t value;  // out when ok
+    mx_u64_t esr;    // out when !ok — fault status
+    mx_u64_t far;    // out when !ok — faulting address
+    mx_u64_t elr;    // out when !ok — faulting PC
+    mx_u64_t faults; // out — faults observed during the read
 };
 static_assert(sizeof(MxDiagEl3Rprobe) == 56);
 
@@ -389,13 +416,13 @@ constexpr mx_u64_t MX_DIAG_EL3_RSCAN_MAX = 0x40000;
 struct MxDiagEl3Rscan {
     mx_u32_t version;
     mx_u32_t aborted;
-    mx_u64_t base;          // in
-    mx_u64_t length;        // in (<= RSCAN_MAX, multiple of 8)
-    mx_u64_t readable;      // out — 8-byte words read successfully
-    mx_u64_t faults;        // out — words that raised a handled fault
-    mx_u64_t seg_count;     // out — readable byte ranges recorded (<= 8)
-    mx_u64_t first_count;   // out — first non-zero readable words recorded (<= 8)
-    mx_u64_t esr_last;      // out — ESR of the last fault caught
+    mx_u64_t base;               // in
+    mx_u64_t length;             // in (<= RSCAN_MAX, multiple of 8)
+    mx_u64_t readable;           // out — 8-byte words read successfully
+    mx_u64_t faults;             // out — words that raised a handled fault
+    mx_u64_t seg_count;          // out — readable byte ranges recorded (<= 8)
+    mx_u64_t first_count;        // out — first non-zero readable words recorded (<= 8)
+    mx_u64_t esr_last;           // out — ESR of the last fault caught
     mx_u64_t segments[8][2];     // [start, end) byte ranges
     mx_u64_t first_values[8][2]; // [addr, value]
 };

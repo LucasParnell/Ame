@@ -6,9 +6,21 @@
 
 HwInfo g_hw{};
 static unsigned ticks, ipis, deliveries;
-namespace drivers::timer { void handle_tick() { ++ticks; } }
-namespace smp { void handle_ipi() { ++ipis; } }
-namespace irq { void deliver(u32) { ++deliveries; } }
+namespace drivers::timer {
+void handle_tick() {
+    ++ticks;
+}
+} // namespace drivers::timer
+namespace smp {
+void handle_ipi() {
+    ++ipis;
+}
+} // namespace smp
+namespace irq {
+void deliver(u32) {
+    ++deliveries;
+}
+} // namespace irq
 
 static std::array<u32, 1024> dist{}, cpu{};
 static std::array<u8, 0x8000> window{};
@@ -53,10 +65,13 @@ int main() {
 #endif
     assert(calls == 1); // No SMC from interrupt context.
     const auto events = snapshot(MX_RPMB_STATUS).events;
-    cpu[0xc / 4] = 1; drivers::gic::handle_irq();
-    cpu[0xc / 4] = 30; drivers::gic::handle_irq();
+    cpu[0xc / 4] = 1;
+    drivers::gic::handle_irq();
+    cpu[0xc / 4] = 30;
+    drivers::gic::handle_irq();
     const auto previous = deliveries;
-    cpu[0xc / 4] = 100; drivers::gic::handle_irq();
+    cpu[0xc / 4] = 100;
+    drivers::gic::handle_irq();
     assert(ipis == 1 && ticks == 1 && deliveries == previous + 1);
     assert(snapshot(MX_RPMB_STATUS).events == events);
     cpu[0xc / 4] = 1023;

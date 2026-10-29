@@ -20,6 +20,14 @@ enum MxPlatformOp : mx_u32_t {
     // Read-only: argument is one of SYSTEM_OFF/RESET/FASTBOOT. Returns status
     // before init stops services; unsupported transitions must leave them live.
     MX_PLATFORM_SYSTEM_CHECK = 13,
+    // Exclusive charger observer publishes two raw bytes (STATUS0, CHG_REG0).
+    MX_PLATFORM_CHARGER_SAMPLE = 14,
+    MX_PLATFORM_CHARGER_INVALIDATE = 15,
+    // System owner: upper 32 bits = frequency domain, lower 32 = requested kHz.
+    MX_PLATFORM_CPU_FREQUENCY = 16,
+    // Exclusive eMMC owner, arg=0: inspect fixed board clock/gate/reset fields.
+    // Returns the active input frequency in Hz, or a negative status.
+    MX_PLATFORM_EMMC_CLOCK = 17,
 };
 constexpr mx_u32_t MX_ANNE_USB_RESETS = (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) |
                                         (1u << 12) | (1u << 13) | (1u << 14) | (1u << 27);

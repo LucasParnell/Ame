@@ -16,19 +16,39 @@ struct Resources {
         assert(offset + bytes.size <= upload.size());
         libk::copy_exact(libk::as_bytes(upload.data() + offset, bytes.size), bytes);
     }
-    void discard_upload() { upload.fill(0); }
-    mx_status_t launch(mx_u32_t) { child = !fail_launch; return fail_launch ? MX_ERR_BAD_IMAGE : MX_OK; }
-    bool has_child() { return child; }
-    void kill() { ++kills; }
-    bool poll_exit(mx_i32_t& code) { if (!exited) return false; code = 42; exited = false; return true; }
-    void clear_app() { child = false; ++clears; }
+    void discard_upload() {
+        upload.fill(0);
+    }
+    mx_status_t launch(mx_u32_t) {
+        child = !fail_launch;
+        return fail_launch ? MX_ERR_BAD_IMAGE : MX_OK;
+    }
+    bool has_child() {
+        return child;
+    }
+    void kill() {
+        ++kills;
+    }
+    bool poll_exit(mx_i32_t& code) {
+        if (!exited)
+            return false;
+        code = 42;
+        exited = false;
+        return true;
+    }
+    void clear_app() {
+        child = false;
+        ++clears;
+    }
 };
 using Session = mochi::apps::Session<Resources>;
-static mx_status_t request(Session& s, mx_u16_t type, libk::const_bytes body = {}, mx_u64_t now = 100) {
+static mx_status_t request(Session& s, mx_u16_t type, libk::const_bytes body = {},
+                           mx_u64_t now = 100) {
     mx_u8_t bytes[64]{};
     libk::write_le<mx_u64_t>(libk::as_bytes(bytes, 8), s.id);
     libk::copy_exact(libk::as_bytes(bytes + 8, body.size), body);
-    return s.request(type, type == midix::apps::kHello ? body : libk::as_bytes(bytes, body.size + 8), 7, now);
+    return s.request(
+        type, type == midix::apps::kHello ? body : libk::as_bytes(bytes, body.size + 8), 7, now);
 }
 static void begin(Session& s) {
     mx_u8_t body[8]{};
@@ -73,19 +93,27 @@ int main() {
     begin(s);
     s.tick(100 + kUploadTimeoutNs);
     assert(s.state == Ready && libk::is_zero(libk::as_bytes(s.resources.upload.data(), 128)));
-    begin(s); upload(s); assert(request(s, kRun) == MX_OK);
+    begin(s);
+    upload(s);
+    assert(request(s, kRun) == MX_OK);
     s.tick(1'000'100);
     assert(s.state == Stopping && s.resources.child);
-    s.resources.exited = true; s.tick(1'000'101);
+    s.resources.exited = true;
+    s.tick(1'000'101);
     assert(s.state == Ready && !s.resources.child);
-    begin(s); upload(s);
+    begin(s);
+    upload(s);
     s.resources.fail_launch = true;
     assert(request(s, kRun) == MX_ERR_BAD_IMAGE && s.state == Ready);
     assert(libk::is_zero(libk::as_bytes(s.resources.upload.data(), 128)));
     s.resources.fail_launch = false;
-    begin(s); upload(s); assert(request(s, kRun) == MX_OK);
-    s.disconnect(); assert(s.state == Stopping);
-    s.resources.exited = true; s.tick(300);
+    begin(s);
+    upload(s);
+    assert(request(s, kRun) == MX_OK);
+    s.disconnect();
+    assert(s.state == Stopping);
+    s.resources.exited = true;
+    s.tick(300);
     assert(s.state == Closed && s.generation == 0);
     std::puts("app streaming session probe ok");
 }

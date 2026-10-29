@@ -15,6 +15,8 @@ The [IPC and scheduler refactor](docs/IPC_REFACTOR.md) describes the current
 fast paths, wakeup ordering and validation.
 See [Cortex-A53 IPC execution paths](docs/IPC_FLOOR.md) for the P20 Lite-oriented
 ASID, framing, combined IPC and scheduler changes.
+See [reusable IPC APIs](docs/IPC_OPTIMIZATIONS.md) for application channels,
+scoped handoff, capacity planning, batching and deadline scheduling.
 
 ## Build
 

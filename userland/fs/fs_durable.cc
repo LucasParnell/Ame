@@ -169,7 +169,8 @@ static mx_u32_t enumerate_data(DurableEntry out[kDurableMaxRecords]) {
 static void read_logical_block(const InodeState& inode, mx_u64_t logical_block, mx_u8_t* out) {
     const ExtentState* extent = find_extent_const(inode, logical_block);
     if (extent && extent->phys_block < kMaxPhysBlocks) {
-        libk::copy_exact(libk::as_bytes(out, kBlockSize), libk::as_bytes(g_data_blocks[extent->phys_block]));
+        libk::copy_exact(libk::as_bytes(out, kBlockSize),
+                         libk::as_bytes(g_data_blocks[extent->phys_block]));
     } else {
         libk::zero(out, kBlockSize);
     }
@@ -196,7 +197,8 @@ static DurableRecord& fill_record(const DurableEntry& entry) {
 
 static void finalize_record(DurableRecord& rec) {
     rec.record_crc32 = 0;
-    rec.record_crc32 = libk::crc32_ieee(libk::as_bytes(reinterpret_cast<const mx_u8_t*>(&rec), sizeof(rec)));
+    rec.record_crc32 =
+        libk::crc32_ieee(libk::as_bytes(reinterpret_cast<const mx_u8_t*>(&rec), sizeof(rec)));
 }
 
 static bool write_header(mx_u32_t state, mx_u32_t content_blocks) {
@@ -208,7 +210,8 @@ static bool write_header(mx_u32_t state, mx_u32_t content_blocks) {
     header.generation = g_generation;
     header.content_blocks = content_blocks;
     header.header_crc32 = 0;
-    header.header_crc32 = libk::crc32_ieee(libk::as_bytes(reinterpret_cast<const mx_u8_t*>(&header), sizeof(header)));
+    header.header_crc32 =
+        libk::crc32_ieee(libk::as_bytes(reinterpret_cast<const mx_u8_t*>(&header), sizeof(header)));
     return region_write_block(kDurableHeaderBlock, g_header_block);
 }
 
@@ -226,7 +229,8 @@ mx_i32_t durable_sync() {
     }
 
     const mx_u32_t count = enumerate_data(g_entries);
-    if (count == 0) return MX_ERR_FAULT;
+    if (count == 0)
+        return MX_ERR_FAULT;
 
     // g_entries[0] is the /data root itself and is implicit on disk
     // (parent_slot 0); only its descendants get records.
@@ -250,7 +254,8 @@ mx_i32_t durable_sync() {
     }
 
     const mx_i32_t dirty_flush = disk_flush();
-    if (dirty_flush != MX_OK) return dirty_flush;
+    if (dirty_flush != MX_OK)
+        return dirty_flush;
 
     mx_u64_t rel = kDurableFirstRecordBlock;
     for (mx_u32_t i = 1; i < count; ++i) {
@@ -281,7 +286,8 @@ mx_i32_t durable_sync() {
     }
 
     const mx_i32_t records_flush = disk_flush();
-    if (records_flush != MX_OK) return records_flush;
+    if (records_flush != MX_OK)
+        return records_flush;
     if (!write_header(kDurableStateCommitted, static_cast<mx_u32_t>(total))) {
         return static_cast<mx_i32_t>(MX_ERR_FAULT);
     }
@@ -315,7 +321,8 @@ static bool validate_record(mx_u64_t rel, mx_u64_t end) {
     }
     const mx_u32_t stored_crc = rec.record_crc32;
     rec.record_crc32 = 0;
-    const mx_u32_t actual_crc = libk::crc32_ieee(libk::as_bytes(g_record_block, sizeof(DurableRecord)));
+    const mx_u32_t actual_crc =
+        libk::crc32_ieee(libk::as_bytes(g_record_block, sizeof(DurableRecord)));
     rec.record_crc32 = stored_crc;
     if (actual_crc != stored_crc) {
         return false;
@@ -357,7 +364,8 @@ bool durable_load() {
     }
     const mx_u32_t stored_crc = header.header_crc32;
     header.header_crc32 = 0;
-    const mx_u32_t actual_crc = libk::crc32_ieee(libk::as_bytes(g_header_block, sizeof(DurableHeader)));
+    const mx_u32_t actual_crc =
+        libk::crc32_ieee(libk::as_bytes(g_header_block, sizeof(DurableHeader)));
     header.header_crc32 = stored_crc;
     if (actual_crc != stored_crc) {
         return false;
@@ -394,7 +402,8 @@ bool durable_load() {
     // immediately, and roll back only the inodes created by this replay.
     libk::zero(g_record_slots);
     InodeState* root = live_inode(g_data_inode);
-    if (!root || root->type != FS_INODE_DIR) return false;
+    if (!root || root->type != FS_INODE_DIR)
+        return false;
     const mx_u64_t generation_before = g_generation;
     const bool dirty_before = g_metadata_dirty;
     mx_u32_t slot = 0;
@@ -418,8 +427,8 @@ bool durable_load() {
         }
         // Replay writes are internal; restore immutable content-store status
         // only after all of a file's blocks have been loaded.
-        InodeState* inode = alloc_inode(rec.type, FS_CLASS_USER_DATA, parent->inode_number,
-                                       rec.name, rec.name_len);
+        InodeState* inode =
+            alloc_inode(rec.type, FS_CLASS_USER_DATA, parent->inode_number, rec.name, rec.name_len);
         if (!inode) {
             complete = false;
             break;
@@ -438,7 +447,8 @@ bool durable_load() {
                 break;
             }
         }
-        if (!complete) break;
+        if (!complete)
+            break;
         inode->size = rec.size;
         inode->inode_class = rec.inode_class;
         rel += kDurableRecordMetaBlocks + rec.data_blocks;

@@ -31,16 +31,21 @@ struct OutputSink : ByteEndpoint {
 // Read side: the rendered display byte stream (io.console/tty.fb0 <- msh).
 struct OutputSource : ByteEndpoint {
     bool try_read(RingSlot* out) const {
-        if (!out || !ring) return false;
-        if (!try_pop(out)) return false;
+        if (!out || !ring)
+            return false;
+        if (!try_pop(out))
+            return false;
         return message_valid(*out) && out->type == MX_TERM_OUTPUT_BYTES;
     }
 
     bool wait_read(RingSlot* out) const {
-        if (!out || !valid()) return false;
+        if (!out || !valid())
+            return false;
         for (;;) {
-            if (!wait_pop(out)) return false;
-            if (message_valid(*out) && out->type == MX_TERM_OUTPUT_BYTES) return true;
+            if (!wait_pop(out))
+                return false;
+            if (message_valid(*out) && out->type == MX_TERM_OUTPUT_BYTES)
+                return true;
         }
     }
 };
@@ -48,8 +53,10 @@ struct OutputSource : ByteEndpoint {
 // Read side: input bytes headed for the shell (shell <- serial bridge).
 struct InputSource : ByteEndpoint {
     bool try_read(RingSlot* out) const {
-        if (!out || !ring) return false;
-        if (!try_pop(out)) return false;
+        if (!out || !ring)
+            return false;
+        if (!try_pop(out))
+            return false;
         return message_valid(*out) && out->type == MX_TERM_INPUT_BYTES;
     }
 };
@@ -70,7 +77,9 @@ struct InputSink : ByteEndpoint {
 struct Terminal {
     mochi::SpscEndpoint endpoint;
 
-    bool valid() const { return endpoint.valid(); }
+    bool valid() const {
+        return endpoint.valid();
+    }
 
     bool try_write_bytes(const void* data, uint32_t len) const {
         return endpoint.valid() && endpoint.tx().push_bytes(MX_TERM_OUTPUT_BYTES, data, len) == len;
@@ -78,19 +87,24 @@ struct Terminal {
 
     bool write_bytes_spinning(const void* data, uint32_t len,
                               uint32_t max_yields_per_chunk = 1024) const {
-        return endpoint.valid() &&
-               endpoint.tx().push_bytes(MX_TERM_OUTPUT_BYTES, data, len, max_yields_per_chunk) == len;
+        return endpoint.valid() && endpoint.tx().push_bytes(MX_TERM_OUTPUT_BYTES, data, len,
+                                                            max_yields_per_chunk) == len;
     }
 
     bool try_read(RingSlot* out) const {
-        if (!endpoint.try_recv(out)) return false;
-        return out && message_valid(*out) && (out->type == MX_TERM_INPUT_BYTES || out->type == MX_TERM_CONTROL);
+        if (!endpoint.try_recv(out))
+            return false;
+        return out && message_valid(*out) &&
+               (out->type == MX_TERM_INPUT_BYTES || out->type == MX_TERM_CONTROL);
     }
 
-    bool wait_read(RingSlot* out) const {
+    bool wait_read(RingSlot* out, mx_status_t* status = nullptr) const {
         for (;;) {
-            if (!endpoint.wait_recv(out)) return false;
-            if (out && message_valid(*out) && (out->type == MX_TERM_INPUT_BYTES || out->type == MX_TERM_CONTROL)) return true;
+            if (!endpoint.wait_recv(out, status))
+                return false;
+            if (out && message_valid(*out) &&
+                (out->type == MX_TERM_INPUT_BYTES || out->type == MX_TERM_CONTROL))
+                return true;
         }
     }
 };

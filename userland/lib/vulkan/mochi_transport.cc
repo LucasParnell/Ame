@@ -21,7 +21,8 @@ bool mochi_pop(void* ctx, MxVkFrame* out) {
 // true return, so this never consumes a slot on its own.
 bool mochi_wait(void* ctx) {
     auto* ship = static_cast<MochiShip*>(ctx);
-    if (!ship || !ship->reply_ring) return false;
+    if (!ship || !ship->reply_ring)
+        return false;
     return ring_wait_readable(ship->reply_ring, ship->order, ship->reply_doorbell);
 }
 

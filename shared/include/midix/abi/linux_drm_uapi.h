@@ -17,9 +17,9 @@
 #endif
 
 /* --- IOCTL encoding (asm-generic/ioctl.h, 4 KiB-page Linux) --------------- */
-#define DRM_IOC(dir, type, nr, size) \
-    (((unsigned long)(dir) << 30) | ((unsigned long)(size) << 16) | \
-     ((unsigned long)(type) << 8) | (unsigned long)(nr))
+#define DRM_IOC(dir, type, nr, size)                                                               \
+    (((unsigned long)(dir) << 30) | ((unsigned long)(size) << 16) | ((unsigned long)(type) << 8) | \
+     (unsigned long)(nr))
 #define DRM_IO(nr) DRM_IOC(0, 'd', nr, 0)
 #define DRM_IOWR(nr, t) DRM_IOC(3, 'd', nr, sizeof(t))
 

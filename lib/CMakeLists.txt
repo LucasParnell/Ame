@@ -5,7 +5,7 @@ add_library(freestanding_memory${variant} STATIC libk/string.cc)
 target_include_directories(freestanding_memory${variant} PUBLIC include)
 # These routines also run before the MMU establishes Normal memory attributes.
 target_compile_options(freestanding_memory${variant} PRIVATE -mstrict-align)
-add_library(libk${variant} STATIC libk/printf.cc libk/panic.cc)
+add_library(libk${variant} STATIC libk/printf.cc libk/panic.cc libk/arm64/crypto.S)
 target_include_directories(libk${variant} PUBLIC include)
 target_compile_options(libk${variant} PRIVATE -mstrict-align)
 target_link_libraries(libk${variant} PUBLIC freestanding_memory${variant})

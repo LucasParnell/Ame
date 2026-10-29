@@ -299,7 +299,8 @@ int vkd_vulkan_available(void) {
 int vkd_vulkan_init(void) {
     return -1;
 }
-void vkd_vulkan_shutdown(void) {}
+void vkd_vulkan_shutdown(void) {
+}
 int vkd_vulkan_execute(uint8_t* arena, uint32_t arena_bytes, uint32_t command_offset,
                        uint32_t command_bytes) {
     (void)arena;

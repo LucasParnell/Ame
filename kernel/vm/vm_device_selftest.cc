@@ -334,21 +334,25 @@ void vm_device_selftest_if_testdev() {
     // record; a page map inside it splits it without disturbing neighbours; and
     // unmapping that page leaves the rest of the block mapped.
     constexpr u64 block_ipa = 0x60000000;
-    const PhysAddr block_pa = mm::alloc_pages_contiguous_aligned(kStage2BlockPages, kStage2BlockPages);
+    const PhysAddr block_pa =
+        mm::alloc_pages_contiguous_aligned(kStage2BlockPages, kStage2BlockPages);
     check(block_pa != 0, "(vi) contiguous 2 MiB backing");
     if (block_pa) {
         check((block_pa & (kStage2BlockSize - 1)) == 0, "(vi) backing is 2 MiB aligned");
         check(stage2_map_block(&owner->stage2, block_ipa, block_pa, RIGHT_READ | RIGHT_WRITE,
-                               Stage2MemType::NormalWB) == E_OK, "(vi) block map");
+                               Stage2MemType::NormalWB) == E_OK,
+              "(vi) block map");
         check(stage2_lookup_page(&owner->stage2, block_ipa + 0x3000, nullptr, nullptr) ==
-                  block_pa + 0x3000, "(vi) lookup resolves inside a block");
+                  block_pa + 0x3000,
+              "(vi) lookup resolves inside a block");
         check(stage2_validate_no_overlap(&owner->stage2, block_ipa + 0x100000, PAGE_SIZE) == E_BUSY,
               "(vi) overlap detection covers the whole block");
         // A split already maps every page of the unit, so a page map over one of
         // them is refused (the documented "cannot be replaced") -- and must not
         // disturb the block.
         check(stage2_map_page(&owner->stage2, block_ipa + 0x4000, block_pa + PAGE_SIZE,
-                              RIGHT_READ) == E_BUSY, "(vi) a block-mapped page cannot be replaced");
+                              RIGHT_READ) == E_BUSY,
+              "(vi) a block-mapped page cannot be replaced");
         // Unmapping a page inside the block splits it: only that page goes away
         // and the rest of the 2 MiB unit keeps its mapping.
         check(stage2_unmap_page(&owner->stage2, block_ipa + 0x4000) == E_OK,
@@ -356,9 +360,11 @@ void vm_device_selftest_if_testdev() {
         check(stage2_lookup_page(&owner->stage2, block_ipa + 0x4000, nullptr, nullptr) == 0,
               "(vi) the unmapped page is gone");
         check(stage2_lookup_page(&owner->stage2, block_ipa + 0x3000, nullptr, nullptr) ==
-                  block_pa + 0x3000, "(vi) block neighbour intact after split");
+                  block_pa + 0x3000,
+              "(vi) block neighbour intact after split");
         check(stage2_lookup_page(&owner->stage2, block_ipa + 0x5000, nullptr, nullptr) ==
-                  block_pa + 0x5000, "(vi) block survives the page unmap");
+                  block_pa + 0x5000,
+              "(vi) block survives the page unmap");
         ANKO_LOGF_INFO("vm/selftest", "(vi) block map+split+unmap ok ipa=0x%llx pa=0x%llx",
                        static_cast<unsigned long long>(block_ipa),
                        static_cast<unsigned long long>(block_pa));
@@ -386,13 +392,15 @@ void vm_device_selftest_if_testdev() {
         const bool ran = vcpu_ecam_probe(g_vcpu, *owner);
         check(ran, "(v) guest ECAM faults resume through HVC");
         const auto& r = g_vcpu.el2.regs;
-        check(r[1] == (u32(kTestdevDevice) << 16 | kTestdevVendor) &&
-              r[2] == kTestdevVendor && r[3] == (kTestdevVendor >> 8), "(v) sized config reads");
+        check(r[1] == (u32(kTestdevDevice) << 16 | kTestdevVendor) && r[2] == kTestdevVendor &&
+                  r[3] == (kTestdevVendor >> 8),
+              "(v) sized config reads");
         check(r[5] == 0xfffff000u && r[7] == kGuestPhysMin && r[13] == kGuestPhysMin,
               "(v) BAR sizing, restore and denied relocation");
         check(r[8] == 0xffffffffu && r[9] == 0xffffffffu && r[11] == ~0ull,
               "(v) absent function/device and signed load");
-        if (ran && g_failures == 0) ANKO_LOG_INFO("vm/selftest", "(v) ECAM guest trap proof passed");
+        if (ran && g_failures == 0)
+            ANKO_LOG_INFO("vm/selftest", "(v) ECAM guest trap proof passed");
         // The boot-only probe has exited EL2; no runner can reference this page.
         (void)stage2_unmap_page(&owner->stage2, code_ipa);
         mm::free_page(code);
@@ -533,7 +541,8 @@ void vm_device_selftest_if_testdev() {
 #else // !ANKO_BUILD_DEV
 
 namespace vm {
-void vm_device_selftest_if_testdev() {}
+void vm_device_selftest_if_testdev() {
+}
 } // namespace vm
 
 #endif

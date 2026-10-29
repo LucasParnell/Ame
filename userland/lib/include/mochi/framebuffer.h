@@ -15,7 +15,9 @@ struct Client {
     Ring cmd;
     Ring reply;
 
-    bool valid() const { return cmd.valid(); }
+    bool valid() const {
+        return cmd.valid();
+    }
 
     bool try_send(uint32_t type, const void* data, uint32_t len) const {
         return cmd.try_push(type, data, len);
@@ -67,11 +69,17 @@ struct Server {
     Ring cmd;
     Ring reply;
 
-    bool valid() const { return cmd.valid(); }
+    bool valid() const {
+        return cmd.valid();
+    }
 
-    bool try_recv(RingSlot* out) const { return cmd.try_pop(out); }
+    bool try_recv(RingSlot* out) const {
+        return cmd.try_pop(out);
+    }
 
-    bool wait_recv(RingSlot* out) const { return cmd.wait_pop(out); }
+    bool wait_recv(RingSlot* out) const {
+        return cmd.wait_pop(out);
+    }
 
     bool send_info(const FbInfo& info) const {
         return reply.valid() && reply.try_push_msg(FB_INFO, info);

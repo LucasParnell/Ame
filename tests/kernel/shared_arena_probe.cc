@@ -70,8 +70,10 @@ void* memset(void* dst, int c, usize n) {
 
 // --- logging + panic stubs --------------------------------------------------
 namespace anko::log {
-void write(Level, const char*, const char*) {}
-void writef(Level, const char*, const char*, ...) {}
+void write(Level, const char*, const char*) {
+}
+void writef(Level, const char*, const char*, ...) {
+}
 } // namespace anko::log
 
 [[noreturn]] void panic(const char* msg) {
@@ -150,8 +152,10 @@ u64 refs_of(Record* record) {
 
 // --- vm / cap stubs for the capability-facing wrappers ----------------------
 namespace vm {
-void metric_inc(VmDebugCounter) {}
-void note_error() {}
+void metric_inc(VmDebugCounter) {
+}
+void note_error() {
+}
 cap::Ref require_cap(Process&, CapHandle, CapType, u32, SysError*) {
     return cap::Ref(nullptr);
 }
@@ -173,8 +177,8 @@ CapHandle alloc(CapTable&, CapType, void*, u32) {
 namespace {
 constexpr u64 kPage = PAGE_SIZE;
 constexpr u32 kRw = RIGHT_READ | RIGHT_WRITE;
-constexpr u32 kRwDma = static_cast<u32>(iommu::DmaPerm::Read) |
-                       static_cast<u32>(iommu::DmaPerm::Write);
+constexpr u32 kRwDma =
+    static_cast<u32>(iommu::DmaPerm::Read) | static_cast<u32>(iommu::DmaPerm::Write);
 
 u8* alloc_host_pages(u64 pages) {
     void* p = std::aligned_alloc(kPage, pages * kPage);
@@ -216,8 +220,7 @@ VmFixture make_vm(u32 id) {
     f.vm->vm_id = id;
     f.vm->state = VM_CREATED;
     assert(vm::stage2_create(&f.vm->stage2) == E_OK);
-    f.vm->lifetime = object::create(
-        f.vm, [](void* target) { delete static_cast<Vm*>(target); });
+    f.vm->lifetime = object::create(f.vm, [](void* target) { delete static_cast<Vm*>(target); });
     assert(f.vm->lifetime);
     return f;
 }
@@ -260,8 +263,8 @@ int main() {
     for (u64 i = 0; i < fixt.arena.size / kPage; ++i) {
         u32 rights = 0;
         vm::Stage2MemType type = vm::Stage2MemType::Device;
-        const PhysAddr pa = vm::stage2_lookup_page(&base.vm->stage2, guest_pa + i * kPage,
-                                                   &rights, &type);
+        const PhysAddr pa =
+            vm::stage2_lookup_page(&base.vm->stage2, guest_pa + i * kPage, &rights, &type);
         assert(pa == reinterpret_cast<PhysAddr>(fixt.host) + i * kPage);
         assert(rights == kRw);
         assert(type == vm::Stage2MemType::NormalWB);
@@ -272,23 +275,24 @@ int main() {
     vm::SharedArena* bad = nullptr;
     assert(vm::shared_arena_create(base.vm, &fixt.arena, fixt.record, guest_pa + 1, fixt.arena.size,
                                    kRw, vm::kSharedArenaFlagNone, &bad) == E_INVALID);
-    assert(vm::shared_arena_create(base.vm, &fixt.arena, fixt.record, guest_pa, fixt.arena.size - kPage,
-                                   kRw, vm::kSharedArenaFlagNone, &bad) == E_INVALID);
+    assert(vm::shared_arena_create(base.vm, &fixt.arena, fixt.record, guest_pa,
+                                   fixt.arena.size - kPage, kRw, vm::kSharedArenaFlagNone,
+                                   &bad) == E_INVALID);
     assert(vm::shared_arena_create(base.vm, &fixt.arena, fixt.record, 0, fixt.arena.size, kRw,
                                    vm::kSharedArenaFlagNone, &bad) == E_INVALID);
     assert(vm::shared_arena_create(base.vm, &fixt.arena, fixt.record, 1ull << 39, fixt.arena.size,
                                    kRw, vm::kSharedArenaFlagNone, &bad) == E_INVALID);
     assert(vm::shared_arena_create(base.vm, &fixt.arena, fixt.record, guest_pa + 0x100'0000ull,
-                                   fixt.arena.size, 0, vm::kSharedArenaFlagNone, &bad) ==
-           E_INVALID);
+                                   fixt.arena.size, 0, vm::kSharedArenaFlagNone,
+                                   &bad) == E_INVALID);
     assert(vm::shared_arena_create(base.vm, &fixt.arena, fixt.record, guest_pa + 0x100'0000ull,
                                    fixt.arena.size, RIGHT_READ | RIGHT_EXEC,
                                    vm::kSharedArenaFlagNone, &bad) == E_INVALID);
     assert(vm::shared_arena_create(base.vm, &fixt.arena, fixt.record, guest_pa + 0x100'0000ull,
                                    fixt.arena.size, kRw, 1u, &bad) == E_INVALID);
     assert(vm::shared_arena_create(base.vm, &fixt.arena, fixt.record, guest_pa - kPage,
-                                   fixt.arena.size, kRw, vm::kSharedArenaFlagNone, &bad) ==
-           E_BUSY); // overlaps the attachment above
+                                   fixt.arena.size, kRw, vm::kSharedArenaFlagNone,
+                                   &bad) == E_BUSY); // overlaps the attachment above
     // A VA-only arena (no pinned pages) cannot be attached.
     Arena va_only{};
     va_only.size = kPage;
@@ -314,8 +318,7 @@ int main() {
         iommu::IommuDomain* domain = nullptr;
         assert(iommu::domain_create(ds->object_tag, ops, iommu::null_backend(), &domain) == E_OK);
 
-        const iommu::IommuMap map =
-            make_map(0x6000'0000, ds->host_phys_base, ds->size, kRwDma);
+        const iommu::IommuMap map = make_map(0x6000'0000, ds->host_phys_base, ds->size, kRwDma);
         // Unregistered: the domain refuses the page (owner query returns false).
         assert(iommu::domain_map_batch(*domain, &map, 1) == E_PERM);
         assert(iommu::domain_pinned_pages(*domain) == 0);
@@ -401,8 +404,8 @@ int main() {
         }
         vm::SharedArena* overflow = nullptr;
         assert(vm::shared_arena_create(cv.vm, &cf.arena, cf.record, 0x5100'0000ull + 0x20'0000ull,
-                                       cf.arena.size, kRw, vm::kSharedArenaFlagNone, &overflow) ==
-               E_OVERFLOW);
+                                       cf.arena.size, kRw, vm::kSharedArenaFlagNone,
+                                       &overflow) == E_OVERFLOW);
         while (cv.vm->shared_arena_count) {
             object::release(cv.vm->shared_arenas[cv.vm->shared_arena_count - 1]->lifetime);
         }

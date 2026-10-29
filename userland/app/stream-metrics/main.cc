@@ -11,5 +11,6 @@ extern "C" [[noreturn]] void _start() {
                    static_cast<long long>(sys_debug_counter(201)));
     mochi::log_raw_marker(line);
     mx_exit(0);
-    for (;;) mx_yield();
+    for (;;)
+        mx_yield();
 }

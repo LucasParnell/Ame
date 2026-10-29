@@ -20,8 +20,7 @@ inline bool message_valid(const MxRingSlot& slot) {
 }
 
 // Validate the wire representation once for every typed sender and decoder.
-template <typename T>
-constexpr mx_u32_t message_size() {
+template <typename T> constexpr mx_u32_t message_size() {
     static_assert(__is_trivially_copyable(T), "inline messages must be trivially copyable");
     static_assert(sizeof(T) <= MX_RING_INLINE_PAYLOAD,
                   "message exceeds the inline ring payload; put it in an arena");
@@ -32,10 +31,10 @@ constexpr mx_u32_t message_size() {
 // written in full, including a zeroed tail; seq starts at zero. Ring publication
 // stamps its own sequence. Callers must initialise all transmitted fields and
 // padding within T; these helpers copy its object representation.
-template <typename T>
-inline bool message_put(MxRingSlot* slot, mx_u32_t type, const T& msg) {
+template <typename T> inline bool message_put(MxRingSlot* slot, mx_u32_t type, const T& msg) {
     constexpr mx_u32_t size = message_size<T>();
-    if (!slot) return false;
+    if (!slot)
+        return false;
     slot->type = type;
     slot->length = size;
     slot->seq = 0;
@@ -48,12 +47,14 @@ inline bool message_put(MxRingSlot* slot, mx_u32_t type, const T& msg) {
 // Decode `slot` into `out`. `expect` is the required opcode, or 0 to accept any
 // opcode. Returns false and leaves `out` untouched if the opcode does not match
 // or the length is shorter than T or larger than the inline payload.
-template <typename T>
-inline bool message_get(const MxRingSlot& slot, T* out, mx_u32_t expect = 0) {
+template <typename T> inline bool message_get(const MxRingSlot& slot, T* out, mx_u32_t expect = 0) {
     constexpr mx_u32_t size = message_size<T>();
-    if (!out) return false;
-    if (expect != 0 && slot.type != expect) return false;
-    if (slot.length < size || !message_valid(slot)) return false;
+    if (!out)
+        return false;
+    if (expect != 0 && slot.type != expect)
+        return false;
+    if (slot.length < size || !message_valid(slot))
+        return false;
     return libk::copy_n(libk::as_bytes(out, size), libk::as_bytes(slot.payload), size);
 }
 

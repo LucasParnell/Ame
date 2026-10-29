@@ -25,5 +25,7 @@ static const HwInfo kFallback = {
     .t210_dc_fb_height = 0,
     .xhci_noreset = false,
 };
-const HwInfo& get_board_fallback() { return kFallback; }
+const HwInfo& get_board_fallback() {
+    return kFallback;
 }
+} // namespace platform

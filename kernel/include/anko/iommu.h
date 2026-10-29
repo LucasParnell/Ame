@@ -147,10 +147,10 @@ struct IommuBackendOps {
     SysError (*detach_stream)(void* ctx, IommuDeviceId device);
     void* ctx;
     const IommuTableFormat* table_format; // stable for the backend's lifetime
-    u8 iova_bits; // 1..39; zero selects 39 only in a software model
-    u8 pa_bits;   // 12..48; zero selects 48 only in a software model
-    bool hardware; // verified translation backend, not a mock/no-op
-    bool (*ready)(void* ctx); // hardware routes stop authorizing DMA after failure
+    u8 iova_bits;                         // 1..39; zero selects 39 only in a software model
+    u8 pa_bits;                           // 12..48; zero selects 48 only in a software model
+    bool hardware;                        // verified translation backend, not a mock/no-op
+    bool (*ready)(void* ctx);             // hardware routes stop authorizing DMA after failure
 };
 
 // The no-op backend: all hooks absent, so every operation succeeds without
@@ -162,7 +162,11 @@ const IommuBackendOps& null_backend();
 // A PCI segment or SoC namespace must describe actual wiring, not mere SMMU
 // presence. Registration is fixed-capacity and permanent; ops/format live for
 // the kernel lifetime. No match returns nullptr and denies direct DMA.
-struct IommuRoute { u32 segment; u32 first_stream; u32 stream_count; };
+struct IommuRoute {
+    u32 segment;
+    u32 first_stream;
+    u32 stream_count;
+};
 constexpr u32 kMaxIommuBackends = 4;
 SysError register_backend(IommuRoute route, const IommuBackendOps& backend);
 const IommuBackendOps* backend_for(IommuDeviceId device);

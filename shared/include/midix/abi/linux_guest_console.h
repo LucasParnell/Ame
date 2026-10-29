@@ -15,7 +15,8 @@
 
 static inline unsigned long mx_strlen(const char* s) {
     unsigned long n = 0;
-    while (s[n]) ++n;
+    while (s[n])
+        ++n;
     return n;
 }
 
@@ -24,14 +25,16 @@ static inline int mx_memeq(const void* a, const void* b, unsigned long n) {
     const unsigned char* pa = (const unsigned char*)a;
     const unsigned char* pb = (const unsigned char*)b;
     for (unsigned long i = 0; i < n; ++i) {
-        if (pa[i] != pb[i]) return 0;
+        if (pa[i] != pb[i])
+            return 0;
     }
     return 1;
 }
 
 static inline void mx_zero(void* dst, unsigned long n) {
     unsigned char* d = (unsigned char*)dst;
-    for (unsigned long i = 0; i < n; ++i) d[i] = 0;
+    for (unsigned long i = 0; i < n; ++i)
+        d[i] = 0;
 }
 
 static inline void mx_puts(const char* s) {
@@ -50,12 +53,14 @@ static inline char* mx_append_u32(char* out, unsigned int v) {
         tmp[n++] = (char)('0' + (v % 10u));
         v /= 10u;
     }
-    while (n) *out++ = tmp[--n];
+    while (n)
+        *out++ = tmp[--n];
     return out;
 }
 
 static inline char* mx_append_str(char* out, const char* s) {
-    while (*s) *out++ = *s++;
+    while (*s)
+        *out++ = *s++;
     return out;
 }
 

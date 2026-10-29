@@ -208,7 +208,7 @@ inline bool skip(const char*& p, const char* end, unsigned depth = 0,
     }
     return false;
 }
-inline Value parse(const char* data, size_t length) {
+inline Value parse(const char* data, size_t length, bool check_duplicates = true) {
     if (!data || length > 65536) {
         return {};
     }
@@ -216,7 +216,7 @@ inline Value parse(const char* data, size_t length) {
     const char* end = data + length;
     ws(p, end);
     const char* start = p;
-    if (!skip(p, end)) {
+    if (!skip(p, end, 0, check_duplicates)) {
         return {};
     }
     const char* stop = p;
@@ -285,6 +285,35 @@ inline Value member(Value object, const char* name) {
         }
     }
     return {};
+}
+// Walk an array once. element(v, i) rescans from the first byte for every
+// index, which turns a full pass over n elements into n^2/2 skips.
+inline const char* array_cursor(Value array) {
+    if (!array || *array.begin != '[') {
+        return nullptr;
+    }
+    return array.begin + 1;
+}
+inline bool array_next(const char*& cursor, Value array, Value& out) {
+    if (!cursor) {
+        return false;
+    }
+    ws(cursor, array.end);
+    if (cursor >= array.end || *cursor == ']') {
+        cursor = nullptr;
+        return false;
+    }
+    const char* start = cursor;
+    if (!skip(cursor, array.end, 0, false)) {
+        cursor = nullptr;
+        return false;
+    }
+    out = Value{start, cursor};
+    ws(cursor, array.end);
+    if (cursor < array.end && *cursor == ',') {
+        ++cursor;
+    }
+    return true;
 }
 inline Value element(Value array, size_t index) {
     if (!array || *array.begin != '[') {

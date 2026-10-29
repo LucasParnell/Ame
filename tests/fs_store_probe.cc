@@ -1,4 +1,5 @@
 #include "../userland/fs/store.h"
+#include "libk/endian.h"
 #include <array>
 #include <cassert>
 #include <cstdio>
@@ -15,16 +16,18 @@ struct Disk {
     int fd;
     std::map<u64, Block> stable, volatile_pages;
     int cut = -1, events = 0;
+    unsigned writes = 0, flushes = 0;
     bool reverse = false;
-    explicit Disk(int file) : fd(file) {}
+    explicit Disk(int file) : fd(file) {
+    }
     void tick() {
         if (events++ == cut)
             throw PowerCut{};
     }
-    static bool read(void *context, u64 first, u32 count, void *output) {
-        auto &d = *static_cast<Disk *>(context);
+    static bool read(void* context, u64 first, u32 count, void* output) {
+        auto& d = *static_cast<Disk*>(context);
         for (u32 i = 0; i < count; ++i) {
-            auto *out = static_cast<u8 *>(output) + i * kBlock;
+            auto* out = static_cast<u8*>(output) + i * kBlock;
             auto v = d.volatile_pages.find(first + i), p = d.stable.find(first + i);
             if (v != d.volatile_pages.end())
                 std::memcpy(out, v->second.data(), kBlock);
@@ -35,18 +38,20 @@ struct Disk {
         }
         return true;
     }
-    static bool write(void *context, u64 first, u32 count, const void *input) {
-        auto &d = *static_cast<Disk *>(context);
+    static bool write(void* context, u64 first, u32 count, const void* input) {
+        auto& d = *static_cast<Disk*>(context);
+        ++d.writes;
         for (u32 i = 0; i < count; ++i) {
-            auto &out = d.volatile_pages[first + i];
-            std::memcpy(out.data(), static_cast<const u8 *>(input) + i * kBlock, kBlock);
+            auto& out = d.volatile_pages[first + i];
+            std::memcpy(out.data(), static_cast<const u8*>(input) + i * kBlock, kBlock);
             d.tick();
         }
         return true;
     }
-    static bool flush(void *context) {
-        auto &d = *static_cast<Disk *>(context);
-        auto persist = [&](u64 block, const Block &value) {
+    static bool flush(void* context) {
+        auto& d = *static_cast<Disk*>(context);
+        ++d.flushes;
+        auto persist = [&](u64 block, const Block& value) {
             Block original{};
             read(&d, block, 1, original.data());
             // Read the stable version rather than the unflushed cache.
@@ -55,7 +60,7 @@ struct Disk {
                 original = found->second;
             else
                 assert(pread(d.fd, original.data(), kBlock, block * kBlock) == kBlock);
-            auto &out = d.stable[block];
+            auto& out = d.stable[block];
             out = original;
             for (u32 sector = 0; sector < 8; ++sector) {
                 std::memcpy(out.data() + sector * 512, value.data() + sector * 512, 512);
@@ -66,28 +71,31 @@ struct Disk {
             for (auto it = d.volatile_pages.rbegin(); it != d.volatile_pages.rend(); ++it)
                 persist(it->first, it->second);
         else
-            for (const auto &[block, value] : d.volatile_pages)
+            for (const auto& [block, value] : d.volatile_pages)
                 persist(block, value);
         d.volatile_pages.clear();
         d.tick();
         return true;
     }
-    Io io() { return {this, read, write, flush}; }
+    Io io() {
+        return {this, read, write, flush};
+    }
     void reboot() {
         volatile_pages.clear();
         cut = -1;
         events = 0;
     }
 };
-static InodeLeafEntry child(State &s, u32 parent, const char *name, u16 kind = FS_INODE_FILE) {
+static InodeLeafEntry child(State& s, u32 parent, const char* name, u16 kind = FS_INODE_FILE) {
     InodeLeafEntry i{};
     auto status = create(s, parent, name, u8(std::strlen(name)), kind, i);
     if (status != MX_OK)
-        std::fprintf(stderr, "create %s status=%d error=%d pages=%u\n", name, status, s.error, s.page_count);
+        std::fprintf(stderr, "create %s status=%d error=%d pages=%u\n", name, status, s.error,
+                     s.page_count);
     assert(status == MX_OK);
     return i;
 }
-static void verify(State &s, u32 ino, u64 offset, const void *expected, u32 length) {
+static void verify(State& s, u32 ino, u64 offset, const void* expected, u32 length) {
     std::array<u8, 65536> result{};
     u32 n = 0;
     assert(length <= result.size());
@@ -97,7 +105,8 @@ static void verify(State &s, u32 ino, u64 offset, const void *expected, u32 leng
     assert(status == MX_OK && n == length && !std::memcmp(result.data(), expected, length));
 }
 template <class Mutate, class Verify>
-static void crash_matrix(Disk seed, State &state, const char *operation, Mutate mutate, Verify verify_state) {
+static void crash_matrix(Disk seed, State& state, const char* operation, Mutate mutate,
+                         Verify verify_state) {
     for (bool reverse : {false, true}) {
         Disk complete = seed;
         complete.reverse = reverse;
@@ -109,18 +118,22 @@ static void crash_matrix(Disk seed, State &state, const char *operation, Mutate 
             Disk torn = seed;
             torn.reverse = reverse;
             if (!mount(state, torn.io())) {
-                std::fprintf(stderr,"recovery failed operation=%s cut=%d reverse=%d error=%d orphans=%u\n",operation,cut,reverse,state.error,state.orphans);
+                std::fprintf(stderr,
+                             "recovery failed operation=%s cut=%d reverse=%d error=%d orphans=%u\n",
+                             operation, cut, reverse, state.error, state.orphans);
                 assert(false);
             }
             torn.events = 0;
             torn.cut = cut;
             try {
                 (void)mutate(state);
-            } catch (PowerCut &) {
+            } catch (PowerCut&) {
             }
             torn.reboot();
             if (!mount(state, torn.io())) {
-                std::fprintf(stderr,"recovery failed operation=%s cut=%d reverse=%d error=%d orphans=%u\n",operation,cut,reverse,state.error,state.orphans);
+                std::fprintf(stderr,
+                             "recovery failed operation=%s cut=%d reverse=%d error=%d orphans=%u\n",
+                             operation, cut, reverse, state.error, state.orphans);
                 assert(false);
             }
             assert(!state.orphans && !state.poisoned);
@@ -129,7 +142,7 @@ static void crash_matrix(Disk seed, State &state, const char *operation, Mutate 
         std::printf("%s power-cut points: %d reverse=%d\n", operation, events, reverse);
     }
 }
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     assert(argc == 2 || argc == 3);
     int fd = open(argv[1], O_RDONLY);
     assert(fd >= 0);
@@ -158,7 +171,8 @@ int main(int argc, char **argv) {
         assert(truncate(*s, file.inode_number) == MX_OK);
         assert(s->reserve_count == kReserve && !s->orphans);
         for (u32 i = 0; i < 4; ++i)
-            assert(write(*s, file.inode_number, i * bytes.size(), bytes.data(), bytes.size()) == MX_OK);
+            assert(write(*s, file.inode_number, i * bytes.size(), bytes.data(), bytes.size()) ==
+                   MX_OK);
         disk.reboot();
         assert(mount(*s, disk.io()));
         verify(*s, file.inode_number, 3 * bytes.size(), bytes.data(), bytes.size());
@@ -189,7 +203,8 @@ int main(int argc, char **argv) {
     for (u32 i = 0; i < bytes.size(); ++i)
         bytes[i] = u8(i * 17 + 3);
     for (u32 i = 0; i < 40; ++i) {
-        auto status = write(*s, file.inode_number, u64(i) * bytes.size(), bytes.data(), bytes.size());
+        auto status =
+            write(*s, file.inode_number, u64(i) * bytes.size(), bytes.data(), bytes.size());
         if (status)
             std::fprintf(stderr, "write chunk=%u error=%d\n", i, status);
         assert(status == MX_OK);
@@ -199,7 +214,7 @@ int main(int argc, char **argv) {
     s->allocation_hint = s->super.total_blocks - 20;
     assert(write(*s, file.inode_number, 40 * bytes.size(), bytes.data(), bytes.size()) == MX_OK);
     bool physical_tail = false;
-    for (const auto &[block, value] : disk.stable)
+    for (const auto& [block, value] : disk.stable)
         if (block >= s->super.total_blocks - 20 && value[0] == bytes[0])
             physical_tail = true;
     assert(physical_tail);
@@ -234,6 +249,59 @@ int main(int argc, char **argv) {
     static_assert(sizeof(old) == sizeof(replacement));
     assert(write(*s, probe.inode_number, 0, old, sizeof(old)) == MX_OK);
     assert(sync(*s) == MX_OK);
+
+    // A clean equal-LSN mount verifies every home page without rewriting it,
+    // and still flushes: matching reads can come from a volatile card cache.
+    Disk clean = seed;
+    clean.reboot();
+    clean.writes = clean.flushes = 0;
+    MountProfile clean_profile{};
+    assert(mount(*s, clean.io(), &clean_profile));
+    assert(clean_profile.recovery_home_blocks > 0);
+    assert(clean_profile.recovery_reused_blocks == clean_profile.recovery_home_blocks);
+    assert(clean.writes == 0 && clean.flushes == 1);
+    verify(*s, probe.inode_number, 0, old, sizeof(old));
+
+    // Damage one byte after an otherwise valid checkpoint. An equal LSN must
+    // repair the home image, and another power cut during repair is recoverable.
+    Disk damaged = clean;
+    const auto target =
+        libk::load_le<u32>(damaged.stable.at(s->super.journal_start_block).data() + 12);
+    damaged.stable.at(target)[kBlock - 1] ^= 1;
+    damaged.events = 0;
+    damaged.writes = damaged.flushes = 0;
+    Disk repaired = damaged;
+    assert(mount(*s, repaired.io()));
+    assert(repaired.writes == 1 && repaired.flushes == 1);
+    assert(repaired.stable.at(target) == clean.stable.at(target));
+
+    auto failed_read = clean.io();
+    static u64 unreadable;
+    unreadable = target;
+    failed_read.read = [](void* context, u64 first, u32 count, void* out) {
+        if (unreadable >= first && unreadable - first < count)
+            return false;
+        return Disk::read(context, first, count, out);
+    };
+    assert(!mount(*s, failed_read) && !s->mounted && s->error == MX_ERR_FAULT);
+
+    auto failed_flush = clean.io();
+    failed_flush.flush = [](void*) { return false; };
+    assert(!mount(*s, failed_flush) && !s->mounted && s->poisoned);
+
+    for (int cut = 0; cut < repaired.events; ++cut) {
+        Disk interrupted = damaged;
+        interrupted.cut = cut;
+        try {
+            (void)mount(*s, interrupted.io());
+        } catch (PowerCut&) {
+        }
+        interrupted.reboot();
+        assert(mount(*s, interrupted.io()));
+        assert(interrupted.stable.at(target) == clean.stable.at(target));
+        verify(*s, probe.inode_number, 0, old, sizeof(old));
+    }
+
     for (bool reverse : {false, true}) {
         Disk complete = seed;
         complete.reverse = reverse;
@@ -250,7 +318,7 @@ int main(int argc, char **argv) {
             torn.cut = cut;
             try {
                 (void)write(*s, probe.inode_number, 0, replacement, sizeof(replacement));
-            } catch (PowerCut &) {
+            } catch (PowerCut&) {
             }
             torn.reboot();
             assert(mount(*s, torn.io()));
@@ -266,10 +334,11 @@ int main(int argc, char **argv) {
     Disk metadata_seed = seed;
     assert(mount(*s, metadata_seed.io()));
     for (u32 i = 0; i < 3; ++i)
-        assert(write(*s, probe.inode_number, i * bytes.size(), bytes.data(), bytes.size()) == MX_OK);
+        assert(write(*s, probe.inode_number, i * bytes.size(), bytes.data(), bytes.size()) ==
+               MX_OK);
     crash_matrix(
-        metadata_seed, *s, "truncate", [&](State &st) { return truncate(st, probe.inode_number); },
-        [&](State &st) {
+        metadata_seed, *s, "truncate", [&](State& st) { return truncate(st, probe.inode_number); },
+        [&](State& st) {
             InodeLeafEntry current{};
             assert(inode(st, probe.inode_number, current));
             assert(current.size == 0 || current.size == 3 * bytes.size());
@@ -277,8 +346,8 @@ int main(int argc, char **argv) {
                 verify(st, probe.inode_number, 2 * bytes.size(), bytes.data(), bytes.size());
         });
     crash_matrix(
-        metadata_seed, *s, "unlink", [&](State &st) { return unlink(st, kDataRoot, "crash", 5); },
-        [&](State &st) {
+        metadata_seed, *s, "unlink", [&](State& st) { return unlink(st, kDataRoot, "crash", 5); },
+        [&](State& st) {
             InodeLeafEntry current{};
             auto result = lookup(st, kDataRoot, "crash", 5, current);
             assert(result == MX_OK || result == MX_ERR_NOT_FOUND);
@@ -287,8 +356,8 @@ int main(int argc, char **argv) {
         });
     crash_matrix(
         metadata_seed, *s, "rename",
-        [&](State &st) { return rename(st, kDataRoot, "crash", 5, kDataRoot, "renamed", 7); },
-        [&](State &st) {
+        [&](State& st) { return rename(st, kDataRoot, "crash", 5, kDataRoot, "renamed", 7); },
+        [&](State& st) {
             InodeLeafEntry old_name{}, new_name{};
             const auto old_result = lookup(st, kDataRoot, "crash", 5, old_name),
                        new_result = lookup(st, kDataRoot, "renamed", 7, new_name);
@@ -298,11 +367,11 @@ int main(int argc, char **argv) {
         });
     crash_matrix(
         metadata_seed, *s, "promote",
-        [&](State &st) {
+        [&](State& st) {
             InodeLeafEntry promoted{};
             return promote(st, probe.inode_number, promoted);
         },
-        [&](State &st) {
+        [&](State& st) {
             for (u32 ordinal = 0;; ++ordinal) {
                 DirLeafEntry row{};
                 bool eof = false;
@@ -313,6 +382,7 @@ int main(int argc, char **argv) {
             }
         });
     close(fd);
-    std::puts("disk store: full-volume allocation, scalable B+trees, sparse I/O, rename, truncate, recovery "
+    std::puts("disk store: full-volume allocation, scalable B+trees, sparse I/O, rename, truncate, "
+              "recovery "
               "passed");
 }

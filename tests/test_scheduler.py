@@ -44,6 +44,8 @@ def build_probe(work, *, snapshot=None, benchmark=False, run=True, sanitizer='ad
     cmd += [str(kernel/'sched'/p) for p in ['accounting.cc', 'fair_queue.cc', 'sched_class.cc', 'handoff.cc', 'steal.cc', 'sched_context.cc', 'metrics.cc']]
     cmd += [str(kernel/'cap'/p if (kernel/'cap'/p).exists() else root/'kernel/cap'/p)
             for p in ['cap_table.cc', 'object.cc']]
+    cmd += [str(kernel/'power/accounting.cc')]
+    cmd += [str(root/'tests/timer_boundary.cc')]
     cmd += [str(p) for p in extra_sources]
     cmd += ['-o', str(work/'probe')]
     subprocess.run(cmd, check=True)

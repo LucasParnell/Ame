@@ -151,8 +151,7 @@ bool find_by_id(PhysAddr ecam_base, u16 vendor_id, u16 device_id, PciFunctionInf
 // cached `info` bases are updated.  `cursor_inout` is the next free window
 // offset, shared across the functions of one assignment.  Returns false when the
 // window cannot satisfy a BAR.
-bool assign_bars(PciFunctionInfo* info, PhysAddr window_base, u64 window_size,
-                 u64* cursor_inout);
+bool assign_bars(PciFunctionInfo* info, PhysAddr window_base, u64 window_size, u64* cursor_inout);
 
 // Read the host PCI command register for a BDF.
 u16 read_command(u8 bus, u8 device, u8 function);
@@ -191,17 +190,18 @@ constexpr u32 kRegIntPin = 0x3D;
 
 // The six BARs and the expansion ROM BAR must lie wholly inside the (type-0)
 // 256-byte configuration space every consumer models.
-static_assert((kRegBar0 - kRegVendorId) / 4u == 4u, "BAR0 must start four dwords after the vendor id");
+static_assert((kRegBar0 - kRegVendorId) / 4u == 4u,
+              "BAR0 must start four dwords after the vendor id");
 static_assert(kRegBar0 + kMaxBars * 4u == kRegBarEnd, "BAR window must end at kRegBarEnd");
 static_assert(kRegBarEnd <= kCfgSpaceBytes, "BAR window must fit in config space");
 static_assert(kRegRomBar + 4u <= kCfgSpaceBytes, "expansion ROM BAR must fit in config space");
 
 // BAR register decoding (PCI 3.0 §6.2.5.1).
-constexpr u32 kBarTypeMask = 0x0Fu;          // low bits: address kind / flags
-constexpr u32 kBarAddrMask = ~0x0Fu;         // high bits: writable base address
-constexpr u64 kBarMinSize = 16;              // 16 bytes: the smallest BAR aperture
-constexpr u64 kMmio32BarLimit = 1ull << 32;  // 32-bit MMIO BARs live below 4 GiB
-constexpr u32 kBarProbeValue = 0xFFFF'FFFFu; // write to size a BAR, then restore
+constexpr u32 kBarTypeMask = 0x0Fu;                       // low bits: address kind / flags
+constexpr u32 kBarAddrMask = ~0x0Fu;                      // high bits: writable base address
+constexpr u64 kBarMinSize = 16;                           // 16 bytes: the smallest BAR aperture
+constexpr u64 kMmio32BarLimit = 1ull << 32;               // 32-bit MMIO BARs live below 4 GiB
+constexpr u32 kBarProbeValue = 0xFFFF'FFFFu;              // write to size a BAR, then restore
 constexpr u64 kBarUpperAbsent = 0xFFFF'FFFF'0000'0000ull; // 64-bit BAR, no upper half
 
 // Header-type byte (PCI 3.0 §6.1.2).
@@ -220,8 +220,8 @@ static_assert(kCfgCapMin % 4u == 0 && kCfgCapMax % 4u == 0 && kCfgCapMax + 4u <=
               "capability window must stay inside config space");
 
 // MSI / MSI-X capability geometry (PCI 3.0 §6.8).
-constexpr u32 kMsiCtrlOffset = 2;      // control word, relative to the cap header
-constexpr u32 kMsiCapBytes = 24;       // header + control + address + data
+constexpr u32 kMsiCtrlOffset = 2; // control word, relative to the cap header
+constexpr u32 kMsiCapBytes = 24;  // header + control + address + data
 constexpr u32 kMsixVectorCountMask = 0x7FF;
 constexpr u32 kMsixBirMask = 0x7;
 constexpr u32 kMsixTableEntryBytes = 16;
@@ -239,9 +239,8 @@ constexpr u32 kPciIntxPinCount = 4;
 // ECAM address for one config-space dword. Every index is masked so a malformed
 // record or a hostile BDF can never address outside the function's 4 KiB window.
 constexpr u64 ecam_offset(u64 base, u32 bus, u32 dev, u32 fn, u32 off) {
-    return base | (static_cast<u64>(bus & 0xFFu) << 20) |
-           (static_cast<u64>(dev & 0x1Fu) << 15) | (static_cast<u64>(fn & 0x07u) << 12) |
-           (off & 0xFFFu);
+    return base | (static_cast<u64>(bus & 0xFFu) << 20) | (static_cast<u64>(dev & 0x1Fu) << 15) |
+           (static_cast<u64>(fn & 0x07u) << 12) | (off & 0xFFFu);
 }
 
 // Little-endian 16-bit access through an identity-mapped ECAM window. Uses byte
@@ -343,7 +342,7 @@ struct MsiMessage {
 // MSI capability geometry for the synthetic view of one function.
 struct MsiState {
     bool present;
-    bool msix;      // true: MSI-X table; false: MSI capability
+    bool msix; // true: MSI-X table; false: MSI capability
     bool enabled;
     u32 cap_offset; // config-space offset of the MSI/MSI-X capability
     u32 table_bar;  // MSI-X: BAR holding the vector table

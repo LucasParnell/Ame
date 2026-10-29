@@ -6,12 +6,18 @@
 #include "midix/format/bundle.h"
 #include "manifest_trust.h"
 #include "libk/string.h"
+#include "libk/arm64_crypto.h"
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && defined(ANKO_ANNE_WATCHDOG)
 #include "watchdog.h"
 #endif
 namespace kernel::init {
 namespace {
 midix::format::Bundle g_archive{};
+extern "C" void kernel_sha256_blocks(u32*, const u8*, usize, const u32*);
+
+void boot_sha256(u32* state, const u8* data, usize blocks) {
+    kernel_sha256_blocks(state, data, blocks, libk::sha256_detail::kSha256K);
+}
 struct InitrdVisitorCtx {
     i64 chosen_depth = -1;
     PhysAddr initrd_start = 0;
@@ -56,7 +62,8 @@ bool discover_initrd(PhysAddr dtb_phys, PhysAddr* out_base, usize* out_size) {
     // Carry a signed MXB in this native image without modifying either ramdisk.
     extern const u8 anne_bundle_start[] asm("anne_bundle_start");
     extern const u8 anne_bundle_end[] asm("anne_bundle_end");
-    if (!out_base || !out_size) return false;
+    if (!out_base || !out_size)
+        return false;
     *out_base = reinterpret_cast<PhysAddr>(anne_bundle_start);
     *out_size = static_cast<usize>(anne_bundle_end - anne_bundle_start);
     return *out_size != 0;
@@ -86,15 +93,27 @@ bool discover_initrd(PhysAddr dtb_phys, PhysAddr* out_base, usize* out_size) {
 bool init_archive(PhysAddr base, usize size) {
     const u64 started = sched::sched_clock_ns();
     integrity::Progress progress{};
+    midix::format::VerifyProfile profile{};
+    profile.clock_ns = sched::sched_clock_ns;
+    u64 isar0;
+    asm volatile("mrs %0, ID_AA64ISAR0_EL1" : "=r"(isar0));
+    const libk::arm64::CryptoFeatures features{isar0};
+    const integrity::Backend backend{
+        features.sha256() ? boot_sha256 : nullptr,
+        features.crc32() ? libk::arm64::crc32c_update : nullptr,
+    };
+    ANKO_LOGF_INFO("kernel/init", "bundle acceleration sha256=%u crc32c=%u isar0=%llx",
+                   features.sha256(), features.crc32(), static_cast<unsigned long long>(isar0));
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && defined(ANKO_ANNE_WATCHDOG)
     // Bundle validation runs before CPU0 enters the scheduler with IRQs enabled.
     // Feed the inherited watchdog between bounded checksum/hash chunks; never
     // weaken authentication or put board-specific policy in the format library.
     progress.step = [](void*) { anne::watchdog::poll(); };
 #endif
-    const char* error = midix::format::verify_bundle(
-        reinterpret_cast<const u8*>(base), size, kManifestTrustedKeys,
-        sizeof(kManifestTrustedKeys) / sizeof(kManifestTrustedKeys[0]), g_archive, progress);
+    const char* error =
+        midix::format::verify_bundle(reinterpret_cast<const u8*>(base), size, kManifestTrustedKeys,
+                                     sizeof(kManifestTrustedKeys) / sizeof(kManifestTrustedKeys[0]),
+                                     g_archive, progress, &profile, &backend);
     if (error) {
         ANKO_LOGF_ERROR("kernel/init", "bundle rejected: %s", error);
         return false;
@@ -103,6 +122,16 @@ bool init_archive(PhysAddr base, usize size) {
                    g_archive.header.object_count,
                    static_cast<unsigned long long>(sched::sched_clock_ns() - started),
                    static_cast<unsigned long long>(size));
+    ANKO_LOGF_INFO("kernel/init",
+                   "bundle profile header=%llu manifest_hash=%llu signature=%llu json=%llu "
+                   "objects=%llu sha=%llu crc=%llu",
+                   static_cast<unsigned long long>(profile.header_ns),
+                   static_cast<unsigned long long>(profile.manifest_hash_ns),
+                   static_cast<unsigned long long>(profile.signature_ns),
+                   static_cast<unsigned long long>(profile.json_ns),
+                   static_cast<unsigned long long>(profile.objects_ns),
+                   static_cast<unsigned long long>(profile.object_sha_ns),
+                   static_cast<unsigned long long>(profile.object_crc_ns));
     return true;
 }
 bool archive_get(const char* wanted, const void** data, usize* size) {

@@ -20,17 +20,28 @@ int main() {
     assert(framebuffer_fits({base + size - 4, 1, 1}, base, size));
 
     using namespace midix::tegra_dc;
-    const Window live{kWindowEnabled, 0xc, (1280u << 16) | 720,
-                      (1280u << 16) | (720 * 4), 720 * 4, 0xf5a00000, 0, 0, 0};
+    const Window live{kWindowEnabled,
+                      0xc,
+                      (1280u << 16) | 720,
+                      (1280u << 16) | (720 * 4),
+                      720 * 4,
+                      0xf5a00000,
+                      0,
+                      0,
+                      0};
     assert(framebuffer(live, base, size).address == fb.address);
     assert(!framebuffer({}, base, size).address); // disabled/reset controller
     // Each rejected layout used to risk writing into unrelated RAM.
-    const struct { std::uint32_t Window::*field; std::uint32_t value; } invalid[] = {
-        {&Window::options, 0}, {&Window::options, kWindowEnabled | (1u << 4)},
-        {&Window::format, 6}, {&Window::size, 0}, {&Window::prescaled_size, 0},
-        {&Window::stride, 4096}, {&Window::address, 0},
-        {&Window::address, 0xfffff000}, {&Window::offset_h, 4},
-        {&Window::offset_v, 1}, {&Window::surface_kind, 2},
+    const struct {
+        std::uint32_t Window::* field;
+        std::uint32_t value;
+    } invalid[] = {
+        {&Window::options, 0},        {&Window::options, kWindowEnabled | (1u << 4)},
+        {&Window::format, 6},         {&Window::size, 0},
+        {&Window::prescaled_size, 0}, {&Window::stride, 4096},
+        {&Window::address, 0},        {&Window::address, 0xfffff000},
+        {&Window::offset_h, 4},       {&Window::offset_v, 1},
+        {&Window::surface_kind, 2},
     };
     for (const auto& mutation : invalid) {
         auto window = live;
@@ -42,5 +53,6 @@ int main() {
     assert(framebuffer_fits(target, target.address, 8 * sizeof(pixels[0])));
     libk::framebuffer_fill(target, 0xffff00ff);
     assert(pixels[0] == 0 && pixels[9] == 0);
-    for (unsigned i = 1; i < 9; ++i) assert(pixels[i] == 0xffff00ff);
+    for (unsigned i = 1; i < 9; ++i)
+        assert(pixels[i] == 0xffff00ff);
 }

@@ -24,29 +24,52 @@ constexpr std::uint64_t div_round_up(std::uint64_t value, std::uint64_t divisor)
 // caller can never mistake a wrapped result for a real one.
 constexpr bool checked_add(std::uint64_t a, std::uint64_t b, std::uint64_t* out) {
     constexpr std::uint64_t kMax = ~static_cast<std::uint64_t>(0);
-    if (a > kMax - b) return false;
-    if (out) *out = a + b;
+    if (a > kMax - b)
+        return false;
+    if (out)
+        *out = a + b;
     return true;
 }
 constexpr bool checked_sub(std::uint64_t a, std::uint64_t b, std::uint64_t* out) {
-    if (a < b) return false;
-    if (out) *out = a - b;
+    if (a < b)
+        return false;
+    if (out)
+        *out = a - b;
     return true;
 }
 constexpr bool checked_mul(std::uint64_t a, std::uint64_t b, std::uint64_t* out) {
     constexpr std::uint64_t kMax = ~static_cast<std::uint64_t>(0);
-    if (a != 0 && b > kMax / a) return false;
-    if (out) *out = a * b;
+    if (a != 0 && b > kMax / a)
+        return false;
+    if (out)
+        *out = a * b;
     return true;
 }
 
-constexpr bool checked_align_up(std::uint64_t value, std::uint64_t align,
-                                std::uint64_t* out) {
-    if (align == 0 || (align & (align - 1)) != 0) return false;
+constexpr bool checked_align_up(std::uint64_t value, std::uint64_t align, std::uint64_t* out) {
+    if (align == 0 || (align & (align - 1)) != 0)
+        return false;
     std::uint64_t padded = 0;
-    if (!checked_add(value, align - 1, &padded)) return false;
-    if (out) *out = padded & ~(align - 1);
+    if (!checked_add(value, align - 1, &padded))
+        return false;
+    if (out)
+        *out = padded & ~(align - 1);
     return true;
+}
+
+// Saturating fraction in thousandths, without overflowing a 64-bit product
+// or requiring freestanding 128-bit division support. Only very large totals
+// need normalization; discarded low bits are below the output's precision.
+constexpr std::uint32_t ratio_per_mille(std::uint64_t value, std::uint64_t total) {
+    if (!total)
+        return 0;
+    if (value >= total)
+        return 1000;
+    while (total > ~std::uint64_t{0} / 1000) {
+        total >>= 1;
+        value >>= 1;
+    }
+    return static_cast<std::uint32_t>(value * 1000 / total);
 }
 
 // Absolute value in unsigned storage, including INT64_MIN.

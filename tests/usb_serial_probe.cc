@@ -131,7 +131,8 @@ static void lifecycle_backpressure() {
     assert(f.shell.try_pop(&drained) && f.input.flush(f.shell));
     assert(mochi::tty::accept_serial(slot, f.mirror, f.input));
     assert(f.mirror.generation == 32 && !f.input.flush(f.shell));
-    for (unsigned i = 0; i < 7; ++i) assert(f.shell.try_pop(&drained));
+    for (unsigned i = 0; i < 7; ++i)
+        assert(f.shell.try_pop(&drained));
     assert(f.shell.try_pop(&drained));
     MxTermControl control{};
     assert(mochi::message_get(drained, &control, MX_TERM_CONTROL));

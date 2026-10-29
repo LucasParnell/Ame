@@ -62,8 +62,8 @@ constexpr uint64_t kStagingHostVa = 0x3002'0000ull;
 
 // Windows are disjoint when neither contains the start of the other. Every
 // constant here is small enough that base + size cannot wrap.
-constexpr bool windows_disjoint(uint64_t a_base, uint64_t a_size,
-                                uint64_t b_base, uint64_t b_size) {
+constexpr bool windows_disjoint(uint64_t a_base, uint64_t a_size, uint64_t b_base,
+                                uint64_t b_size) {
     return a_base + a_size <= b_base || b_base + b_size <= a_base;
 }
 
@@ -80,8 +80,8 @@ static_assert(windows_disjoint(kGpuBar4Ipa, kGpuBar4Size, kStagingGuestIpa, kSta
               "GPU BAR4 aperture overlaps the GPU staging window");
 static_assert(windows_disjoint(kRamBase, kRamSize, kStagingGuestIpa, kStagingSize),
               "GPU staging window must live outside guest RAM");
-static_assert(windows_disjoint(kChannelGuestBase, kChannelGuestSize,
-                               kStagingGuestIpa, kStagingSize),
+static_assert(windows_disjoint(kChannelGuestBase, kChannelGuestSize, kStagingGuestIpa,
+                               kStagingSize),
               "GPU staging window overlaps the channel window");
 
 // The manager's own window VAs must not collide either, or one mapping would
@@ -106,16 +106,8 @@ struct VmLayout {
 
 constexpr VmLayout v3_layout() {
     return {
-        kRamBase,
-        kRamSize,
-        kKernelLoad,
-        kInitramfsLoad,
-        kDtbBase,
-        kDtbSize,
-        kMmioBase,
-        kMmioSize,
-        kChannelBase,
-        kChannelSize,
+        kRamBase, kRamSize,  kKernelLoad, kInitramfsLoad, kDtbBase,
+        kDtbSize, kMmioBase, kMmioSize,   kChannelBase,   kChannelSize,
     };
 }
 

@@ -13,6 +13,7 @@ using namespace mochi::va::usb_host;
 #include "midix/abi/protocols/usb_controller.h"
 #include "midix/usb/descriptors.h"
 #include "libk/endian.h"
+#include "libk/str.h"
 #include "libk/slot_pool.h"
 
 namespace {
@@ -612,18 +613,32 @@ extern "C" [[noreturn]] void _start() {
         mochi::boot::invalid_boot();
     }
     g->next_id = mx_clock_ns() & ~(1ull << 63);
+    const uint64_t negotiate_started = mx_clock_ns();
     MxUsbControllerReply reply{};
     if (!cold(MX_USB_CONTROLLER_NEGOTIATE, {}, &reply)) {
         mochi::boot::invalid_boot();
     }
+    const uint64_t enumerate_started = mx_clock_ns();
+    // Signal readiness before enumerating. Existing devices cost a string of
+    // control transfers, and nothing in the boot path depends on them: topology
+    // events carry the results to whoever is listening.
+    mochi::log_raw_marker("io.usb: ready\n");
+    mochi::boot::ready(boot);
     for (uint32_t port = 1; port <= reply.value && port < 256; ++port) {
         MxUsbControllerReply status{};
         if (cold(MX_USB_CONTROLLER_PORT_STATUS, {0, 0, 0, 0, port, 0}, &status) && status.value) {
             (void)enumerate(static_cast<uint8_t>(port));
         }
     }
-    mochi::log_raw_marker("io.usb: ready\n");
-    mochi::boot::ready(boot);
+    {
+        char line[96];
+        libk::str::Buffer b(line);
+        b.format("io.usb: negotiate_ns=%llu enumerate_ns=%llu ports=%u",
+                 static_cast<unsigned long long>(enumerate_started - negotiate_started),
+                 static_cast<unsigned long long>(mx_clock_ns() - enumerate_started),
+                 static_cast<unsigned>(reply.value));
+        mochi::log_raw_marker(line);
+    }
     const mochi::SpscEndpoint readers[] = {g->controller, g->client};
     for (;;) {
         if (mochi::driver::run_batch(service)) {

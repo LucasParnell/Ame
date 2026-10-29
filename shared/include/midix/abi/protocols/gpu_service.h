@@ -38,11 +38,11 @@
 
 enum MxGpuServiceOpcode {
     // --- Native service surface (spec §15.2) ------------------------------
-    GPU_SERVICE_INFO = 0x47535601u,                  // no payload -> INFO_REPLY
+    GPU_SERVICE_INFO = 0x47535601u, // no payload -> INFO_REPLY
     GPU_SERVICE_INFO_REPLY = 0x47535602u,
-    GPU_SERVICE_REGISTER_STAGING = 0x47535603u,      // RegisterStaging -> reply
+    GPU_SERVICE_REGISTER_STAGING = 0x47535603u, // RegisterStaging -> reply
     GPU_SERVICE_REGISTER_STAGING_REPLY = 0x47535604u,
-    GPU_SERVICE_PRESENT = 0x47535605u,               // Present -> PRESENT_COMPLETE
+    GPU_SERVICE_PRESENT = 0x47535605u, // Present -> PRESENT_COMPLETE
     GPU_SERVICE_PRESENT_COMPLETE = 0x47535606u,
     // Rejected request; `opcode` names the request the service refused.
     GPU_SERVICE_ERROR = 0x475356FFu,
@@ -80,11 +80,11 @@ enum MxGpuServiceBufferFlags {
 struct MxGpuServiceInfoReply {
     mx_status_t status;
     mx_u64_t boot_generation;
-    mx_u32_t flags;         // MxGpuServiceFlags
-    mx_u32_t pixel_format;  // MxGpuPixelFormat
+    mx_u32_t flags;        // MxGpuServiceFlags
+    mx_u32_t pixel_format; // MxGpuPixelFormat
     mx_u32_t width;
     mx_u32_t height;
-    mx_u32_t stride;        // bytes per row
+    mx_u32_t stride; // bytes per row
     mx_u32_t reserved0;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuServiceInfoReply) <= MX_GPU_SERVICE_INLINE_PAYLOAD,
@@ -99,13 +99,13 @@ MX_STATIC_ASSERT(sizeof(struct MxGpuServiceInfoReply) == 40, "INFO reply size dr
 // client echoes on every present; a client built against a different layout is
 // rejected rather than silently mis-presented.
 struct MxGpuServiceRegisterStagingRequest {
-    mx_u64_t staging_pa;    // guest PA of the appliance staging window
-    mx_u64_t staging_size;  // bytes
+    mx_u64_t staging_pa;   // guest PA of the appliance staging window
+    mx_u64_t staging_size; // bytes
     mx_u32_t width;
     mx_u32_t height;
-    mx_u32_t stride;        // bytes per row
-    mx_u32_t pixel_format;  // MxGpuPixelFormat
-    mx_u32_t flags;         // MxGpuServiceBufferFlags
+    mx_u32_t stride;       // bytes per row
+    mx_u32_t pixel_format; // MxGpuPixelFormat
+    mx_u32_t flags;        // MxGpuServiceBufferFlags
     mx_u32_t reserved0;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuServiceRegisterStagingRequest) <= MX_GPU_SERVICE_INLINE_PAYLOAD,
@@ -115,8 +115,8 @@ MX_STATIC_ASSERT(sizeof(struct MxGpuServiceRegisterStagingRequest) == 40,
 
 struct MxGpuServiceRegisterStagingReply {
     mx_status_t status;
-    mx_u64_t buffer_id;    // opaque, boot-generation-scoped buffer token
-    mx_u32_t flags;        // MxGpuServiceBufferFlags echo
+    mx_u64_t buffer_id; // opaque, boot-generation-scoped buffer token
+    mx_u32_t flags;     // MxGpuServiceBufferFlags echo
     mx_u32_t reserved0;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuServiceRegisterStagingReply) <= MX_GPU_SERVICE_INLINE_PAYLOAD,
@@ -126,9 +126,9 @@ MX_STATIC_ASSERT(sizeof(struct MxGpuServiceRegisterStagingReply) == 24,
 
 // --- GPU_SERVICE_PRESENT ----------------------------------------------------
 struct MxGpuServicePresentRequest {
-    mx_u64_t buffer_id;    // token from REGISTER_STAGING
-    mx_u32_t flags;        // MxGpuServicePresentFlags
-    mx_u32_t damage_count; // 1 => damage is valid; 0 => nothing to present unless FULL_FRAME
+    mx_u64_t buffer_id;     // token from REGISTER_STAGING
+    mx_u32_t flags;         // MxGpuServicePresentFlags
+    mx_u32_t damage_count;  // 1 => damage is valid; 0 => nothing to present unless FULL_FRAME
     MxGpuDamageRect damage; // valid when damage_count == 1
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuServicePresentRequest) <= MX_GPU_SERVICE_INLINE_PAYLOAD,
@@ -141,8 +141,8 @@ MX_STATIC_ASSERT(sizeof(struct MxGpuServicePresentRequest) == 32, "PRESENT reque
 struct MxGpuServicePresentComplete {
     mx_status_t status;
     mx_u64_t buffer_id;
-    mx_u64_t frame_index;  // monotonic count of completed presents
-    mx_u32_t flags;        // MxGpuServicePresentFlags echo
+    mx_u64_t frame_index; // monotonic count of completed presents
+    mx_u32_t flags;       // MxGpuServicePresentFlags echo
     mx_u32_t reserved0;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuServicePresentComplete) <= MX_GPU_SERVICE_INLINE_PAYLOAD,
@@ -177,9 +177,12 @@ MX_STATIC_ASSERT(MX_GPU_SERVICE_INLINE_PAYLOAD == 48, "GPU service payload budge
 // Every opcode value is unique; enumerated in one place so a copy/paste
 // duplicate fails the build in every translation unit.
 constexpr mx_u32_t kMxGpuServiceOpcodeValues[] = {
-    GPU_SERVICE_INFO,           GPU_SERVICE_INFO_REPLY,
-    GPU_SERVICE_REGISTER_STAGING, GPU_SERVICE_REGISTER_STAGING_REPLY,
-    GPU_SERVICE_PRESENT,        GPU_SERVICE_PRESENT_COMPLETE,
+    GPU_SERVICE_INFO,
+    GPU_SERVICE_INFO_REPLY,
+    GPU_SERVICE_REGISTER_STAGING,
+    GPU_SERVICE_REGISTER_STAGING_REPLY,
+    GPU_SERVICE_PRESENT,
+    GPU_SERVICE_PRESENT_COMPLETE,
     GPU_SERVICE_ERROR,
 };
 

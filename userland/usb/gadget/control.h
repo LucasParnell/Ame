@@ -76,7 +76,8 @@ inline bool service(Runtime& r) {
 }
 
 inline bool retry_pending(const Runtime& r) {
-    if (r.demand_pending || r.pending_function || (r.configuration && r.configure_next < kFunctionEndpointCount)) {
+    if (r.demand_pending || r.pending_function ||
+        (r.configuration && r.configure_next < kFunctionEndpointCount)) {
         return true;
     }
     if (!r.ep0_active && r.phase != ControlPhase::Idle && r.phase != ControlPhase::Function) {

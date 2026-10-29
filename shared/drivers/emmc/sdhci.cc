@@ -2,6 +2,7 @@
 // hi6250 Linux 65e545cbaa11d132e243287b150146bc2a51c45e (sdhci.h,
 // sdhci-of-arasan.c, mmc.h). Polling PIO/ADMA2; no tuning or IRQ ownership.
 #include "midix/drivers/emmc.h"
+#include "libk/bytes.h"
 
 namespace drivers::emmc {
 namespace {
@@ -9,12 +10,14 @@ constexpr u32 kPresent = 0x24, kInterrupt = 0x30;
 constexpr u32 kErrors = 0xffff8000, kCardErrors = 0xffff8000 | (1u << 7);
 constexpr u16 kR1 = 0x1a, kR1b = 0x1b, kR2 = 0x09, kR3 = 0x02;
 constexpr u64 kCommandUs = 100000, kDataUs = 2000000;
-u16 be16(const u8 *p) { return (u16(p[0]) << 8) | p[1]; }
-void put16(u8 *p, u16 v) {
+u16 be16(const u8* p) {
+    return (u16(p[0]) << 8) | p[1];
+}
+void put16(u8* p, u16 v) {
     p[0] = u8(v);
     p[1] = u8(v >> 8);
 }
-void put32(u8 *p, u32 v) {
+void put32(u8* p, u32 v) {
     for (unsigned n = 0; n < 4; ++n)
         p[n] = u8(v >> (8 * n));
 }
@@ -33,8 +36,12 @@ void consume_dma() {
 #endif
 }
 } // namespace
-u32 Driver::rd(u32 o, unsigned w) const { return io_.read(io_.context, o, w); }
-void Driver::wr(u32 o, u32 v, unsigned w) { io_.write(io_.context, o, w, v); }
+u32 Driver::rd(u32 o, unsigned w) const {
+    return io_.read(io_.context, o, w);
+}
+void Driver::wr(u32 o, u32 v, unsigned w) {
+    io_.write(io_.context, o, w, v);
+}
 Error Driver::fail(Error e, u32 irq, u32 status) {
     failure_.error = e;
     failure_.interrupt = irq;
@@ -88,11 +95,14 @@ Error Driver::clock(u32 input, u32 target) {
     wr(0x2c, 0, 2);
     wr(0x2c, value, 2);
     auto e = wait(0x2c, 2, 2, 2, kCommandUs);
-    if (e == Error::Ok)
+    if (e == Error::Ok) {
         wr(0x2c, value | 4, 2);
+        info_.input_clock_hz = input;
+        info_.bus_clock_hz = input / divisor;
+    }
     return e;
 }
-Error Driver::command(u32 index, u32 arg, u16 flags, u32 *response) {
+Error Driver::command(u32 index, u32 arg, u16 flags, u32* response) {
     failure_.command = index;
     const bool data = flags & 0x20;
     const bool busy = (flags & 3) == 3;
@@ -150,7 +160,7 @@ void Driver::recover() {
         ready_ = false;
     failure_ = original;
 }
-Error Driver::transfer(u32 index, u32 arg, u32 count, u8 *buffer, bool write) {
+Error Driver::transfer(u32 index, u32 arg, u32 count, u8* buffer, bool write) {
     wr(0x04, 512, 2);
     wr(0x06, count, 2);
     // CMD23 supplies the card's count; AUTO_CMD12/23 and DMA stay disabled.
@@ -162,7 +172,7 @@ Error Driver::transfer(u32 index, u32 arg, u32 count, u8 *buffer, bool write) {
         if (e != Error::Ok)
             break;
         for (u32 i = 0; i < 512; i += 4) {
-            u8 *p = buffer + b * 512 + i;
+            u8* p = buffer + b * 512 + i;
             if (write)
                 wr(0x20, u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24));
             else {
@@ -192,17 +202,18 @@ Error Driver::enable_dma(DmaArena arena) {
     dma_ = arena;
     return Error::Ok;
 }
-Error Driver::transfer_dma(u32 index, u32 arg, u32 count, u8 *buffer, bool write) {
+Error Driver::transfer_dma(u32 index, u32 arg, u32 count, u8* buffer, bool write) {
     const u32 bytes = count * kSectorSize;
-    auto *payload = dma_.cpu + kDmaDataOffset;
-    if (write)
-        for (u32 n = 0; n < bytes; ++n)
-            payload[n] = buffer[n];
+    auto* payload = dma_.cpu + kDmaDataOffset;
+    if (write) {
+        libk::copy_exact(libk::as_bytes(payload, bytes), libk::as_bytes(buffer, bytes));
+    }
+
     // ADMA2 32-bit descriptors: attributes, nonzero length, bus address. Split
     // at 32 KiB to avoid the ambiguous zero-length encoding for 64 KiB.
     for (u32 offset = 0, n = 0; offset < bytes; ++n) {
         const u32 length = bytes - offset > 32768 ? 32768 : bytes - offset;
-        auto *descriptor = dma_.cpu + n * 8;
+        auto* descriptor = dma_.cpu + n * 8;
         put16(descriptor, u16(0x21 | (offset + length == bytes ? 2 : 0)));
         put16(descriptor + 2, u16(length));
         put32(descriptor + 4, u32(dma_.physical + kDmaDataOffset + offset));
@@ -227,11 +238,80 @@ Error Driver::transfer_dma(u32 index, u32 arg, u32 count, u8 *buffer, bool write
         return e;
     }
     consume_dma();
-    if (!write)
-        for (u32 n = 0; n < bytes; ++n)
-            buffer[n] = payload[n];
+    if (!write) {
+        libk::copy_exact(libk::as_bytes(buffer, bytes), libk::as_bytes(payload, bytes));
+    }
+
     return Error::Ok;
 }
+Error Driver::adopt_hs400(u32 input, u32 bus_width) {
+    ready_ = false;
+    info_ = {};
+    failure_ = {};
+    dma_ = {};
+
+    if (!io_.read || !io_.write || !io_.now_us || !input || bus_width != 8)
+        return fail(Error::Invalid);
+
+    const u32 host = rd(0x28, 1), host2 = rd(0x3e, 2);
+    const u32 clock_control = rd(0x2c, 2);
+    const u32 encoded = ((clock_control >> 8) & 255u) | ((clock_control & 0xc0u) << 2);
+    const u32 bus_hz = input / (encoded ? encoded * 2 : 1);
+
+    // No active command/data/DMA, v3 address semantics, card clock stable,
+    // 1.8V HS400, eight data lines and a calibrated, locked PHY DLL. A v4,
+    // programmable-clock or queued-mode handoff needs a separate adapter.
+    if (!(rd(0x29, 1) & 1u) || (rd(0xfe, 2) & 255u) < 2 || (rd(kPresent) & 0x307u) ||
+        (clock_control & 0x27u) != 7u || (host & 0x26u) != 0x24u || (host2 & 0xbccfu) != 0x8du ||
+        (rd(0x440) & 0x43u) != 0x42u || !(rd(0x430) & (1u << 7)) || !(rd(0x40) & (1u << 18)) ||
+        bus_hz < 52000000u || bus_hz > 200000000u)
+        return fail(Error::Unsupported);
+
+    // The inherited transfer is complete. Disable its DMA and interrupt path,
+    // retaining bus mode, signal voltage, PHY delays and clock/tuning state.
+    wr(0x38, 0);
+    wr(0x34, 0xffff0033);
+    wr(0x28, host & ~0x18u, 1);
+    wr(0x0c, 0, 2);
+    wr(0x58, 0);
+
+    auto e = ready_status();
+    if (e != Error::Ok)
+        return e;
+
+    if ((e = transfer(8, 0, 1, info_.ext_csd, false)) != Error::Ok)
+        return e;
+
+    const auto* ext = info_.ext_csd;
+    const bool enhanced_strobe = rd(0x78, 2) & 1u;
+    // BUS_WIDTH is write-only on real cards and may read back as zero. The
+    // eight-line host setting plus successful full CRC-checked EXT_CSD reads
+    // establish matching bus width, as in Linux's immutable-field comparison.
+    if ((ext[185] & 15u) != 3u || !(ext[196] & 0x40u) || ext[192] < 7 || ext[15] || ext[61] ||
+        (ext[179] & 7u) || (enhanced_strobe && !(ext[184] & 1u)))
+        return fail(Error::Unsupported);
+
+    // Compare all 512 bytes, not a word or a short prefix of the readback.
+    alignas(8) u8 check[512];
+    if ((e = transfer(8, 0, 1, check, false)) != Error::Ok)
+        return e;
+    if (!libk::equal(libk::as_bytes(check), libk::as_bytes(info_.ext_csd)))
+        return fail(Error::Controller);
+
+    info_.sectors =
+        u32(ext[212]) | (u32(ext[213]) << 8) | (u32(ext[214]) << 16) | (u32(ext[215]) << 24);
+    if (!info_.sectors)
+        return fail(Error::Unsupported);
+
+    partition_ = ext[179];
+    info_.bus_width = 8;
+    info_.input_clock_hz = input;
+    info_.bus_clock_hz = bus_hz;
+    info_.inherited_hs400 = true;
+    ready_ = true;
+    return Error::Ok;
+}
+
 Error Driver::initialize(u32 input, bool arasan, u32 bus_width) {
     ready_ = false;
     info_ = {};
@@ -301,7 +381,7 @@ Error Driver::initialize(u32 input, bool arasan, u32 bus_width) {
     // CMD0 resets volatile bus width, HS timing and command queue mode.
     if (info_.ext_csd[183] || info_.ext_csd[185] || info_.ext_csd[15] || info_.ext_csd[61])
         return fail(Error::Unsupported); // native 4K sectors are unsupported
-    const u8 *p = info_.ext_csd + 212;
+    const u8* p = info_.ext_csd + 212;
     info_.sectors = u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24);
     partition_ = info_.ext_csd[179];
     if (!info_.sectors)
@@ -358,11 +438,12 @@ Error Driver::initialize(u32 input, bool arasan, u32 bus_width) {
     ready_ = true;
     return Error::Ok;
 }
-Error Driver::blocks(u32 lba, u32 count, u8 *buffer, bool write) {
+Error Driver::blocks(u32 lba, u32 count, u8* buffer, bool write) {
     failure_ = {};
     if (!ready_)
         return fail(Error::NotReady);
-    if (!buffer || !count || count > kMaxUserSectors || lba >= info_.sectors || count > info_.sectors - lba)
+    if (!buffer || !count || count > kMaxUserSectors || lba >= info_.sectors ||
+        count > info_.sectors - lba)
         return fail(Error::Invalid);
     if (partition_ & 7)
         return fail(Error::NotReady);
@@ -375,15 +456,15 @@ Error Driver::blocks(u32 lba, u32 count, u8 *buffer, bool write) {
                       : transfer(write ? 25 : 18, lba, count, buffer, write);
     return e;
 }
-Error Driver::read(u32 lba, u32 count, void *buffer) {
-    return blocks(lba, count, static_cast<u8 *>(buffer), false);
+Error Driver::read(u32 lba, u32 count, void* buffer) {
+    return blocks(lba, count, static_cast<u8*>(buffer), false);
 }
-Error Driver::write(u32 lba, u32 count, const void *buffer) {
+Error Driver::write(u32 lba, u32 count, const void* buffer) {
     const auto result = write_buffered(lba, count, buffer);
     return result == Error::Ok ? flush() : result;
 }
-Error Driver::write_buffered(u32 lba, u32 count, const void *buffer) {
-    return blocks(lba, count, const_cast<u8 *>(static_cast<const u8 *>(buffer)), true);
+Error Driver::write_buffered(u32 lba, u32 count, const void* buffer) {
+    return blocks(lba, count, const_cast<u8*>(static_cast<const u8*>(buffer)), true);
 }
 Error Driver::flush() {
     failure_ = {};
@@ -400,7 +481,7 @@ Error Driver::flush() {
         recover();
     return result;
 }
-Error Driver::rpmb(const Frame *request, u32 count, Frame *response, u32 responses) {
+Error Driver::rpmb(const Frame* request, u32 count, Frame* response, u32 responses) {
     failure_ = {};
     if (!ready_)
         return fail(Error::NotReady);
@@ -433,7 +514,7 @@ Error Driver::rpmb(const Frame *request, u32 count, Frame *response, u32 respons
     }
     const u8 saved = partition_;
     auto e = select((saved & ~7u) | 3);
-    auto send = [&](u8 *data, u32 n, bool write, bool reliable) {
+    auto send = [&](u8* data, u32 n, bool write, bool reliable) {
         auto result = command(23, n | (reliable ? 0x80000000u : 0), kR1);
         if (result != Error::Ok) {
             recover();
@@ -442,7 +523,7 @@ Error Driver::rpmb(const Frame *request, u32 count, Frame *response, u32 respons
         return transfer(write ? 25 : 18, 0, n, data, write);
     };
     if (e == Error::Ok)
-        e = send(reinterpret_cast<u8 *>(const_cast<Frame *>(request)), count, true,
+        e = send(reinterpret_cast<u8*>(const_cast<Frame*>(request)), count, true,
                  operation == 1 || operation == 3);
     if (e == Error::Ok && (operation == 1 || operation == 3)) {
         Frame status{};
@@ -452,7 +533,7 @@ Error Driver::rpmb(const Frame *request, u32 count, Frame *response, u32 respons
         e = send(status.bytes, 1, true, false);
     }
     if (e == Error::Ok)
-        e = send(reinterpret_cast<u8 *>(response), responses, false, false);
+        e = send(reinterpret_cast<u8*>(response), responses, false, false);
     const Failure original = failure_;
     // Restore even after a failed SWITCH: it may have reached the card.
     if (select(saved) != Error::Ok) {

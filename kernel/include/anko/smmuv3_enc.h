@@ -45,10 +45,10 @@ enum Reg : u64 {
 };
 
 // IDR0 feature bits.
-constexpr u32 kIdr0S2P = 1u << 0; // stage-2 translation supported
-constexpr u32 kIdr0S1P = 1u << 1; // stage-1 translation supported
+constexpr u32 kIdr0S2P = 1u << 0;    // stage-2 translation supported
+constexpr u32 kIdr0S1P = 1u << 1;    // stage-1 translation supported
 constexpr u32 kIdr0Cohacc = 1u << 4; // SMMU's own walks/structures/queues only
-constexpr u32 kIdr3Ril = 1u << 10; // range invalidation supported
+constexpr u32 kIdr3Ril = 1u << 10;   // range invalidation supported
 constexpr u32 kIdr5Gran4K = 1u << 4;
 constexpr u32 kIdr1Preset = (1u << 30) | (1u << 29); // tables/queues preset
 
@@ -161,8 +161,8 @@ inline Ste make_ste_abort() {
 // `vmid` scopes this domain's translations, `t0sz` is the input-address size
 // (64 - IOVA bits), `ps` is the STE.S2PS field, and `record_faults` enables
 // F_TRANSLATION/F_PERMISSION event recording (STE.S2R).
-inline Ste make_ste_stage2(PhysAddr s2ttb, u16 vmid, u32 t0sz, u32 sl0, u32 ps,
-                           bool record_faults, bool coherent_walk = false) {
+inline Ste make_ste_stage2(PhysAddr s2ttb, u16 vmid, u32 t0sz, u32 sl0, u32 ps, bool record_faults,
+                           bool coherent_walk = false) {
     Ste s{};
     s.w[0] = 1u | (kCfgS2Translate << 1);
     s.w[4] = static_cast<u32>(vmid) & 0xFFFFu;
@@ -170,7 +170,8 @@ inline Ste make_ste_stage2(PhysAddr s2ttb, u16 vmid, u32 t0sz, u32 sl0, u32 ps,
              ((ps & 0x7u) << 16) | (1u << 19) /* S2AA64 */ |
              ((record_faults ? 1u : 0u) << 26) /* S2R */;
     // Match CPU WB mappings only when the SMMU can access them coherently.
-    if (coherent_walk) s.w[5] |= (1u << 8) | (1u << 10) | (3u << 12);
+    if (coherent_walk)
+        s.w[5] |= (1u << 8) | (1u << 10) | (3u << 12);
     s.w[6] = static_cast<u32>(s2ttb & 0xFFFF'FFF0ull);
     s.w[7] = static_cast<u32>((s2ttb >> 32) & 0x000F'FFFFull);
     return s;
@@ -242,7 +243,10 @@ inline Cmd make_cmd_tlbi_s2_ipa(u16 vmid, u64 iova, u32 pages) {
         const u64 granule = 1ull << scale;
         const u64 offset = first_page & (granule - 1);
         const u64 units = (count + offset + granule - 1) / granule;
-        if (units <= 32) { num = static_cast<u32>(units - 1); break; }
+        if (units <= 32) {
+            num = static_cast<u32>(units - 1);
+            break;
+        }
         ++scale;
     }
     const u64 base = (first_page & ~((1ull << scale) - 1)) << 12;
@@ -366,7 +370,7 @@ inline u32 q_entries(u32 log2size) {
 }
 inline bool q_full(u32 producer, u32 consumer, u32 log2size) {
     return q_index(producer, log2size) == q_index(consumer, log2size) &&
-        q_wrap_index(producer, log2size) != q_wrap_index(consumer, log2size);
+           q_wrap_index(producer, log2size) != q_wrap_index(consumer, log2size);
 }
 inline bool q_overflow_changed(u32 producer, u32 consumer) {
     return ((producer ^ consumer) & (1u << 31)) != 0;
@@ -378,8 +382,8 @@ inline u32 oas_bits(u32 encoding) {
 // CR1.{TABLE,QUEUE}: Inner Shareable WB for coherent access; otherwise
 // Non-cacheable Outer Shareable. These attributes describe SMMU accesses.
 inline u32 make_cr1(bool coherent) {
-    return coherent ? (3u << 10) | (1u << 8) | (1u << 6) |
-        (3u << 4) | (1u << 2) | 1u : (2u << 10) | (2u << 4);
+    return coherent ? (3u << 10) | (1u << 8) | (1u << 6) | (3u << 4) | (1u << 2) | 1u
+                    : (2u << 10) | (2u << 4);
 }
 
 // ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@
 #include "anko/types.h"
 #include "anko/object.h"
 
-constexpr usize PAGE_SIZE  = 4096;
+constexpr usize PAGE_SIZE = 4096;
 constexpr usize PAGE_SHIFT = 12;
 constexpr VirtAddr USER_STACK_TOP = 0x3FFF'0000ull;
 
@@ -26,10 +26,10 @@ constexpr VirtAddr USER_STACK_TOP = 0x3FFF'0000ull;
 // ---------------------------------------------------------------------------
 struct PhysAllocator {
     PhysAddr ram_base;
-    usize    ram_size;
-    u8*      bitmap;       // 1 bit per page; 1=free, 0=used
-    usize    page_count;
-    usize    next_hint;    // next page to check on alloc (not a guarantee)
+    usize ram_size;
+    u8* bitmap; // 1 bit per page; 1=free, 0=used
+    usize page_count;
+    usize next_hint; // next page to check on alloc (not a guarantee)
 };
 
 // ---------------------------------------------------------------------------
@@ -38,14 +38,14 @@ struct PhysAllocator {
 // V0: no COW, no demand paging.
 // ---------------------------------------------------------------------------
 struct VmSpace {
-    PhysAddr pgd_phys;    // physical address of L0 (PGD) page table, 4KB aligned
-    u32      pid;         // owning process
+    PhysAddr pgd_phys; // physical address of L0 (PGD) page table, 4KB aligned
+    u32 pid;           // owning process
     // V0: no mapping list needed; all maps are permanent until process death.
 };
 
 struct MemoryObject {
     PhysAddr phys_base;
-    u64      size;
+    u64 size;
 };
 
 // ---------------------------------------------------------------------------
@@ -60,14 +60,14 @@ struct MemoryObject {
 //     The arena system exists so later snapshotting has the right shape.
 // ---------------------------------------------------------------------------
 struct Arena {
-    VirtAddr base_va;    // base virtual address in the owning process
-    PhysAddr phys_base;  // physical backing when kernel-created; 0 for VA-only registrations
-    u64      size;
-    u32      owner_pid;
-    u32      rights;     // CapRights bitmask
-    u32      flags;
-    u32      owner_generation;
-    u8       pad[24];    // pad to 64 bytes for cache friendliness
+    VirtAddr base_va;   // base virtual address in the owning process
+    PhysAddr phys_base; // physical backing when kernel-created; 0 for VA-only registrations
+    u64 size;
+    u32 owner_pid;
+    u32 rights; // CapRights bitmask
+    u32 flags;
+    u32 owner_generation;
+    u8 pad[24]; // pad to 64 bytes for cache friendliness
 };
 static_assert(sizeof(Arena) == 64);
 
@@ -86,8 +86,8 @@ struct ArenaTable {
     Arena entries[kArenaTableSize];
     object::Record* backing[kArenaTableSize];
     u64 unmapped[kArenaTableSize];
-    u32   count;
-    u32   lock;
+    u32 count;
+    u32 lock;
 };
 
 namespace mm {

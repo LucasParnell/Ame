@@ -74,12 +74,12 @@ inline bool configure(Runtime& r) {
                                      0,
                                      0,
                                      static_cast<mx_u16_t>(ep == 0x83                    ? 16
-                                                           : (ep & 15) == 6             ? 64
+                                                           : (ep & 15) == 6              ? 64
                                                            : r.speed == MxUsbSpeed::High ? 512
                                                                                          : 64),
                                      ep,
                                      ep == 0x83 || (ep & 15) == 6 ? MxUsbTransferType::Interrupt
-                                                : MxUsbTransferType::Bulk,
+                                                                  : MxUsbTransferType::Bulk,
                                      0,
                                      0};
         if (!r.links[0].tx().try_push_msg(MX_DEVICE_CONFIGURE, request)) {
@@ -98,7 +98,8 @@ inline void reset_functions(Runtime& r) {
         mx_exit(MX_ERR_OVERFLOW);
     }
     ++r.function_generation;
-    if (r.fido2_requested) r.demand_pending = true;
+    if (r.fido2_requested)
+        r.demand_pending = true;
     r.fido2_requested = false;
     for (auto& function : r.functions) {
         function = {};

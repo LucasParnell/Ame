@@ -24,19 +24,31 @@ int main() {
 
     // Every corruption is rejected wholesale.
     uint8_t bad[sizeof(file)];
-    std::memcpy(bad, file, size); bad[0] = 'X';
+    std::memcpy(bad, file, size);
+    bad[0] = 'X';
     assert(!q.decode(bad, size));
-    std::memcpy(bad, file, size); bad[5] = 9;
+    std::memcpy(bad, file, size);
+    bad[5] = 9;
     assert(!q.decode(bad, size));
-    std::memcpy(bad, file, size); bad[9] ^= 0x40;          // entry checksum
+    std::memcpy(bad, file, size);
+    bad[9] ^= 0x40; // entry checksum
     assert(!q.decode(bad, size));
-    assert(!q.decode(file, size - 1));                      // truncated
-    std::memcpy(bad, file, size); bad[6] = 0xff; bad[7] = 0xff;
-    assert(!q.decode(bad, size));                           // overlong count
+    assert(!q.decode(file, size - 1)); // truncated
+    assert(!q.decode(file, size + 1)); // trailing data
+    std::memcpy(bad, file, size);
+    std::memcpy(bad + 24, bad + 8, 16); // duplicate identity
+    assert(!q.decode(bad, size));
+    std::memcpy(bad, file, size);
+    bad[6] = 0xff;
+    bad[7] = 0xff;
+    assert(!q.decode(bad, size)); // overlong count
     assert(!q.decode(nullptr, 0));
 
     // A rejected decode must not wipe the last good profile.
     assert(q.count == 2);
+    assert(q.set(msh, 0)); // explicit no-spin
+    const auto zero_size = q.encode(file, sizeof(file));
+    assert(p.decode(file, zero_size) && p.lookup(msh, 99) == 0);
 
     std::puts("profile: roundtrip, clamp, strict rejection, last-good preserved");
     return 0;

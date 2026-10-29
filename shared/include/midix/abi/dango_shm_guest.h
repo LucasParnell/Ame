@@ -80,9 +80,9 @@ struct dango_shm_desc {
  * `boot_generation` out. The `mmap_offset` in the reply is the byte offset to
  * pass to mmap(2) on DANGO_DEV_SHM (a per-slot page, never 0). */
 struct dango_shm_query {
-    struct dango_shm_region region; /* out */
-    unsigned int index;             /* in */
-    unsigned int count;             /* out: live regions */
+    struct dango_shm_region region;     /* out */
+    unsigned int index;                 /* in */
+    unsigned int count;                 /* out: live regions */
     unsigned long long boot_generation; /* out */
     unsigned long long mmap_offset;     /* out */
 };

@@ -44,6 +44,19 @@ def report(cost=100):
 
 
 class IpcBenchmark(unittest.TestCase):
+    def test_shared_system_scope_is_preserved_and_cannot_be_pooled_with_isolated(self):
+        rows = records()
+        rows[0]['diagnostic_scope'] = 'shared_system'
+        run = results.parse_log(log(rows))
+        self.assertEqual(run['header']['diagnostic_scope'], 'shared_system')
+        with self.assertRaisesRegex(ValueError, 'run configurations differ'):
+            results.summarize([run, results.parse_log(log(records()))])
+        shared = report()
+        for item in shared['runs']:
+            item['header']['diagnostic_scope'] = 'shared_system'
+        with self.assertRaisesRegex(ValueError, 'diagnostic scope mismatch'):
+            results.compare(report(), shared)
+
     def test_complete_matrix_and_counter_normalization(self):
         run = results.parse_log(log(records()))
         summary = results.summarize([run])

@@ -18,7 +18,7 @@
 /* Positive syscall errors are returned negated; EINTR must not be terminal. */
 #define GPUD_EINTR 4
 
-static void channel_reset(struct gpud_channel *channel) {
+static void channel_reset(struct gpud_channel* channel) {
     channel->fd = -1;
     channel->mapping = 0;
     channel->mapping_len = 0;
@@ -29,8 +29,8 @@ static void channel_reset(struct gpud_channel *channel) {
     channel->staging_len = 0;
 }
 
-int gpud_channel_open(struct gpud_channel *channel) {
-    const struct dango_channel_layout *layout;
+int gpud_channel_open(struct gpud_channel* channel) {
+    const struct dango_channel_layout* layout;
     unsigned long staging_off;
     unsigned long staging_len;
     unsigned long total;
@@ -55,8 +55,7 @@ int gpud_channel_open(struct gpud_channel *channel) {
     layout = &channel->layout;
     /* Pin the exact geometry the profile fixes: a mismatch is a host/driver
      * contract break, not something to adapt to silently. */
-    if (layout->desc.magic != DANGO_CH_MAGIC ||
-        layout->desc.version_major != DANGO_CH_VERSION ||
+    if (layout->desc.magic != DANGO_CH_MAGIC || layout->desc.version_major != DANGO_CH_VERSION ||
         layout->desc.version_minor != DANGO_CH_VER_MINOR ||
         layout->desc.ring_order != DANGO_CH_DEFAULT_RING_ORDER ||
         layout->ring_bytes != DANGO_RING_BYTES(DANGO_CH_DEFAULT_RING_ORDER) ||
@@ -86,13 +85,13 @@ int gpud_channel_open(struct gpud_channel *channel) {
         return -1;
     }
 
-    channel->mapping = (unsigned char *)(unsigned long)mapped;
+    channel->mapping = (unsigned char*)(unsigned long)mapped;
     channel->mapping_len = total;
     channel->staging_off = staging_off;
     /* The driver maps the host -> guest ring first, then the guest -> host
      * ring, so the two ring views are exactly `ring_bytes` apart. */
-    channel->rx = (struct dango_ring_hdr *)channel->mapping;
-    channel->tx = (struct dango_ring_hdr *)(channel->mapping + layout->ring_bytes);
+    channel->rx = (struct dango_ring_hdr*)channel->mapping;
+    channel->tx = (struct dango_ring_hdr*)(channel->mapping + layout->ring_bytes);
     if (staging_len != 0) {
         channel->staging = channel->mapping + staging_off;
         channel->staging_len = staging_len;
@@ -100,7 +99,7 @@ int gpud_channel_open(struct gpud_channel *channel) {
     return 0;
 }
 
-void gpud_channel_close(struct gpud_channel *channel) {
+void gpud_channel_close(struct gpud_channel* channel) {
     if (!channel) {
         return;
     }
@@ -113,9 +112,9 @@ void gpud_channel_close(struct gpud_channel *channel) {
     channel_reset(channel);
 }
 
-int gpud_channel_publish(struct gpud_channel *channel, const struct dango_ring_slot *slot) {
-    struct dango_ring_hdr *tx = channel->tx;
-    struct dango_ring_slot *dst;
+int gpud_channel_publish(struct gpud_channel* channel, const struct dango_ring_slot* slot) {
+    struct dango_ring_hdr* tx = channel->tx;
+    struct dango_ring_slot* dst;
     uint64_t head;
     uint64_t tail;
 
@@ -127,14 +126,14 @@ int gpud_channel_publish(struct gpud_channel *channel, const struct dango_ring_s
     if (head - tail >= GPUD_RING_SLOTS) {
         return -1; /* full: the caller retries after the host drains */
     }
-    dst = (struct dango_ring_slot *)(tx + 1) + (head & GPUD_RING_MASK);
+    dst = (struct dango_ring_slot*)(tx + 1) + (head & GPUD_RING_MASK);
     *dst = *slot; /* 64-byte copy; lowers to the agent's global memcpy */
     __atomic_store_n(&tx->head, head + 1, __ATOMIC_RELEASE);
     return mx_ioctl(channel->fd, DANGO_CH_NOTIFY, 0) == 0 ? 0 : -1;
 }
 
-int gpud_channel_peek(const struct gpud_channel *channel, struct dango_ring_slot *slot) {
-    const struct dango_ring_hdr *rx = channel->rx;
+int gpud_channel_peek(const struct gpud_channel* channel, struct dango_ring_slot* slot) {
+    const struct dango_ring_hdr* rx = channel->rx;
     uint64_t tail;
     uint64_t head;
 
@@ -146,12 +145,12 @@ int gpud_channel_peek(const struct gpud_channel *channel, struct dango_ring_slot
     if (head == tail) {
         return 0;
     }
-    *slot = *((const struct dango_ring_slot *)(rx + 1) + (tail & GPUD_RING_MASK));
+    *slot = *((const struct dango_ring_slot*)(rx + 1) + (tail & GPUD_RING_MASK));
     return 1;
 }
 
-void gpud_channel_consume(struct gpud_channel *channel) {
-    struct dango_ring_hdr *rx = channel->rx;
+void gpud_channel_consume(struct gpud_channel* channel) {
+    struct dango_ring_hdr* rx = channel->rx;
     uint64_t tail;
     if (!rx) {
         return;
@@ -160,8 +159,8 @@ void gpud_channel_consume(struct gpud_channel *channel) {
     __atomic_store_n(&rx->tail, tail + 1, __ATOMIC_RELEASE);
 }
 
-int gpud_channel_full(const struct gpud_channel *channel) {
-    const struct dango_ring_hdr *tx = channel->tx;
+int gpud_channel_full(const struct gpud_channel* channel) {
+    const struct dango_ring_hdr* tx = channel->tx;
     uint64_t head;
     uint64_t tail;
     if (!tx) {
@@ -172,14 +171,14 @@ int gpud_channel_full(const struct gpud_channel *channel) {
     return head - tail >= GPUD_RING_SLOTS;
 }
 
-long gpud_channel_wait(struct gpud_channel *channel) {
+long gpud_channel_wait(struct gpud_channel* channel) {
     /* The device `read` is a doorbell: it returns as soon as the host has
      * published, and blocks otherwise. It is the only sleep in the hot path. */
     uint64_t interrupts;
     return mx_read(channel->fd, &interrupts, sizeof(interrupts));
 }
 
-long gpud_channel_wait_timeout(struct gpud_channel *channel, long milliseconds) {
+long gpud_channel_wait_timeout(struct gpud_channel* channel, long milliseconds) {
     struct mx_pollfd pollfd;
     struct mx_timespec timeout;
     pollfd.fd = channel->fd;

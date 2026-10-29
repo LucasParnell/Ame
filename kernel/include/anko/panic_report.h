@@ -12,7 +12,7 @@
 namespace anko::panic_report {
 
 constexpr u32 kMaxBacktrace = 16;
-constexpr u32 kMaxQrPayload = 1536;   // bytes of caption text budgeted for the screen
+constexpr u32 kMaxQrPayload = 1536; // bytes of caption text budgeted for the screen
 constexpr u32 kMaxSerialText = 4096;
 constexpr u32 kMaxCaptionText = 2048; // formatted on-screen report text
 
@@ -20,17 +20,17 @@ constexpr u32 kMaxCaptionText = 2048; // formatted on-screen report text
 // corner at a scannable module size, so it holds the identifying subset (trap,
 // the exception registers, the call/argument registers and a short trace); the
 // serial dump carries the complete register file and the full trace.
-constexpr u32 kQrRegisterCount = 8;   // x0..x7 in the bundle
-constexpr u32 kQrBacktrace = 8;       // trace frames in the bundle
+constexpr u32 kQrRegisterCount = 8; // x0..x7 in the bundle
+constexpr u32 kQrBacktrace = 8;     // trace frames in the bundle
 
 // Where the QR URL points. The fragment carries the whole payload, so the host
 // is a placeholder for a decoder page and can be changed freely at build time.
 constexpr const char* kQrUrlPrefix = "https://ame.example/p#";
-constexpr u32 kBundleMax = 512;       // packed body budget
-constexpr u32 kUrlMax = 1024;         // URL budget
+constexpr u32 kBundleMax = 512; // packed body budget
+constexpr u32 kUrlMax = 1024;   // URL budget
 
 struct Registers {
-    u64 x[31];      // x0..x30 (x29 = fp, x30 = lr)
+    u64 x[31]; // x0..x30 (x29 = fp, x30 = lr)
     u64 sp;
     u64 elr;
     u64 spsr;
@@ -39,33 +39,32 @@ struct Registers {
 };
 
 struct Hardware {
-    bool present;       // hardware facts captured
+    bool present; // hardware facts captured
     bool has_pcie;
     bool has_pci_mmio;
     bool has_smmu;
-    u32  virtio_count;
-    u64  pci_mmio_base;
-    u64  pci_mmio_size;
-    u64  ram_base;
-    u64  ram_size;
-    u32  boot_el;
+    u32 virtio_count;
+    u64 pci_mmio_base;
+    u64 pci_mmio_size;
+    u64 ram_base;
+    u64 ram_size;
+    u32 boot_el;
 };
 
 struct Report {
-    const char* title;      // "KERNEL PANIC"
-    const char* reason;     // decoded trap, e.g. "data abort (EL1)"
+    const char* title;  // "KERNEL PANIC"
+    const char* reason; // decoded trap, e.g. "data abort (EL1)"
     u32 core;
     Registers regs;
     u32 trace_count;
     u64 trace[kMaxBacktrace];
     Hardware hw;
-    u32 cap_denials;        // rejected capability operations seen so far
-    const char* build;      // build identifier (may be null)
+    u32 cap_denials;   // rejected capability operations seen so far
+    const char* build; // build identifier (may be null)
 };
 
 // Fill the register record from the faulting context.
-void capture_registers(Report& report, const u64* x, u64 sp, u64 elr, u64 spsr,
-                       u64 esr, u64 far);
+void capture_registers(Report& report, const u64* x, u64 sp, u64 elr, u64 spsr, u64 esr, u64 far);
 
 // Walk the AArch64 frame-pointer chain from `fp` into report.trace (bounded).
 // Only pointers inside [lo, hi) are followed: the chain lives on the kernel

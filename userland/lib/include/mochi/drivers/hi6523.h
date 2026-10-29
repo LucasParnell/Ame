@@ -3,11 +3,40 @@
 #include "libk/bytes.h"
 
 namespace mochi::hi6523 {
+// Preserve the sink owner's charge-enable bit across an OTG source session.
+// Never invent a charge-enable setting when firmware left charging disabled.
+struct ChargeHandoff {
+    bool active = false, restore = false;
+    template <typename Bus> bool suspend(Bus& bus) {
+        if (active)
+            return true;
+        mx_u8_t config = 0;
+        if (!bus.read(0x90, config))
+            return false;
+        restore = (config & 0x20) != 0;
+        if (!bus.update(0x90, 0x20, 0))
+            return false;
+        active = true;
+        return true;
+    }
+    // Caller must successfully disable boost before invoking resume.
+    template <typename Bus> bool resume(Bus& bus) {
+        if (!active)
+            return true;
+        if (restore && !bus.update(0x90, 0x20, 0x20))
+            return false;
+        active = false;
+        restore = false;
+        return true;
+    }
+};
 enum class SourceFailure : mx_u8_t { None, Read, BoostStopped, HardFault, Clear, Feed };
 struct SourceHealth {
     mx_u8_t status = 0, faults = 0;
     SourceFailure failure = SourceFailure::None;
-    bool ok() const { return failure == SourceFailure::None; }
+    bool ok() const {
+        return failure == SourceFailure::None;
+    }
 };
 
 // STATUS0..IRQ0 are contiguous. One snapshot avoids separate service round
@@ -27,12 +56,14 @@ template <typename Bus> SourceHealth maintain_source(Bus& bus, bool startup = fa
     }
     result.status = snapshot[0];
     result.faults = snapshot[6];
-    if (!(result.status & 0x40)) result.failure = SourceFailure::BoostStopped;
+    if (!(result.status & 0x40))
+        result.failure = SourceFailure::BoostStopped;
     else if ((result.faults & 0x03) || (!startup && (result.faults & 0x1c)))
         result.failure = SourceFailure::HardFault;
     else if ((result.faults & 0x1c) && !bus.write(0x0c, result.faults & 0x1c))
         result.failure = SourceFailure::Clear;
-    else if (!bus.write(0xe8, 1)) result.failure = SourceFailure::Feed;
+    else if (!bus.write(0xe8, 1))
+        result.failure = SourceFailure::Feed;
     return result;
 }
 } // namespace mochi::hi6523

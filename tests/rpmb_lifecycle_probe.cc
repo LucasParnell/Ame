@@ -69,7 +69,8 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     const std::string scenario = argv[1];
     // Plausible/stale frame bytes alone must never authorize completion.
-    window[510] = 0; window[511] = 2;
+    window[510] = 0;
+    window[511] = 2;
     window[rpmb::kRequestInfoOffset + 20] = 3;
     window[rpmb::kRequestInfoOffset] = 1;
     window[0x6900] = 0x7f;
@@ -97,7 +98,8 @@ int main(int argc, char** argv) {
         assert(run(MX_RPMB_RELEASE).result == MX_RPMB_OK);
         return 0;
     }
-    if (scenario == "old-event") rpmb_diag::notify_request(7);
+    if (scenario == "old-event")
+        rpmb_diag::notify_request(7);
     arm();
     if (scenario == "no-event" || scenario == "old-event") {
         assert(run(MX_RPMB_COMPLETE).result == MX_RPMB_NO_REQUEST);
@@ -147,7 +149,8 @@ int main(int argc, char** argv) {
         assert(run(MX_RPMB_RELEASE).result == MX_RPMB_BUSY);
         assert(completions == 1);
         return 0;
-    } else assert(false);
+    } else
+        assert(false);
     assert(run(MX_RPMB_RELEASE).result == MX_RPMB_OK);
     assert(run(MX_RPMB_COUNTER).result == MX_RPMB_BUSY);
     assert(run(MX_RPMB_COMPLETE).result == MX_RPMB_BUSY);

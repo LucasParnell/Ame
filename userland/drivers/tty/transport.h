@@ -10,9 +10,12 @@ struct InputBuffer {
     libk::ByteCursor pending;
     MxTermControl control;
     bool control_pending;
-    bool retained() const { return control_pending || !pending.empty(); }
+    bool retained() const {
+        return control_pending || !pending.empty();
+    }
     bool hold_control(const MxTermControl& next) {
-        if (retained()) return false;
+        if (retained())
+            return false;
         control = next;
         control_pending = true;
         return true;
@@ -29,7 +32,8 @@ struct InputBuffer {
     }
     bool flush(const terminal::InputSink& sink) {
         if (control_pending) {
-            if (!sink.try_push_msg(MX_TERM_CONTROL, control)) return false;
+            if (!sink.try_push_msg(MX_TERM_CONTROL, control))
+                return false;
             control_pending = false;
             return true;
         }

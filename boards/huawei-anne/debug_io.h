@@ -18,8 +18,8 @@ constexpr u64 kDebugPmicBase = 0xfff34000;
 constexpr u64 kDebugSctrlBase = 0xfff0a000;
 #endif
 constexpr u64 kDebugRamBytes = 0x100000;
-constexpr u64 kDebugZones[] = {kDebugRamBase + 0x60000, kDebugRamBase + 0xe0000,
-                              kDebugRamBase, kDebugRamBase + 0x20000, kDebugRamBase + 0x40000};
+constexpr u64 kDebugZones[] = {kDebugRamBase + 0x60000, kDebugRamBase + 0xe0000, kDebugRamBase,
+                               kDebugRamBase + 0x20000, kDebugRamBase + 0x40000};
 constexpr u32 kDebugZoneSizes[] = {0x80000, 0x20000, 0x20000, 0x20000, 0x20000};
 inline u8 debug_pmic_read(u32 reg) {
     return *reinterpret_cast<volatile u8*>(kDebugPmicBase + (reg << 2));
@@ -32,7 +32,8 @@ inline void debug_led(char stage) {
         debug_pmic_write(0x14d, debug_pmic_read(0x14d) & ~7u);
         return;
     }
-    if (stage != 'r' && stage != 'g' && stage != 'b' && stage != 'w') return;
+    if (stage != 'r' && stage != 'g' && stage != 'b' && stage != 'w')
+        return;
     // Match the stock driver's disable path: clear the channel enables. The
     // two-bit output controls are not disable bits; setting unselected pairs
     // to 3 can override a disabled channel and produce mixed colours.
@@ -47,7 +48,8 @@ inline void debug_led(char stage) {
     const u32 selected = stage == 'w' ? 7u : 1u << (stage == 'r' ? 0 : stage == 'g' ? 1 : 2);
     debug_pmic_write(0x156, 0x33);
     for (u32 id = 0; id < 3; ++id) {
-        if (!(selected & (1u << id))) continue;
+        if (!(selected & (1u << id)))
+            continue;
         debug_pmic_write(0x14f + 2 * id, id == 1 ? 1 : 7);
         debug_pmic_write(0x150 + 2 * id, 3);
     }
@@ -60,7 +62,7 @@ inline void debug_clean(u64 base, u32 bytes) {
     asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
     const u64 line = 4ull << ((ctr >> 16) & 15);
     for (u64 p = base & ~(line - 1); p < base + bytes; p += line)
-        asm volatile("dc cvac, %0" :: "r"(p) : "memory");
+        asm volatile("dc cvac, %0" ::"r"(p) : "memory");
     asm volatile("dsb sy" ::: "memory");
 }
-}
+} // namespace anne

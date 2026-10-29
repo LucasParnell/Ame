@@ -41,7 +41,7 @@ uint64_t gpud_object_id(uint64_t generation, uint32_t type, uint32_t index);
 
 /* Decode `id` and confirm it names `type` in `generation`. Returns 0 and stores
  * the 1-based index when valid, or -1 when the id is stale, mistyped or null. */
-int gpud_object_index(uint64_t id, uint32_t type, uint64_t generation, uint32_t *index_out);
+int gpud_object_index(uint64_t id, uint32_t type, uint64_t generation, uint32_t* index_out);
 
 /* 1 when the opcode is one of the bootstrap opcodes this server implements. */
 int gpud_opcode_supported(uint32_t opcode);
@@ -49,15 +49,15 @@ int gpud_opcode_supported(uint32_t opcode);
 /* Validate `slot` as a request of `expected_opcode` whose inline payload is
  * exactly `expected_bytes`, then point `*payload` at it. Returns 0 on success,
  * -1 when the opcode or length does not match. */
-int gpud_frame_decode(const struct dango_ring_slot *slot, uint32_t expected_opcode,
-                      uint32_t expected_bytes, const void **payload);
+int gpud_frame_decode(const struct dango_ring_slot* slot, uint32_t expected_opcode,
+                      uint32_t expected_bytes, const void** payload);
 
 /* Build an opcode reply frame: opcode, echoed seq, inline payload. */
-void gpud_frame_reply(struct dango_ring_slot *slot, uint32_t opcode, uint64_t seq,
-                      const void *payload, uint32_t bytes);
+void gpud_frame_reply(struct dango_ring_slot* slot, uint32_t opcode, uint64_t seq,
+                      const void* payload, uint32_t bytes);
 
 /* Build a GPU_ERROR frame answering `request`. */
-void gpud_frame_error(struct dango_ring_slot *slot, const struct dango_ring_slot *request,
+void gpud_frame_error(struct dango_ring_slot* slot, const struct dango_ring_slot* request,
                       int64_t status, uint64_t object_id, uint64_t generation, uint64_t detail);
 
 #endif /* MIDIX_GPUD_PROTOCOL_H */

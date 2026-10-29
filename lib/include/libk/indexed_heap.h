@@ -8,12 +8,14 @@
 namespace libk::indexed_heap {
 inline constexpr uint32_t no_index = ~uint32_t{0};
 
-template<class T, size_t N, class Key, class Position>
+template <class T, size_t N, class Key, class Position>
 uint32_t sift_up(T (&data)[N], uint32_t i, Key key, Position position) {
-    if (i >= N) return no_index;
+    if (i >= N)
+        return no_index;
     while (i) {
         const uint32_t parent = (i - 1) / 2;
-        if (key(data[parent]) <= key(data[i])) break;
+        if (key(data[parent]) <= key(data[i]))
+            break;
         const T value = data[parent];
         data[parent] = data[i];
         data[i] = value;
@@ -24,16 +26,20 @@ uint32_t sift_up(T (&data)[N], uint32_t i, Key key, Position position) {
     return i;
 }
 
-template<class T, size_t N, class Key, class Position>
+template <class T, size_t N, class Key, class Position>
 void sift_down(T (&data)[N], uint32_t size, uint32_t i, Key key, Position position) {
-    if (size > N) return;
+    if (size > N)
+        return;
     while (i < size) {
         const uint32_t left = 2 * i + 1;
         const uint32_t right = left + 1;
         uint32_t smallest = i;
-        if (left < size && key(data[left]) < key(data[smallest])) smallest = left;
-        if (right < size && key(data[right]) < key(data[smallest])) smallest = right;
-        if (smallest == i) break;
+        if (left < size && key(data[left]) < key(data[smallest]))
+            smallest = left;
+        if (right < size && key(data[right]) < key(data[smallest]))
+            smallest = right;
+        if (smallest == i)
+            break;
         const T value = data[i];
         data[i] = data[smallest];
         data[smallest] = value;
@@ -43,9 +49,10 @@ void sift_down(T (&data)[N], uint32_t size, uint32_t i, Key key, Position positi
     }
 }
 
-template<class T, size_t N, class Key, class Position>
+template <class T, size_t N, class Key, class Position>
 bool push(T (&data)[N], uint32_t& size, T value, Key key, Position position) {
-    if (size >= N) return false;
+    if (size >= N)
+        return false;
     data[size] = value;
     position(value, size);
     ++size;
@@ -53,9 +60,10 @@ bool push(T (&data)[N], uint32_t& size, T value, Key key, Position position) {
     return true;
 }
 
-template<class T, size_t N, class Key, class Position>
+template <class T, size_t N, class Key, class Position>
 bool remove_at(T (&data)[N], uint32_t& size, uint32_t i, Key key, Position position) {
-    if (size > N || i >= size) return false;
+    if (size > N || i >= size)
+        return false;
     const T removed = data[i];
     --size;
     if (i < size) {

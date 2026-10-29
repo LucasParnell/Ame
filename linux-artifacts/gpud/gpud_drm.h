@@ -91,13 +91,13 @@ struct gdrm_dumb {
     uint32_t bpp;
     uint32_t pitch;
     uint64_t size;
-    unsigned char *map;
+    unsigned char* map;
     uint64_t map_len;
 };
 
 /* Open `path` (card0), take master and read the resource tables. */
-int gdrm_card_open(struct gdrm_card *card, const char *path);
-void gdrm_card_close(struct gdrm_card *card);
+int gdrm_card_open(struct gdrm_card* card, const char* path);
+void gdrm_card_close(struct gdrm_card* card);
 
 /* Release DRM master while keeping the card open, so the framebuffer this file
  * created stays on the CRTC (closing would drop it: drm_file_free() calls
@@ -108,39 +108,39 @@ int gdrm_fb_flush(struct gdrm_card* card, uint32_t fb_id);
 
 /* Fill `outputs`/`modes` from the connector tables (preferred mode first).
  * Returns 0 when at least one output with modes was found. */
-int gdrm_card_enumerate(struct gdrm_card *card);
+int gdrm_card_enumerate(struct gdrm_card* card);
 
-int gdrm_dumb_create(struct gdrm_card *card, uint32_t width, uint32_t height, uint32_t bpp,
-                     struct gdrm_dumb *dumb);
-void gdrm_dumb_destroy(struct gdrm_card *card, uint32_t handle);
+int gdrm_dumb_create(struct gdrm_card* card, uint32_t width, uint32_t height, uint32_t bpp,
+                     struct gdrm_dumb* dumb);
+void gdrm_dumb_destroy(struct gdrm_card* card, uint32_t handle);
 
-int gdrm_fb_create(struct gdrm_card *card, const struct gdrm_dumb *dumb, uint32_t *fb_id_out);
+int gdrm_fb_create(struct gdrm_card* card, const struct gdrm_dumb* dumb, uint32_t* fb_id_out);
 /* Same framebuffer, but for any GEM handle (an imported dma-buf object as well
  * as a dumb buffer). `pitch`/`bpp`/`depth` describe how the memory is scanned
  * out; the caller has already validated the geometry against the handle. */
-int gdrm_fb_create_handle(struct gdrm_card *card, uint32_t handle, uint32_t width, uint32_t height,
-                          uint32_t pitch, uint32_t bpp, uint32_t depth, uint32_t *fb_id_out);
-void gdrm_fb_destroy(struct gdrm_card *card, uint32_t fb_id);
+int gdrm_fb_create_handle(struct gdrm_card* card, uint32_t handle, uint32_t width, uint32_t height,
+                          uint32_t pitch, uint32_t bpp, uint32_t depth, uint32_t* fb_id_out);
+void gdrm_fb_destroy(struct gdrm_card* card, uint32_t fb_id);
 
 /* Read a DRM capability (DRM_IOCTL_GET_CAP). Returns the value, or -1 when the
  * ioctl fails. `capability` is a DRM_CAP_* id. */
-long gdrm_get_cap(struct gdrm_card *card, uint64_t capability);
+long gdrm_get_cap(struct gdrm_card* card, uint64_t capability);
 
 /* Import `fd` (a dma-buf) as a GEM handle. Returns 0 and stores the handle, or
  * a negative errno from the ioctl (-EINVAL when the device does not support
  * import at all, -ENODEV when it advertises import but cannot wrap this buffer).
  * A negative errno is returned rather than collapsed to -1 so the caller can
  * record *why* an import was refused. */
-long gdrm_prime_import(struct gdrm_card *card, int fd, uint32_t *handle_out);
+long gdrm_prime_import(struct gdrm_card* card, int fd, uint32_t* handle_out);
 
 /* Release a GEM handle created by this file (import or dumb). */
-void gdrm_gem_close(struct gdrm_card *card, uint32_t handle);
+void gdrm_gem_close(struct gdrm_card* card, uint32_t handle);
 
 /* Program `crtc_id` to scan out `fb_id` on `connector_id` in `mode`. */
-int gdrm_crtc_program(struct gdrm_card *card, uint32_t crtc_id, uint32_t connector_id,
-                      uint32_t fb_id, const struct drm_mode_modeinfo *mode);
+int gdrm_crtc_program(struct gdrm_card* card, uint32_t crtc_id, uint32_t connector_id,
+                      uint32_t fb_id, const struct drm_mode_modeinfo* mode);
 
 /* 1 when the CRTC currently scans `fb_id`, 0 when it does not, -1 on error. */
-int gdrm_crtc_scanning(struct gdrm_card *card, uint32_t crtc_id, uint32_t fb_id);
+int gdrm_crtc_scanning(struct gdrm_card* card, uint32_t crtc_id, uint32_t fb_id);
 
 #endif /* MIDIX_GPUD_DRM_H */

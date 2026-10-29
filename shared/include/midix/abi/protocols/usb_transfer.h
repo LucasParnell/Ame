@@ -12,13 +12,24 @@ enum class MxUsbTransferType : mx_u8_t { Control = 0, Isochronous = 1, Bulk = 2,
 enum class MxUsbDirection : mx_u8_t { Out = 0, In = 1 };
 enum class MxUsbRole : mx_u8_t { Detached = 0, Host = 1, Device = 2 };
 enum class MxUsbStatus : mx_u32_t {
-    Success = 0, Short = 1, Stall = 2, Cancelled = 3, Timeout = 4,
-    Disconnected = 5, ControllerLost = 6, Invalid = 7, Denied = 8,
-    Unsupported = 9, QueueFull = 10, IoError = 11,
+    Success = 0,
+    Short = 1,
+    Stall = 2,
+    Cancelled = 3,
+    Timeout = 4,
+    Disconnected = 5,
+    ControllerLost = 6,
+    Invalid = 7,
+    Denied = 8,
+    Unsupported = 9,
+    QueueFull = 10,
+    IoError = 11,
 };
 enum MxUsbTransferMsg : mx_u32_t {
-    MX_USB_TRANSFER_SUBMIT = 1, MX_USB_TRANSFER_CANCEL = 2,
-    MX_USB_TRANSFER_COMPLETE = 3, MX_USB_TRANSFER_CONTROL = 4,
+    MX_USB_TRANSFER_SUBMIT = 1,
+    MX_USB_TRANSFER_CANCEL = 2,
+    MX_USB_TRANSFER_COMPLETE = 3,
+    MX_USB_TRANSFER_CONTROL = 4,
 };
 enum MxUsbTransferFlags : mx_u32_t {
     MX_USB_TRANSFER_ALLOW_SHORT = 1u << 0,
@@ -44,7 +55,9 @@ struct MxUsbSubmit {
     mx_u32_t flags;
     mx_u32_t reserved;
 };
-struct MxUsbCancel { mx_u64_t request_id; };
+struct MxUsbCancel {
+    mx_u64_t request_id;
+};
 struct MxUsbCompletion {
     mx_u64_t request_id;
     MxUsbToken endpoint;

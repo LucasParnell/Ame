@@ -31,17 +31,27 @@ int main(int argc, char** argv) {
 
     anko::qr::Level level = anko::qr::Level::L;
     switch (argv[2][0]) {
-    case 'L': level = anko::qr::Level::L; break;
-    case 'M': level = anko::qr::Level::M; break;
-    case 'Q': level = anko::qr::Level::Q; break;
-    case 'H': level = anko::qr::Level::H; break;
-    default: std::fprintf(stderr, "bad level\n"); return 2;
+    case 'L':
+        level = anko::qr::Level::L;
+        break;
+    case 'M':
+        level = anko::qr::Level::M;
+        break;
+    case 'Q':
+        level = anko::qr::Level::Q;
+        break;
+    case 'H':
+        level = anko::qr::Level::H;
+        break;
+    default:
+        std::fprintf(stderr, "bad level\n");
+        return 2;
     }
 
     static anko::qr::Code code;
     if (!anko::qr::encode(data.data(), static_cast<u32>(data.size()), level, code)) {
-        std::fprintf(stderr, "encode failed (payload %zu bytes, level %c)\n",
-                     data.size(), argv[2][0]);
+        std::fprintf(stderr, "encode failed (payload %zu bytes, level %c)\n", data.size(),
+                     argv[2][0]);
         return 1;
     }
 

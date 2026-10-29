@@ -29,8 +29,10 @@ struct const_bytes {
     std::size_t size = 0;
 
     constexpr const_bytes() = default;
-    constexpr const_bytes(const std::uint8_t* d, std::size_t s) : data(d), size(s) {}
-    constexpr const_bytes(bytes b) : data(b.data), size(b.size) {} // mutable -> read-only
+    constexpr const_bytes(const std::uint8_t* d, std::size_t s) : data(d), size(s) {
+    }
+    constexpr const_bytes(bytes b) : data(b.data), size(b.size) {
+    } // mutable -> read-only
 };
 
 // Build a view. (nullptr, n) normalises to the empty view so the helpers below
@@ -43,38 +45,39 @@ inline const_bytes as_bytes(const void* data, std::size_t size) {
 }
 
 // Array extents come from the type rather than a repeated caller-supplied size.
-template <typename T, std::size_t N>
-inline bytes as_bytes(T (&data)[N]) {
+template <typename T, std::size_t N> inline bytes as_bytes(T (&data)[N]) {
     static_assert(__is_trivially_copyable(T), "byte views require trivially copyable elements");
     return as_bytes(data, sizeof(data));
 }
-template <typename T, std::size_t N>
-inline const_bytes as_bytes(const T (&data)[N]) {
+template <typename T, std::size_t N> inline const_bytes as_bytes(const T (&data)[N]) {
     static_assert(__is_trivially_copyable(T), "byte views require trivially copyable elements");
     return as_bytes(data, sizeof(data));
 }
 
 // Sub-view [offset, offset+length). A range outside `b` yields the empty view.
 inline const_bytes slice(const_bytes b, std::size_t offset, std::size_t length) {
-    if (!b.data || offset > b.size || length > b.size - offset) return {nullptr, 0};
+    if (!b.data || offset > b.size || length > b.size - offset)
+        return {nullptr, 0};
     return {b.data + offset, length};
 }
 inline bytes slice(bytes b, std::size_t offset, std::size_t length) {
-    if (!b.data || offset > b.size || length > b.size - offset) return {nullptr, 0};
+    if (!b.data || offset > b.size || length > b.size - offset)
+        return {nullptr, 0};
     return {b.data + offset, length};
 }
 
 // Checked replacement for memcpy(dst, src, n): refuses unless both views hold
 // at least `n` bytes.
 inline bool copy_n(bytes dst, const_bytes src, std::size_t n) {
-    if (n > dst.size || n > src.size || (n != 0 && (!dst.data || !src.data))) return false;
+    if (n > dst.size || n > src.size || (n != 0 && (!dst.data || !src.data)))
+        return false;
     std::size_t i = 0;
 #if defined(__aarch64__)
     // A53-friendly scalar pairs. Both endpoints must be naturally aligned:
     // this also works with the kernel's strict-alignment/SIMD-free contract.
     // No overread, destination padding access, or FP register ownership change.
-    if (((reinterpret_cast<std::uintptr_t>(dst.data) |
-          reinterpret_cast<std::uintptr_t>(src.data)) & 7) == 0) {
+    if (((reinterpret_cast<std::uintptr_t>(dst.data) | reinterpret_cast<std::uintptr_t>(src.data)) &
+         7) == 0) {
         auto* d = dst.data;
         const auto* s = src.data;
         for (; n - i >= 32; i += 32) {
@@ -84,22 +87,26 @@ inline bool copy_n(bytes dst, const_bytes src, std::size_t n) {
                          "stp %0, %1, [%5]\n"
                          "stp %2, %3, [%5, #16]"
                          : "=&r"(a), "=&r"(b), "=&r"(c), "=&r"(e)
-                         : "r"(s + i), "r"(d + i) : "memory");
+                         : "r"(s + i), "r"(d + i)
+                         : "memory");
         }
         using Word = std::uint64_t __attribute__((__may_alias__));
         for (; n - i >= 8; i += 8)
             *reinterpret_cast<Word*>(d + i) = *reinterpret_cast<const Word*>(s + i);
     }
 #endif
-    for (; i < n; ++i) dst.data[i] = src.data[i];
+    for (; i < n; ++i)
+        dst.data[i] = src.data[i];
     return true;
 }
 
 // Bounded memmove, including partial overlap. Aligned bulk moves use whole
 // words; byte tails and unaligned ranges retain the same overlap semantics.
 inline bool move_n(bytes dst, const_bytes src, std::size_t n) {
-    if (n > dst.size || n > src.size || (n && (!dst.data || !src.data))) return false;
-    if (!n || dst.data == src.data) return true;
+    if (n > dst.size || n > src.size || (n && (!dst.data || !src.data)))
+        return false;
+    if (!n || dst.data == src.data)
+        return true;
     const auto dest = reinterpret_cast<std::uintptr_t>(dst.data);
     const auto source = reinterpret_cast<std::uintptr_t>(src.data);
     const bool backward = dest > source && dest - source < n;
@@ -109,14 +116,18 @@ inline bool move_n(bytes dst, const_bytes src, std::size_t n) {
         const auto* s = reinterpret_cast<const Word*>(src.data);
         const auto count = n / sizeof(Word);
         if (backward) {
-            for (std::size_t i = count; i; --i) d[i - 1] = s[i - 1];
+            for (std::size_t i = count; i; --i)
+                d[i - 1] = s[i - 1];
         } else {
-            for (std::size_t i = 0; i < count; ++i) d[i] = s[i];
+            for (std::size_t i = 0; i < count; ++i)
+                d[i] = s[i];
         }
     } else if (backward) {
-        for (std::size_t i = n; i; --i) dst.data[i - 1] = src.data[i - 1];
+        for (std::size_t i = n; i; --i)
+            dst.data[i - 1] = src.data[i - 1];
     } else {
-        for (std::size_t i = 0; i < n; ++i) dst.data[i] = src.data[i];
+        for (std::size_t i = 0; i < n; ++i)
+            dst.data[i] = src.data[i];
     }
     return true;
 }
@@ -133,10 +144,36 @@ inline bool copy_exact(bytes dst, const_bytes src) {
     return dst.size == src.size && copy_n(dst, src, dst.size);
 }
 
+// Exact byte equality for sized views. This is not a constant-time comparison
+// for secrets. Aligned words keep page comparisons out of byte-at-a-time loops.
+inline bool equal(const_bytes a, const_bytes b) {
+    if (a.size != b.size || (a.size && (!a.data || !b.data)))
+        return false;
+
+    std::size_t i = 0;
+    if (((reinterpret_cast<std::uintptr_t>(a.data) | reinterpret_cast<std::uintptr_t>(b.data)) &
+         7) == 0) {
+        using Word = std::uint64_t __attribute__((__may_alias__));
+        for (; a.size - i >= sizeof(Word); i += sizeof(Word)) {
+            if (*reinterpret_cast<const Word*>(a.data + i) !=
+                *reinterpret_cast<const Word*>(b.data + i))
+                return false;
+        }
+    }
+
+    for (; i < a.size; ++i) {
+        if (a.data[i] != b.data[i])
+            return false;
+    }
+    return true;
+}
+
 // Checked replacement for memset(dst, value, n): refuses unless dst holds `n`.
 inline bool fill_n(bytes dst, std::uint8_t value, std::size_t n) {
-    if (n > dst.size || (n != 0 && !dst.data)) return false;
-    for (std::size_t i = 0; i < n; ++i) dst.data[i] = value;
+    if (n > dst.size || (n != 0 && !dst.data))
+        return false;
+    for (std::size_t i = 0; i < n; ++i)
+        dst.data[i] = value;
     return true;
 }
 
@@ -147,9 +184,11 @@ inline void fill(bytes dst, std::uint8_t value) {
 
 // Inspect a complete range without reading beyond its supplied extent.
 inline bool is_zero(const_bytes src) {
-    if (src.size && !src.data) return false;
+    if (src.size && !src.data)
+        return false;
     for (std::size_t i = 0; i < src.size; ++i) {
-        if (src.data[i] != 0) return false;
+        if (src.data[i] != 0)
+            return false;
     }
     return true;
 }
@@ -168,8 +207,7 @@ inline bool zero(void* data, std::size_t size) {
 
 // Arrays and objects carry their own extent. A bare pointer is deliberately
 // rejected: pass *ptr to clear the object, or (ptr, size) for dynamic storage.
-template <typename T>
-inline bool zero(T& object) {
+template <typename T> inline bool zero(T& object) {
     static_assert(__is_trivially_copyable(T), "zero requires trivially copyable storage");
     static_assert(!__is_pointer(T), "zero a pointee or provide the storage size");
     return zero(static_cast<void*>(&object), sizeof(object));

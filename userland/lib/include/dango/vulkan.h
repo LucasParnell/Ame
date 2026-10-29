@@ -52,7 +52,9 @@ struct Memory {
     mx_u64_t arena_offset = 0;
     mx_u32_t size = 0;
     mx_u8_t* ptr = nullptr;
-    bool valid() const { return id != 0; }
+    bool valid() const {
+        return id != 0;
+    }
 };
 
 // The `ame_remote` ICD marshalling: append bounded command records into the
@@ -60,29 +62,37 @@ struct Memory {
 // body, aligned to MX_VK_COMMAND_ALIGNMENT. No allocation, no overflow: a
 // record that does not fit leaves the recorder unchanged and returns false.
 class CommandRecorder {
-public:
+  public:
     void begin(mx_u8_t* region, mx_u32_t capacity) {
         region_ = region;
         capacity_ = capacity;
         size_ = 0;
         overflow_ = false;
     }
-    void reset() { size_ = 0; overflow_ = false; }
-    mx_u32_t size() const { return size_; }
-    bool empty() const { return size_ == 0; }
-    bool overflowed() const { return overflow_; }
+    void reset() {
+        size_ = 0;
+        overflow_ = false;
+    }
+    mx_u32_t size() const {
+        return size_;
+    }
+    bool empty() const {
+        return size_ == 0;
+    }
+    bool overflowed() const {
+        return overflow_;
+    }
 
     bool fill_buffer(const Memory& dst, mx_u64_t offset, mx_u64_t size, mx_u32_t value);
     bool copy_buffer(const Memory& src, mx_u64_t src_offset, const Memory& dst, mx_u64_t dst_offset,
                      mx_u64_t size);
     bool dispatch(mx_u32_t group_x, mx_u32_t group_y, mx_u32_t group_z);
     bool bind_vertex_buffer(const Memory& buffer, mx_u64_t offset);
-    bool bind_render_target(const Memory& target, mx_u32_t width, mx_u32_t height,
-                            mx_u32_t stride);
+    bool bind_render_target(const Memory& target, mx_u32_t width, mx_u32_t height, mx_u32_t stride);
     bool draw(mx_u32_t vertex_count, mx_u32_t instance_count, mx_u64_t color_xrgb8888);
     bool pipeline_barrier();
 
-private:
+  private:
     mx_u8_t* reserve(mx_u32_t opcode, mx_u32_t record_bytes);
 
     mx_u8_t* region_ = nullptr;
@@ -94,8 +104,10 @@ private:
 // The client owns exactly one session. attach() is non-owning; open() runs the
 // handshake and pins the session id and arena.
 class SessionClient {
-public:
-    void attach(const Transport& transport) { transport_ = transport; }
+  public:
+    void attach(const Transport& transport) {
+        transport_ = transport;
+    }
 
     // Open a session. On success `info()` describes the granted quotas and the
     // arena view (when the transport can map one) is armed for the recorder.
@@ -105,16 +117,26 @@ public:
     // Close the session. Safe to call when not open.
     bool close();
 
-    bool open_ok() const { return open_ok_; }
-    const MxVkSessionOpenReply& info() const { return info_; }
-    mx_u64_t session_id() const { return info_.session_id; }
+    bool open_ok() const {
+        return open_ok_;
+    }
+    const MxVkSessionOpenReply& info() const {
+        return info_;
+    }
+    mx_u64_t session_id() const {
+        return info_.session_id;
+    }
 
     // Host-visible memory.
     bool alloc(mx_u64_t size, mx_u32_t alignment, mx_u32_t memory_type, Memory* out);
     bool free(const Memory& memory);
 
-    CommandRecorder& recorder() { return recorder_; }
-    const CommandRecorder& recorder() const { return recorder_; }
+    CommandRecorder& recorder() {
+        return recorder_;
+    }
+    const CommandRecorder& recorder() const {
+        return recorder_;
+    }
 
     // Signalled result of sync_wait(); MX_OK when the token was reached.
     bool submit(mx_u64_t sync_id, mx_status_t* out_status);
@@ -134,7 +156,7 @@ public:
         return arena_base_ && arena_offset < arena_bytes_ ? arena_base_ + arena_offset : nullptr;
     }
 
-private:
+  private:
     // Send one request and collect its reply frame. Returns true when a reply of
     // `expect_reply` (or a VK_SESSION_ERROR) arrived. Fills `out`.
     bool call(mx_u32_t opcode, const void* payload, mx_u32_t bytes, mx_u32_t expect_reply,
@@ -145,8 +167,10 @@ private:
     bool call_into(mx_u32_t opcode, const void* payload, mx_u32_t bytes, mx_u32_t expect_reply,
                    T* out) {
         MxVkFrame frame{};
-        if (!call(opcode, payload, bytes, expect_reply, &frame)) return false;
-        if (frame.type == VK_SESSION_ERROR) return false;
+        if (!call(opcode, payload, bytes, expect_reply, &frame))
+            return false;
+        if (frame.type == VK_SESSION_ERROR)
+            return false;
         return mx_vk_slot_decode(&frame, expect_reply, (mx_u32_t)sizeof(T), out) == 0;
     }
 

@@ -18,9 +18,14 @@ class alignas(16) BudgetWindow {
     }
 
   public:
-    struct Snapshot { u64 used_ns; u64 period_start_ns; };
+    struct Snapshot {
+        u64 used_ns;
+        u64 period_start_ns;
+    };
 
-    void reset(u64 start) { __atomic_store_n(&state_, pack(0, start), __ATOMIC_RELAXED); }
+    void reset(u64 start) {
+        __atomic_store_n(&state_, pack(0, start), __ATOMIC_RELAXED);
+    }
 
     Snapshot snapshot() const {
         const Word state = __atomic_load_n(&state_, __ATOMIC_RELAXED);
@@ -42,9 +47,9 @@ class alignas(16) BudgetWindow {
             // Saturation preserves exhaustion instead of wrapping into credit.
             used = delta > ~0ull - used ? ~0ull : used + delta;
             const Word desired = pack(used, start);
-            if (desired == observed || __atomic_compare_exchange_n(
-                    &state_, &observed, desired, false,
-                    __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            if (desired == observed ||
+                __atomic_compare_exchange_n(&state_, &observed, desired, false, __ATOMIC_RELAXED,
+                                            __ATOMIC_RELAXED))
                 return {used, start};
         }
     }

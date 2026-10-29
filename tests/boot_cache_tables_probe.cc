@@ -5,7 +5,8 @@ using namespace mm::boot_cache;
 
 u64 descriptor(const Tables& tables, u64 address) {
     const u64 block = tables.level2[address >> 30][(address >> 21) & 511];
-    if ((block & 3) != kTable) return block;
+    if ((block & 3) != kTable)
+        return block;
     const auto* leaf = reinterpret_cast<const u64*>(block & 0x0000fffffffff000ull);
     return leaf[(address >> 12) & 511];
 }
@@ -23,11 +24,16 @@ int main() {
     };
     for (const auto& c : cases) {
         const bool ok = build(tables, c[0], c[1], c[2], c[3]);
-        if (&c == &cases[0]) { assert(!ok); continue; }
+        if (&c == &cases[0]) {
+            assert(!ok);
+            continue;
+        }
         assert(ok && tables.leaf_count <= 4);
         assert(tables.root[0] == (reinterpret_cast<u64>(tables.level1) | kTable));
-        for (u32 i = 1; i < 512; ++i) assert(!tables.root[i]);
-        for (u32 i = 4; i < 512; ++i) assert(!tables.level1[i]);
+        for (u32 i = 1; i < 512; ++i)
+            assert(!tables.root[i]);
+        for (u32 i = 4; i < 512; ++i)
+            assert(!tables.level1[i]);
         for (u64 pa = 0; pa < kLimit; pa += kPage) {
             const u64 entry = descriptor(tables, pa);
             const bool kernel = pa >= (c[0] & ~(kPage - 1)) && pa < c[1];

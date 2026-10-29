@@ -11,7 +11,7 @@
 
 constexpr mx_u16_t kBTreeInternal = 1;
 constexpr mx_u16_t kBTreeLeaf = 2;
-constexpr mx_u32_t kBTreeEntrySize = 64;          // every tree entry occupies one 64-byte slot
+constexpr mx_u32_t kBTreeEntrySize = 64; // every tree entry occupies one 64-byte slot
 constexpr mx_u32_t kBTreeMaxEntries = (kBlockSize - sizeof(BTreeNodeHeader)) / kBTreeEntrySize;
 constexpr mx_u32_t kBTreeMaxDepth = 8;            // bound on a single descent before giving up
 constexpr mx_u32_t kBTreeInternalChildOffset = 8; // BTreeInternalEntry.child_block
@@ -85,9 +85,16 @@ static void disk_cache_store(mx_u64_t block, const mx_u8_t* data) {
     mx_u32_t victim = 0;
     bool empty = false;
     for (mx_u32_t i = 0; i < kDiskBlockCacheEntries; ++i) {
-        if ((g_cache_valid & (1u << i)) && g_cache_blocks[i] == block) { victim = i; break; }
-        if (!(g_cache_valid & (1u << i))) { if (!empty) victim = i; empty = true; }
-        else if (!empty && g_cache_ages[i] < g_cache_ages[victim]) victim = i;
+        if ((g_cache_valid & (1u << i)) && g_cache_blocks[i] == block) {
+            victim = i;
+            break;
+        }
+        if (!(g_cache_valid & (1u << i))) {
+            if (!empty)
+                victim = i;
+            empty = true;
+        } else if (!empty && g_cache_ages[i] < g_cache_ages[victim])
+            victim = i;
     }
     g_cache_blocks[victim] = block;
     g_cache_ages[victim] = ++g_disk_cache_clock;
@@ -96,19 +103,44 @@ static void disk_cache_store(mx_u64_t block, const mx_u8_t* data) {
 }
 static void disk_cache_invalidate(mx_u64_t block) {
     for (mx_u32_t i = 0; i < kDiskBlockCacheEntries; ++i)
-        if ((g_cache_valid & (1u << i)) && g_cache_blocks[i] == block) g_cache_valid &= ~(1u << i);
+        if ((g_cache_valid & (1u << i)) && g_cache_blocks[i] == block)
+            g_cache_valid &= ~(1u << i);
 }
 static void disk_cache_reset() {
     g_cache_valid = 0;
     g_disk_cache_clock = 1;
 }
+struct MountIoTiming {
+    mx_u64_t calls{}, sectors{}, elapsed_ns{};
+};
+static MountIoTiming g_mount_io[3]{};
+static bool g_profile_mount;
+struct MountTimingScope {
+    MountTimingScope() {
+        libk::zero(g_mount_io);
+        g_profile_mount = true;
+    }
+    ~MountTimingScope() {
+        g_profile_mount = false;
+    }
+};
 // An unanswered command may still own the shared transfer arena. Never reuse
 // it or accept an uncorrelated late reply after the bounded wait expires.
 static bool block_request(mx_u32_t type, mx_u64_t sector, mx_u32_t count, BlkReply* reply) {
-    if (!g_blk_available) return false;
-    if (!g_blk_client.request(type, sector, count, MX_NULL_HANDLE,
-                             type == BLK_FLUSH ? 0 : BLK_DMA_CLIENT_OFFSET,
-                             reply, mx_clock_ns() + kBlkReplyTimeoutNs)) {
+    if (!g_blk_available)
+        return false;
+    const auto started = g_profile_mount ? mx_clock_ns() : 0;
+    const bool completed = g_blk_client.request(type, sector, count, MX_NULL_HANDLE,
+                                                type == BLK_FLUSH ? 0 : BLK_DMA_CLIENT_OFFSET,
+                                                reply, mx_clock_ns() + kBlkReplyTimeoutNs);
+    if (g_profile_mount) {
+        const auto index = type == BLK_READ ? 0 : type == BLK_WRITE ? 1 : 2;
+        auto& timing = g_mount_io[index];
+        ++timing.calls;
+        timing.sectors += count;
+        timing.elapsed_ns += mx_clock_ns() - started;
+    }
+    if (!completed) {
         g_blk_available = false;
         disk_cache_reset();
         return false;
@@ -143,12 +175,14 @@ static bool disk_read_sectors(mx_u64_t sector, mx_u32_t sector_count, mx_u8_t* o
 // Resolve an fs block inside the mounted partition without wrapping either
 // multiplication or addition. Also used before a cache lookup.
 static bool disk_sector_for_block(mx_u64_t block, mx_u64_t* sector) {
-    if (g_disk_total_blocks != 0 && block >= g_disk_total_blocks) return false;
+    if (g_disk_total_blocks != 0 && block >= g_disk_total_blocks)
+        return false;
     mx_u64_t relative = 0;
-    if (!libk::checked_mul(block, kSectorsPerFsBlock, &relative)) return false;
-    if (g_disk_partition_sectors != 0 &&
-        (relative > g_disk_partition_sectors ||
-         kSectorsPerFsBlock > g_disk_partition_sectors - relative)) return false;
+    if (!libk::checked_mul(block, kSectorsPerFsBlock, &relative))
+        return false;
+    if (g_disk_partition_sectors != 0 && (relative > g_disk_partition_sectors ||
+                                          kSectorsPerFsBlock > g_disk_partition_sectors - relative))
+        return false;
     return libk::checked_add(g_disk_base_sector, relative, sector) &&
            libk::checked_add(*sector, kSectorsPerFsBlock - 1, nullptr);
 }
@@ -158,21 +192,27 @@ static bool disk_sector_for_block(mx_u64_t block, mx_u64_t* sector) {
 // keeps the read cache coherent with the new contents.
 bool disk_write_blocks(mx_u64_t block, mx_u32_t count, const void* input) {
     if (!g_blk_available || !g_blk_dma || !input || !count || count > 16 ||
-        block > ~mx_u64_t{0} - (count - 1)) return false;
+        block > ~mx_u64_t{0} - (count - 1))
+        return false;
     mx_u64_t sector = 0, last = 0;
-    if (!disk_sector_for_block(block, &sector) ||
-        !disk_sector_for_block(block + count - 1, &last)) return false;
+    if (!disk_sector_for_block(block, &sector) || !disk_sector_for_block(block + count - 1, &last))
+        return false;
     const auto bytes = static_cast<mx_u64_t>(count) * kBlockSize;
-    if (!libk::copy_exact(libk::slice(libk::as_bytes(g_blk_dma, g_blk_dma_size),
-                                     BLK_DMA_CLIENT_OFFSET, bytes), libk::as_bytes(input, bytes))) return false;
+    if (!libk::copy_exact(
+            libk::slice(libk::as_bytes(g_blk_dma, g_blk_dma_size), BLK_DMA_CLIENT_OFFSET, bytes),
+            libk::as_bytes(input, bytes)))
+        return false;
     // Invalidate before submission, including every block in a partial or
     // ambiguous write. Old cached bytes can never conceal a failed transfer.
-    for (mx_u32_t i = 0; i < count; ++i) disk_cache_invalidate(block + i);
+    for (mx_u32_t i = 0; i < count; ++i)
+        disk_cache_invalidate(block + i);
     BlkReply reply{};
     if (!block_request(BLK_WRITE, sector, count * kSectorsPerFsBlock, &reply) ||
-        reply.status != MX_OK || reply.sectors_transferred != count * kSectorsPerFsBlock) return false;
+        reply.status != MX_OK || reply.sectors_transferred != count * kSectorsPerFsBlock)
+        return false;
     const auto* data = static_cast<const mx_u8_t*>(input);
-    for (mx_u32_t i = 0; i < count; ++i) disk_cache_store(block + i, data + i * kBlockSize);
+    for (mx_u32_t i = 0; i < count; ++i)
+        disk_cache_store(block + i, data + i * kBlockSize);
     return true;
 }
 // Device-level read accounting for the mount phases: cache hits are excluded,
@@ -184,14 +224,18 @@ bool disk_write_block(mx_u64_t block, const mx_u8_t* data) {
     return disk_write_blocks(block, 1, data);
 }
 bool disk_read_blocks(mx_u64_t block, mx_u32_t count, void* out) {
-    if (!out || !count || count > 16 || block > ~mx_u64_t{0} - (count - 1)) return false;
+    if (!out || !count || count > 16 || block > ~mx_u64_t{0} - (count - 1))
+        return false;
     auto* data = static_cast<mx_u8_t*>(out);
-    if (count == 1) return disk_read_block(block, data);
+    if (count == 1)
+        return disk_read_block(block, data);
     mx_u64_t sector = 0, last = 0;
     if (!disk_sector_for_block(block, &sector) ||
         !disk_sector_for_block(block + count - 1, &last) ||
-        !disk_read_sectors(sector, count * kSectorsPerFsBlock, data)) return false;
-    for (mx_u32_t i = 0; i < count; ++i) disk_cache_store(block + i, data + i * kBlockSize);
+        !disk_read_sectors(sector, count * kSectorsPerFsBlock, data))
+        return false;
+    for (mx_u32_t i = 0; i < count; ++i)
+        disk_cache_store(block + i, data + i * kBlockSize);
     return true;
 }
 
@@ -199,13 +243,15 @@ bool disk_read_blocks(mx_u64_t block, mx_u32_t count, void* out) {
 // service, so contiguous metadata is fetched one request deep.
 alignas(4096) static mx_u8_t g_readahead[16 * kBlockSize];
 static void disk_readahead(mx_u64_t first, mx_u32_t count) {
-    if (!g_blk_available || !g_blk_dma || !count) return;
-    if (count > 16) count = 16;
+    if (!g_blk_available || !g_blk_dma || !count)
+        return;
+    if (count > 16)
+        count = 16;
     const mx_u64_t started = mx_clock_ns();
     const bool ok = disk_read_blocks(first, count, g_readahead);
     g_dev_read_ns += mx_clock_ns() - started;
     ++g_dev_reads;
-    (void)ok;  // A failed read-ahead only means the caller reads block by block.
+    (void)ok; // A failed read-ahead only means the caller reads block by block.
 }
 
 bool disk_read_block(mx_u64_t block, mx_u8_t* out) {
@@ -213,7 +259,8 @@ bool disk_read_block(mx_u64_t block, mx_u8_t* out) {
         return false;
     }
     mx_u64_t sector = 0;
-    if (!disk_sector_for_block(block, &sector)) return false;
+    if (!disk_sector_for_block(block, &sector))
+        return false;
     if (disk_cache_lookup(block, out)) {
         return true;
     }
@@ -251,8 +298,9 @@ static mx_u64_t disk_entry_key(const mx_u8_t* entry, DiskTree tree) {
 enum class DiskLookup { Found, Missing, Invalid };
 
 static DiskLookup disk_btree_find(mx_u64_t root, mx_u64_t key, DiskTree tree,
-                            mx_u8_t out_entry[kBTreeEntrySize]) {
-    if (!root) return DiskLookup::Missing;
+                                  mx_u8_t out_entry[kBTreeEntrySize]) {
+    if (!root)
+        return DiskLookup::Missing;
     mx_u64_t block = root;
     for (mx_u32_t depth = 0; depth < kBTreeMaxDepth; ++depth) {
         if (block == 0 || !disk_read_block(block, g_disk_block)) {
@@ -270,7 +318,8 @@ static DiskLookup disk_btree_find(mx_u64_t root, mx_u64_t key, DiskTree tree,
                 const mx_u64_t max_key = libk::load_le<mx_u64_t>(entry);
                 if (key <= max_key) {
                     child = libk::load_le<mx_u64_t>(entry + kBTreeInternalChildOffset);
-                    if (!child) return DiskLookup::Invalid;
+                    if (!child)
+                        return DiskLookup::Invalid;
                     break;
                 }
             }
@@ -320,10 +369,12 @@ bool disk_dir_lookup(const InodeLeafEntry& dir, mx_u32_t parent_inode, const cha
     if (dir.type != FS_INODE_DIR || name_len == 0 || name_len > kMaxName || !name || !out_inode) {
         return false;
     }
-    if (g_volume.mounted) return mochi::store::lookup(g_volume, parent_inode, name, name_len, *out_inode) == MX_OK;
+    if (g_volume.mounted)
+        return mochi::store::lookup(g_volume, parent_inode, name, name_len, *out_inode) == MX_OK;
     alignas(8) mx_u8_t entry[kBTreeEntrySize];
     const mx_u64_t key = (static_cast<mx_u64_t>(parent_inode) << 32) | name_hash32(name, name_len);
-    if (disk_btree_find(dir.extent_tree_root, key, DiskTree::Directory, entry) != DiskLookup::Found) {
+    if (disk_btree_find(dir.extent_tree_root, key, DiskTree::Directory, entry) !=
+        DiskLookup::Found) {
         return false;
     }
     const auto* dirent = reinterpret_cast<const DirLeafEntry*>(entry);
@@ -340,9 +391,14 @@ bool disk_dir_lookup(const InodeLeafEntry& dir, mx_u32_t parent_inode, const cha
 
 static DiskLookup disk_btree_nth_entry(mx_u64_t root, mx_u32_t target, mx_u32_t* cursor,
                                        mx_u8_t out_entry[kBTreeEntrySize]) {
-    if (!cursor || !out_entry) return DiskLookup::Invalid;
-    if (!root) return DiskLookup::Missing;
-    struct Frame { mx_u64_t block; mx_u32_t next_child; };
+    if (!cursor || !out_entry)
+        return DiskLookup::Invalid;
+    if (!root)
+        return DiskLookup::Missing;
+    struct Frame {
+        mx_u64_t block;
+        mx_u32_t next_child;
+    };
     Frame path[kBTreeMaxDepth]{{root, 0}};
     mx_u32_t depth = 1;
     mx_u64_t visits = 0;
@@ -350,33 +406,42 @@ static DiskLookup disk_btree_nth_entry(mx_u64_t root, mx_u32_t target, mx_u32_t*
         auto& frame = path[depth - 1];
         // Reload the parent after descending: g_disk_block is shared scratch,
         // so pointers into it cannot survive a child read.
-        if (!disk_read_block(frame.block, g_disk_block)) return DiskLookup::Invalid;
+        if (!disk_read_block(frame.block, g_disk_block))
+            return DiskLookup::Invalid;
         const auto& header = *reinterpret_cast<const BTreeNodeHeader*>(g_disk_block);
-        if (header.entry_count > kBTreeMaxEntries) return DiskLookup::Invalid;
+        if (header.entry_count > kBTreeMaxEntries)
+            return DiskLookup::Invalid;
         const auto* entries = g_disk_block + sizeof(BTreeNodeHeader);
         if (header.node_type == kBTreeLeaf) {
             for (mx_u32_t i = 0; i < header.entry_count; ++i) {
                 if (*cursor == target) {
-                    (void)libk::copy_exact(libk::as_bytes(out_entry, kBTreeEntrySize),
-                                           libk::as_bytes(entries + i * kBTreeEntrySize, kBTreeEntrySize));
+                    (void)libk::copy_exact(
+                        libk::as_bytes(out_entry, kBTreeEntrySize),
+                        libk::as_bytes(entries + i * kBTreeEntrySize, kBTreeEntrySize));
                     return DiskLookup::Found;
                 }
-                if (*cursor == ~mx_u32_t{0}) return DiskLookup::Invalid;
+                if (*cursor == ~mx_u32_t{0})
+                    return DiskLookup::Invalid;
                 ++*cursor;
             }
             --depth;
         } else if (header.node_type == kBTreeInternal) {
-            if (frame.next_child == header.entry_count) { --depth; continue; }
+            if (frame.next_child == header.entry_count) {
+                --depth;
+                continue;
+            }
             const auto child = libk::load_le<mx_u64_t>(
                 entries + frame.next_child++ * kBTreeEntrySize + kBTreeInternalChildOffset);
             if (!child || depth == kBTreeMaxDepth || ++visits > g_disk_total_blocks) {
                 return DiskLookup::Invalid;
             }
             for (mx_u32_t i = 0; i < depth; ++i) {
-                if (path[i].block == child) return DiskLookup::Invalid;
+                if (path[i].block == child)
+                    return DiskLookup::Invalid;
             }
             path[depth++] = {child, 0};
-        } else return DiskLookup::Invalid;
+        } else
+            return DiskLookup::Invalid;
     }
     return DiskLookup::Missing;
 }
@@ -395,14 +460,16 @@ mx_i32_t disk_read_file(const OpenHandle& handle, mx_u64_t offset, mx_u32_t leng
     if (length > FS_INLINE_READ_MAX) {
         return static_cast<mx_i32_t>(MX_ERR_NOT_IMPLEMENTED);
     }
-    if (g_volume.mounted) return mochi::store::read(g_volume, handle.inode_number, offset,
-                                                    reply->inline_data, length, reply->length_read);
+    if (g_volume.mounted)
+        return mochi::store::read(g_volume, handle.inode_number, offset, reply->inline_data, length,
+                                  reply->length_read);
     if (offset >= handle.size) {
         reply->length_read = 0;
         return MX_OK;
     }
     const auto available = handle.size - offset;
-    const auto remaining = static_cast<mx_u32_t>(available < FS_INLINE_READ_MAX ? available : FS_INLINE_READ_MAX);
+    const auto remaining =
+        static_cast<mx_u32_t>(available < FS_INLINE_READ_MAX ? available : FS_INLINE_READ_MAX);
     const mx_u32_t n = min_u32(length, min_u32(remaining, FS_INLINE_READ_MAX));
     mx_u32_t copied = 0;
     while (copied < n) {
@@ -411,8 +478,10 @@ mx_i32_t disk_read_file(const OpenHandle& handle, mx_u64_t offset, mx_u32_t leng
         const mx_u32_t block_off = static_cast<mx_u32_t>(abs % kBlockSize);
         const mx_u32_t chunk = min_u32(n - copied, kBlockSize - block_off);
         alignas(8) mx_u8_t entry[kBTreeEntrySize];
-        const auto lookup = disk_btree_find(handle.tree_root, logical_block, DiskTree::Extent, entry);
-        if (lookup == DiskLookup::Invalid) return MX_ERR_FAULT;
+        const auto lookup =
+            disk_btree_find(handle.tree_root, logical_block, DiskTree::Extent, entry);
+        if (lookup == DiskLookup::Invalid)
+            return MX_ERR_FAULT;
         if (lookup == DiskLookup::Missing) {
             libk::zero(reply->inline_data + copied, chunk);
             copied += chunk;
@@ -423,7 +492,8 @@ mx_i32_t disk_read_file(const OpenHandle& handle, mx_u64_t offset, mx_u32_t leng
             !disk_read_block(extent->phys_block, g_disk_block)) {
             return static_cast<mx_i32_t>(MX_ERR_FAULT);
         }
-        if (extent->data_crc32 != 0 && libk::crc32_ieee(libk::as_bytes(g_disk_block, kBlockSize)) != extent->data_crc32) {
+        if (extent->data_crc32 != 0 &&
+            libk::crc32_ieee(libk::as_bytes(g_disk_block, kBlockSize)) != extent->data_crc32) {
             return static_cast<mx_i32_t>(MX_ERR_FAULT);
         }
         libk::copy_n(libk::slice(libk::as_bytes(reply->inline_data), copied, chunk),
@@ -445,14 +515,16 @@ mx_i32_t disk_readdir(const OpenHandle& handle, const FsReaddirRequest& req,
     mx_u32_t cursor = 0;
     alignas(8) mx_u8_t entry[kBTreeEntrySize];
     const auto lookup = disk_btree_nth_entry(handle.tree_root, req.cookie, &cursor, entry);
-    if (lookup == DiskLookup::Invalid) return MX_ERR_FAULT;
+    if (lookup == DiskLookup::Invalid)
+        return MX_ERR_FAULT;
     if (lookup == DiskLookup::Missing) {
         reply->flags = FS_READDIR_EOF;
         reply->entry_count = cursor;
         return MX_OK;
     }
     const auto* dirent = reinterpret_cast<const DirLeafEntry*>(entry);
-    if (dirent->name_len > sizeof(dirent->name) || req.cookie == ~mx_u32_t{0}) return MX_ERR_FAULT;
+    if (dirent->name_len > sizeof(dirent->name) || req.cookie == ~mx_u32_t{0})
+        return MX_ERR_FAULT;
     reply->flags = FS_READDIR_HAS_ENTRY;
     reply->next_cookie = req.cookie + 1;
     reply->inode_number = dirent->child_inode;
@@ -469,7 +541,8 @@ mx_i32_t disk_readdir(const OpenHandle& handle, const FsReaddirRequest& req,
     mx_u32_t after = 0;
     mx_u8_t ignored[kBTreeEntrySize];
     const auto next = disk_btree_nth_entry(handle.tree_root, req.cookie + 1, &after, ignored);
-    if (next == DiskLookup::Invalid) return MX_ERR_FAULT;
+    if (next == DiskLookup::Invalid)
+        return MX_ERR_FAULT;
     if (next == DiskLookup::Missing) {
         reply->flags |= FS_READDIR_EOF;
     }
@@ -593,6 +666,7 @@ static bool mount_disk_fs() {
     if (!g_blk_available || !g_blk_dma) {
         return false;
     }
+    MountTimingScope profile_io;
     const mx_u64_t mount_started = mx_clock_ns();
     g_dev_reads = 0;
     g_dev_read_ns = 0;
@@ -617,19 +691,41 @@ static bool mount_disk_fs() {
     g_disk_journal_start = sb->journal_start_block;
     g_disk_journal_blocks = sb->journal_block_count;
     g_disk_first_data = sb->first_data_block;
-    const mochi::store::Io io{
-        nullptr,
-        [](void*, mx_u64_t first, mx_u32_t count, void* out) { return disk_read_blocks(first, count, out); },
-        [](void*, mx_u64_t first, mx_u32_t count, const void* data) { return disk_write_blocks(first, count, data); },
-        [](void*) { return disk_flush() == MX_OK; }};
+    const mochi::store::Io io{nullptr,
+                              [](void*, mx_u64_t first, mx_u32_t count, void* out) {
+                                  return disk_read_blocks(first, count, out);
+                              },
+                              [](void*, mx_u64_t first, mx_u32_t count, const void* data) {
+                                  return disk_write_blocks(first, count, data);
+                              },
+                              [](void*) { return disk_flush() == MX_OK; }};
     mochi::log_counter("io.fs.mount_super_ns", mx_clock_ns() - mount_started);
     const mx_u64_t store_started = mx_clock_ns();
-    if (!mochi::store::mount(g_volume, io) && g_volume.error != MX_ERR_NOT_IMPLEMENTED) {
+    mochi::store::MountProfile profile{};
+    profile.clock_ns = []() -> mx_u64_t { return mx_clock_ns(); };
+    if (!mochi::store::mount(g_volume, io, &profile) && g_volume.error != MX_ERR_NOT_IMPLEMENTED) {
         mochi::log_raw_marker("io.fs: disk recovery failed; volume not writable\n");
         g_volume.mounted = false;
         return false;
     }
-    mochi::log_counter("io.fs.store_mount_ns", mx_clock_ns() - store_started);
+    const auto store_ns = mx_clock_ns() - store_started;
+    mochi::log_counter("io.fs.store_mount_ns", store_ns);
+    mochi::log_counter("io.fs.store_reset_ns", profile.reset_ns);
+    mochi::log_counter("io.fs.store_checkpoint_ns", profile.checkpoint_ns);
+    mochi::log_counter("io.fs.store_recovery_ns", profile.recovery_ns);
+    mochi::log_counter("io.fs.store_tail_ns", profile.tail_ns);
+    mochi::log_counter("io.fs.recovery_records", profile.recovery_records);
+    mochi::log_counter("io.fs.recovery_home_blocks", profile.recovery_home_blocks);
+    mochi::log_counter("io.fs.recovery_reused_blocks", profile.recovery_reused_blocks);
+    const char* names[] = {"read", "write", "flush"};
+    for (mx_u32_t i = 0; i < 3; ++i) {
+        char line[128];
+        libk::snprintf(line, sizeof(line), "io.fs.mount_%s calls=%llu sectors=%llu ns=%llu\n",
+                       names[i], static_cast<unsigned long long>(g_mount_io[i].calls),
+                       static_cast<unsigned long long>(g_mount_io[i].sectors),
+                       static_cast<unsigned long long>(g_mount_io[i].elapsed_ns));
+        mochi::log_raw_marker(line);
+    }
     mochi::log_counter("io.fs.mount_dev_reads", g_dev_reads);
     mochi::log_counter("io.fs.mount_dev_read_ns", g_dev_read_ns);
     if (g_volume.mounted) {
@@ -701,15 +797,16 @@ bool disk_durable_region(mx_u64_t* start_block, mx_u64_t* block_count) {
 // Boot wiring for the block backend and the optional disk mount.
 // ---------------------------------------------------------------------------
 void fs_disk_init(const MxBootInfo* boot) {
-    g_blk_client.ep = mochi::boot::map_endpoint(boot,
-        {"blk.req.ring", kVaBlkReqRing, "blk.req.doorbell"},
-        {"blk.reply.ring", kVaBlkReplyRing, "blk.reply.doorbell"});
+    g_blk_client.ep =
+        mochi::boot::map_endpoint(boot, {"blk.req.ring", kVaBlkReqRing, "blk.req.doorbell"},
+                                  {"blk.reply.ring", kVaBlkReplyRing, "blk.reply.doorbell"});
     g_blk_available = g_blk_client.valid();
     mochi::log_raw_marker(g_blk_available ? "io.fs: block endpoint ready\n"
-        : "io.fs: no block endpoint; running memory backend\n");
+                                          : "io.fs: no block endpoint; running memory backend\n");
 
     mx_handle_t blk_dma = mochi::boot::handle(boot, "blk.buffer");
-    if (blk_dma == MX_NULL_HANDLE) blk_dma = mochi::boot::handle(boot, "virtio.blk.dma");
+    if (blk_dma == MX_NULL_HANDLE)
+        blk_dma = mochi::boot::handle(boot, "virtio.blk.dma");
     MxCapInfo dma_info{};
     if (blk_dma != MX_NULL_HANDLE && mx_cap_info(blk_dma, &dma_info) == MX_OK &&
         dma_info.size >= BLK_DMA_CLIENT_OFFSET + kBlockSize &&

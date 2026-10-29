@@ -37,10 +37,11 @@ static int mount_fs(const char* name, const char* target) {
 }
 
 static int gpu_probe(void) {
-    if (!mount_fs("devtmpfs", "/dev") || !mount_fs("proc", "/proc") ||
-        !mount_fs("sysfs", "/sys")) return 0;
+    if (!mount_fs("devtmpfs", "/dev") || !mount_fs("proc", "/proc") || !mount_fs("sysfs", "/sys"))
+        return 0;
     long fd = mx_openat(MX_AT_FDCWD, DANGO_DEV_DRM_CARD0, MX_O_RDWR, 0);
-    if (fd < 0) return 0;
+    if (fd < 0)
+        return 0;
     char name[32] = {0};
     struct drm_version version = {0, 0, 0, sizeof(name), name, 0, 0, 0, 0};
     long rc = mx_ioctl((int)fd, DRM_IOCTL_VERSION, &version);
@@ -55,24 +56,31 @@ static int gpu_probe(void) {
     // The kernel's boot-time virtqueue requests require real completions.
     // Independently check Linux accounted at least one virtio ISR invocation.
     fd = mx_openat(MX_AT_FDCWD, DANGO_DEV_PROC_INTERRUPTS, MX_O_RDONLY, 0);
-    if (fd < 0) return 0;
+    if (fd < 0)
+        return 0;
     char interrupts[4096];
     long n = mx_read((int)fd, interrupts, sizeof(interrupts));
     (void)mx_close((int)fd);
     // A short or buffer-filling read is not an error: scan exactly the bytes
     // returned, line by line. Only a negative read result is a failure.
-    if (n < 0) return 0;
+    if (n < 0)
+        return 0;
     const long tag_len = (long)(sizeof(k_virtio_isr_tag) - 1);
     for (long begin = 0; begin < n;) {
         long end = begin;
-        while (end < n && interrupts[end] != '\n') ++end;
+        while (end < n && interrupts[end] != '\n')
+            ++end;
         int virtio = 0;
         for (long i = begin; i + tag_len <= end; ++i)
-            if (mx_memeq(interrupts + i, k_virtio_isr_tag, (unsigned long)tag_len)) virtio = 1;
+            if (mx_memeq(interrupts + i, k_virtio_isr_tag, (unsigned long)tag_len))
+                virtio = 1;
         long pos = begin;
-        while (pos < end && interrupts[pos] != ':') ++pos;
-        if (pos < end) ++pos;
-        while (pos < end && interrupts[pos] == ' ') ++pos;
+        while (pos < end && interrupts[pos] != ':')
+            ++pos;
+        if (pos < end)
+            ++pos;
+        while (pos < end && interrupts[pos] == ' ')
+            ++pos;
         unsigned long count = 0;
         while (pos < end && interrupts[pos] >= '0' && interrupts[pos] <= '9')
             count = count * 10 + (unsigned long)(interrupts[pos++] - '0');
@@ -98,9 +106,8 @@ int dango_gpud_resume(void);
 void _start(void) {
     ensure_stdio_console();
 
-    const char msg[] =
-        "dango-agent: started\n"
-        "dango: linux guest responded\n";
+    const char msg[] = "dango-agent: started\n"
+                       "dango: linux guest responded\n";
 
     if (mx_write(1, msg, sizeof(msg) - 1) < 0) {
         (void)mx_write(2, msg, sizeof(msg) - 1);

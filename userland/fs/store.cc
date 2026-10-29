@@ -6,7 +6,7 @@
 namespace mochi::store {
 namespace {
 constexpr u32 kCoverage = kBlock * 4, kRecordType = JRN_METADATA_FRAGMENT, kFragmentBytes = 4056;
-mx_i32_t reap(State &, u32);
+mx_i32_t reap(State&, u32);
 constexpr u32 kCounts = 1, kExtension = 0x31585446; // FTX1 checkpoint extension
 struct Record {
     u64 lsn;
@@ -22,16 +22,18 @@ struct Commit {
     u8 pad[4064];
 };
 static_assert(sizeof(Record) == kBlock && sizeof(Commit) == kBlock);
-void copy(void *to, const void *from, u32 n) {
+void copy(void* to, const void* from, u32 n) {
     libk::copy_exact(libk::as_bytes(to, n), libk::as_bytes(from, n));
 }
-u32 crc(const void *p, u32 n) { return libk::crc32_ieee(libk::as_bytes(p, n)); }
-bool fail(State &s, mx_i32_t error = MX_ERR_BAD_IMAGE) {
+u32 crc(const void* p, u32 n) {
+    return libk::crc32_ieee(libk::as_bytes(p, n));
+}
+bool fail(State& s, mx_i32_t error = MX_ERR_BAD_IMAGE) {
     if (!s.error)
         s.error = error;
     return false;
 }
-bool get(State &s, u64 block, void *out) {
+bool get(State& s, u64 block, void* out) {
     if (block >= s.super.total_blocks)
         return fail(s);
     for (u32 i = 0; i < s.page_count; ++i)
@@ -43,7 +45,7 @@ bool get(State &s, u64 block, void *out) {
         return fail(s, MX_ERR_FAULT);
     return true;
 }
-u8 *stage(State &s, u64 block, bool blank = false) {
+u8* stage(State& s, u64 block, bool blank = false) {
     for (u32 i = 0; i < s.page_count; ++i)
         if (s.page_ids[i] == block)
             return s.pages[i];
@@ -55,7 +57,7 @@ u8 *stage(State &s, u64 block, bool blank = false) {
         fail(s, MX_ERR_NOMEM);
         return nullptr;
     }
-    auto *page = s.pages[s.page_count];
+    auto* page = s.pages[s.page_count];
     if (blank)
         libk::zero(page, kBlock);
     else if (!get(s, block, page))
@@ -63,11 +65,17 @@ u8 *stage(State &s, u64 block, bool blank = false) {
     s.page_ids[s.page_count++] = block;
     return page;
 }
-BTreeNodeHeader &header(u8 *p) { return *reinterpret_cast<BTreeNodeHeader *>(p); }
-u8 *entry(u8 *p, u32 i) { return p + 64 + i * 64; }
-u64 key(const u8 *p, bool inodes) { return inodes ? libk::load_le<u32>(p) : libk::load_le<u64>(p); }
-u32 bound(u8 *p, u64 target, bool inodes, bool upper = false) {
-    auto &h = header(p);
+BTreeNodeHeader& header(u8* p) {
+    return *reinterpret_cast<BTreeNodeHeader*>(p);
+}
+u8* entry(u8* p, u32 i) {
+    return p + 64 + i * 64;
+}
+u64 key(const u8* p, bool inodes) {
+    return inodes ? libk::load_le<u32>(p) : libk::load_le<u64>(p);
+}
+u32 bound(u8* p, u64 target, bool inodes, bool upper = false) {
+    auto& h = header(p);
     u32 lo = 0, hi = h.entry_count;
     while (lo < hi) {
         u32 mid = (lo + hi) / 2;
@@ -79,17 +87,18 @@ u32 bound(u8 *p, u64 target, bool inodes, bool upper = false) {
     }
     return lo;
 }
-bool valid_node(State &s, u8 *p, bool inodes) {
-    const auto &h = header(p);
+bool valid_node(State& s, u8* p, bool inodes) {
+    const auto& h = header(p);
     if ((h.node_type != 1 && h.node_type != 2) || h.entry_count > kEntries)
         return fail(s);
     for (u32 i = 1; i < h.entry_count; ++i)
-        if (key(entry(p, i - 1), h.node_type == 2 && inodes) > key(entry(p, i), h.node_type == 2 && inodes))
+        if (key(entry(p, i - 1), h.node_type == 2 && inodes) >
+            key(entry(p, i), h.node_type == 2 && inodes))
             return fail(s);
     return true;
 }
 // Exact lookup or predecessor; no pointers into scratch survive another read.
-bool find(State &s, u64 root, u64 target, bool inodes, void *out, bool floor = false) {
+bool find(State& s, u64 root, u64 target, bool inodes, void* out, bool floor = false) {
     if (!root)
         return false;
     u64 previous = 0;
@@ -98,7 +107,7 @@ bool find(State &s, u64 root, u64 target, bool inodes, void *out, bool floor = f
     for (u32 depth = 0; depth < kDepth; ++depth) {
         if (!get(s, root, s.lookup) || !valid_node(s, s.lookup, inodes))
             return false;
-        auto &h = header(s.lookup);
+        auto& h = header(s.lookup);
         u32 i = rightmost ? h.entry_count : bound(s.lookup, target, inodes, floor);
         if (h.node_type == 2) {
             if (floor) {
@@ -138,22 +147,22 @@ bool find(State &s, u64 root, u64 target, bool inodes, void *out, bool floor = f
 }
 // Rank lookup uses persisted child counts on new internal nodes. Legacy image
 // nodes are counted recursively once as they are rewritten.
-u64 count(State &s, u64 root, u32 depth = 0, bool inodes = false) {
+u64 count(State& s, u64 root, u32 depth = 0, bool inodes = false) {
     if (!root)
         return 0;
     if (depth == kDepth || !get(s, root, s.path[depth]) || !valid_node(s, s.path[depth], inodes)) {
         fail(s);
         return 0;
     }
-    auto *p = s.path[depth];
+    auto* p = s.path[depth];
     auto h = header(p);
     if (h.node_type == 2)
         return h.entry_count;
     u64 n = 0;
     for (u32 i = 0; i < h.entry_count; ++i) {
         u64 child = libk::load_le<u64>(entry(p, i) + 8);
-        u64 amount =
-            (h.flags & kCounts) ? libk::load_le<u64>(entry(p, i) + 16) : count(s, child, depth + 1, inodes);
+        u64 amount = (h.flags & kCounts) ? libk::load_le<u64>(entry(p, i) + 16)
+                                         : count(s, child, depth + 1, inodes);
         if (~u64{0} - n < amount) {
             fail(s);
             return 0;
@@ -162,12 +171,12 @@ u64 count(State &s, u64 root, u32 depth = 0, bool inodes = false) {
     }
     return n;
 }
-bool nth(State &s, u64 root, u64 rank, bool inodes, void *out, u32 depth = 0) {
+bool nth(State& s, u64 root, u64 rank, bool inodes, void* out, u32 depth = 0) {
     if (!root)
         return false;
     if (depth == kDepth || !get(s, root, s.path[depth]) || !valid_node(s, s.path[depth], inodes))
         return fail(s);
-    auto *p = s.path[depth];
+    auto* p = s.path[depth];
     auto h = header(p);
     if (h.node_type == 2) {
         if (rank >= h.entry_count)
@@ -177,8 +186,8 @@ bool nth(State &s, u64 root, u64 rank, bool inodes, void *out, u32 depth = 0) {
     }
     for (u32 i = 0; i < h.entry_count; ++i) {
         u64 child = libk::load_le<u64>(entry(p, i) + 8);
-        u64 amount =
-            (h.flags & kCounts) ? libk::load_le<u64>(entry(p, i) + 16) : count(s, child, depth + 1, inodes);
+        u64 amount = (h.flags & kCounts) ? libk::load_le<u64>(entry(p, i) + 16)
+                                         : count(s, child, depth + 1, inodes);
         if (s.error)
             return false;
         if (rank < amount)
@@ -187,10 +196,11 @@ bool nth(State &s, u64 root, u64 rank, bool inodes, void *out, u32 depth = 0) {
     }
     return false;
 }
-bool bitmap(State &s, u64 block, u8 *&page, u32 &shift, u32 &offset) {
+bool bitmap(State& s, u64 block, u8*& page, u32& shift, u32& offset) {
     FreeSpaceLeafEntry free{};
     if (!find(s, s.pending.extent_bitmap_root, (block / kCoverage) * kCoverage, false, &free) ||
-        block < free.range_start || block >= free.range_end || free.range_end - free.range_start > kCoverage)
+        block < free.range_start || block >= free.range_end ||
+        free.range_end - free.range_start > kCoverage)
         return fail(s);
     page = stage(s, free.bitmap_block);
     if (!page)
@@ -200,7 +210,7 @@ bool bitmap(State &s, u64 block, u8 *&page, u32 &shift, u32 &offset) {
     shift = u32(relative % 4) * 2;
     return true;
 }
-u64 allocate(State &s) {
+u64 allocate(State& s) {
     u64 start = s.allocation_hint;
     if (start < s.super.first_data_block || start >= s.super.total_blocks)
         start = s.super.first_data_block;
@@ -226,7 +236,7 @@ u64 allocate(State &s) {
                 }
                 if ((s.lookup[off] >> sh) & 3)
                     continue;
-                auto *page = stage(s, free.bitmap_block);
+                auto* page = stage(s, free.bitmap_block);
                 if (!page)
                     return 0;
                 page[off] |= u8(1u << sh);
@@ -237,7 +247,7 @@ u64 allocate(State &s) {
     }
     if (s.reclaim && s.reserve_count) {
         const auto block = s.reserve[--s.reserve_count];
-        u8 *page = nullptr;
+        u8* page = nullptr;
         u32 shift = 0, offset = 0;
         if (!bitmap(s, block, page, shift, offset))
             return 0;
@@ -251,10 +261,10 @@ u64 allocate(State &s) {
     fail(s, MX_ERR_NOMEM);
     return 0;
 }
-bool release(State &s, u64 block) {
+bool release(State& s, u64 block) {
     if (block < s.super.first_data_block || block >= s.super.total_blocks)
         return fail(s);
-    u8 *p = nullptr;
+    u8* p = nullptr;
     u32 sh = 0, off = 0;
     if (!bitmap(s, block, p, sh, off))
         return false;
@@ -276,8 +286,8 @@ bool release(State &s, u64 block) {
         }
     return true;
 }
-bool put_page(State &s, u64 block, const u8 *data) {
-    auto *out = stage(s, block, true);
+bool put_page(State& s, u64 block, const u8* data) {
+    auto* out = stage(s, block, true);
     if (!out)
         return false;
     copy(out, data, kBlock);
@@ -286,20 +296,20 @@ bool put_page(State &s, u64 block, const u8 *data) {
 struct Branch {
     u64 block{}, maximum{}, amount{}, right{}, right_max{}, right_amount{};
 };
-void separator(u8 *p, u64 maximum, u64 block, u64 amount) {
+void separator(u8* p, u64 maximum, u64 block, u64 amount) {
     libk::zero(p, 64);
     copy(p, &maximum, 8);
     copy(p + 8, &block, 8);
     copy(p + 16, &amount, 8);
 }
-Branch mutate(State &s, u64 block, u64 target, const u8 *value, bool inodes, bool erase, u32 depth,
+Branch mutate(State& s, u64 block, u64 target, const u8* value, bool inodes, bool erase, u32 depth,
               u32 mode) {
     Branch result{};
     if (depth == kDepth) {
         fail(s, MX_ERR_OVERFLOW);
         return result;
     }
-    auto *p = s.path[depth];
+    auto* p = s.path[depth];
     if (block) {
         if (!get(s, block, p) || !valid_node(s, p, inodes))
             return result;
@@ -312,7 +322,7 @@ Branch mutate(State &s, u64 block, u64 target, const u8 *value, bool inodes, boo
         if (!block)
             return result;
     }
-    auto &h = header(p);
+    auto& h = header(p);
     u32 position = mode == 2 ? u32(target) : bound(p, target, inodes);
     if (h.node_type == 2) {
         const bool found =
@@ -360,8 +370,8 @@ Branch mutate(State &s, u64 block, u64 target, const u8 *value, bool inodes, boo
             }
             position = h.entry_count - 1;
         }
-        auto child = mutate(s, libk::load_le<u64>(entry(p, position) + 8), target, value, inodes, erase,
-                            depth + 1, mode);
+        auto child = mutate(s, libk::load_le<u64>(entry(p, position) + 8), target, value, inodes,
+                            erase, depth + 1, mode);
         if (s.error)
             return result;
         if (!child.block) {
@@ -398,7 +408,7 @@ Branch mutate(State &s, u64 block, u64 target, const u8 *value, bool inodes, boo
         result.right = allocate(s);
         if (!result.right)
             return {};
-        auto *right = stage(s, result.right, true);
+        auto* right = stage(s, result.right, true);
         if (!right)
             return {};
         copy(right, p, 64);
@@ -415,9 +425,9 @@ Branch mutate(State &s, u64 block, u64 target, const u8 *value, bool inodes, boo
         return {};
     return result;
 }
-bool update(State &s, u64 &root, u64 target, const void *value, bool inodes = false, bool erase = false,
-            u32 mode = 0) {
-    auto result = mutate(s, root, target, static_cast<const u8 *>(value), inodes, erase, 0, mode);
+bool update(State& s, u64& root, u64 target, const void* value, bool inodes = false,
+            bool erase = false, u32 mode = 0) {
+    auto result = mutate(s, root, target, static_cast<const u8*>(value), inodes, erase, 0, mode);
     if (s.error)
         return false;
     root = result.block;
@@ -425,7 +435,7 @@ bool update(State &s, u64 &root, u64 target, const void *value, bool inodes = fa
         const auto block = allocate(s);
         if (!block)
             return false;
-        auto *p = stage(s, block, true);
+        auto* p = stage(s, block, true);
         if (!p)
             return false;
         header(p) = {1, 2, kCounts, s.pending.current_generation, 0, 0, {}};
@@ -444,7 +454,7 @@ bool update(State &s, u64 &root, u64 target, const void *value, bool inodes = fa
     }
     return true;
 }
-bool begin(State &s) {
+bool begin(State& s) {
     s.error = 0;
     if (!s.mounted)
         return fail(s, MX_ERR_SERVICE_UNAVAILABLE);
@@ -462,7 +472,7 @@ bool begin(State &s) {
     ++s.pending.current_generation;
     return true;
 }
-bool raw_write(State &s, u64 block, u32 n, const void *p) {
+bool raw_write(State& s, u64 block, u32 n, const void* p) {
     if (!n || block >= s.super.total_blocks || n > s.super.total_blocks - block ||
         !s.io.write(s.io.context, block, n, p)) {
         s.poisoned = true;
@@ -470,15 +480,15 @@ bool raw_write(State &s, u64 block, u32 n, const void *p) {
     }
     return true;
 }
-bool flush(State &s) {
+bool flush(State& s) {
     if (!s.io.flush(s.io.context)) {
         s.poisoned = true;
         return fail(s, MX_ERR_FAULT);
     }
     return true;
 }
-void checkpoint_crc(State &s) {
-    auto &cp = s.pending;
+void checkpoint_crc(State& s) {
+    auto& cp = s.pending;
     cp.crc32 = crc(&cp, 56);
     libk::zero(cp.padding, sizeof(cp.padding));
     copy(cp.padding, &kExtension, 4);
@@ -489,14 +499,14 @@ void checkpoint_crc(State &s) {
     const u32 check = crc(&cp, 64 + 16 + sizeof(s.reserve));
     copy(cp.padding + 16 + sizeof(s.reserve), &check, 4);
 }
-bool valid_checkpoint(const FsCheckpoint &cp) {
+bool valid_checkpoint(const FsCheckpoint& cp) {
     if (crc(&cp, 56) != cp.crc32)
         return false;
     return libk::load_le<u32>(cp.padding) != kExtension ||
            (libk::load_le<u32>(cp.padding + 12) <= kReserve &&
             crc(&cp, 64 + 16 + 8 * kReserve) == libk::load_le<u32>(cp.padding + 16 + 8 * kReserve));
 }
-void restore_extra(State &s) {
+void restore_extra(State& s) {
     s.orphans = s.reserve_count = 0;
     if (libk::load_le<u32>(s.checkpoint.padding) == kExtension) {
         s.orphans = libk::load_le<u32>(s.checkpoint.padding + 8);
@@ -504,14 +514,14 @@ void restore_extra(State &s) {
         copy(s.reserve, s.checkpoint.padding + 16, sizeof(s.reserve));
     }
 }
-bool commit(State &s) {
+bool commit(State& s) {
     if (s.error) {
         s.page_count = 0;
         s.transaction = false;
         return false;
     }
     for (u32 i = 0; i < s.free_count; ++i) {
-        u8 *page = nullptr;
+        u8* page = nullptr;
         u32 sh = 0, off = 0;
         if (!bitmap(s, s.freed[i], page, sh, off)) {
             s.page_count = 0;
@@ -541,7 +551,7 @@ bool commit(State &s) {
     u32 batch_crc = libk::kCrc32IeeeInit;
     for (u32 i = 0; i <= s.page_count; ++i)
         for (u32 part = 0; part < 2; ++part) {
-            auto &record = *reinterpret_cast<Record *>(s.batch[batch_count]);
+            auto& record = *reinterpret_cast<Record*>(s.batch[batch_count]);
             libk::zero(record);
             record.lsn = s.checkpoint.lsn + written + batch_count + 1;
             record.type = kRecordType;
@@ -551,7 +561,8 @@ bool commit(State &s) {
             copy(record.data, &record.target, 4);
             copy(record.data + 4, &offset, 2);
             copy(record.data + 6, &length, 2);
-            const auto *source = i == s.page_count ? reinterpret_cast<const u8 *>(&s.pending) : s.pages[i];
+            const auto* source =
+                i == s.page_count ? reinterpret_cast<const u8*>(&s.pending) : s.pages[i];
             copy(record.data + 8, source + offset, length);
             record.crc = crc(record.data, sizeof(record.data));
             batch_crc = libk::crc32_ieee_update(batch_crc, libk::as_bytes(record.data));
@@ -566,13 +577,14 @@ bool commit(State &s) {
     if (!flush(s))
         goto failed;
     {
-        auto &c = *reinterpret_cast<Commit *>(s.journal);
+        auto& c = *reinterpret_cast<Commit*>(s.journal);
         libk::zero(c);
         c.lsn = s.pending.lsn;
         c.first = s.checkpoint.lsn + 1;
         c.count = records;
         c.crc = ~batch_crc;
-        if (!raw_write(s, s.super.journal_start_block + s.super.journal_block_count - 1, 1, &c) || !flush(s))
+        if (!raw_write(s, s.super.journal_start_block + s.super.journal_block_count - 1, 1, &c) ||
+            !flush(s))
             goto failed;
     }
     // Journal is durable. Home blocks can now be replaced; replay is idempotent.
@@ -596,7 +608,7 @@ failed:
     s.transaction = false;
     return false;
 }
-mx_i32_t finish(State &s) {
+mx_i32_t finish(State& s) {
     if (!s.error)
         commit(s);
     const auto error = s.error;
@@ -606,23 +618,28 @@ mx_i32_t finish(State &s) {
     s.transaction = false;
     return error;
 }
-bool put_inode(State &s, const InodeLeafEntry &inode) {
+bool put_inode(State& s, const InodeLeafEntry& inode) {
     return update(s, s.pending.inode_table_root, inode.inode_number, &inode, true);
 }
-u32 parent_of(const InodeLeafEntry &i) { return libk::load_le<u32>(i.reserved); }
-bool valid_name(const char *name, u8 n) {
-    if (!name || !n || n > 47 || (n == 1 && name[0] == '.') || (n == 2 && name[0] == '.' && name[1] == '.'))
+u32 parent_of(const InodeLeafEntry& i) {
+    return libk::load_le<u32>(i.reserved);
+}
+bool valid_name(const char* name, u8 n) {
+    if (!name || !n || n > 47 || (n == 1 && name[0] == '.') ||
+        (n == 2 && name[0] == '.' && name[1] == '.'))
         return false;
     for (u32 i = 0; i < n; ++i)
         if (!name[i] || name[i] == '/')
             return false;
     return true;
 }
-u64 dir_key(u32 parent, const char *name, u8 n) { return (u64(parent) << 32) | crc(name, n); }
+u64 dir_key(u32 parent, const char* name, u8 n) {
+    return (u64(parent) << 32) | crc(name, n);
+}
 // Collision-safe directory lookup. A rank seek skips subtrees by their maxima;
 // only entries with the same hash need their actual names compared.
-bool dir_find(State &s, const InodeLeafEntry &parent, const char *name, u8 n, DirLeafEntry &out,
-              u64 *ordinal = nullptr) {
+bool dir_find(State& s, const InodeLeafEntry& parent, const char* name, u8 n, DirLeafEntry& out,
+              u64* ordinal = nullptr) {
     u64 lo = 0, hi = count(s, parent.extent_tree_root);
     const auto target = dir_key(parent.inode_number, name, n);
     while (lo < hi) {
@@ -651,7 +668,7 @@ bool dir_find(State &s, const InodeLeafEntry &parent, const char *name, u8 n, Di
 }
 } // namespace
 namespace {
-bool roots_valid(State &s, const FsCheckpoint &cp) {
+bool roots_valid(State& s, const FsCheckpoint& cp) {
     const u64 roots[] = {cp.inode_table_root, cp.extent_bitmap_root, cp.phys_refcount_root,
                          cp.snapshot_tree_root};
     if (!roots[0] || !roots[1])
@@ -661,10 +678,11 @@ bool roots_valid(State &s, const FsCheckpoint &cp) {
             return false;
     return cp.current_generation != 0;
 }
-bool recover_journal(State &s, bool checkpoint_ok) {
-    if (!s.io.read(s.io.context, s.super.journal_start_block + s.super.journal_block_count - 1, 1, s.journal))
+bool recover_journal(State& s, bool checkpoint_ok, MountProfile* profile) {
+    if (!s.io.read(s.io.context, s.super.journal_start_block + s.super.journal_block_count - 1, 1,
+                   s.journal))
         return fail(s, MX_ERR_FAULT);
-    const auto &c = *reinterpret_cast<const Commit *>(s.journal);
+    const auto& c = *reinterpret_cast<const Commit*>(s.journal);
     const u64 lsn = c.lsn, first = c.first;
     const u32 records = c.count, expected = c.crc;
     // A device may persist the new checkpoint sector before metadata home
@@ -674,15 +692,16 @@ bool recover_journal(State &s, bool checkpoint_ok) {
     // after the preceding home/checkpoint flush has completed.
     if (checkpoint_ok && lsn < s.checkpoint.lsn)
         return true;
-    if (!records || records % 2 || records > 2 * (kPages + 1) || records >= s.super.journal_block_count ||
-        first > ~u64{0} - records || first + records != lsn)
+    if (!records || records % 2 || records > 2 * (kPages + 1) ||
+        records >= s.super.journal_block_count || first > ~u64{0} - records ||
+        first + records != lsn)
         return checkpoint_ok || fail(s);
     s.page_count = 0;
     u32 batch_crc = libk::kCrc32IeeeInit;
     for (u32 i = 0; i < records; ++i) {
         if (!s.io.read(s.io.context, s.super.journal_start_block + i, 1, s.lookup))
             return fail(s, MX_ERR_FAULT);
-        const auto &r = *reinterpret_cast<const Record *>(s.lookup);
+        const auto& r = *reinterpret_cast<const Record*>(s.lookup);
         const u16 offset = libk::load_le<u16>(r.data + 4), length = libk::load_le<u16>(r.data + 6);
         const bool final = i / 2 == records / 2 - 1;
         if (r.lsn != first + i || r.type != kRecordType || r.reserved ||
@@ -703,18 +722,66 @@ bool recover_journal(State &s, bool checkpoint_ok) {
                 s.page_ids[i / 2] = r.target;
             }
         }
-        copy((final ? reinterpret_cast<u8 *>(&s.pending) : s.pages[i / 2]) + offset, r.data + 8, length);
+        copy((final ? reinterpret_cast<u8*>(&s.pending) : s.pages[i / 2]) + offset, r.data + 8,
+             length);
         batch_crc = libk::crc32_ieee_update(batch_crc, libk::as_bytes(r.data));
     }
     if (~batch_crc != expected || !valid_checkpoint(s.pending) || s.pending.lsn != lsn ||
         !roots_valid(s, s.pending))
         goto invalid;
     s.page_count = records / 2 - 1;
-    for (u32 i = 0; i < s.page_count; ++i)
-        if (!raw_write(s, s.page_ids[i], 1, s.pages[i]))
-            return false;
-    if (!raw_write(s, 1, 1, &s.pending) || !flush(s))
+    if (profile) {
+        profile->recovery_records = records;
+        profile->recovery_home_blocks = s.page_count;
+    }
+
+    // Equal-LSN recovery is still mandatory, but a home page already identical
+    // to the validated redo image needs no replacement. Read contiguous runs
+    // into the existing scratch batch and coalesce only the mismatched pages.
+    for (u32 i = 0; i < s.page_count;) {
+        u32 n = 1;
+        while (i + n < s.page_count && n < kBatch && s.page_ids[i + n] == s.page_ids[i] + n)
+            ++n;
+
+        if (!s.io.read(s.io.context, s.page_ids[i], n, s.batch))
+            return fail(s, MX_ERR_FAULT);
+
+        u32 dirty = 0;
+        for (u32 j = 0; j < n; ++j) {
+            if (!libk::equal(libk::as_bytes(s.batch[j]), libk::as_bytes(s.pages[i + j])))
+                dirty |= 1u << j;
+            else if (profile)
+                ++profile->recovery_reused_blocks;
+        }
+
+        for (u32 j = 0; j < n;) {
+            if (!(dirty & (1u << j))) {
+                ++j;
+                continue;
+            }
+
+            u32 count = 1;
+            while (j + count < n && (dirty & (1u << (j + count))))
+                ++count;
+
+            if (!raw_write(s, s.page_ids[i + j], count, s.pages[i + j]))
+                return false;
+            j += count;
+        }
+
+        i += n;
+    }
+
+    if (!libk::equal(libk::as_bytes(&s.checkpoint, sizeof(s.checkpoint)),
+                     libk::as_bytes(&s.pending, sizeof(s.pending))) &&
+        !raw_write(s, 1, 1, &s.pending))
         return false;
+
+    // Matching reads may have come from the card's volatile cache. Preserve
+    // the final durability boundary even when no replacement was necessary.
+    if (!flush(s))
+        return false;
+
     s.checkpoint = s.pending;
     s.page_count = 0;
     return true;
@@ -722,7 +789,7 @@ invalid:
     s.page_count = 0;
     return checkpoint_ok || fail(s);
 }
-bool directory(State &s, u32 number, InodeLeafEntry &out) {
+bool directory(State& s, u32 number, InodeLeafEntry& out) {
     if (!inode(s, number, out))
         return fail(s, MX_ERR_NOT_FOUND);
     if (out.type != FS_INODE_DIR)
@@ -731,7 +798,7 @@ bool directory(State &s, u32 number, InodeLeafEntry &out) {
         return fail(s, MX_ERR_PERM);
     return true;
 }
-bool data_ref(State &s, u64 block, bool increment) {
+bool data_ref(State& s, u64 block, bool increment) {
     PhysExtentLeafEntry range{};
     u64 lo = 0, hi = count(s, s.pending.phys_refcount_root);
     while (lo < hi) {
@@ -795,7 +862,8 @@ bool data_ref(State &s, u64 block, bool increment) {
         return false;
     return release(s, block);
 }
-bool new_child(State &s, InodeLeafEntry &parent, const char *name, u8 n, u16 type, InodeLeafEntry &out) {
+bool new_child(State& s, InodeLeafEntry& parent, const char* name, u8 n, u16 type,
+               InodeLeafEntry& out) {
     DirLeafEntry dir{};
     if (dir_find(s, parent, name, n, dir))
         return fail(s, MX_ERR_BUSY);
@@ -814,31 +882,45 @@ bool new_child(State &s, InodeLeafEntry &parent, const char *name, u8 n, u16 typ
     dir.name_len = n;
     dir.file_type = u8(type);
     copy(dir.name, name, n);
-    if (!put_inode(s, out) || !update(s, parent.extent_tree_root, dir.compound_key, &dir, false, false, 1))
+    if (!put_inode(s, out) ||
+        !update(s, parent.extent_tree_root, dir.compound_key, &dir, false, false, 1))
         return false;
     if (type == FS_INODE_DIR)
         ++parent.nlink;
     return put_inode(s, parent);
 }
 } // namespace
-bool mount(State &s, Io io) {
+bool mount(State& s, Io io, MountProfile* profile) {
+    const auto now = [&]() -> u64 {
+        return profile && profile->clock_ns ? profile->clock_ns() : 0;
+    };
+    u64 started = now();
     libk::zero(s);
+    if (profile)
+        profile->reset_ns = now() - started;
+    started = now();
     s.io = io;
     if (!io.read || !io.write || !io.flush)
         return fail(s, MX_ERR_INVALID);
     if (!io.read(io.context, 0, 1, &s.super))
         return fail(s, MX_ERR_FAULT);
-    const auto &b = s.super;
+    const auto& b = s.super;
     if (b.magic != FS_MAGIC || b.version != FS_SUPERBLOCK_VERSION || b.block_size != kBlock ||
         b.total_blocks > ~u32{0} || b.journal_start_block != 2 || b.journal_block_count < 8 ||
-        b.journal_block_count > b.total_blocks - 2 || b.first_data_block < 2 + b.journal_block_count ||
-        b.first_data_block >= b.total_blocks)
+        b.journal_block_count > b.total_blocks - 2 ||
+        b.first_data_block < 2 + b.journal_block_count || b.first_data_block >= b.total_blocks)
         return fail(s);
     if (!io.read(io.context, 1, 1, &s.checkpoint))
         return fail(s, MX_ERR_FAULT);
     const bool good = valid_checkpoint(s.checkpoint) && roots_valid(s, s.checkpoint);
-    if (!recover_journal(s, good))
+    if (profile)
+        profile->checkpoint_ns = now() - started;
+    started = now();
+    if (!recover_journal(s, good, profile))
         return false;
+    if (profile)
+        profile->recovery_ns = now() - started;
+    started = now();
     // Do not silently overwrite a populated legacy checkpoint. The old service
     // remains available to read/export it before an explicit migration.
     if (!io.read(io.context, b.journal_start_block, 1, s.lookup))
@@ -873,7 +955,7 @@ bool mount(State &s, Io io) {
             auto block = allocate(s);
             if (!block)
                 return finish(s) == MX_OK;
-            u8 *page = nullptr;
+            u8* page = nullptr;
             u32 sh = 0, off = 0;
             if (!bitmap(s, block, page, sh, off))
                 return finish(s) == MX_OK;
@@ -912,17 +994,19 @@ bool mount(State &s, Io io) {
                 ++ordinal;
         }
     }
+    if (profile)
+        profile->tail_ns = now() - started;
     return true;
 }
-bool inode(State &s, u32 number, InodeLeafEntry &out) {
+bool inode(State& s, u32 number, InodeLeafEntry& out) {
     if (!s.mounted || s.poisoned)
         return fail(s, MX_ERR_SERVICE_UNAVAILABLE);
-    if (!find(s, s.transaction ? s.pending.inode_table_root : s.checkpoint.inode_table_root, number, true,
-              &out))
+    if (!find(s, s.transaction ? s.pending.inode_table_root : s.checkpoint.inode_table_root, number,
+              true, &out))
         return false;
     return out.inode_number == number && out.type && out.nlink;
 }
-mx_i32_t lookup(State &s, u32 parent, const char *name, u8 n, InodeLeafEntry &out) {
+mx_i32_t lookup(State& s, u32 parent, const char* name, u8 n, InodeLeafEntry& out) {
     s.error = 0;
     if (!valid_name(name, n))
         return MX_ERR_INVALID;
@@ -936,7 +1020,7 @@ mx_i32_t lookup(State &s, u32 parent, const char *name, u8 n, InodeLeafEntry &ou
         return s.error ? s.error : MX_ERR_NOT_FOUND;
     return inode(s, row.child_inode, out) ? MX_OK : (s.error ? s.error : MX_ERR_BAD_IMAGE);
 }
-mx_i32_t create(State &s, u32 parent, const char *name, u8 n, u16 type, InodeLeafEntry &out) {
+mx_i32_t create(State& s, u32 parent, const char* name, u8 n, u16 type, InodeLeafEntry& out) {
     if (!valid_name(name, n) || (type != FS_INODE_FILE && type != FS_INODE_DIR))
         return MX_ERR_INVALID;
     if (!begin(s))
@@ -946,7 +1030,7 @@ mx_i32_t create(State &s, u32 parent, const char *name, u8 n, u16 type, InodeLea
         new_child(s, dir, name, n, type, out);
     return finish(s);
 }
-mx_i32_t read(State &s, u32 number, u64 offset, void *out, u32 length, u32 &received) {
+mx_i32_t read(State& s, u32 number, u64 offset, void* out, u32 length, u32& received) {
     s.error = 0;
     received = 0;
     InodeLeafEntry file{};
@@ -970,17 +1054,17 @@ mx_i32_t read(State &s, u32 number, u64 offset, void *out, u32 length, u32 &rece
             if (extent.length_blocks != 1 || extent.phys_block < s.super.first_data_block ||
                 !get(s, extent.phys_block, s.data) || crc(s.data, kBlock) != extent.data_crc32)
                 return MX_ERR_BAD_CHECKSUM;
-            copy(static_cast<u8 *>(out) + received, s.data + inside, n);
+            copy(static_cast<u8*>(out) + received, s.data + inside, n);
         } else {
             if (s.error)
                 return s.error;
-            libk::zero(static_cast<u8 *>(out) + received, n);
+            libk::zero(static_cast<u8*>(out) + received, n);
         }
         received += n;
     }
     return MX_OK;
 }
-mx_i32_t write(State &s, u32 number, u64 offset, const void *input, u32 length) {
+mx_i32_t write(State& s, u32 number, u64 offset, const void* input, u32 length) {
     if ((!input && length) || length > kBatch * kBlock || offset > ~u64{0} - length)
         return MX_ERR_INVALID;
     if (!begin(s))
@@ -1024,7 +1108,7 @@ mx_i32_t write(State &s, u32 number, u64 offset, const void *input, u32 length) 
             }
         }
         // Sparse file holes and the unwritten tail of a partial block remain zero.
-        copy(s.data + inside, static_cast<const u8 *>(input) + done, n);
+        copy(s.data + inside, static_cast<const u8*>(input) + done, n);
         const auto physical = allocate(s);
         if (!physical)
             break;
@@ -1035,8 +1119,8 @@ mx_i32_t write(State &s, u32 number, u64 offset, const void *input, u32 length) 
         if (!buffered)
             first_buffered = physical;
         copy(s.batch[buffered++], s.data, kBlock);
-        ExtentLeafEntry extent{logical, physical, 1, s.pending.current_generation, 0, 0, crc(s.data, kBlock),
-                               0,       {}};
+        ExtentLeafEntry extent{
+            logical, physical, 1, s.pending.current_generation, 0, 0, crc(s.data, kBlock), 0, {}};
         if (!data_ref(s, physical, true) || !update(s, file.extent_tree_root, logical, &extent))
             break;
         if (exists && !data_ref(s, old.phys_block, false))
@@ -1050,7 +1134,7 @@ mx_i32_t write(State &s, u32 number, u64 offset, const void *input, u32 length) 
     }
     return finish(s);
 }
-mx_i32_t readdir(State &s, u32 number, u32 ordinal, DirLeafEntry &out, bool &eof) {
+mx_i32_t readdir(State& s, u32 number, u32 ordinal, DirLeafEntry& out, bool& eof) {
     s.error = 0;
     eof = false;
     InodeLeafEntry dir{};
@@ -1066,7 +1150,7 @@ mx_i32_t readdir(State &s, u32 number, u32 ordinal, DirLeafEntry &out, bool &eof
         return MX_ERR_BAD_IMAGE;
     return MX_OK;
 }
-mx_i32_t sync(State &s) {
+mx_i32_t sync(State& s) {
     if (!s.mounted)
         return MX_ERR_NOT_IMPLEMENTED;
     if (s.poisoned)
@@ -1078,11 +1162,11 @@ mx_i32_t sync(State &s) {
 
 namespace mochi::store {
 namespace {
-bool raw_inode(State &s, u32 number, InodeLeafEntry &out) {
-    return find(s, s.transaction ? s.pending.inode_table_root : s.checkpoint.inode_table_root, number, true,
-                &out);
+bool raw_inode(State& s, u32 number, InodeLeafEntry& out) {
+    return find(s, s.transaction ? s.pending.inode_table_root : s.checkpoint.inode_table_root,
+                number, true, &out);
 }
-mx_i32_t reap(State &s, u32 number) {
+mx_i32_t reap(State& s, u32 number) {
     for (;;) {
         if (!begin(s))
             return finish(s);
@@ -1130,9 +1214,9 @@ mx_i32_t reap(State &s, u32 number) {
             return status;
     }
 }
-bool cycle(State &s, u32 source, u32 destination) {
+bool cycle(State& s, u32 source, u32 destination) {
     u32 slow = destination, fast = destination;
-    auto advance = [&](u32 &number) {
+    auto advance = [&](u32& number) {
         if (number == kDataRoot)
             return true;
         InodeLeafEntry ancestor{};
@@ -1158,7 +1242,7 @@ bool cycle(State &s, u32 source, u32 destination) {
     return true;
 }
 } // namespace
-mx_i32_t truncate(State &s, u32 number) {
+mx_i32_t truncate(State& s, u32 number) {
     if (!begin(s))
         return finish(s);
     InodeLeafEntry file{};
@@ -1178,7 +1262,7 @@ mx_i32_t truncate(State &s, u32 number) {
     auto status = finish(s);
     return status == MX_OK ? reap(s, number) : status;
 }
-mx_i32_t unlink(State &s, u32 parent, const char *name, u8 n) {
+mx_i32_t unlink(State& s, u32 parent, const char* name, u8 n) {
     if (!valid_name(name, n))
         return MX_ERR_INVALID;
     if (!begin(s))
@@ -1207,8 +1291,8 @@ mx_i32_t unlink(State &s, u32 parent, const char *name, u8 n) {
     const auto status = finish(s);
     return status == MX_OK ? reap(s, victim.inode_number) : status;
 }
-mx_i32_t rename(State &s, u32 old_parent, const char *old_name, u8 old_n, u32 new_parent,
-                const char *new_name, u8 new_n) {
+mx_i32_t rename(State& s, u32 old_parent, const char* old_name, u8 old_n, u32 new_parent,
+                const char* new_name, u8 new_n) {
     if (!valid_name(old_name, old_n) || !valid_name(new_name, new_n))
         return MX_ERR_INVALID;
     if (!begin(s))
@@ -1217,13 +1301,15 @@ mx_i32_t rename(State &s, u32 old_parent, const char *old_name, u8 old_n, u32 ne
     DirLeafEntry row{}, existing{};
     u64 ordinal = 0;
     if (directory(s, old_parent, from) && directory(s, new_parent, to)) {
-        if (!dir_find(s, from, old_name, old_n, row, &ordinal) || !inode(s, row.child_inode, victim))
+        if (!dir_find(s, from, old_name, old_n, row, &ordinal) ||
+            !inode(s, row.child_inode, victim))
             fail(s, MX_ERR_NOT_FOUND);
         else if (old_parent == new_parent && old_n == new_n &&
                  libk::str::equal_n(old_name, new_name, old_n)) {
         } else if (dir_find(s, to, new_name, new_n, existing))
             fail(s, MX_ERR_BUSY);
-        else if (!s.error && (victim.type != FS_INODE_DIR || cycle(s, victim.inode_number, new_parent))) {
+        else if (!s.error &&
+                 (victim.type != FS_INODE_DIR || cycle(s, victim.inode_number, new_parent))) {
             update(s, from.extent_tree_root, ordinal, nullptr, false, true, 2);
             if (victim.type == FS_INODE_DIR && old_parent != new_parent)
                 --from.nlink;
@@ -1248,7 +1334,7 @@ mx_i32_t rename(State &s, u32 old_parent, const char *old_name, u8 old_n, u32 ne
 } // namespace mochi::store
 
 namespace mochi::store {
-mx_i32_t promote(State &s, u32 source_number, InodeLeafEntry &out) {
+mx_i32_t promote(State& s, u32 source_number, InodeLeafEntry& out) {
     s.error = 0;
     InodeLeafEntry source{};
     if (!inode(s, source_number, source))

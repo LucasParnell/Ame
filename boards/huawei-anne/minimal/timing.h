@@ -16,12 +16,13 @@ constexpr bool elapsed(std::uint64_t start, std::uint64_t now, std::uint64_t tic
 #if defined(__aarch64__)
 inline std::uint64_t counter() {
     std::uint64_t value;
-    asm volatile("isb\n mrs %0, cntpct_el0" : "=r"(value) :: "memory");
+    asm volatile("isb\n mrs %0, cntpct_el0" : "=r"(value)::"memory");
     return value;
 }
 inline void wait_ticks(std::uint64_t ticks) {
     const auto start = counter();
-    while (!elapsed(start, counter(), ticks)) asm volatile("nop");
+    while (!elapsed(start, counter(), ticks))
+        asm volatile("nop");
 }
 #endif
-}
+} // namespace anne::minimal

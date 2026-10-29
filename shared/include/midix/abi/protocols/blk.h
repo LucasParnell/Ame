@@ -19,7 +19,7 @@ constexpr mx_u32_t MX_PROTOCOL_BLK = 0x424C4B00u; // 'BLK\0'
 using mx_cap_handle_t = mx_handle_t;
 
 enum BlkMsgType : mx_u32_t {
-    BLK_READ  = 1,
+    BLK_READ = 1,
     BLK_WRITE = 2,
     BLK_FLUSH = 3,
     BLK_REPLY = 4,

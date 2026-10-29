@@ -13,25 +13,32 @@ namespace libk::str {
 
 // Length up to (but not including) the first NUL. Null is the empty string.
 inline std::size_t length(const char* s) {
-    if (!s) return 0;
+    if (!s)
+        return 0;
     std::size_t n = 0;
-    while (s[n]) ++n;
+    while (s[n])
+        ++n;
     return n;
 }
 
 // Length capped at `max` — use when `s` may not be terminated within its buffer.
 inline std::size_t length_n(const char* s, std::size_t max) {
-    if (!s) return 0;
+    if (!s)
+        return 0;
     std::size_t n = 0;
-    while (n < max && s[n]) ++n;
+    while (n < max && s[n])
+        ++n;
     return n;
 }
 
 inline bool equal(const char* a, const char* b) {
-    if (a == b) return true;
-    if (!a || !b) return false;
+    if (a == b)
+        return true;
+    if (!a || !b)
+        return false;
     std::size_t i = 0;
-    while (a[i] && a[i] == b[i]) ++i;
+    while (a[i] && a[i] == b[i])
+        ++i;
     return a[i] == b[i];
 }
 
@@ -40,32 +47,64 @@ inline bool equal_n(const char* a, const char* b, std::size_t n) {
     for (std::size_t i = 0; i < n; ++i) {
         const unsigned char ca = a ? static_cast<unsigned char>(a[i]) : 0;
         const unsigned char cb = b ? static_cast<unsigned char>(b[i]) : 0;
-        if (ca != cb) return false;
-        if (ca == 0) return true;
+        if (ca != cb)
+            return false;
+        if (ca == 0)
+            return true;
     }
     return true;
 }
 
+struct Literal {
+    const char* data;
+    std::size_t size;
+
+    template <std::size_t N> constexpr Literal(const char (&text)[N]) : data(text), size(N - 1) {
+    }
+};
+
+// Match a bounded name against a static set without repeatedly scanning the
+// candidates' terminators. Empty views may use nullptr; nonempty ones may not.
+template <std::size_t N>
+inline bool one_of(const char* text, std::size_t size, const Literal (&choices)[N]) {
+    if (size && !text)
+        return false;
+    for (const auto& choice : choices) {
+        if (size == choice.size && equal_n(text, choice.data, size))
+            return true;
+    }
+    return false;
+}
+
 inline bool starts_with(const char* s, const char* prefix) {
-    if (!s || !prefix) return false;
+    if (!s || !prefix)
+        return false;
     std::size_t i = 0;
     while (prefix[i]) {
-        if (s[i] != prefix[i]) return false;
+        if (s[i] != prefix[i])
+            return false;
         ++i;
     }
     return true;
 }
 
 // Character classes for the shell/parsers.
-inline bool is_space(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
-inline bool is_digit(char c) { return c >= '0' && c <= '9'; }
-inline bool is_ascii_printable(char c) { return c >= 32 && c <= 126; }
+inline bool is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+inline bool is_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+inline bool is_ascii_printable(char c) {
+    return c >= 32 && c <= 126;
+}
 
 // Copy `src` into dst[0..cap) with a NUL terminator when it fits; truncates
 // otherwise. Returns characters copied (excluding the terminator). Never writes
 // past `cap`; cap == 0 writes nothing. Reads at most cap - 1 source characters.
 inline std::size_t copy_into(char* dst, std::size_t cap, const char* src) {
-    if (!dst || cap == 0) return 0;
+    if (!dst || cap == 0)
+        return 0;
     std::size_t i = 0;
     if (src) {
         while (i + 1 < cap && src[i]) {
@@ -80,10 +119,13 @@ inline std::size_t copy_into(char* dst, std::size_t cap, const char* src) {
 // Checked replacement for strcpy: false (dst untouched) unless `src` fits with
 // its terminator. Reads at most cap source characters.
 inline bool copy_exact_fit(char* dst, std::size_t cap, const char* src) {
-    if (!dst || cap == 0) return false;
+    if (!dst || cap == 0)
+        return false;
     const std::size_t n = length_n(src, cap);
-    if (n == cap) return false;
-    for (std::size_t i = 0; i < n; ++i) dst[i] = src[i];
+    if (n == cap)
+        return false;
+    for (std::size_t i = 0; i < n; ++i)
+        dst[i] = src[i];
     dst[n] = '\0';
     return true;
 }

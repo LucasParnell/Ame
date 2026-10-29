@@ -1,0 +1,278 @@
+Midgard depth/stencil and per-sample attachment preloads.
+
+Use separate color and Z/S wallpaper jobs, per-sample texture fetches, writable
+late depth/stencil renderer state, and aspect-specific texture views. Preserve
+initialization and tiler dependencies through job injection.
+
+diff --git a/src/panfrost/vulkan/midgard/panvk_v5_cmd_fb_preload.c b/src/panfrost/vulkan/midgard/panvk_v5_cmd_fb_preload.c
+--- a/src/panfrost/vulkan/midgard/panvk_v5_cmd_fb_preload.c
++++ b/src/panfrost/vulkan/midgard/panvk_v5_cmd_fb_preload.c
+@@ -18,18 +18,16 @@
+ struct preload_key {
+    enum panvk_meta_object_key_type type;
+    uint32_t color_mask;
++   uint32_t aspects;
++   uint32_t samples;
+ };
+ 
+ static VkResult
+-get_shader(struct panvk_device *dev, uint32_t color_mask,
++get_shader(struct panvk_device *dev, const struct preload_key *key,
+            struct panvk_internal_shader **out)
+ {
+-   const struct preload_key key = {
+-      .type = PANVK_META_OBJECT_KEY_FB_PRELOAD_SHADER,
+-      .color_mask = color_mask,
+-   };
+    VkShaderEXT handle = (VkShaderEXT)vk_meta_lookup_object(
+-      &dev->meta, VK_OBJECT_TYPE_SHADER_EXT, &key, sizeof(key));
++      &dev->meta, VK_OBJECT_TYPE_SHADER_EXT, key, sizeof(*key));
+    if (handle != VK_NULL_HANDLE) {
+       *out = panvk_internal_shader_from_handle(handle);
+       return VK_SUCCESS;
+@@ -37,7 +35,7 @@
+ 
+    nir_builder b = nir_builder_init_simple_shader(
+       MESA_SHADER_FRAGMENT, GENX(pan_shader_get_compiler_options)(),
+-      "panvk-midgard-preload-%x", color_mask);
++      "panvk-midgard-preload-%x-%x-%u", key->color_mask, key->aspects, key->samples);
+    nir_def *bary = nir_load_barycentric(
+       &b, nir_intrinsic_load_barycentric_pixel, INTERP_MODE_SMOOTH);
+    nir_def *coord = nir_load_interpolated_input(
+@@ -46,21 +44,33 @@
+       .io_semantics.num_slots = 1);
+ 
+    unsigned tex_idx = 0;
+-   u_foreach_bit(rt, color_mask) {
+-      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+-      tex->op = nir_texop_txl;
+-      tex->dest_type = nir_type_float32;
++   uint32_t surfaces = key->color_mask;
++   if (key->aspects & VK_IMAGE_ASPECT_DEPTH_BIT) surfaces |= BITFIELD_BIT(8);
++   if (key->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) surfaces |= BITFIELD_BIT(9);
++   u_foreach_bit(surface, surfaces) {
++      bool stencil = surface == 9;
++      bool ms = key->samples > 1;
++      nir_tex_instr *tex = nir_tex_instr_create(b.shader, ms ? 3 : 1);
++      tex->op = ms ? nir_texop_txf_ms : nir_texop_txl;
++      tex->dest_type = stencil ? nir_type_uint32 : nir_type_float32;
+       tex->texture_index = tex_idx++;
+       tex->sampler_index = 0;
+-      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
++      tex->sampler_dim = ms ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D;
+       tex->coord_components = 2;
+-      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
++      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, ms ? nir_f2i32(&b, coord) : coord);
++      if (ms) {
++         tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_ms_index, nir_load_sample_id(&b));
++         tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
++      }
+       nir_def_init(&tex->instr, &tex->def, 4, 32);
+       nir_builder_instr_insert(&b, &tex->instr);
+-      nir_store_output(&b, &tex->def, nir_imm_int(&b, 0), .base = tex_idx - 1,
+-                       .src_type = nir_type_float32,
+-                       .io_semantics.location = FRAG_RESULT_DATA0 + rt,
+-                       .io_semantics.num_slots = 1, .write_mask = 0xf);
++      nir_def *value = surface < 8 ? &tex->def : nir_channel(&b, &tex->def, stencil ? 1 : 0);
++      nir_store_output(&b, value, nir_imm_int(&b, 0), .base = tex_idx - 1,
++                       .src_type = tex->dest_type,
++                       .io_semantics.location = surface < 8 ? FRAG_RESULT_DATA0 + surface :
++                                                stencil ? FRAG_RESULT_STENCIL : FRAG_RESULT_DEPTH,
++                       .io_semantics.num_slots = 1,
++                       .write_mask = nir_component_mask(value->num_components));
+    }
+ 
+    nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
+@@ -82,63 +92,65 @@
+       return result;
+ 
+    handle = (VkShaderEXT)vk_meta_cache_object(
+-      &dev->vk, &dev->meta, &key, sizeof(key), VK_OBJECT_TYPE_SHADER_EXT,
++      &dev->vk, &dev->meta, key, sizeof(*key), VK_OBJECT_TYPE_SHADER_EXT,
+       (uint64_t)panvk_internal_shader_to_handle(shader));
+    *out = panvk_internal_shader_from_handle(handle);
+    return VK_SUCCESS;
+ }
+ 
+-VkResult
+-panvk_v5_cmd_fb_preload(struct panvk_cmd_buffer *cmdbuf)
++static VkResult
++emit_preload(struct panvk_cmd_buffer *cmdbuf, uint32_t mask, bool zs)
+ {
+    struct pan_fb_info *fb = &cmdbuf->state.gfx.render.fb.info;
+    struct panvk_batch *batch = cmdbuf->cur_batch;
+    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+-   uint32_t mask = 0;
+-   for (unsigned i = 0; i < fb->rt_count; i++)
+-      if (fb->rts[i].preload)
+-         mask |= BITFIELD_BIT(i);
+-   if (!mask && !fb->zs.preload.z && !fb->zs.preload.s)
+-      return VK_SUCCESS;
+-
+-   /* Start with the fixed-function color formats. Other formats need Midgard
+-    * blend/type-conversion shaders; Z/S and layered/MSAA jobs need distinct
+-    * shader keys, texture views and renderer state. Never silently lose them.
+-    */
+-   if (fb->zs.preload.z || fb->zs.preload.s || fb->nr_samples != 1 ||
+-       cmdbuf->state.gfx.render.layer_count != 1)
+-      goto unsupported;
+-   u_foreach_bit(rt, mask) {
+-      const struct pan_image_view *view = fb->rts[rt].view;
+-      if (!view || view->dim != MALI_TEXTURE_DIMENSION_2D ||
+-          view->first_layer != view->last_layer ||
+-          !panfrost_blendable_formats_v7[view->format].internal)
+-         goto unsupported;
+-   }
+-
+-   VkResult result = panvk_v5_cmd_alloc_tls_desc(cmdbuf, true);
+-   if (result != VK_SUCCESS)
+-      return result;
+-
++   struct preload_key key = {
++      .type = PANVK_META_OBJECT_KEY_FB_PRELOAD_SHADER,
++      .color_mask = mask,
++      .samples = fb->nr_samples,
++      .aspects = zs ? (fb->zs.preload.z ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) |
++                      (fb->zs.preload.s ? VK_IMAGE_ASPECT_STENCIL_BIT : 0) : 0,
++   };
++   const struct pan_image_view *views[8];
++   struct pan_image_view stencil_view;
++   unsigned tex_count = 0;
++   if (zs) {
++      if (fb->zs.preload.z) views[tex_count++] = fb->zs.view.zs;
++      if (fb->zs.preload.s) {
++         stencil_view = *(fb->zs.view.s ?: fb->zs.view.zs);
++         switch (stencil_view.format) {
++         case PIPE_FORMAT_Z24_UNORM_S8_UINT:
++            stencil_view.format = PIPE_FORMAT_X24S8_UINT;
++            break;
++         case PIPE_FORMAT_Z32_FLOAT_S8X24_UINT:
++            stencil_view.format = PIPE_FORMAT_X32_S8X24_UINT;
++            break;
++         default: break;
++         }
++         views[tex_count++] = &stencil_view;
++      }
++   } else {
++      u_foreach_bit(rt, mask) views[tex_count++] = fb->rts[rt].view;
++   }
++   for (unsigned i = 0; i < tex_count; i++) {
++      if (!views[i] || views[i]->dim != MALI_TEXTURE_DIMENSION_2D ||
++          views[i]->first_layer != views[i]->last_layer)
++         return VK_ERROR_FEATURE_NOT_PRESENT;
++   }
+    struct panvk_internal_shader *shader;
+-   result = get_shader(dev, mask, &shader);
+-   if (result != VK_SUCCESS)
+-      return result;
+-   /* cmd_close_batch allocated TLS before entering this helper. The small
+-    * preload shaders must not introduce an unbacked spill stack afterwards.
+-    */
+-   if (shader->info.tls_size)
+-      goto unsupported;
+-
++   VkResult result = get_shader(dev, &key, &shader);
++   if (result != VK_SUCCESS) return result;
++   /* The compiler emits these small blit shaders without a spill stack. */
++   if (shader->info.tls_size) return VK_ERROR_FEATURE_NOT_PRESENT;
+    struct panfrost_ptr rsd = panvk_cmd_alloc_desc_aggregate(
+-      cmdbuf, PAN_DESC(RENDERER_STATE), PAN_DESC_ARRAY(fb->rt_count, BLEND));
++      cmdbuf, PAN_DESC(RENDERER_STATE), PAN_DESC_ARRAY(MAX2(fb->rt_count, 1), BLEND));
+    struct panfrost_ptr sampler = panvk_cmd_alloc_desc(cmdbuf, SAMPLER);
+    struct panfrost_ptr varying = panvk_cmd_alloc_desc(cmdbuf, ATTRIBUTE);
+    struct panfrost_ptr buffers = panvk_cmd_alloc_desc(cmdbuf, ATTRIBUTE_BUFFER);
+    struct panfrost_ptr viewport = panvk_cmd_alloc_desc(cmdbuf, VIEWPORT);
+    struct panfrost_ptr coords = panvk_cmd_alloc_dev_mem(cmdbuf, desc, 64, 64);
+    struct panfrost_ptr textures = panvk_cmd_alloc_dev_mem(
+-      cmdbuf, desc, util_bitcount(mask) * sizeof(mali_ptr), sizeof(mali_ptr));
++      cmdbuf, desc, tex_count * sizeof(mali_ptr), sizeof(mali_ptr));
+    struct panfrost_ptr job = panvk_cmd_alloc_desc(cmdbuf, TILER_JOB);
+    if (!rsd.cpu || !sampler.cpu || !varying.cpu || !buffers.cpu ||
+        !viewport.cpu || !coords.cpu || !textures.cpu || !job.cpu)
+@@ -173,13 +185,25 @@
+       pan_shader_prepare_rsd(&shader->info,
+                             panvk_priv_mem_dev_addr(shader->code_mem), &cfg);
+       cfg.properties.work_register_count = MAX2(shader->info.work_reg_count, 4);
+-      cfg.properties.force_early_z = true;
++      cfg.properties.force_early_z = !zs;
+       cfg.multisample_misc.sample_mask = 0xffff;
+       cfg.multisample_misc.depth_function = MALI_FUNC_ALWAYS;
++      cfg.multisample_misc.multisample_enable = fb->nr_samples > 1;
++      cfg.multisample_misc.evaluate_per_sample = fb->nr_samples > 1;
++      cfg.multisample_misc.depth_write_mask = zs && fb->zs.preload.z;
+       cfg.stencil_mask_misc.alpha_test_compare_function = MALI_FUNC_ALWAYS;
++      cfg.stencil_mask_misc.stencil_enable = zs && fb->zs.preload.s;
++      cfg.stencil_mask_misc.stencil_mask_front = 0xff;
++      cfg.stencil_mask_misc.stencil_mask_back = 0xff;
++      cfg.stencil_front.compare_function = MALI_FUNC_ALWAYS;
++      cfg.stencil_front.stencil_fail = MALI_STENCIL_OP_REPLACE;
++      cfg.stencil_front.depth_fail = MALI_STENCIL_OP_REPLACE;
++      cfg.stencil_front.depth_pass = MALI_STENCIL_OP_REPLACE;
++      cfg.stencil_front.mask = 0xff;
++      cfg.stencil_back = cfg.stencil_front;
+    }
+    struct mali_blend_packed *blends = rsd.cpu + pan_size(RENDERER_STATE);
+-   for (unsigned i = 0; i < fb->rt_count; i++) {
++   for (unsigned i = 0; i < MAX2(fb->rt_count, 1); i++) {
+       pan_pack(&blends[i], BLEND, cfg) {
+          cfg.enable = mask & BITFIELD_BIT(i);
+          cfg.round_to_fb_precision = true;
+@@ -192,19 +216,15 @@
+       }
+    }
+ 
+-   unsigned idx = 0;
+-   u_foreach_bit(rt, mask) {
+-      const struct pan_image_view *view = fb->rts[rt].view;
+-      size_t size = pan_size(TEXTURE) +
+-                    GENX(panfrost_estimate_texture_payload_size)(view);
+-      struct panfrost_ptr tex = panvk_cmd_alloc_dev_mem(
+-         cmdbuf, desc, size, pan_alignment(TEXTURE));
+-      if (!tex.cpu)
+-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   for (unsigned idx = 0; idx < tex_count; idx++) {
++      const struct pan_image_view *view = views[idx];
++      size_t size = pan_size(TEXTURE) + GENX(panfrost_estimate_texture_payload_size)(view);
++      struct panfrost_ptr tex = panvk_cmd_alloc_dev_mem(cmdbuf, desc, size, pan_alignment(TEXTURE));
++      if (!tex.cpu) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+       struct panfrost_ptr surfaces = {.cpu = tex.cpu + pan_size(TEXTURE),
+                                      .gpu = tex.gpu + pan_size(TEXTURE)};
+       GENX(panfrost_new_texture)(view, tex.cpu, &surfaces);
+-      ((mali_ptr *)textures.cpu)[idx++] = tex.gpu;
++      ((mali_ptr *)textures.cpu)[idx] = tex.gpu;
+    }
+ 
+    pan_section_pack(job.cpu, TILER_JOB, DRAW, cfg) {
+@@ -232,7 +252,29 @@
+                   0, 0, &job, true);
+    return VK_SUCCESS;
+ 
+-unsupported:
+-   vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+-   return VK_ERROR_FEATURE_NOT_PRESENT;
+ }
++
++VkResult
++panvk_v5_cmd_fb_preload(struct panvk_cmd_buffer *cmdbuf)
++{
++   const struct pan_fb_info *fb = &cmdbuf->state.gfx.render.fb.info;
++   uint32_t mask = 0;
++   for (unsigned rt = 0; rt < fb->rt_count; rt++)
++      if (fb->rts[rt].preload) mask |= BITFIELD_BIT(rt);
++   bool zs = fb->zs.preload.z || fb->zs.preload.s;
++   if (!mask && !zs) return VK_SUCCESS;
++   if (cmdbuf->state.gfx.render.layer_count != 1) return VK_ERROR_FEATURE_NOT_PRESENT;
++   u_foreach_bit(rt, mask) {
++      if (!panfrost_blendable_formats_v7[fb->rts[rt].view->format].internal)
++         return VK_ERROR_FEATURE_NOT_PRESENT;
++   }
++   VkResult result = panvk_v5_cmd_alloc_tls_desc(cmdbuf, true);
++   if (result != VK_SUCCESS) return result;
++   /* Injection prepends jobs. Insert color first so depth/stencil executes
++    * before color and both execute before the application tiler chain. */
++   if (mask) {
++      result = emit_preload(cmdbuf, mask, false);
++      if (result != VK_SUCCESS) return result;
++   }
++   return zs ? emit_preload(cmdbuf, 0, true) : VK_SUCCESS;
++}

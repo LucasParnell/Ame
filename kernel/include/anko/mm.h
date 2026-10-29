@@ -17,6 +17,9 @@
 
 constexpr usize PAGE_SIZE = 4096;
 constexpr usize PAGE_SHIFT = 12;
+// Keep creation limits and mapping teardown geometry in sync.
+constexpr usize kMaxUserArenaPages = 256;
+constexpr usize kArenaUnmapWords = (kMaxUserArenaPages + 63) / 64;
 constexpr VirtAddr USER_STACK_TOP = 0x3FFF'0000ull;
 
 // ---------------------------------------------------------------------------
@@ -85,7 +88,7 @@ constexpr u32 kArenaTableSize = 64;
 struct ArenaTable {
     Arena entries[kArenaTableSize];
     object::Record* backing[kArenaTableSize];
-    u64 unmapped[kArenaTableSize];
+    u64 unmapped[kArenaTableSize][kArenaUnmapWords];
     u32 count;
     u32 lock;
 };

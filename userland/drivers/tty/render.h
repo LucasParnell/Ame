@@ -70,8 +70,7 @@ struct Render {
             dirty(rows - 1, 0, cols);
             // Coalesce a burst into one copy. A whole-screen scroll needs no
             // old pixels; every row will have acquired a full dirty range.
-            if (!clear_pending && scroll_rows < rows)
-                ++scroll_rows;
+            if (!clear_pending && scroll_rows < rows) ++scroll_rows;
         }
     }
     void character(char ch) {
@@ -128,8 +127,7 @@ struct Render {
         }
     }
     bool pending() const {
-        return clear_pending || status.pending() || scroll_rows || dirty_count || cursor_pending ||
-               present_pending;
+        return clear_pending || status.pending() || scroll_rows || dirty_count || cursor_pending || present_pending;
     }
     bool flush(mx_u32_t budget = 64) {
         bool progress = false;
@@ -141,16 +139,14 @@ struct Render {
                 }
                 clear_pending = false;
             } else if (status.pending()) {
-                if (!status.flush(fb))
-                    break;
+                if (!status.flush(fb)) break;
                 present_pending = true;
             } else if (scroll_rows) {
                 if (scroll_rows < rows) {
-                    const FbCopyRectCmd command{origin_x,      origin_y + scroll_rows * cell_h,
-                                                origin_x,      origin_y,
-                                                cols * cell_w, (rows - scroll_rows) * cell_h};
-                    if (!fb.try_send(FB_COPY_RECT, &command, sizeof(command)))
-                        break;
+                    const FbCopyRectCmd command{origin_x, origin_y + scroll_rows * cell_h,
+                                                origin_x, origin_y, cols * cell_w,
+                                                (rows - scroll_rows) * cell_h};
+                    if (!fb.try_send(FB_COPY_RECT, &command, sizeof(command))) break;
                 }
                 scroll_rows = 0;
             } else if (dirty_count) {

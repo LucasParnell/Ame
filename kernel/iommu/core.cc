@@ -47,10 +47,7 @@ IommuFaultRecord g_last_fault;
 SpinLock g_fault_record_lock;
 
 const IommuBackendOps g_null_backend = {}; // explicit software model
-struct BackendRoute {
-    IommuRoute route;
-    IommuBackendOps ops;
-};
+struct BackendRoute { IommuRoute route; IommuBackendOps ops; };
 BackendRoute g_routes[kMaxIommuBackends];
 u32 g_route_count;
 constexpr u8 kTableDirty = 1;
@@ -64,23 +61,20 @@ void quarantine(IommuDomain& domain) {
     __atomic_add_fetch(&g_counters[IOMMU_QUARANTINES], 1ull, __ATOMIC_RELAXED);
 }
 bool valid_backend(const IommuBackendOps& ops) {
-    if (ops.iova_bits > kIommuIovaBits || ops.pa_bits > 48 || (ops.pa_bits && ops.pa_bits < 12))
-        return false;
-    if (ops.hardware &&
-        (!ops.iova_bits || !ops.pa_bits || !ops.table_format || !ops.publish_page_table_range ||
-         !ops.invalidate_iotlb_range || !ops.sync_command_stream || !ops.attach_stream ||
-         !ops.detach_stream || !ops.ready))
-        return false;
+    if (ops.iova_bits > kIommuIovaBits || ops.pa_bits > 48 ||
+        (ops.pa_bits && ops.pa_bits < 12)) return false;
+    if (ops.hardware && (!ops.iova_bits || !ops.pa_bits || !ops.table_format ||
+        !ops.publish_page_table_range || !ops.invalidate_iotlb_range ||
+        !ops.sync_command_stream || !ops.attach_stream || !ops.detach_stream || !ops.ready)) return false;
     const auto& f = ops.table_format ? *ops.table_format : kArmStage2Tables;
     // The shared walker needs a 48-bit descriptor address field and distinct
     // table/block types. Reject unsupported shapes instead of masking a PA.
-    return f.address_mask == kArmStage2Tables.address_mask && f.valid_mask && f.table_mask &&
-           (f.table_bits & f.valid_mask) && (f.table_bits & f.table_mask) &&
-           !(f.block_bits & f.table_mask) && (f.block_bits & f.valid_mask) &&
-           (f.page_bits & f.valid_mask) &&
-           !((f.table_bits | f.block_bits | f.page_bits | f.attributes | f.read_bits |
-              f.write_bits) &
-             f.address_mask);
+    return f.address_mask == kArmStage2Tables.address_mask && f.valid_mask &&
+        f.table_mask && (f.table_bits & f.valid_mask) &&
+        (f.table_bits & f.table_mask) && !(f.block_bits & f.table_mask) &&
+        (f.block_bits & f.valid_mask) && (f.page_bits & f.valid_mask) &&
+        !((f.table_bits | f.block_bits | f.page_bits | f.attributes |
+           f.read_bits | f.write_bits) & f.address_mask);
 }
 const IommuTableFormat& format(const IommuDomain& domain) {
     return *domain.backend_.table_format;
@@ -121,7 +115,8 @@ u32 l3_index(u64 addr) {
 
 u64 leaf_attrs(const IommuDomain& domain, u32 perms) {
     const auto& f = format(domain);
-    return f.attributes | ((perms & 1u) ? f.read_bits : 0) | ((perms & 2u) ? f.write_bits : 0);
+    return f.attributes | ((perms & 1u) ? f.read_bits : 0) |
+        ((perms & 2u) ? f.write_bits : 0);
 }
 
 void write_entry(IommuDomain& domain, PhysAddr table, u32 index, u64 value) {
@@ -139,13 +134,11 @@ SysError publish_dirty(IommuDomain& domain) {
     // including existing leaf tables and cleared descriptors before TLBI.
     for (u32 t = domain.table_count_; t > 0;) {
         --t;
-        if (!(domain.table_flags_[t] & kTableDirty))
-            continue;
+        if (!(domain.table_flags_[t] & kTableDirty)) continue;
         if (domain.backend_.publish_page_table_range) {
-            const auto rc = domain.backend_.publish_page_table_range(domain.backend_.ctx,
-                                                                     domain.tables_[t], kPageBytes);
-            if (rc != E_OK)
-                return rc;
+            const auto rc = domain.backend_.publish_page_table_range(
+                domain.backend_.ctx, domain.tables_[t], kPageBytes);
+            if (rc != E_OK) return rc;
         }
         domain.table_flags_[t] &= ~kTableDirty;
     }
@@ -174,8 +167,7 @@ PhysAddr alloc_table(IommuDomain* domain) {
 
 void retire_table(IommuDomain* domain, PhysAddr pa, u64 iova, u64 length) {
     for (u32 t = 0; t < domain->table_count_; ++t) {
-        if (domain->tables_[t] != pa)
-            continue;
+        if (domain->tables_[t] != pa) continue;
         domain->table_flags_[t] |= kTableRetired;
         domain->retired_iova_[t] = iova;
         domain->retired_length_[t] = length;
@@ -185,10 +177,7 @@ void retire_table(IommuDomain* domain, PhysAddr pa, u64 iova, u64 length) {
 // Called only after parent-descriptor publication and IOTLB completion.
 void release_retired(IommuDomain& domain) {
     for (u32 t = 0; t < domain.table_count_;) {
-        if (!(domain.table_flags_[t] & kTableRetired)) {
-            ++t;
-            continue;
-        }
+        if (!(domain.table_flags_[t] & kTableRetired)) { ++t; continue; }
         mm::free_page(domain.tables_[t]);
         --domain.table_count_;
         // Stable compaction preserves child-before-parent publication order.
@@ -203,8 +192,7 @@ void release_retired(IommuDomain& domain) {
 
 bool table_empty(const IommuDomain& domain, PhysAddr pa) {
     for (u32 i = 0; i < 512; ++i) {
-        if (valid(domain, table_ptr(pa)[i]))
-            return false;
+        if (valid(domain, table_ptr(pa)[i])) return false;
     }
     return true;
 }
@@ -247,8 +235,7 @@ SysError emit_pages(IommuDomain* domain, const IommuMap& map) {
             return E_BUSY;
         }
         // A level-3 entry must be a page descriptor: type field [1:0] = 0b11.
-        write_entry(*domain, l3, l3_index(iova),
-                    pa | leaf_attrs(*domain, map.perms) | format(*domain).page_bits);
+        write_entry(*domain, l3, l3_index(iova), pa | leaf_attrs(*domain, map.perms) | format(*domain).page_bits);
     }
     return E_OK;
 }
@@ -266,8 +253,7 @@ SysError emit_blocks(IommuDomain* domain, const IommuMap& map) {
         if (valid(*domain, block)) {
             return E_BUSY; // an existing table or block leaf owns this range
         }
-        write_entry(*domain, l2, l2_index(iova),
-                    pa | leaf_attrs(*domain, map.perms) | format(*domain).block_bits);
+        write_entry(*domain, l2, l2_index(iova), pa | leaf_attrs(*domain, map.perms) | format(*domain).block_bits);
     }
     return E_OK;
 }
@@ -374,8 +360,7 @@ SysError check_mapping(const IommuDomain& domain, const IommuMap& map) {
     if (__builtin_add_overflow(map.pa, map.length, &pa_end)) {
         return E_OVERFLOW;
     }
-    if (pa_end > (1ull << domain.backend_.pa_bits))
-        return E_INVALID;
+    if (pa_end > (1ull << domain.backend_.pa_bits)) return E_INVALID;
     return E_OK;
 }
 
@@ -436,24 +421,19 @@ u32 find_record(IommuDomain* domain, u64 iova, u64 length) {
 }
 
 SysError invalidate_range(IommuDomain& domain, u64 iova, u64 length) {
-    if (!domain.backend_.invalidate_iotlb_range)
-        return E_OK;
-    const auto rc =
-        domain.backend_.invalidate_iotlb_range(domain.backend_.ctx, &domain, iova, length);
-    if (rc == E_OK)
-        counter_inc(length == ~0ull ? IOMMU_TLBI_DOMAIN : IOMMU_TLBI_RANGE);
+    if (!domain.backend_.invalidate_iotlb_range) return E_OK;
+    const auto rc = domain.backend_.invalidate_iotlb_range(domain.backend_.ctx, &domain, iova, length);
+    if (rc == E_OK) counter_inc(length == ~0ull ? IOMMU_TLBI_DOMAIN : IOMMU_TLBI_RANGE);
     return rc;
 }
 SysError sync(IommuDomain& domain) {
-    return domain.backend_.sync_command_stream
-               ? domain.backend_.sync_command_stream(domain.backend_.ctx)
-               : E_OK;
+    return domain.backend_.sync_command_stream ?
+        domain.backend_.sync_command_stream(domain.backend_.ctx) : E_OK;
 }
 
 SysError invalidate_retired(IommuDomain& domain) {
     for (u32 t = 0; t < domain.table_count_; ++t) {
-        if (!(domain.table_flags_[t] & kTableRetired))
-            continue;
+        if (!(domain.table_flags_[t] & kTableRetired)) continue;
         const auto base = domain.retired_iova_[t];
         const auto length = domain.retired_length_[t];
         bool covered = false;
@@ -467,8 +447,7 @@ SysError invalidate_retired(IommuDomain& domain) {
         }
         if (!covered) {
             const auto rc = invalidate_range(domain, base, length);
-            if (rc != E_OK)
-                return rc;
+            if (rc != E_OK) return rc;
         }
     }
     return E_OK;
@@ -476,14 +455,12 @@ SysError invalidate_retired(IommuDomain& domain) {
 
 SysError publish_records(IommuDomain& domain, u32 start, bool invalidate) {
     auto rc = publish_dirty(domain);
-    if (rc != E_OK)
-        return rc;
+    if (rc != E_OK) return rc;
     if (invalidate) {
         for (u32 r = start; r < domain.mapping_count_; ++r) {
             const auto& m = domain.mappings_[r];
             rc = invalidate_range(domain, m.iova, m.length);
-            if (rc != E_OK)
-                return rc;
+            if (rc != E_OK) return rc;
         }
     }
     rc = invalidate_retired(domain);
@@ -503,8 +480,7 @@ SysError rollback(IommuDomain& domain, u32 start, SysError error) {
         return E_FAULT;
     }
     release_retired(domain);
-    for (u32 r = start; r < domain.mapping_count_; ++r)
-        domain.pinned_pages_ -= domain.mappings_[r].pages;
+    for (u32 r = start; r < domain.mapping_count_; ++r) domain.pinned_pages_ -= domain.mappings_[r].pages;
     domain.mapping_count_ = start;
     return error;
 }
@@ -542,22 +518,17 @@ const IommuBackendOps& null_backend() {
 }
 
 SysError register_backend(IommuRoute route, const IommuBackendOps& backend) {
-    if (!valid_backend(backend) || !backend.hardware || !backend.ready(backend.ctx) ||
-        !route.stream_count ||
-        static_cast<u64>(route.first_stream) + route.stream_count > (1ull << 32))
-        return E_INVALID;
+    if (!valid_backend(backend) || !backend.hardware || !backend.ready(backend.ctx) || !route.stream_count ||
+        static_cast<u64>(route.first_stream) + route.stream_count > (1ull << 32)) return E_INVALID;
     LockGuard guard(g_stream_lock);
     for (u32 i = 0; i < g_route_count; ++i) {
         const auto& r = g_routes[i].route;
-        if (r.segment == route.segment &&
-            static_cast<u64>(r.first_stream) <
-                static_cast<u64>(route.first_stream) + route.stream_count &&
-            static_cast<u64>(route.first_stream) <
-                static_cast<u64>(r.first_stream) + r.stream_count)
+        if (r.segment == route.segment && static_cast<u64>(r.first_stream) <
+            static_cast<u64>(route.first_stream) + route.stream_count &&
+            static_cast<u64>(route.first_stream) < static_cast<u64>(r.first_stream) + r.stream_count)
             return E_BUSY;
     }
-    if (g_route_count == kMaxIommuBackends)
-        return E_OVERFLOW;
+    if (g_route_count == kMaxIommuBackends) return E_OVERFLOW;
     g_routes[g_route_count++] = {route, backend};
     return E_OK;
 }
@@ -567,21 +538,17 @@ const IommuBackendOps* backend_for(IommuDeviceId device) {
     for (u32 i = 0; i < g_route_count; ++i) {
         const auto& r = g_routes[i].route;
         if (r.segment == device.segment && device.requester_or_stream_id >= r.first_stream &&
-            static_cast<u64>(device.requester_or_stream_id) <
-                static_cast<u64>(r.first_stream) + r.stream_count)
+            static_cast<u64>(device.requester_or_stream_id) < static_cast<u64>(r.first_stream) + r.stream_count)
             return g_routes[i].ops.ready(g_routes[i].ops.ctx) ? &g_routes[i].ops : nullptr;
     }
     return nullptr;
 }
 
 SysError domain_map_batch(IommuDomain& domain, const IommuMap* maps, u32 count) {
-    if (!maps || !count)
-        return E_INVALID;
+    if (!maps || !count) return E_INVALID;
     LockGuard guard(domain.lock_);
-    if (domain_state(domain) != DomainState::Active)
-        return E_PERM;
-    if (count > kMaxDomainMappings - domain.mapping_count_)
-        return E_OVERFLOW;
+    if (domain_state(domain) != DomainState::Active) return E_PERM;
+    if (count > kMaxDomainMappings - domain.mapping_count_) return E_OVERFLOW;
 
     // Complete validation before any descriptor write. Existing records retain
     // their pins even when a previous hardware operation was uncertain.
@@ -589,26 +556,21 @@ SysError domain_map_batch(IommuDomain& domain, const IommuMap* maps, u32 count) 
     for (u32 i = 0; i < count; ++i) {
         const auto& m = maps[i];
         auto rc = check_mapping(domain, m);
-        if (rc != E_OK)
-            return rc;
+        if (rc != E_OK) return rc;
         u64 owner = 0;
         VmDmaClass cls = VmDmaClass::None;
         rc = validate_ownership(&domain, m, &owner, &cls);
-        if (rc != E_OK)
-            return rc;
+        if (rc != E_OK) return rc;
         for (u32 j = 0; j < domain.mapping_count_; ++j) {
             const auto& r = domain.mappings_[j];
-            if (m.iova < r.iova + r.length && r.iova < m.iova + m.length)
-                return E_BUSY;
+            if (m.iova < r.iova + r.length && r.iova < m.iova + m.length) return E_BUSY;
         }
         for (u32 j = 0; j < i; ++j) {
-            if (m.iova < maps[j].iova + maps[j].length && maps[j].iova < m.iova + m.length)
-                return E_BUSY;
+            if (m.iova < maps[j].iova + maps[j].length && maps[j].iova < m.iova + m.length) return E_BUSY;
         }
         new_pages += m.length / kPageBytes;
     }
-    if (new_pages > 0xFFFF'FFFFull - domain.pinned_pages_)
-        return E_OVERFLOW;
+    if (new_pages > 0xFFFF'FFFFull - domain.pinned_pages_) return E_OVERFLOW;
 
     const u32 start = domain.mapping_count_;
     for (u32 i = 0; i < count; ++i) {
@@ -618,20 +580,12 @@ SysError domain_map_batch(IommuDomain& domain, const IommuMap* maps, u32 count) 
         if (!domain.owner_.query(domain.owner_.ctx, map.pa, &ownership))
             return rollback(domain, start, E_PERM);
         auto& record = domain.mappings_[domain.mapping_count_++];
-        record = {map.iova,
-                  map.pa,
-                  map.length,
-                  ownership.object,
-                  map.perms,
-                  static_cast<u32>(map.length / kPageBytes),
-                  ownership.dma_class,
-                  is_block_map(map),
-                  true,
-                  {}};
+        record = {map.iova, map.pa, map.length, ownership.object, map.perms,
+                  static_cast<u32>(map.length / kPageBytes), ownership.dma_class,
+                  is_block_map(map), true, {}};
         domain.pinned_pages_ += record.pages;
         const auto rc = record.block ? emit_blocks(&domain, map) : emit_pages(&domain, map);
-        if (rc != E_OK)
-            return rollback(domain, start, rc);
+        if (rc != E_OK) return rollback(domain, start, rc);
     }
     // Cache publication is required for existing tables too. Invalidate the
     // changed ranges (including cached walk state), then synchronise once.
@@ -642,31 +596,23 @@ SysError domain_map_batch(IommuDomain& domain, const IommuMap* maps, u32 count) 
     for (u32 i = 0; i < count; ++i) {
         counter_inc(IOMMU_MAP_OPS);
         counter_add(IOMMU_MAP_BYTES, maps[i].length);
-        if (is_block_map(maps[i]))
-            counter_add(IOMMU_BLOCK_MAP_BYTES, maps[i].length);
+        if (is_block_map(maps[i])) counter_add(IOMMU_BLOCK_MAP_BYTES, maps[i].length);
     }
     return E_OK;
 }
 
 SysError domain_unmap_batch(IommuDomain& domain, const IommuMap* maps, u32 count) {
-    if (!maps || !count)
-        return E_INVALID;
+    if (!maps || !count) return E_INVALID;
     LockGuard guard(domain.lock_);
-    if (!domain.in_use_ || domain.index_ == kQuarantineIndex)
-        return E_PERM;
-    if (count > domain.mapping_count_)
-        return E_NOTFOUND;
+    if (!domain.in_use_ || domain.index_ == kQuarantineIndex) return E_PERM;
+    if (count > domain.mapping_count_) return E_NOTFOUND;
     // Preflight the complete batch; duplicates or missing records cannot cause
     // a partial release. Exact ranges are intentional, keeping pins auditable.
     for (u32 i = 0; i < count; ++i) {
         const auto rc = check_extent(domain, maps[i]);
-        if (rc != E_OK)
-            return rc;
-        if (find_record(&domain, maps[i].iova, maps[i].length) == kNoIndex)
-            return E_NOTFOUND;
-        for (u32 j = 0; j < i; ++j)
-            if (maps[i].iova == maps[j].iova)
-                return E_INVALID;
+        if (rc != E_OK) return rc;
+        if (find_record(&domain, maps[i].iova, maps[i].length) == kNoIndex) return E_NOTFOUND;
+        for (u32 j = 0; j < i; ++j) if (maps[i].iova == maps[j].iova) return E_INVALID;
     }
     for (u32 i = 0; i < count; ++i) {
         const auto& r = domain.mappings_[find_record(&domain, maps[i].iova, maps[i].length)];
@@ -686,8 +632,7 @@ SysError domain_unmap_batch(IommuDomain& domain, const IommuMap* maps, u32 count
     for (u32 i = 0; i < count; ++i) {
         const u32 idx = find_record(&domain, maps[i].iova, maps[i].length);
         const auto record = domain.mappings_[idx];
-        if (domain.owner_.release)
-            domain.owner_.release(domain.owner_.ctx, record.pa, record.length);
+        if (domain.owner_.release) domain.owner_.release(domain.owner_.ctx, record.pa, record.length);
         domain.pinned_pages_ -= record.pages;
         counter_inc(IOMMU_UNMAP_OPS);
         domain.mappings_[idx] = domain.mappings_[--domain.mapping_count_];
@@ -697,18 +642,15 @@ SysError domain_unmap_batch(IommuDomain& domain, const IommuMap* maps, u32 count
 
 SysError domain_sync(IommuDomain& domain) {
     LockGuard guard(domain.lock_);
-    if (!domain.in_use_)
-        return E_INVALID;
+    if (!domain.in_use_) return E_INVALID;
     const auto rc = sync(domain);
-    if (rc != E_OK)
-        quarantine(domain);
+    if (rc != E_OK) quarantine(domain);
     return rc;
 }
 
 void domain_quarantine(IommuDomain& domain) {
     LockGuard guard(domain.lock_);
-    if (domain.in_use_ && domain_state(domain) != DomainState::Quarantined)
-        quarantine(domain);
+    if (domain.in_use_ && domain_state(domain) != DomainState::Quarantined) quarantine(domain);
 }
 
 SysError quarantine_stream(IommuDeviceId device) {
@@ -717,18 +659,14 @@ SysError quarantine_stream(IommuDeviceId device) {
     for (u32 i = 0; i < kMaxIommuStreams; ++i) {
         auto& b = g_streams[i];
         if (!b.used || b.segment != device.segment || b.sid != device.requester_or_stream_id ||
-            b.domain_index == kQuarantineIndex)
-            continue;
+            b.domain_index == kQuarantineIndex) continue;
         auto* previous = domain_by_index(b.domain_index);
-        if (!previous)
-            return E_FAULT;
+        if (!previous) return E_FAULT;
         LockGuard state(previous->lock_);
         quarantine(*previous);
-        const auto rc = previous->backend_.detach_stream
-                            ? previous->backend_.detach_stream(previous->backend_.ctx, device)
-                            : E_OK;
-        if (rc != E_OK || sync(*previous) != E_OK)
-            return E_FAULT;
+        const auto rc = previous->backend_.detach_stream ?
+            previous->backend_.detach_stream(previous->backend_.ctx, device) : E_OK;
+        if (rc != E_OK || sync(*previous) != E_OK) return E_FAULT;
         b.domain_index = kQuarantineIndex;
         __atomic_and_fetch(&previous->attached_mask_, ~(1ull << i), __ATOMIC_RELAXED);
         return E_OK;
@@ -739,8 +677,7 @@ SysError quarantine_stream(IommuDeviceId device) {
         const auto& r = g_routes[i].route;
         const auto& ops = g_routes[i].ops;
         if (r.segment != device.segment || device.requester_or_stream_id < r.first_stream ||
-            static_cast<u64>(device.requester_or_stream_id) >=
-                static_cast<u64>(r.first_stream) + r.stream_count)
+            static_cast<u64>(device.requester_or_stream_id) >= static_cast<u64>(r.first_stream) + r.stream_count)
             continue;
         const auto rc = ops.detach_stream(ops.ctx, device);
         return rc == E_OK ? ops.sync_command_stream(ops.ctx) : rc;
@@ -752,61 +689,46 @@ SysError domain_attach(IommuDomain& domain, IommuDeviceId device) {
     ensure_initialised();
     LockGuard streams(g_stream_lock);
     LockGuard state(domain.lock_); // lifecycle lock order: streams -> domain
-    if (!domain.in_use_ ||
-        (domain_state(domain) != DomainState::Active && domain.index_ != kQuarantineIndex))
-        return E_PERM;
+    if (!domain.in_use_ || (domain_state(domain) != DomainState::Active &&
+        domain.index_ != kQuarantineIndex)) return E_PERM;
     // A software model cannot replace a real hardware context. Routing also
     // rejects a hardware backend serving a different controller/namespace.
     const IommuBackendOps* route = nullptr;
     for (u32 i = 0; i < g_route_count; ++i) {
         const auto& r = g_routes[i].route;
         if (r.segment == device.segment && device.requester_or_stream_id >= r.first_stream &&
-            static_cast<u64>(device.requester_or_stream_id) <
-                static_cast<u64>(r.first_stream) + r.stream_count)
+            static_cast<u64>(device.requester_or_stream_id) < static_cast<u64>(r.first_stream) + r.stream_count)
             route = &g_routes[i].ops;
     }
-    if (domain.backend_.hardware &&
-        (!route || !route->ready(route->ctx) || route->ctx != domain.backend_.ctx ||
-         route->attach_stream != domain.backend_.attach_stream))
-        return E_PERM;
-    if (route && !domain.backend_.hardware && domain.index_ != kQuarantineIndex)
-        return E_PERM;
+    if (domain.backend_.hardware && (!route || !route->ready(route->ctx) || route->ctx != domain.backend_.ctx ||
+        route->attach_stream != domain.backend_.attach_stream)) return E_PERM;
+    if (route && !domain.backend_.hardware && domain.index_ != kQuarantineIndex) return E_PERM;
     u32 slot = kNoIndex;
     for (u32 i = 0; i < kMaxIommuStreams; ++i) {
         const auto& b = g_streams[i];
         if (b.used && b.segment == device.segment && b.sid == device.requester_or_stream_id) {
             slot = i;
-            if (b.domain_index == domain.index_)
-                return E_OK;
+            if (b.domain_index == domain.index_) return E_OK;
             // Quarantined metadata does not prove that the old STE denies DMA.
-            if (b.domain_index != kQuarantineIndex)
-                return E_BUSY;
+            if (b.domain_index != kQuarantineIndex) return E_BUSY;
             break;
         }
-        if (!b.used && slot == kNoIndex)
-            slot = i;
+        if (!b.used && slot == kNoIndex) slot = i;
     }
     if (slot == kNoIndex) {
         // Denied bindings can be recycled: capacity limits live/uncertain
         // references, not the number of devices ever connected.
         for (u32 i = 0; i < kMaxIommuStreams; ++i)
-            if (g_streams[i].domain_index == kQuarantineIndex) {
-                slot = i;
-                break;
-            }
+            if (g_streams[i].domain_index == kQuarantineIndex) { slot = i; break; }
     }
-    if (slot == kNoIndex)
-        return E_OVERFLOW;
+    if (slot == kNoIndex) return E_OVERFLOW;
     auto rc = E_OK;
     if (domain.index_ == kQuarantineIndex && route) {
         rc = route->detach_stream(route->ctx, device);
-        if (rc == E_OK)
-            rc = route->sync_command_stream(route->ctx);
+        if (rc == E_OK) rc = route->sync_command_stream(route->ctx);
     } else {
-        if (!program_stream(&domain, device))
-            rc = E_FAULT;
-        if (rc == E_OK)
-            rc = sync(domain);
+        if (!program_stream(&domain, device)) rc = E_FAULT;
+        if (rc == E_OK) rc = sync(domain);
     }
     if (rc != E_OK) {
         // The STE may have been partly installed. Keep its binding and table
@@ -827,13 +749,10 @@ SysError domain_detach(IommuDomain& domain, IommuDeviceId device) {
     LockGuard state(domain.lock_);
     for (u32 i = 0; i < kMaxIommuStreams; ++i) {
         auto& b = g_streams[i];
-        if (!b.used || b.segment != device.segment || b.sid != device.requester_or_stream_id)
-            continue;
-        if (b.domain_index != domain.index_)
-            return E_NOTFOUND;
-        const auto rc = domain.backend_.detach_stream
-                            ? domain.backend_.detach_stream(domain.backend_.ctx, device)
-                            : E_OK;
+        if (!b.used || b.segment != device.segment || b.sid != device.requester_or_stream_id) continue;
+        if (b.domain_index != domain.index_) return E_NOTFOUND;
+        const auto rc = domain.backend_.detach_stream ?
+            domain.backend_.detach_stream(domain.backend_.ctx, device) : E_OK;
         if (rc != E_OK || sync(domain) != E_OK) {
             quarantine(domain);
             return E_FAULT; // binding and pins retained until denial is proven
@@ -879,8 +798,7 @@ SysError domain_create(u64 authorized_object, const IommuOwnerOps& owner,
         return E_INVALID;
     }
     *out = nullptr;
-    if (!valid_backend(backend))
-        return E_INVALID;
+    if (!valid_backend(backend)) return E_INVALID;
     ensure_initialised();
     LockGuard guard(g_stream_lock);
     for (u32 i = 0; i < kMaxIommuDomains; ++i) {
@@ -902,12 +820,9 @@ SysError domain_create(u64 authorized_object, const IommuOwnerOps& owner,
         domain.authorized_object_ = authorized_object;
         domain.owner_ = owner;
         domain.backend_ = backend;
-        if (!domain.backend_.table_format)
-            domain.backend_.table_format = &kArmStage2Tables;
-        if (!domain.backend_.iova_bits)
-            domain.backend_.iova_bits = kIommuIovaBits;
-        if (!domain.backend_.pa_bits)
-            domain.backend_.pa_bits = 48;
+        if (!domain.backend_.table_format) domain.backend_.table_format = &kArmStage2Tables;
+        if (!domain.backend_.iova_bits) domain.backend_.iova_bits = kIommuIovaBits;
+        if (!domain.backend_.pa_bits) domain.backend_.pa_bits = 48;
         const PhysAddr root = alloc_table(&domain);
         if (!root) {
             domain.in_use_ = false;
@@ -932,47 +847,33 @@ SysError domain_create(u64 authorized_object, const IommuOwnerOps& owner,
 }
 
 SysError domain_destroy(IommuDomain* domain) {
-    if (!domain)
-        return E_INVALID;
+    if (!domain) return E_INVALID;
     ensure_initialised();
     LockGuard streams(g_stream_lock);
     LockGuard state(domain->lock_);
-    if (!domain->in_use_)
-        return E_OK;
-    if (domain->index_ == kQuarantineIndex)
-        return E_PERM;
+    if (!domain->in_use_) return E_OK;
+    if (domain->index_ == kQuarantineIndex) return E_PERM;
     // First remove every hardware reference to the root. A failed detach keeps
     // the binding intact so later teardown retries it rather than freeing it.
     for (u32 i = 0; i < kMaxIommuStreams; ++i) {
         auto& b = g_streams[i];
-        if (!b.used || b.domain_index != domain->index_)
-            continue;
+        if (!b.used || b.domain_index != domain->index_) continue;
         const IommuDeviceId device{b.segment, b.sid};
-        const auto rc = domain->backend_.detach_stream
-                            ? domain->backend_.detach_stream(domain->backend_.ctx, device)
-                            : E_OK;
-        if (rc != E_OK || sync(*domain) != E_OK) {
-            quarantine(*domain);
-            return E_FAULT;
-        }
+        const auto rc = domain->backend_.detach_stream ?
+            domain->backend_.detach_stream(domain->backend_.ctx, device) : E_OK;
+        if (rc != E_OK || sync(*domain) != E_OK) { quarantine(*domain); return E_FAULT; }
         b.domain_index = kQuarantineIndex;
         __atomic_and_fetch(&domain->attached_mask_, ~(1ull << i), __ATOMIC_RELAXED);
     }
-    for (u32 r = 0; r < domain->mapping_count_; ++r)
-        clear_record(domain, domain->mappings_[r]);
+    for (u32 r = 0; r < domain->mapping_count_; ++r) clear_record(domain, domain->mappings_[r]);
     if (publish_dirty(*domain) != E_OK || invalidate_range(*domain, 0, ~0ull) != E_OK ||
-        sync(*domain) != E_OK) {
-        quarantine(*domain);
-        return E_FAULT;
-    }
+        sync(*domain) != E_OK) { quarantine(*domain); return E_FAULT; }
     for (u32 r = 0; r < domain->mapping_count_; ++r) {
         const auto& record = domain->mappings_[r];
-        if (domain->owner_.release)
-            domain->owner_.release(domain->owner_.ctx, record.pa, record.length);
+        if (domain->owner_.release) domain->owner_.release(domain->owner_.ctx, record.pa, record.length);
         counter_inc(IOMMU_UNMAP_OPS);
     }
-    for (u32 t = 0; t < domain->table_count_; ++t)
-        mm::free_page(domain->tables_[t]);
+    for (u32 t = 0; t < domain->table_count_; ++t) mm::free_page(domain->tables_[t]);
     domain->mapping_count_ = domain->table_count_ = domain->pinned_pages_ = 0;
     domain->root_table_ = 0;
     domain->in_use_ = false;

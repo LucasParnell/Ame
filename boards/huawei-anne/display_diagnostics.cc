@@ -1,8 +1,9 @@
 #include "display_diagnostics.h"
+#include "anko/panic_screen.h"
 #include "anko/spinlock.h"
 #include "boot_diagnostics.h"
 #include "debug_io.h"
-#include "anko/panic_screen.h"
+#include "scanout.h"
 #ifdef ANKO_ANNE_FRAMEBUFFER
 #include "anko/framebuffer_console.h"
 #endif
@@ -10,23 +11,23 @@
 extern "C" u64 g_boot_el;
 namespace anne::native_display {
 namespace {
-u32 read(u64 base, u32 offset) {
-    return *reinterpret_cast<volatile u32*>(base + offset);
-}
-void text(const char* s) {
+u32 read(u64 base, u32 offset) { return *reinterpret_cast<volatile u32 *>(base + offset); }
+void text(const char *s) {
     usize size = 0;
-    while (s[size])
+    while (s[size]) {
         ++size;
+    }
     boot_log_write(s, size);
 }
 void value(u64 v) {
     char output[19] = {'0', 'x'};
-    for (u32 i = 0; i < 16; ++i)
+    for (u32 i = 0; i < 16; ++i) {
         output[i + 2] = "0123456789abcdef"[(v >> ((15 - i) * 4)) & 15];
+    }
     output[18] = ' ';
     boot_log_write(output, sizeof(output));
 }
-template <usize N> void dump(const char* name, u64 base, const u32 (&offsets)[N]) {
+template <usize N> void dump(const char *name, u64 base, const u32 (&offsets)[N]) {
     text("DISPLAY ");
     text(name);
     text(" base=");
@@ -80,9 +81,9 @@ Pipeline pipeline(Channel c) {
     p.dfc_padding = read(dma, 0x124);
     return p;
 }
-void paint_pattern(const minimal::Buffer& fb, u64 el) {
+void paint_pattern(const minimal::Buffer &fb, u64 el) {
     constexpr u32 left = 64, top = 144, scale = 8;
-    const char* label = el == 1 ? "ANKO EL1" : "ANKO EL2";
+    const char *label = el == 1 ? "ANKO EL1" : "ANKO EL2";
     for (u32 y = 0; y < fb.height; ++y) {
         for (u32 x = 0; x < fb.width; ++x) {
             u32 rgb = el == 1 ? 0x00ff00 : 0xff00ff;
@@ -92,15 +93,17 @@ void paint_pattern(const minimal::Buffer& fb, u64 el) {
                 if (x >= left && y >= top) {
                     const u32 cx = (x - left) / scale, cy = (y - top) / scale;
                     if (cy < 7 && cx < 48 && cx % 6 < 5 &&
-                        (minimal::glyph(label[cx / 6], cy) & (1u << (4 - cx % 6))))
+                        (minimal::glyph(label[cx / 6], cy) & (1u << (4 - cx % 6)))) {
                         rgb = 0xffffff;
+                    }
                 }
             }
             const u64 address = fb.address + u64{y} * fb.stride + x * fb.bpp();
-            if (fb.bpp() == 2)
-                *reinterpret_cast<volatile u16*>(address) = minimal::pixel(fb.format, rgb);
-            else
-                *reinterpret_cast<volatile u32*>(address) = minimal::pixel(fb.format, rgb);
+            if (fb.bpp() == 2) {
+                *reinterpret_cast<volatile u16 *>(address) = minimal::pixel(fb.format, rgb);
+            } else {
+                *reinterpret_cast<volatile u32 *>(address) = minimal::pixel(fb.format, rgb);
+            }
         }
     }
 }
@@ -110,36 +113,35 @@ kernel::SpinLock screen_lock{};
 bool screen_enabled;
 char screen_line[512];
 u32 screen_line_length;
-bool prefix(const char* value, const char* start) {
-    for (u32 i = 0; start[i]; ++i)
-        if (value[i] != start[i])
+bool prefix(const char *value, const char *start) {
+    for (u32 i = 0; start[i]; ++i) {
+        if (value[i] != start[i]) {
             return false;
+        }
+    }
     return true;
 }
 void screen_commit_line() {
     screen_line[screen_line_length] = '\0';
+    // Checkpoints already update the fixed status row. Keep detailed per-CPU
+    // telemetry in the retained log so it cannot page away service messages.
     if (!screen_line_length || prefix(screen_line, "DISPLAY ") || prefix(screen_line, " reg=") ||
-        prefix(screen_line, "CTOR ") || prefix(screen_line, "LED ") ||
-        prefix(screen_line, "AMEANKO1 ") || prefix(screen_line, "RUN tag=")) {
+        prefix(screen_line, "BOOT ") || prefix(screen_line, "RESSHA ") ||
+        prefix(screen_line, "CACHE ") || prefix(screen_line, "FIQ_SOURCE ") ||
+        prefix(screen_line, "CPU_FEATURES ") || prefix(screen_line, "CPU ") ||
+        prefix(screen_line, "EL0 first_svc=") || prefix(screen_line, "CTOR ") ||
+        prefix(screen_line, "LED ") || prefix(screen_line, "AMEANKO1 ") ||
+        prefix(screen_line, "RUN tag=")) {
         screen_line_length = 0;
         return;
     }
-    u32 length = screen_line_length;
-    if (prefix(screen_line, "BOOT ")) {
-        for (u32 i = 0; i + 6 < length; ++i) {
-            if (screen_line[i] == ' ' && prefix(screen_line + i, " tick=")) {
-                length = i;
-                break;
-            }
-        }
-    }
-    screen.write(screen_line, length);
+    screen.write(screen_line, screen_line_length);
     screen.putchar('\n');
     screen_line_length = 0;
 }
 #endif
 } // namespace
-void snapshot(const char* phase, bool paint) {
+void snapshot(const char *phase, bool paint) {
     text("\nDISPLAY begin phase=");
     text(phase);
     text("\n");
@@ -178,7 +180,7 @@ void snapshot(const char* phase, bool paint) {
                                0x100, 0x10c, 0x110, 0x114, 0x124, 0x850, 0x900, 0x914};
         dump("rdma_dfc", kDssBase + c.offset, dma);
         const Pipeline p = pipeline(c);
-        const char* why = rejection(p);
+        const char *why = rejection(p);
         text("DISPLAY candidate channel=");
         value(c.index);
         text("reject=");
@@ -211,23 +213,26 @@ bool bind_console() {
     screen_line_length = 0;
     for (Channel channel : kChannels) {
         const Pipeline p = pipeline(channel);
-        if (rejection(p) || ((p.dma.control >> 3) & 31) < 5)
+        if (rejection(p) || ((p.dma.control >> 3) & 31) < 5) {
             continue;
+        }
         const libk::Framebuffer32 fb{p.dma.address, 1080, 2280};
-        if (!libk::framebuffer_fits(fb, kLogoBase, kLogoBytes))
+        if (!libk::framebuffer_fits(fb, kLogoBase, kLogoBytes)) {
             continue;
+        }
         libk::framebuffer_fill(fb, console::FramebufferConsole::kBackground);
         // Row 0 of the former viewport is kept as a fixed status line: the
         // log viewport wraps, so without it the newest stage can land mid-screen.
         if (!screen.bind(fb, kLogoBase, kLogoBytes, {64, 256, 952, 1928, 2},
-                         console::FramebufferConsole::Overflow::Wrap))
+                         console::FramebufferConsole::Overflow::Wrap)) {
             continue;
+        }
         // Bound here rather than in boot_caps: this runs at MmuDone, before the
         // eMMC/capability panics that a bring-up boot actually hits, so the panic
         // screen is live for the whole of the rest of boot. Same channel as the
         // console, and the stride comes from the hardware rather than from an
         // assumption about row padding.
-        anko::panic_screen::bind(reinterpret_cast<volatile u32*>(p.dma.address), 1080, 2280,
+        anko::panic_screen::bind(reinterpret_cast<volatile u32 *>(p.dma.address), 1080, 2280,
                                  (p.dma.stride * 16u) / 4u);
         anko::panic_screen::set_flush_hook(&panic_flush);
         screen.draw_text(64, 144, 3, g_boot_el == 1 ? "ANKO EL1" : "ANKO EL2", 0xff7ee6a8);
@@ -246,11 +251,9 @@ bool bind_console() {
     boot_log_flush();
     return false;
 }
-void panic_flush(u64 base, u32 bytes) {
-    debug_clean(base, bytes);
-}
+void panic_flush(u64 base, u32 bytes) { debug_clean(base, bytes); }
 
-bool framebuffer(u64& address, u32& width, u32& height, u32& stride) {
+bool framebuffer(u64 &address, u32 &width, u32 &height, u32 &stride) {
     for (Channel channel : kChannels) {
         const Pipeline p = pipeline(channel);
         if (!rejection(p) && ((p.dma.control >> 3) & 31) >= 5) {
@@ -267,7 +270,7 @@ bool framebuffer(u64& address, u32& width, u32& height, u32& stride) {
     return false;
 }
 
-bool framebuffer(u64& address, u32& width, u32& height) {
+bool framebuffer(u64 &address, u32 &width, u32 &height) {
     u32 stride = 0;
     return framebuffer(address, width, height, stride);
 }
@@ -276,50 +279,92 @@ void handoff_console() {
     kernel::LockGuard guard(screen_lock);
     __atomic_store_n(&screen_enabled, false, __ATOMIC_RELEASE);
 }
-void console_status(const char* text) {
+void console_status(const char *text) {
     // The panic screen owns the glass from the moment it is painted. This check
     // is deliberately lock-free and comes before the guard: a status line at
     // (64,224) would land inside the QR code.
-    if (anko::panic_screen::painted())
+    if (anko::panic_screen::painted()) {
         return;
+    }
     kernel::LockGuard guard(screen_lock);
-    if (!screen_enabled || !text)
+    if (!screen_enabled || !text) {
         return;
+    }
     char line[60];
     u32 n = 0;
     while (text[n] && n < 59) {
         line[n] = text[n];
         ++n;
     }
-    while (n < 59)
+    while (n < 59) {
         line[n++] = ' ';
+    }
     line[59] = '\0';
     // Same cell as the viewport's first row, so it never shifts with the ring.
     screen.draw_text(64, 224, 2, line, 0xffffd070);
 }
 void console_putchar(char c) {
-    if (anko::panic_screen::painted())
+    if (anko::panic_screen::painted()) {
         return;
+    }
     kernel::LockGuard guard(screen_lock);
-    if (!screen_enabled)
+    if (!screen_enabled) {
         return;
-    if (c == '\n')
+    }
+    if (c == '\n') {
         screen_commit_line();
-    else if (screen_line_length + 1 < sizeof(screen_line))
+    } else if (screen_line_length + 1 < sizeof(screen_line)) {
         screen_line[screen_line_length++] = c;
+    }
 }
 void console_flush() {
     kernel::LockGuard guard(screen_lock);
     u64 address;
     u32 bytes;
-    if (screen_enabled && screen.take_dirty(address, bytes))
+    if (screen_enabled && screen.take_dirty(address, bytes)) {
         debug_clean(address, bytes);
+    }
 }
-bool console_active() {
-    return screen_enabled;
+bool console_active() { return screen_enabled; }
+u64 console_characters() { return screen.characters(); }
+namespace {
+scanout::State scanout_state;
+struct ScanoutIo {
+    u32 read(u32 offset) { return *reinterpret_cast<volatile u32 *>(kDssBase + offset); }
+    void write(u32 offset, u32 value) {
+        *reinterpret_cast<volatile u32 *>(kDssBase + offset) = value;
+    }
+    void barrier() { asm volatile("dsb sy" ::: "memory"); }
+};
+} // namespace
+bool scanout_prepare() {
+    ScanoutIo io;
+    if (scanout_state.ready) {
+        return !scanout_state.faulted;
+    }
+    for (auto channel : kChannels) {
+        if (scanout_state.prepare(io, pipeline(channel))) {
+            return true;
+        }
+    }
+    return false;
 }
-u64 console_characters() {
-    return screen.characters();
+int scanout_step(int slot, u64 address, u64 now) {
+    ScanoutIo io;
+    return scanout_state.step(io, slot, address, now);
+}
+u32 scanout_status() {
+    return (scanout_state.ready ? 1u : 0u) | (scanout_state.live() ? 2u : 0u) |
+           (scanout_state.faulted ? 4u : 0u) | (scanout_state.underflows ? 8u : 0u) |
+           (static_cast<u32>(scanout_state.flips & 0x7fffff) << 8);
+}
+void scanout_emergency() {
+    if (!scanout_state.live()) {
+        return;
+    }
+    ScanoutIo io;
+    scanout_state.program(io, -1, 0);
+    scanout_state.faulted = true;
 }
 #endif
 } // namespace anne::native_display

@@ -1,4 +1,4 @@
-"""Exercise real FP/NEON register isolation through the production EL2 monitor."""
+"""Exercise FP/NEON isolation and host timer preemption through the real EL2 monitor."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,6 +10,21 @@ except ImportError:
     from test_boot_cache import llvm_tool
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class PhysicalTimer(unittest.TestCase):
+    def test_guest_register_encoding_masks_and_signed_deadlines(self):
+        with tempfile.TemporaryDirectory(prefix='ame-physical-timer-') as directory:
+            probe = str(Path(directory) / 'probe')
+            result = subprocess.run([
+                'clang++', '-std=c++23', '-O2', '-g', '-Wall', '-Wextra', '-Werror',
+                '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                '-I'+str(ROOT/'kernel/include'), '-I'+str(ROOT/'shared/include'),
+                '-idirafter', str(ROOT/'lib/include'), str(ROOT/'tests/arm64_timer_probe.cc'),
+                '-o', probe], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([probe], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 @unittest.skipUnless(shutil.which('qemu-system-aarch64') and llvm_tool('clang++') and

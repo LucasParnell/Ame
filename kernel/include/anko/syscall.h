@@ -126,7 +126,8 @@ enum Syscall : unsigned {
         MX_NR_VM_SHARED_MEMORY_INSPECT, // (shared, SharedArenaInfo*, len)
     SYS_WAIT_DOORBELL_UNTIL = MX_NR_WAIT_DOORBELL_UNTIL,
     SYS_PLATFORM_CONTROL = MX_NR_PLATFORM_CONTROL,
-    SYS_COUNT = MX_NR_DEBUG_READ + 1,
+    SYS_VM_MALI_ATTACH = MX_NR_VM_MALI_ATTACH,
+    SYS_COUNT = MX_NR_VM_MALI_ATTACH + 1,
 };
 
 static_assert(static_cast<unsigned>(SYS_YIELD) == static_cast<unsigned>(MX_NR_YIELD),

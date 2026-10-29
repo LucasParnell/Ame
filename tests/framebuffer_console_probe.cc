@@ -6,8 +6,7 @@
 int main() {
     constexpr u32 width = 128, height = 128, guard = 16, untouched = 0x12345678;
     static u32 storage[width * height + 2 * guard];
-    for (auto& pixel : storage)
-        pixel = untouched;
+    for (auto& pixel : storage) pixel = untouched;
     const u64 address = reinterpret_cast<u64>(storage + guard);
     console::FramebufferConsole screen;
     const libk::Framebuffer32 fb{address, width, height};
@@ -27,8 +26,7 @@ int main() {
     assert(screen.cell(2, 0) == 'f' && screen.cell(3, 0) == 'f');
     screen.write("\rA\bB\tC", 7);
     assert(screen.cell(3, 0) == 'B' && screen.cell(3, 4) == 'C');
-    u64 dirty;
-    u32 bytes;
+    u64 dirty; u32 bytes;
     assert(screen.take_dirty(dirty, bytes));
     assert(dirty == address + 32 * width * 4 && bytes == 64 * width * 4);
     assert(!screen.take_dirty(dirty, bytes));
@@ -53,25 +51,20 @@ int main() {
     // stale line survives above the newest one.
     assert(screen.cell(0, 0) == 'f' && screen.cell(0, 1) == 'i');
     for (u32 row = 1; row < 4; ++row)
-        for (u32 col = 0; col < screen.columns(); ++col)
-            assert(screen.cell(row, col) == ' ');
+        for (u32 col = 0; col < screen.columns(); ++col) assert(screen.cell(row, col) == ' ');
     assert(screen.take_dirty(dirty, bytes));
     assert(dirty == address + 32 * width * 4 && bytes == 64 * width * 4);
     // The banner above y=24 was painted earlier; everything else outside the
     // text viewport must still be untouched.
     for (u32 y = 24; y < height; ++y)
         if (y < 32 || y >= 96)
-            for (u32 x = 0; x < width; ++x)
-                assert(storage[guard + y * width + x] == untouched);
+            for (u32 x = 0; x < width; ++x) assert(storage[guard + y * width + x] == untouched);
     static u32 phone[1080 * 2280];
-    for (auto& pixel : phone)
-        pixel = untouched;
+    for (auto& pixel : phone) pixel = untouched;
     const u64 phone_address = reinterpret_cast<u64>(phone);
-    assert(screen.bind({phone_address, 1080, 2280}, phone_address, sizeof(phone),
-                       {64, 224, 952, 1960, 2}));
+    assert(screen.bind({phone_address, 1080, 2280}, phone_address, sizeof(phone), {64, 224, 952, 1960, 2}));
     assert(screen.columns() == 59 && screen.rows() == 61);
     screen.draw_text(64, 144, 3, "ANKO EL1", 0xff7ee6a8);
     for (u32 y = 0; y < 128; ++y)
-        for (u32 x = 0; x < 1080; ++x)
-            assert(phone[y * 1080 + x] == untouched);
+        for (u32 x = 0; x < 1080; ++x) assert(phone[y * 1080 + x] == untouched);
 }

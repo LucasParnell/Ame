@@ -89,8 +89,7 @@ static void spawn_child(CapHandle* process, CapHandle* thread, uint64_t* identit
 
 static bool poll_exit(uint64_t* identity, long* status) {
     auto event = sys_supervisor_poll(supervisor);
-    if (event.value <= 0)
-        return false;
+    if (event.value <= 0) return false;
     *identity = static_cast<uint64_t>(event.value);
     *status = event.detail;
     return true;
@@ -107,8 +106,7 @@ static void await_exit(uint64_t identity, long expected, const char* message) {
             return;
         }
         if (exit_doorbell) {
-            check(!mx_doorbell_wait_until(exit_doorbell, counter, deadline),
-                  "exit notification wait");
+            check(!mx_doorbell_wait_until(exit_doorbell, counter, deadline), "exit notification wait");
         } else {
             sys_yield();
         }
@@ -147,8 +145,7 @@ static void test_exit_notification_binding() {
     await_exit(identity, -1, "notified exit record");
     const auto notify_deadline = mx_clock_ns() + 3000000000ull;
     while (sys_doorbell_read(exit_doorbell) == expected && mx_clock_ns() < notify_deadline)
-        check(!mx_doorbell_wait_until(exit_doorbell, expected, notify_deadline),
-              "retained notification");
+        check(!mx_doorbell_wait_until(exit_doorbell, expected, notify_deadline), "retained notification");
     check(sys_doorbell_read(exit_doorbell) != expected, "exit increments retained doorbell");
 
     // Rebinding an already published exit must signal the new destination.
@@ -158,8 +155,7 @@ static void test_exit_notification_binding() {
     const auto deadline = mx_clock_ns() + 3000000000ull;
     // A counter change from either this completion or the previous one is not
     // enough: wait for the current process's teardown to revoke its handles.
-    while (sys_cap_identify(process) >= 0 && mx_clock_ns() < deadline)
-        sys_yield();
+    while (sys_cap_identify(process) >= 0 && mx_clock_ns() < deadline) sys_yield();
     // Completion publishes after revocation; wait for its notification as well.
     while (sys_doorbell_read(exit_doorbell) == before && mx_clock_ns() < deadline)
         check(!mx_doorbell_wait_until(exit_doorbell, before, deadline), "completion before rebind");
@@ -186,7 +182,8 @@ static void test_generation_matching() {
     spawn_child(&process, &thread, &first, "test.busy");
     check(!sys_kill(process), "first kill");
     await_exit(first, -1, "first exit identity");
-    check(sys_cap_identify(process) < 0 && sys_cap_identify(thread) < 0, "stale caps after exit");
+    check(sys_cap_identify(process) < 0 && sys_cap_identify(thread) < 0,
+          "stale caps after exit");
 
     CapHandle restarted = kNullCap, restarted_thread = kNullCap;
     uint64_t second = 0;
@@ -236,9 +233,7 @@ static void test_simultaneous_exits() {
         long status = 0;
         if (poll_exit(&got, &status)) {
             uint32_t index = 0;
-            for (; index < kBatch; ++index)
-                if (identities[index] == got)
-                    break;
+            for (; index < kBatch; ++index) if (identities[index] == got) break;
             check(index < kBatch, "foreign exit event");
             check(!(seen & (1u << index)), "duplicate exit event");
             check(status == -1, "exit status");
@@ -299,9 +294,7 @@ static uint32_t g_service_count = 0;
 
 static uint32_t ready_mask() {
     uint32_t mask = 0;
-    for (uint32_t i = 0; i < g_service_count; ++i)
-        if (g_services[i].ready)
-            mask |= 1u << i;
+    for (uint32_t i = 0; i < g_service_count; ++i) if (g_services[i].ready) mask |= 1u << i;
     return mask;
 }
 static bool dependencies_ready(const Service& svc) {
@@ -312,14 +305,11 @@ static void drain_exits() {
     for (;;) {
         uint64_t got = 0;
         long status = 0;
-        if (!poll_exit(&got, &status))
-            break;
+        if (!poll_exit(&got, &status)) break;
         uint64_t identities[kMaxServices];
-        for (uint32_t i = 0; i < g_service_count; ++i)
-            identities[i] = g_services[i].identity;
+        for (uint32_t i = 0; i < g_service_count; ++i) identities[i] = g_services[i].identity;
         const uint32_t index = match_identity(identities, g_service_count, got);
-        if (index == g_service_count)
-            continue;
+        if (index == g_service_count) continue;
         Service& svc = g_services[index];
         svc.process = svc.thread = kNullCap;
         svc.identity = 0;
@@ -327,23 +317,19 @@ static void drain_exits() {
         const auto decision = restart_decision(svc.stopping, svc.desired, svc.automatic,
                                                svc.restart_pending, svc.failures);
         svc.stopping = false;
-        if (decision.failed && svc.failures < kFailureCap)
-            ++svc.failures;
+        if (decision.failed && svc.failures < kFailureCap) ++svc.failures;
         svc.restart_pending = decision.restart;
-        if (decision.delay_ns)
-            svc.retry_at = mx_clock_ns() + decision.delay_ns;
+        if (decision.delay_ns) svc.retry_at = mx_clock_ns() + decision.delay_ns;
     }
 }
 
 static bool stop_mask(uint32_t mask) {
     for (uint32_t i = 0; i < g_service_count; ++i) {
         Service& svc = g_services[i];
-        if (!(mask & (1u << i)))
-            continue;
+        if (!(mask & (1u << i))) continue;
         svc.ready = false;
         svc.restart_pending = svc.desired;
-        if (!svc.process)
-            continue;
+        if (!svc.process) continue;
         svc.stopping = true;
         check(!sys_kill(svc.process), "dependent kill");
     }
@@ -352,11 +338,9 @@ static bool stop_mask(uint32_t mask) {
         drain_exits();
         bool stopped = true;
         for (uint32_t i = 0; i < g_service_count; ++i) {
-            if ((mask & (1u << i)) && g_services[i].process)
-                stopped = false;
+            if ((mask & (1u << i)) && g_services[i].process) stopped = false;
         }
-        if (stopped)
-            return true;
+        if (stopped) return true;
         sys_yield();
     }
     return false;
@@ -367,16 +351,12 @@ static bool supervise() {
     bool progress = false;
     uint32_t affected = 0;
     for (uint32_t i = 0; i < g_service_count; ++i) {
-        if (!g_services[i].process && g_services[i].restart_pending)
-            affected |= 1u << i;
+        if (!g_services[i].process && g_services[i].restart_pending) affected |= 1u << i;
     }
-    if (!affected)
-        return progress;
+    if (!affected) return progress;
     uint32_t dependencies[kMaxServices];
-    for (uint32_t i = 0; i < g_service_count; ++i)
-        dependencies[i] = g_services[i].depends;
-    const uint32_t dependents =
-        dependent_closure(dependencies, g_service_count, affected) & ~affected;
+    for (uint32_t i = 0; i < g_service_count; ++i) dependencies[i] = g_services[i].depends;
+    const uint32_t dependents = dependent_closure(dependencies, g_service_count, affected) & ~affected;
     for (uint32_t i = 0; i < g_service_count; ++i) {
         if ((dependents & (1u << i)) && g_services[i].process) {
             check(stop_mask(dependents), "dependents stopped");
@@ -404,12 +384,12 @@ static bool supervise() {
 }
 
 static void test_dependency_restart() {
-    g_service_count = 3; // 0: root, 1: depends on 0, 2: depends on 1
+    g_service_count = 3;  // 0: root, 1: depends on 0, 2: depends on 1
     for (uint32_t i = 0; i < g_service_count; ++i) {
         g_services[i] = Service{};
         g_services[i].desired = true;
         g_services[i].automatic = true;
-        g_services[i].restart_pending = true; // every desired service wants to run
+        g_services[i].restart_pending = true;  // every desired service wants to run
     }
     g_services[1].depends = 1u << 0;
     g_services[2].depends = 1u << 1;
@@ -431,8 +411,10 @@ static void test_dependency_restart() {
     deadline = mx_clock_ns() + 3000000000ull;
     while (mx_clock_ns() < deadline) {
         supervise();
-        if (ready_mask() == (1u << g_service_count) - 1 && g_services[0].identity != root &&
-            g_services[1].identity != dependent1 && g_services[2].identity != dependent2) {
+        if (ready_mask() == (1u << g_service_count) - 1 &&
+            g_services[0].identity != root &&
+            g_services[1].identity != dependent1 &&
+            g_services[2].identity != dependent2) {
             restarted = true;
             break;
         }
@@ -450,8 +432,7 @@ extern "C" [[noreturn]] void _start() {
     check(!sys_map_page(archive, 0x20000000, RIGHT_READ), "bundle mapping");
     bundle.data = reinterpret_cast<const uint8_t*>(0x20000000);
     bundle.size = mochi::boot::find(boot, "boot.initrd")->aux0;
-    (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)),
-                       libk::as_bytes(bundle.data, sizeof(bundle.header)), sizeof(bundle.header));
+    (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)), libk::as_bytes(bundle.data, sizeof(bundle.header)), sizeof(bundle.header));
     print("supervision regression started\n");
 
     test_exit_notification_binding();

@@ -20,10 +20,8 @@ static u32 owned_frees;
 
 namespace mm {
 PhysAddr alloc_page() {
-    if (allocation_budget == 0)
-        return 0;
-    if (allocation_budget > 0)
-        --allocation_budget;
+    if (allocation_budget == 0) return 0;
+    if (allocation_budget > 0) --allocation_budget;
     auto* p = std::aligned_alloc(PAGE_SIZE, PAGE_SIZE);
     assert(p);
     std::memset(p, 0xa5, PAGE_SIZE); // detect uninitialized descriptors/holes
@@ -35,31 +33,20 @@ void free_page(PhysAddr pa) {
     assert(pages.erase(pa) == 1);
     std::free(reinterpret_cast<void*>(pa));
 }
-void free_page_for(u32, PhysAddr pa) {
-    ++owned_frees;
-    free_page(pa);
+void free_page_for(u32, PhysAddr pa) { ++owned_frees; free_page(pa); }
 }
-} // namespace mm
 namespace object {
-Record* acquire(void* p) {
-    return reinterpret_cast<Record*>(p);
+Record* acquire(void* p) { return reinterpret_cast<Record*>(p); }
+void release(Record*) {}
 }
-void release(Record*) {
-}
-} // namespace object
 namespace sched {
 object::Ref<Process> find_process(u32 pid) {
     return pid == process.pid ? object::Ref<Process>(&process) : object::Ref<Process>{};
 }
-} // namespace sched
-[[noreturn]] void panic(const char*) {
-    std::abort();
 }
+[[noreturn]] void panic(const char*) { std::abort(); }
 #ifdef ANKO_BOARD_HUAWEI_ANNE
-namespace anne {
-void boot_checkpoint(BootStage) {
-}
-} // namespace anne
+namespace anne { void boot_checkpoint(BootStage) {} }
 #endif
 
 // Decode stage-1 tables independently; all identity leaves must remain L3.
@@ -68,18 +55,13 @@ static u64 descriptor(PhysAddr root, u64 va) {
     for (unsigned shift : {39, 30, 21}) {
         const auto* table = reinterpret_cast<const u64*>(root);
         const u64 link = table[(va >> shift) & 511];
-        if (!(link & 1))
-            return 0;
+        if (!(link & 1)) return 0;
         assert((link & 3) == 3);
         root = link & mask;
     }
     return reinterpret_cast<const u64*>(root)[(va >> 12) & 511];
 }
-struct Observed {
-    PhysAddr root;
-    u64 va, original;
-    bool broken;
-};
+struct Observed { PhysAddr root; u64 va, original; bool broken; };
 static std::vector<Observed> observed;
 extern "C" void anko_vm_test_tlbi() {
     ++tlbi_count;
@@ -87,10 +69,8 @@ extern "C" void anko_vm_test_tlbi() {
     // earlier shootdown. This catches make-before-break in the NC update path.
     for (auto& entry : observed) {
         const u64 value = descriptor(entry.root, entry.va);
-        if (!value)
-            entry.broken = true;
-        else if (value != entry.original)
-            assert(entry.broken);
+        if (!value) entry.broken = true;
+        else if (value != entry.original) assert(entry.broken);
     }
 }
 
@@ -140,8 +120,7 @@ static void partial_leaf_and_duplicate_batch() {
         if (va >= 0x10003000 && va < 0x10006000) {
             assert((pte & 0x0000fffffffff000ull) == va);
             assert((pte & 3) == 3 && !(pte & (1ull << 6))); // privileged only
-        } else
-            assert(pte == 0);
+        } else assert(pte == 0);
     }
     const auto count = pages.size();
     assert(!mm::map_identity_range(space, 0x10002000, 8192, true));
@@ -200,6 +179,27 @@ int main() {
     assert(second.pgd_phys && mm::g_identity_plan_valid);
     assert(((descriptor(second.pgd_phys, 0x401ff000) >> 2) & 7) == 2);
     assert(((descriptor(second.pgd_phys, 0x40202000) >> 2) & 7) == 0);
+
+    // Real Anne logo pixels begin 0xb00 bytes into a page. The whole span
+    // must use NC attributes, including the extra last page, in every alias.
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    constexpr u64 scanout = 0x5d964b00;
+    constexpr u64 pixel_bytes = 1080ull * 2280 * 4;
+    constexpr u64 pixel_offset = scanout & 4095;
+    constexpr u64 fb_base = scanout - pixel_offset;
+    constexpr u64 fb_size = (pixel_offset + pixel_bytes + 4095) & ~4095ull;
+    assert(!mm::register_noncached_range(scanout, fb_size));
+    assert(mm::register_noncached_range(fb_base, fb_size));
+    assert(mm::range_is_noncached(fb_base, fb_size));
+    assert(((descriptor(first.pgd_phys, fb_base) >> 2) & 7) == 2);
+    assert(((descriptor(first.pgd_phys, fb_base + fb_size - 4096) >> 2) & 7) == 2);
+    constexpr u64 fb_va = 0x30000000;
+    assert(mm::vm_map_range(first, fb_va, fb_base, fb_size, RIGHT_READ | RIGHT_WRITE));
+    assert(mm::user_va_to_pa(first, fb_va + pixel_offset, RIGHT_WRITE, &translated));
+    assert(translated == scanout);
+    assert(mm::user_va_to_pa(first, fb_va + pixel_offset + pixel_bytes - 1, RIGHT_WRITE, &translated));
+    assert(translated == scanout + pixel_bytes - 1);
+#endif
 
     const auto allocated = pages.size();
     for (int budget = 0; budget < 8; ++budget) {

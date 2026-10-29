@@ -158,8 +158,7 @@ struct MxGpuHello {
     mx_u64_t feature_bits;
     mx_u64_t boot_generation;
 };
-MX_STATIC_ASSERT(sizeof(struct MxGpuHello) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_HELLO must fit one payload");
+MX_STATIC_ASSERT(sizeof(struct MxGpuHello) <= MX_GPU_INLINE_PAYLOAD, "GPU_HELLO must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuHello) == 24, "GPU_HELLO size drift");
 
 struct MxGpuHelloReply {
@@ -171,7 +170,7 @@ struct MxGpuHelloReply {
     mx_u64_t boot_generation;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuHelloReply) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_HELLO reply must fit one payload");
+              "GPU_HELLO reply must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuHelloReply) == 32, "GPU_HELLO reply size drift");
 
 // --- GPU_ENUM_OUTPUTS -------------------------------------------------------
@@ -183,9 +182,8 @@ struct MxGpuEnumOutputsRequest {
     mx_u32_t flags;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuEnumOutputsRequest) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_ENUM_OUTPUTS request must fit one payload");
-MX_STATIC_ASSERT(sizeof(struct MxGpuEnumOutputsRequest) == 24,
-                 "GPU_ENUM_OUTPUTS request size drift");
+              "GPU_ENUM_OUTPUTS request must fit one payload");
+MX_STATIC_ASSERT(sizeof(struct MxGpuEnumOutputsRequest) == 24, "GPU_ENUM_OUTPUTS request size drift");
 
 struct MxGpuEnumOutputsReply {
     mx_status_t status;
@@ -199,7 +197,7 @@ struct MxGpuEnumOutputsReply {
     mx_u8_t name[8];
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuEnumOutputsReply) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_ENUM_OUTPUTS reply must fit one payload");
+              "GPU_ENUM_OUTPUTS reply must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuEnumOutputsReply) == 48, "GPU_ENUM_OUTPUTS reply size drift");
 
 // --- GPU_GET_MODES ----------------------------------------------------------
@@ -211,7 +209,7 @@ struct MxGpuGetModesRequest {
     mx_u32_t flags;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuGetModesRequest) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_GET_MODES request must fit one payload");
+              "GPU_GET_MODES request must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuGetModesRequest) == 24, "GPU_GET_MODES request size drift");
 
 struct MxGpuGetModesReply {
@@ -226,7 +224,7 @@ struct MxGpuGetModesReply {
     mx_u8_t name[8];
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuGetModesReply) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_GET_MODES reply must fit one payload");
+              "GPU_GET_MODES reply must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuGetModesReply) == 48, "GPU_GET_MODES reply size drift");
 
 // --- GPU_BUFFER_REGISTER ----------------------------------------------------
@@ -242,9 +240,8 @@ struct MxGpuBufferRegisterRequest {
     mx_u32_t reserved0;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuBufferRegisterRequest) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_BUFFER_REGISTER request must fit one payload");
-MX_STATIC_ASSERT(sizeof(struct MxGpuBufferRegisterRequest) == 40,
-                 "GPU_BUFFER_REGISTER request size drift");
+              "GPU_BUFFER_REGISTER request must fit one payload");
+MX_STATIC_ASSERT(sizeof(struct MxGpuBufferRegisterRequest) == 40, "GPU_BUFFER_REGISTER request size drift");
 
 struct MxGpuBufferRegisterReply {
     mx_status_t status;
@@ -254,9 +251,8 @@ struct MxGpuBufferRegisterReply {
     mx_u32_t reserved1;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuBufferRegisterReply) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_BUFFER_REGISTER reply must fit one payload");
-MX_STATIC_ASSERT(sizeof(struct MxGpuBufferRegisterReply) == 32,
-                 "GPU_BUFFER_REGISTER reply size drift");
+              "GPU_BUFFER_REGISTER reply must fit one payload");
+MX_STATIC_ASSERT(sizeof(struct MxGpuBufferRegisterReply) == 32, "GPU_BUFFER_REGISTER reply size drift");
 
 // --- GPU_BUFFER_UNREGISTER --------------------------------------------------
 
@@ -265,18 +261,17 @@ struct MxGpuBufferUnregisterRequest {
     mx_u64_t boot_generation;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuBufferUnregisterRequest) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_BUFFER_UNREGISTER request must fit one payload");
+              "GPU_BUFFER_UNREGISTER request must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuBufferUnregisterRequest) == 16,
-                 "GPU_BUFFER_UNREGISTER request size drift");
+              "GPU_BUFFER_UNREGISTER request size drift");
 
 struct MxGpuBufferUnregisterReply {
     mx_status_t status;
     mx_u64_t boot_generation;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuBufferUnregisterReply) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_BUFFER_UNREGISTER reply must fit one payload");
-MX_STATIC_ASSERT(sizeof(struct MxGpuBufferUnregisterReply) == 16,
-                 "GPU_BUFFER_UNREGISTER reply size drift");
+              "GPU_BUFFER_UNREGISTER reply must fit one payload");
+MX_STATIC_ASSERT(sizeof(struct MxGpuBufferUnregisterReply) == 16, "GPU_BUFFER_UNREGISTER reply size drift");
 
 // --- GPU_SET_MODE -----------------------------------------------------------
 
@@ -289,7 +284,7 @@ struct MxGpuSetModeRequest {
     mx_u32_t reserved0;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuSetModeRequest) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_SET_MODE request must fit one payload");
+              "GPU_SET_MODE request must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuSetModeRequest) == 40, "GPU_SET_MODE request size drift");
 
 struct MxGpuSetModeReply {
@@ -298,7 +293,7 @@ struct MxGpuSetModeReply {
     mx_u64_t boot_generation;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuSetModeReply) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_SET_MODE reply must fit one payload");
+              "GPU_SET_MODE reply must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuSetModeReply) == 24, "GPU_SET_MODE reply size drift");
 
 // --- GPU_PRESENT (asynchronous; spec §13.5) --------------------------------
@@ -312,7 +307,7 @@ struct MxGpuPresentRequest {
     MxGpuDamageRect damage;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuPresentRequest) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_PRESENT request must fit one payload");
+              "GPU_PRESENT request must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuPresentRequest) == 48, "GPU_PRESENT request size drift");
 
 // Enqueue acknowledgement: success only means the appliance accepted the
@@ -325,7 +320,7 @@ struct MxGpuPresentReply {
     mx_u32_t reserved1;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuPresentReply) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_PRESENT reply must fit one payload");
+              "GPU_PRESENT reply must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuPresentReply) == 32, "GPU_PRESENT reply size drift");
 
 // Completion notification. The slot `seq` carries the original request token so
@@ -338,7 +333,7 @@ struct MxGpuPresentComplete {
     mx_u32_t reserved0;
 };
 MX_STATIC_ASSERT(sizeof(struct MxGpuPresentComplete) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_PRESENT_COMPLETE must fit one payload");
+              "GPU_PRESENT_COMPLETE must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuPresentComplete) == 32, "GPU_PRESENT_COMPLETE size drift");
 
 // --- GPU_ERROR --------------------------------------------------------------
@@ -353,8 +348,7 @@ struct MxGpuError {
     mx_u32_t reserved0;
     mx_u32_t reserved1;
 };
-MX_STATIC_ASSERT(sizeof(struct MxGpuError) <= MX_GPU_INLINE_PAYLOAD,
-                 "GPU_ERROR must fit one payload");
+MX_STATIC_ASSERT(sizeof(struct MxGpuError) <= MX_GPU_INLINE_PAYLOAD, "GPU_ERROR must fit one payload");
 MX_STATIC_ASSERT(sizeof(struct MxGpuError) == 48, "GPU_ERROR size drift");
 
 // The control-ring frame for this protocol is the shared ring slot verbatim.
@@ -393,7 +387,7 @@ MX_STATIC_ASSERT(mx_gpu_opcodes_unique(), "GPU opcode values must be unique");
 // The bootstrap opcodes stay ahead of the reserved future block, and the future
 // block stays inside its reserved range.
 MX_STATIC_ASSERT(GPU_ERROR < MX_GPU_OPCODE_FUTURE_BASE,
-                 "bootstrap opcodes must precede the reserved future range");
+              "bootstrap opcodes must precede the reserved future range");
 MX_STATIC_ASSERT(GPU_BUFFER_CREATE >= MX_GPU_OPCODE_FUTURE_BASE &&
-                     GPU_GET_PROPERTIES <= MX_GPU_OPCODE_FUTURE_LIMIT,
-                 "future opcodes must live in the reserved range");
+                  GPU_GET_PROPERTIES <= MX_GPU_OPCODE_FUTURE_LIMIT,
+              "future opcodes must live in the reserved range");

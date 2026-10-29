@@ -29,14 +29,12 @@ constexpr Buffer validate(const Registers& r) {
     // portrait geometry. Reject IOVAs, compressed/tiled/cropped/transformed data.
     if (!(r.channel_control & 1) || (r.channel_control & 4) || !(r.ldi_control & 1) ||
         (r.dma_control & ((1u << 1) | (1u << 8) | (7u << 9) | (1u << 12) | (1u << 17))) ||
-        (format != 0 && format != 5 && format != 6) || r.stride >> 16 || r.x0 || r.y0 || r.mask0 ||
-        r.mask1 || width != 1080 || height != 2280 || stride < width * bpp || stride > 16384 ||
-        (r.address & 3) || r.address < kLogoBase)
-        return {};
+        (format != 0 && format != 5 && format != 6) || r.stride >> 16 || r.x0 || r.y0 || r.mask0 || r.mask1 ||
+        width != 1080 || height != 2280 || stride < width * bpp || stride > 16384 ||
+        (r.address & 3) || r.address < kLogoBase) return {};
     const std::uint64_t bytes = std::uint64_t{stride} * (height - 1) + width * bpp;
     const std::uint64_t offset = r.address - kLogoBase;
-    if (offset > kLogoSize || bytes > kLogoSize - offset)
-        return {};
+    if (offset > kLogoSize || bytes > kLogoSize - offset) return {};
     return {r.address, width, height, stride, bpp};
 }
-} // namespace anne::display
+}

@@ -257,7 +257,9 @@ struct VmMemory {
     u8 pad[5];
 };
 
-struct El2RunState {
+// The Cortex-A53 monitor shares this row across cached EL1 / uncached EL2.
+// Whole-line cache maintenance must never include neighboring Vcpu fields.
+struct alignas(64) El2RunState {
     u64 regs[31];
     u64 host_sp_el1;
     u64 pc;
@@ -299,8 +301,8 @@ struct El2RunState {
     u64 guest_irq_pending;
 
     /*
-     * Bit 0: mask the backing physical timer while the guest physical timer IRQ
-     *        is pending/active in the software VGIC.
+     * Bit 0: guest physical timer IRQ pending/active (software-only timer;
+     *        the hardware physical timer always belongs to the host).
      * Bit 1: mask the backing virtual timer while the guest virtual timer IRQ
      *        is pending/active in the software VGIC.
      */
@@ -390,6 +392,7 @@ static_assert(__builtin_offsetof(El2RunState, guest_sp_el0) == 592);
 static_assert(__builtin_offsetof(El2RunState, guest_afsr1_el1) == 696);
 static_assert(__builtin_offsetof(El2RunState, host_fpsimd) == 704);
 static_assert(__builtin_offsetof(El2RunState, guest_fpsimd) == 1232);
+static_assert(sizeof(El2RunState) % 64 == 0);
 struct VcpuSched {
     object::Record* context_lifetime;
     u32 sched_context_id;
@@ -698,6 +701,10 @@ SysError map_channel(Process& caller, CapHandle channel_cap, CapHandle vcpu_cap,
 // descriptor. Validates alignment, size (against the VM's staging memory) and
 // non-overlap; no-op-safe E_INVALID until map_channel() has run.
 SysError stage_channel(Process& caller, CapHandle channel_cap, u64 ipa, u64 size);
+// Rewrite the descriptor page's region table from the VM's current shared
+// arenas. Called after attachment and after a SharedGpu registration so the
+// guest's DMA_SHARED_GPU flag can never lag Anko's own state.
+void publish_shared_regions(Vm& owner);
 SysError notify_channel(Process& caller, CapHandle channel_cap);
 bool channel_hvc(Vcpu& vcpu, Vm& owner);
 void channel_publish(VmChannel& channel); // internal, CallGuard held

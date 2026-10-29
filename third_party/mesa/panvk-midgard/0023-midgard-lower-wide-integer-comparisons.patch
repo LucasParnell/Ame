@@ -1,0 +1,32 @@
+From: Ame Midgard bring-up
+Subject: [PATCH 23/23] midgard: lower 64-bit integer comparisons before scheduling
+
+Scalar branch predicates cannot consume 64-bit sources. The indexed gather
+bounds check was scheduled as CMP.le.i32, losing the high word and admitting
+source offsets of 4 GiB. Lower comparisons to pairs of 32-bit words before
+boolean lowering; run the configured int64 lowering in the optimization loop.
+
+--- a/src/panfrost/midgard/midgard_compile.c
++++ b/src/panfrost/midgard/midgard_compile.c
+@@ -504,6 +504,10 @@
+       NIR_PASS(progress, nir, nir_opt_cse);
+       NIR_PASS(progress, nir, nir_opt_peephole_select, 64, false, true);
+       NIR_PASS(progress, nir, nir_opt_algebraic);
++      /* Branch predicates execute on 16/32-bit scalar units. Lower wide
++       * comparisons before bool lowering and condition scheduling, otherwise
++       * a 64-bit bounds check silently compares only the low word. */
++      NIR_PASS(progress, nir, nir_lower_int64);
+       NIR_PASS(progress, nir, nir_opt_constant_folding);
+       NIR_PASS(progress, nir, nir_opt_undef);
+       NIR_PASS(progress, nir, nir_lower_undef_to_zero);
+--- a/src/panfrost/midgard/midgard_compile.h
++++ b/src/panfrost/midgard/midgard_compile.h
+@@ -89,7 +89,7 @@
+    .lower_pack_split = true,
+    .lower_pack_64_2x32_split = true,
+    .lower_unpack_64_2x32_split = true,
+-   .lower_int64_options = nir_lower_imul_2x32_64,
++   .lower_int64_options = nir_lower_imul_2x32_64 | nir_lower_icmp64,
+ 
+    .lower_doubles_options = nir_lower_dmod,
+ 

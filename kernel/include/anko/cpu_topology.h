@@ -13,4 +13,4 @@ struct CpuTopology {
     u64 system_reset;
 };
 CpuTopology read_cpu_topology(PhysAddr dtb, u64 boot_mpidr);
-} // namespace smp
+}

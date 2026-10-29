@@ -23,17 +23,14 @@ static inline bool try_resolve_request(const SpscEndpoint& ns, const char* name)
 static inline mx_status_t wait_resolve_reply(const SpscEndpoint& ns, MxEndpointDesc* out) {
     RingSlot slot{};
     for (;;) {
-        if (!ns.wait_recv(&slot))
-            return MX_ERR_DEAD;
+        if (!ns.wait_recv(&slot)) return MX_ERR_DEAD;
         MxEndpointDesc endpoint{};
         if (message_get(slot, &endpoint, MSG_NS_RESOLVE_REPLY)) {
-            if (out)
-                *out = endpoint;
+            if (out) *out = endpoint;
             return MX_OK;
         }
         mx_status_t status = MX_ERR_NOT_FOUND;
-        if (message_get(slot, &status, MSG_NS_ERROR))
-            return status;
+        if (message_get(slot, &status, MSG_NS_ERROR)) return status;
     }
 }
 

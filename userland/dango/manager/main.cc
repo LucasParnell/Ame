@@ -17,6 +17,8 @@
 #include "midix/abi/image.h"
 #include "midix/abi/dango_channel_guest.h"
 #include "midix/abi/dango_channel_test.h"
+#include "midix/abi/anne_gpu.h"
+#include "midix/abi/protocols/graphics_cache.h"
 #include "midix/abi/protocols/gpu.h"
 #include "gpu_linux.h"
 #include "mochi/va_layout.h"
@@ -73,6 +75,9 @@ struct LinuxArtifacts {
     dango::VmLayout layout;
     uint64_t entry;
     bool gpu_profile;
+    bool channel_profile;
+    bool mali_hardware;
+    bool mali_renderer;
     // Which guest userspace the artifact set carries (manifest `guest`). Absent
     // means the freestanding appliance initramfs; `lavapipe` is the libc guest
     // with a real Vulkan ICD, which only fits once the guest memory layout grows.
@@ -107,8 +112,9 @@ static void dango_counter(const char* key, uint64_t value) {
     // Keep failures visible even if the console service is blocked.
     sys_debug_puts(msg, slen(msg));
     console_log(msg);
-    while (true)
+    while (true) {
         sys_yield();
+    }
 }
 
 static bool aligned(uint64_t v) {
@@ -118,10 +124,12 @@ static bool aligned(uint64_t v) {
 static bool overlaps(uint64_t a_base, uint64_t a_size, uint64_t b_base, uint64_t b_size) {
     uint64_t a_end = 0;
     uint64_t b_end = 0;
-    if (!libk::checked_add(a_base, a_size, &a_end))
+    if (!libk::checked_add(a_base, a_size, &a_end)) {
         return true;
-    if (!libk::checked_add(b_base, b_size, &b_end))
+    }
+    if (!libk::checked_add(b_base, b_size, &b_end)) {
         return true;
+    }
     return a_base < b_end && a_end > b_base;
 }
 
@@ -129,95 +137,124 @@ static bool contains(uint64_t outer_base, uint64_t outer_size, uint64_t inner_ba
                      uint64_t inner_size) {
     uint64_t outer_end = 0;
     uint64_t inner_end = 0;
-    if (!libk::checked_add(outer_base, outer_size, &outer_end))
+    if (!libk::checked_add(outer_base, outer_size, &outer_end)) {
         return false;
-    if (!libk::checked_add(inner_base, inner_size, &inner_end))
+    }
+    if (!libk::checked_add(inner_base, inner_size, &inner_end)) {
         return false;
+    }
     return inner_base >= outer_base && inner_end <= outer_end && inner_end >= inner_base;
 }
 
 static bool validate_layout(const dango::VmLayout& layout) {
-    if (!aligned(layout.ram_base) || !aligned(layout.ram_size))
+    if (!aligned(layout.ram_base) || !aligned(layout.ram_size)) {
         return false;
-    if (!aligned(layout.kernel_load) || !aligned(layout.initramfs_load))
+    }
+    if (!aligned(layout.kernel_load) || !aligned(layout.initramfs_load)) {
         return false;
-    if (!aligned(layout.dtb_base) || !aligned(layout.dtb_size))
+    }
+    if (!aligned(layout.dtb_base) || !aligned(layout.dtb_size)) {
         return false;
-    if (!aligned(layout.mmio_base) || !aligned(layout.mmio_size))
+    }
+    if (!aligned(layout.mmio_base) || !aligned(layout.mmio_size)) {
         return false;
-    if (!aligned(layout.channel_base) || !aligned(layout.channel_size))
+    }
+    if (!aligned(layout.channel_base) || !aligned(layout.channel_size)) {
         return false;
-    if (layout.ram_size == 0 || layout.channel_size == 0)
+    }
+    if (layout.ram_size == 0 || layout.channel_size == 0) {
         return false;
-    if (!contains(layout.ram_base, layout.ram_size, layout.kernel_load, dango::kPageSize))
+    }
+    if (!contains(layout.ram_base, layout.ram_size, layout.kernel_load, dango::kPageSize)) {
         return false;
-    if (!contains(layout.ram_base, layout.ram_size, layout.initramfs_load, dango::kPageSize))
+    }
+    if (!contains(layout.ram_base, layout.ram_size, layout.initramfs_load, dango::kPageSize)) {
         return false;
-    if (!contains(layout.ram_base, layout.ram_size, layout.dtb_base, layout.dtb_size))
+    }
+    if (!contains(layout.ram_base, layout.ram_size, layout.dtb_base, layout.dtb_size)) {
         return false;
+    }
     // The hello layout reserves space inside RAM; the GPU transport must use
     // separate, non-DMA pages outside it. Reject a partial overlap in either case.
     if (overlaps(layout.ram_base, layout.ram_size, layout.channel_base, layout.channel_size) &&
-        !contains(layout.ram_base, layout.ram_size, layout.channel_base, layout.channel_size))
+        !contains(layout.ram_base, layout.ram_size, layout.channel_base, layout.channel_size)) {
         return false;
-    if (overlaps(layout.ram_base, layout.ram_size, layout.mmio_base, layout.mmio_size))
+    }
+    if (overlaps(layout.ram_base, layout.ram_size, layout.mmio_base, layout.mmio_size)) {
         return false;
-    if (overlaps(layout.dtb_base, layout.dtb_size, layout.mmio_base, layout.mmio_size))
+    }
+    if (overlaps(layout.dtb_base, layout.dtb_size, layout.mmio_base, layout.mmio_size)) {
         return false;
-    if (overlaps(layout.dtb_base, layout.dtb_size, layout.channel_base, layout.channel_size))
+    }
+    if (overlaps(layout.dtb_base, layout.dtb_size, layout.channel_base, layout.channel_size)) {
         return false;
-    if (overlaps(layout.mmio_base, layout.mmio_size, layout.channel_base, layout.channel_size))
+    }
+    if (overlaps(layout.mmio_base, layout.mmio_size, layout.channel_base, layout.channel_size)) {
         return false;
+    }
     return true;
 }
 
 static bool key_at(const uint8_t* data, uint64_t size, uint64_t off, const char* key) {
     if (off != 0) {
         const char prev = static_cast<char>(data[off - 1]);
-        if (prev != '\n' && prev != '\r')
+        if (prev != '\n' && prev != '\r') {
             return false;
+        }
     }
     uint64_t i = off;
-    while (i < size && (data[i] == ' ' || data[i] == '\t'))
+    while (i < size && (data[i] == ' ' || data[i] == '\t')) {
         ++i;
-    for (uint32_t k = 0; key[k]; ++k, ++i) {
-        if (i >= size || static_cast<char>(data[i]) != key[k])
-            return false;
     }
-    while (i < size && (data[i] == ' ' || data[i] == '\t'))
+    for (uint32_t k = 0; key[k]; ++k, ++i) {
+        if (i >= size || static_cast<char>(data[i]) != key[k]) {
+            return false;
+        }
+    }
+    while (i < size && (data[i] == ' ' || data[i] == '\t')) {
         ++i;
+    }
     return i < size && data[i] == '=';
 }
 
 static const uint8_t* manifest_value(const uint8_t* data, uint64_t size, const char* key,
                                      uint64_t* out_len) {
-    if (!data || !key || !out_len)
+    if (!data || !key || !out_len) {
         return nullptr;
+    }
     for (uint64_t off = 0; off < size; ++off) {
-        if (!key_at(data, size, off, key))
+        if (!key_at(data, size, off, key)) {
             continue;
+        }
         uint64_t i = off;
-        while (i < size && data[i] != '=')
+        while (i < size && data[i] != '=') {
             ++i;
-        if (i >= size)
+        }
+        if (i >= size) {
             return nullptr;
+        }
         ++i;
-        while (i < size && libk::str::is_space(static_cast<char>(data[i])))
+        while (i < size && libk::str::is_space(static_cast<char>(data[i]))) {
             ++i;
-        if (i >= size)
+        }
+        if (i >= size) {
             return nullptr;
+        }
         if (data[i] == '"') {
             const uint64_t start = ++i;
-            while (i < size && data[i] != '"')
+            while (i < size && data[i] != '"') {
                 ++i;
-            if (i >= size)
+            }
+            if (i >= size) {
                 return nullptr;
+            }
             *out_len = i - start;
             return data + start;
         }
         const uint64_t start = i;
-        while (i < size && !libk::str::is_space(static_cast<char>(data[i])) && data[i] != '#')
+        while (i < size && !libk::str::is_space(static_cast<char>(data[i])) && data[i] != '#') {
             ++i;
+        }
         *out_len = i - start;
         return data + start;
     }
@@ -227,8 +264,9 @@ static const uint8_t* manifest_value(const uint8_t* data, uint64_t size, const c
 static bool token_equals(const uint8_t* p, uint64_t len, const char* s) {
     uint64_t i = 0;
     while (i < len && s[i]) {
-        if (static_cast<char>(p[i]) != s[i])
+        if (static_cast<char>(p[i]) != s[i]) {
             return false;
+        }
         ++i;
     }
     return i == len && s[i] == '\0';
@@ -241,8 +279,9 @@ static bool manifest_u64(const LinuxArtifacts& artifacts, const char* key, uint6
 }
 
 static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
-    if (!artifacts || !artifacts->manifest || artifacts->manifest_size == 0)
+    if (!artifacts || !artifacts->manifest || artifacts->manifest_size == 0) {
         return false;
+    }
 
     uint64_t manifest_kernel_size = 0;
     uint64_t manifest_initramfs_size = 0;
@@ -265,10 +304,12 @@ static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
         return false;
     }
 
-    if (!libk::checked_align_up(artifacts->dtb_size, dango::kPageSize, &layout.dtb_size))
+    if (!libk::checked_align_up(artifacts->dtb_size, dango::kPageSize, &layout.dtb_size)) {
         return false;
-    if (layout.dtb_size < dango::kDtbSize)
+    }
+    if (layout.dtb_size < dango::kDtbSize) {
         layout.dtb_size = dango::kDtbSize;
+    }
     layout.mmio_base = dango::kMmioBase;
     layout.mmio_size = dango::kMmioSize;
     layout.channel_base = dango::kChannelBase;
@@ -289,15 +330,33 @@ static bool parse_linux_manifest(LinuxArtifacts* artifacts) {
     const auto* profile =
         manifest_value(artifacts->manifest, artifacts->manifest_size, "profile", &profile_len);
     artifacts->gpu_profile = profile && token_equals(profile, profile_len, "gpu");
-    if (profile && !artifacts->gpu_profile && !token_equals(profile, profile_len, "hello"))
+    const bool panfrost = profile && token_equals(profile, profile_len, "panfrost");
+    artifacts->channel_profile = artifacts->gpu_profile || panfrost;
+    uint64_t mali_len = 0;
+    const auto* mali =
+        manifest_value(artifacts->manifest, artifacts->manifest_size, "mali_hardware", &mali_len);
+    artifacts->mali_hardware = mali && token_equals(mali, mali_len, "1");
+    if (artifacts->mali_hardware && !panfrost) {
         return false;
+    }
+    uint64_t renderer_len = 0;
+    const auto* renderer =
+        manifest_value(artifacts->manifest, artifacts->manifest_size, "renderer", &renderer_len);
+    artifacts->mali_renderer = renderer && token_equals(renderer, renderer_len, "gles");
+    if (artifacts->mali_renderer && !panfrost) {
+        return false;
+    }
+    if (profile && !artifacts->channel_profile && !token_equals(profile, profile_len, "hello")) {
+        return false;
+    }
     uint64_t guest_len = 0;
     const auto* guest =
         manifest_value(artifacts->manifest, artifacts->manifest_size, "guest", &guest_len);
     artifacts->lavapipe_guest = guest && token_equals(guest, guest_len, "lavapipe");
-    if (guest && !artifacts->lavapipe_guest && !token_equals(guest, guest_len, "minimal"))
+    if (guest && !artifacts->lavapipe_guest && !token_equals(guest, guest_len, "minimal")) {
         return false;
-    if (artifacts->gpu_profile) {
+    }
+    if (artifacts->channel_profile) {
         layout.channel_base = dango::kChannelGuestBase;
         layout.channel_size = dango::kChannelGuestSize;
     }
@@ -348,8 +407,9 @@ static bool discover_linux_artifacts(libk::const_bytes archive, LinuxArtifacts* 
         dango_log("linux artifact missing: linux/dango-linux.dtb\n");
         missing = true;
     }
-    if (missing)
+    if (missing) {
         return false;
+    }
 
     if (!parse_linux_manifest(&artifacts)) {
         dango_log("linux artifact discovery failed: manifest invalid or size mismatch\n");
@@ -474,15 +534,18 @@ static_assert(kGpuScanoutWidth % kGpuBarCount == 0, "the bar pattern must tile t
 static bool gpu_request(RingPage* tx, RingPage* rx, CapHandle h2g_db, CapHandle g2h_db,
                         CapHandle channel, uint32_t opcode, const void* request, uint32_t length,
                         uint64_t* request_seq, RingSlot* reply) {
-    if (request_seq)
+    if (request_seq) {
         *request_seq = __atomic_load_n(&tx->head.v, __ATOMIC_RELAXED);
+    }
     if (!ring_try_push(tx, DANGO_CH_DEFAULT_RING_ORDER, opcode, request, length, h2g_db)) {
         return false;
     }
-    if (sys_vm_channel_notify(channel) != 0)
+    if (sys_vm_channel_notify(channel) != 0) {
         return false;
-    if (!ring_wait_pop(rx, DANGO_CH_DEFAULT_RING_ORDER, reply, g2h_db))
+    }
+    if (!ring_wait_pop(rx, DANGO_CH_DEFAULT_RING_ORDER, reply, g2h_db)) {
         return false;
+    }
     return reply->type == opcode && (!request_seq || reply->seq == *request_seq);
 }
 
@@ -526,8 +589,9 @@ static bool gpu_fill_bars(CapHandle staging) {
 static CapHandle gpu_staging_publish(CapHandle vm, CapHandle channel) {
     const CapHandle staging =
         as_cap(sys_vm_memory_create(vm, dango::kStagingSize, MX_VM_MEMORY_FLAG_SHARED_STAGING));
-    if (staging == kNullCap)
+    if (staging == kNullCap) {
         fail("gpu client FAILED: staging create\n");
+    }
     if (sys_vm_channel_stage(channel, dango::kStagingGuestIpa, dango::kStagingSize) != 0) {
         fail("gpu client FAILED: staging declare\n");
     }
@@ -535,8 +599,9 @@ static CapHandle gpu_staging_publish(CapHandle vm, CapHandle channel) {
                           dango::RIGHT_READ | dango::RIGHT_WRITE) != 0) {
         fail("gpu client FAILED: staging map\n");
     }
-    if (!gpu_fill_bars(staging))
+    if (!gpu_fill_bars(staging)) {
         fail("gpu client FAILED: staging fill\n");
+    }
     dango_counter("gpu.staging.ipa", dango::kStagingGuestIpa);
     dango_counter("gpu.staging.size", dango::kStagingSize);
     return staging;
@@ -765,6 +830,8 @@ static bool gpu_service_present(void* ctx_ptr, const MxGpuDamageRect& damage, ui
 
 static void runner_entry(uint64_t vcpu_arg) {
     const CapHandle vcpu = static_cast<CapHandle>(vcpu_arg);
+    constexpr char entered[] = "dango: runner thread entered\n";
+    sys_debug_puts(entered, sizeof(entered) - 1);
     dango_log("vm runner thread entered\n");
     bool logged_first_return = false;
     bool logged_hello = false;
@@ -776,10 +843,14 @@ static void runner_entry(uint64_t vcpu_arg) {
 
         if (!logged_first_return) {
             dango_log("vm runner entering first vcpu_run\n");
+            constexpr char entering[] = "dango: entering first vcpu_run\n";
+            sys_debug_puts(entering, sizeof(entering) - 1);
         }
         dango::VcpuRunResult result{};
         const int64_t rc = sys_vcpu_run(vcpu, &budget, &result);
         if (!logged_first_return) {
+            constexpr char returned[] = "dango: first vcpu_run returned\n";
+            sys_debug_puts(returned, sizeof(returned) - 1);
             dango_log("vm runner first vcpu_run returned\n");
             dango_counter("vcpu.first_rc", libk::magnitude(rc));
             dango_counter("vcpu.first_exit_reason", result.exit_reason);
@@ -827,6 +898,8 @@ static void runner_entry(uint64_t vcpu_arg) {
     sys_thread_exit(0);
 }
 
+#include "mali_renderer.h"
+
 extern "C" [[noreturn]] void _start() {
     const MxBootInfo* boot = mochi::boot::map();
     const CapHandle kConsoleRing = mochi::boot::require_handle(boot, "log.ring");
@@ -866,14 +939,24 @@ extern "C" [[noreturn]] void _start() {
     const CapHandle fb_window_cap = mochi::boot::handle(boot, "fb.memory");
     if (fb_window_cap && sys_cap_identify(fb_window_cap) == kCapTypeMmio &&
         sys_map_mmio(fb_window_cap, kVaFbWindow, dango::RIGHT_READ) == 0) {
-        fb_window = reinterpret_cast<const uint8_t*>(kVaFbWindow);
+        uint64_t pixel_offset = 0;
+        if (const auto* entry = mochi::boot::find(boot, "fb.offset")) {
+            pixel_offset = entry->aux0;
+        }
+        MxCapInfo extent{};
+        if (pixel_offset >= 4096 || (pixel_offset & 3) ||
+            mx_cap_info(fb_window_cap, &extent) != MX_OK || pixel_offset >= extent.size) {
+            fail("invalid framebuffer pixel offset\n");
+        }
+        fb_window = reinterpret_cast<const uint8_t*>(kVaFbWindow + pixel_offset);
     }
 
     dango_log("manager starting\n");
     LinuxArtifacts linux{};
     MxCapInfo archive_info{};
-    if (mx_cap_info(kBootInitrd, &archive_info) != MX_OK)
+    if (mx_cap_info(kBootInitrd, &archive_info) != MX_OK) {
         fail("boot archive metadata unavailable\n");
+    }
     const bool have_linux =
         discover_linux_artifacts(libk::as_bytes(boot_archive, archive_info.size), &linux);
     if (have_linux) {
@@ -885,26 +968,37 @@ extern "C" [[noreturn]] void _start() {
     const int64_t el = sys_debug_counter(dango::VM_DEBUG_EL_CURRENT);
     const int64_t el2 = sys_debug_counter(dango::VM_DEBUG_EL2_AVAILABLE);
     const int64_t vhe = sys_debug_counter(dango::VM_DEBUG_VHE_AVAILABLE);
-    if (el < 0 || el > 3 || el2 < 0 || vhe < 0)
+    if (el < 0 || el > 3 || el2 < 0 || vhe < 0) {
         fail("el2 detection failed\n");
+    }
     dango_counter("vm.current_el", static_cast<uint64_t>(el));
     dango_counter("vm.el2_available", static_cast<uint64_t>(el2));
-    if (el2 == 0)
-        fail("el2 unavailable: dango VM cannot run guest\n");
+    if (el2 == 0) {
+        console_log("el2 unavailable: dango VM cannot run guest\n");
+        // EL1 firmware still supports the native desktop. Sleep without ever
+        // issuing HVC or attempting a guest on a CPU without its monitor.
+        // Complete native service startup so dependants and unrelated apps
+        // are not held at init's readiness barrier by an unavailable guest.
+        mochi::boot::ready(boot);
+        mochi::park();
+    }
     dango_debug("el2 available\n");
 
     const dango::VmLayout layout = have_linux ? linux.layout : dango::v3_layout();
-    if (!validate_layout(layout))
+    if (!validate_layout(layout)) {
         fail("layout validation failed\n");
+    }
     const uint64_t active_ram_size = have_linux ? layout.ram_size : (16ull * 1024ull * 1024ull);
 
     dango_debug("creating vm\n");
     const int64_t vm_rc = sys_vm_create(kVmRoot, 0);
-    if (vm_rc < 0)
+    if (vm_rc < 0) {
         fail("vm create syscall failed\n");
+    }
     const CapHandle vm = as_cap(vm_rc);
-    if (vm == kNullCap)
+    if (vm == kNullCap) {
         fail("vm object invalid\n");
+    }
     dango_log("vm created\n");
 
     dango_debug("inspecting vm\n");
@@ -917,8 +1011,9 @@ extern "C" [[noreturn]] void _start() {
 
     dango_debug("creating guest memory\n");
     const CapHandle memory = as_cap(sys_vm_memory_create(vm, active_ram_size, 0));
-    if (memory == kNullCap)
+    if (memory == kNullCap) {
         fail("guest memory failed\n");
+    }
     dango_debug("guest memory created\n");
 
     const uint32_t guest_rights = dango::RIGHT_READ | dango::RIGHT_WRITE | dango::RIGHT_EXEC;
@@ -996,8 +1091,9 @@ extern "C" [[noreturn]] void _start() {
 
     dango_debug("creating vcpu\n");
     const CapHandle vcpu = as_cap(sys_vcpu_create(vm, 0));
-    if (vcpu == kNullCap)
+    if (vcpu == kNullCap) {
         fail("vcpu object invalid\n");
+    }
     dango_debug("vcpu created\n");
 
     uint64_t entry_pc = have_linux ? linux.entry : 0x4008'0000ull;
@@ -1031,18 +1127,32 @@ extern "C" [[noreturn]] void _start() {
     // the GPU function authority (spec §6.1/§8.11) and the guest carries the GPU
     // PCI description. The order is the secure-attach contract: assign -> map
     // BARs -> route INTx -> expose ECAM, all before the vCPU is resumed.
+    if (have_linux && linux.mali_hardware) {
+        const auto authority = mochi::boot::handle(boot, "gpu.platform");
+        if (!authority) {
+            fail("Mali platform authority missing\n");
+        }
+        const auto result = sys_vm_mali_attach(vm, vcpu, authority);
+        if (result != 0) {
+            dango_counter("mali.attach_error", static_cast<uint64_t>(-result));
+            fail("Mali hardware attach failed\n");
+        }
+        console_log("Mali hardware assignment ready\n");
+    }
     const CapHandle gpu_function = mochi::boot::handle(boot, "gpu.function");
     const CapHandle gpu_irq = mochi::boot::handle(boot, "gpu.irq");
     if (have_linux && linux.gpu_profile) {
-        if (!gpu_function || !gpu_irq)
+        if (!gpu_function || !gpu_irq) {
             fail("gpu authority missing\n");
+        }
         // Opt in to host BAR assignment: direct -kernel boot has no firmware, so
         // the function's BARs read as 0 until we program them from the PCIe MMIO
         // window (spec §6.2.5.1).
         const CapHandle assign =
             as_cap(sys_vm_assign_device(vm, gpu_function, dango::ASSIGN_FLAG_ASSIGN_BARS));
-        if (assign == kNullCap)
+        if (assign == kNullCap) {
             fail("gpu assign failed\n");
+        }
 
         // Map BAR4 (the virtio modern common/notify/ISR window) into the DTB MMIO
         // window at an IPA aligned to the BAR size. BAR1 is deliberately NOT
@@ -1105,8 +1215,9 @@ extern "C" [[noreturn]] void _start() {
     }
 
     const CapHandle channel = as_cap(sys_vm_channel_create(vm, DANGO_CH_DEFAULT_RING_ORDER, 0));
-    if (channel == kNullCap)
+    if (channel == kNullCap) {
         fail("channel setup failed\n");
+    }
     const CapHandle h2g_ring = as_cap(sys_vm_channel_endpoint(
         channel, dango::VM_CHANNEL_HOST_TO_GUEST_RING,
         dango::RIGHT_READ | dango::RIGHT_WRITE | dango::RIGHT_MAP | dango::RIGHT_DUP));
@@ -1134,15 +1245,17 @@ extern "C" [[noreturn]] void _start() {
     RingPage* channel_tx = nullptr;
     RingPage* channel_rx = nullptr;
     CapHandle gpu_staging = kNullCap;
-    if (have_linux && linux.gpu_profile) {
+    if (have_linux && linux.channel_profile) {
         if (sys_vm_channel_map(channel, vcpu, layout.channel_base, layout.channel_size,
-                               dango::kChannelGuestIrq) != 0)
+                               dango::kChannelGuestIrq) != 0) {
             fail("channel guest mapping failed\n");
+        }
         if (sys_map_page(h2g_ring, dango::kChannelHostTxVa,
                          dango::RIGHT_READ | dango::RIGHT_WRITE) != 0 ||
             sys_map_page(g2h_ring, dango::kChannelHostRxVa,
-                         dango::RIGHT_READ | dango::RIGHT_WRITE) != 0)
+                         dango::RIGHT_READ | dango::RIGHT_WRITE) != 0) {
             fail("channel host mapping failed\n");
+        }
         channel_tx = reinterpret_cast<RingPage*>(dango::kChannelHostTxVa);
         channel_rx = reinterpret_cast<RingPage*>(dango::kChannelHostRxVa);
         // Exercise both host endpoints, including wraparound, before Linux can
@@ -1156,21 +1269,70 @@ extern "C" [[noreturn]] void _start() {
                 !ring_try_push(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, DANGO_CH_TEST_PONG, &n,
                                sizeof(n), g2h_db) ||
                 !ring_pop(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, &msg) || msg.seq != n ||
-                msg.length != sizeof(n) || *reinterpret_cast<const uint64_t*>(msg.payload) != n)
+                msg.length != sizeof(n) || *reinterpret_cast<const uint64_t*>(msg.payload) != n) {
                 fail("channel native probe FAILED\n");
+            }
         }
         console_log("channel native probe passed\n");
         // Phase H/I: publish and fill the shared staging window while the guest
         // is still stopped, so the channel descriptor describes it the moment
         // the guest can open the channel.
-        gpu_staging = gpu_staging_publish(vm, channel);
+        if (linux.mali_renderer) {
+            const auto pixels = mochi::boot::handle(boot, "render.pixels");
+            const auto pixels1 = mochi::boot::handle(boot, "render.pixels.1");
+            const auto commands = mochi::boot::handle(boot, "gfx.commands");
+            const auto cache = mochi::boot::handle(boot, "gfx.cache");
+            // The pixel arena is registered SharedGpu *before* staging so the
+            // descriptor page the guest reads already carries the flag. Only
+            // the pixel arena is DMA authorised: ordinary staging and
+            // arbitrary physical memory stay non-DMA by construction.
+            const auto pixels_shared =
+                pixels ? sys_vm_shared_memory_attach(vm, pixels, dango::kStagingGuestIpa,
+                                                     AME_GPU_DIAG_BYTES,
+                                                     dango::RIGHT_READ | dango::RIGHT_WRITE, 0)
+                       : -1;
+            const auto pixels1_shared =
+                pixels1 ? sys_vm_shared_memory_attach(
+                              vm, pixels1, dango::kStagingGuestIpa + AME_GPU_DIAG_BYTES,
+                              AME_GPU_DIAG_BYTES, dango::RIGHT_READ | dango::RIGHT_WRITE, 0)
+                        : -1;
+            const auto commands_shared =
+                commands ? sys_vm_shared_memory_attach(
+                               vm, commands, dango::kStagingGuestIpa + AME_GPU_DIAG_SHARED_BYTES,
+                               AME_GFX_COMMAND_BYTES, dango::RIGHT_READ | dango::RIGHT_WRITE, 0)
+                         : -1;
+            const auto cache_shared =
+                cache ? sys_vm_shared_memory_attach(
+                            vm, cache,
+                            dango::kStagingGuestIpa + AME_GPU_DIAG_SHARED_BYTES +
+                                AME_GFX_COMMAND_BYTES,
+                            AME_GFX_CACHE_TRANSFER, dango::RIGHT_READ | dango::RIGHT_WRITE, 0)
+                      : -1;
+            if (!pixels || !pixels1 || !commands || !cache || pixels_shared < 0 ||
+                pixels1_shared < 0 || commands_shared < 0 || cache_shared < 0 ||
+                sys_vm_channel_stage(channel, dango::kStagingGuestIpa,
+                                     AME_GPU_DIAG_SHARED_BYTES + AME_GFX_COMMAND_BYTES +
+                                         AME_GFX_CACHE_TRANSFER) != 0) {
+                fail("Mali render shared pixels failed\n");
+            }
+            // Render targets may be loaded for blending as well as written.
+            // Command storage is CPU-only and is never registered.
+            const int64_t dma_rc = sys_vm_shared_memory_register_dma(as_cap(pixels_shared), 3);
+            if (dma_rc || sys_vm_shared_memory_register_dma(as_cap(pixels1_shared), 3)) {
+                fail("Mali target DMA registration failed\n");
+            }
+            dango_counter("gpu.region.pixels_dma_rc", libk::magnitude(dma_rc));
+        } else if (linux.gpu_profile) {
+            gpu_staging = gpu_staging_publish(vm, channel);
+        }
     }
     console_log("channel ready\n");
     console_log("layout ready\n");
     mochi::boot::ready(boot);
 
-    if (sys_notify(kLayoutDoneDoorbell) != 0)
+    if (sys_notify(kLayoutDoneDoorbell) != 0) {
         fail("service failed\n");
+    }
     if (sys_wait_doorbell(kAuthGateDoorbell, auth_gate_base) != 0) {
         fail("service failed\n");
     }
@@ -1209,13 +1371,17 @@ extern "C" [[noreturn]] void _start() {
     console_log("service ready\n");
     (void)sys_notify(kDoneDoorbell);
 
+    if (linux.mali_renderer) {
+        mali_render_service(boot, channel, channel_tx, channel_rx, h2g_db, g2h_db);
+    }
+
     // Phase H/I: drive the bootstrap GPU control plane and present path first.
     // The guest owns exactly one channel endpoint (the driver's open() is
     // exclusive) and its agent runs dango-gpud before the transport self-test,
     // so this exchange must complete before the guest ping/pong probe below,
     // which then reuses the same channel.
     GpuClientIds gpu_ids{};
-    if (channel_tx && channel_rx) {
+    if (channel_tx && channel_rx && linux.gpu_profile) {
         gpu_bootstrap_client(channel, channel_tx, channel_rx, h2g_db, g2h_db, &gpu_ids);
     }
 
@@ -1223,12 +1389,14 @@ extern "C" [[noreturn]] void _start() {
         // The GPU client above already used this channel, so the transport
         // self-test's ring sequence and counters are relative to its start.
         dango::VmChannelInfo probe_before{};
-        if (sys_vm_channel_inspect(channel, &probe_before, sizeof(probe_before)) != 0)
+        if (sys_vm_channel_inspect(channel, &probe_before, sizeof(probe_before)) != 0) {
             fail("channel guest probe FAILED: counters\n");
+        }
         RingSlot message{};
         if (!ring_wait_pop(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, &message, g2h_db) ||
-            message.type != DANGO_CH_TEST_READY || message.length != 0)
+            message.type != DANGO_CH_TEST_READY || message.length != 0) {
             fail("channel guest probe FAILED: ready\n");
+        }
         const uint64_t ready_seq = message.seq;
         for (uint64_t n = 0; n < DANGO_CH_TEST_ROUNDS; ++n) {
             if (!ring_try_push(channel_tx, DANGO_CH_DEFAULT_RING_ORDER, DANGO_CH_TEST_PING, &n,
@@ -1237,19 +1405,22 @@ extern "C" [[noreturn]] void _start() {
                 !ring_wait_pop(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, &message, g2h_db) ||
                 message.type != DANGO_CH_TEST_PONG || message.length != sizeof(n) ||
                 message.seq != ready_seq + 1 + n ||
-                *reinterpret_cast<const uint64_t*>(message.payload) != n)
+                *reinterpret_cast<const uint64_t*>(message.payload) != n) {
                 fail("channel guest probe FAILED: order\n");
+            }
         }
         if (!ring_wait_pop(channel_rx, DANGO_CH_DEFAULT_RING_ORDER, &message, g2h_db) ||
             message.type != DANGO_CH_TEST_DONE || message.length != sizeof(uint64_t) ||
-            *reinterpret_cast<const uint64_t*>(message.payload) == 0)
+            *reinterpret_cast<const uint64_t*>(message.payload) == 0) {
             fail("channel guest probe FAILED: IRQ\n");
+        }
         if (sys_vm_channel_inspect(channel, &channel_info, sizeof(channel_info)) != 0 ||
             channel_info.messages_host_to_guest - probe_before.messages_host_to_guest !=
                 DANGO_CH_TEST_ROUNDS ||
             channel_info.messages_guest_to_host - probe_before.messages_guest_to_host <
-                DANGO_CH_TEST_ROUNDS + 2)
+                DANGO_CH_TEST_ROUNDS + 2) {
             fail("channel guest probe FAILED: counters\n");
+        }
         dango_counter("channel.h2g", channel_info.messages_host_to_guest);
         dango_counter("channel.g2h", channel_info.messages_guest_to_host);
         console_log("channel guest probe passed: " DANGO_STRINGIFY(
@@ -1283,20 +1454,13 @@ extern "C" [[noreturn]] void _start() {
         gpu_config.staging_size = dango::kStagingSize;
         gpu_server.init(gpu_endpoint, gpu_config);
         gpu_server.set_buffer(gpu_ids.buffer_id, gpu_ids.boot_generation);
-        // Phase N: broker remote Vulkan sessions on the same endpoint (spec
-        // §14.7). The guest dango-vkd backend is not wired into the boot yet, so
-        // a default backend is bound: sessions open and quota accounting runs,
-        // but a submit is refused with MX_ERR_SERVICE_UNAVAILABLE so the native
-        // client keeps its local path instead of stalling. Swapping in the real
-        // backend is the only change Phase N.5 needs.
-        gpu_server.init_vulkan(drv::gpu::linux::VulkanBackend{}, 0);
         present_ctx = GpuPresentContext{channel, channel_tx,  channel_rx, h2g_db,
                                         g2h_db,  gpu_staging, fb_window,  gpu_ids};
         console_log("gpu service: serving\n");
-        console_log("gpu service: vulkan sessions brokered\n");
         for (;;) {
-            if (!gpu_server.serve_once(gpu_service_present, &present_ctx))
+            if (!gpu_server.serve_once(gpu_service_present, &present_ctx)) {
                 break;
+            }
         }
         console_log("gpu service: stopped\n");
     }

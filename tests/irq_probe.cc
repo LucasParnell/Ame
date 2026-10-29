@@ -18,14 +18,11 @@
 // --- kernel memory stubs ----------------------------------------------------
 namespace mm {
 void* slab_alloc(usize size, usize align) {
-    if (align < sizeof(void*))
-        align = sizeof(void*);
+    if (align < sizeof(void*)) align = sizeof(void*);
     void* p = nullptr;
     return posix_memalign(&p, align, size) ? nullptr : p;
 }
-void slab_free(void* p, usize, usize) {
-    std::free(p);
-}
+void slab_free(void* p, usize, usize) { std::free(p); }
 } // namespace mm
 
 [[noreturn]] void panic(const char* text) {
@@ -44,25 +41,12 @@ u32 g_trigger[kMaxIrq];
 
 namespace drivers::gic {
 void spi_configure(u32 irq_id, u32 trigger, u32) {
-    if (irq_id < kMaxIrq)
-        g_trigger[irq_id] = trigger;
+    if (irq_id < kMaxIrq) g_trigger[irq_id] = trigger;
 }
-void spi_enable(u32 irq_id) {
-    if (irq_id < kMaxIrq)
-        g_enabled[irq_id] = true;
-}
-void spi_disable(u32 irq_id) {
-    if (irq_id < kMaxIrq)
-        g_enabled[irq_id] = false;
-}
-void spi_set_pending(u32 irq_id) {
-    if (irq_id < kMaxIrq)
-        g_pending[irq_id] = true;
-}
-void spi_clear_pending(u32 irq_id) {
-    if (irq_id < kMaxIrq)
-        g_pending[irq_id] = false;
-}
+void spi_enable(u32 irq_id) { if (irq_id < kMaxIrq) g_enabled[irq_id] = true; }
+void spi_disable(u32 irq_id) { if (irq_id < kMaxIrq) g_enabled[irq_id] = false; }
+void spi_set_pending(u32 irq_id) { if (irq_id < kMaxIrq) g_pending[irq_id] = true; }
+void spi_clear_pending(u32 irq_id) { if (irq_id < kMaxIrq) g_pending[irq_id] = false; }
 u32 iar_id() {
     // Mirrors GICv2: IAR consumes the highest pending enabled interrupt.
     for (u32 id = kMaxIrq - 1; id >= 32; --id) {
@@ -74,17 +58,13 @@ u32 iar_id() {
     }
     return 1023;
 }
-void eoi(u32 irq_id) {
-    if (irq_id < kMaxIrq)
-        g_active[irq_id] = false;
-}
+void eoi(u32 irq_id) { if (irq_id < kMaxIrq) g_active[irq_id] = false; }
 } // namespace drivers::gic
 
 // --- doorbell notify stub ---------------------------------------------------
 namespace ipc {
 SysError notify_object(Doorbell* db) {
-    if (!db)
-        return E_NOTFOUND;
+    if (!db) return E_NOTFOUND;
     __atomic_add_fetch(&db->counter, 1, __ATOMIC_RELAXED);
     return E_OK;
 }
@@ -166,15 +146,13 @@ int main() {
     irq::deliver(40);
     assert(!g_enabled[40]); // paused so the source cannot storm the CPU
     assert(irq::ack(&lvl, /*owner=*/5) == E_OK);
-    assert(g_enabled[40]);                           // re-armed after the driver serviced it
+    assert(g_enabled[40]); // re-armed after the driver serviced it
     assert(irq::ack(&lvl, /*owner=*/777) == E_PERM); // wrong owner
     irq::unbind_line(&lvl, 5);
 
     // (7) Owner-scoped teardown removes exactly one process's lines.
     IrqLine a{}, b{}, c{};
-    a.irq_id = 50;
-    b.irq_id = 51;
-    c.irq_id = 52;
+    a.irq_id = 50; b.irq_id = 51; c.irq_id = 52;
     assert(irq::bind(&a, db, 7, 0) == E_OK);
     assert(irq::bind(&b, db, 7, 0) == E_OK);
     assert(irq::bind(&c, db, 8, 0) == E_OK);

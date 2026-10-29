@@ -27,6 +27,8 @@
 #include "mochi/framebuffer_raster.h"
 #include "mochi/wait.h"
 #include "libk/cpu.h"
+#include "mochi/gpu_diag.h"
+#include "mochi/state.h"
 
 // Virtual address layout for io.framebuffer.
 using namespace mochi::va::framebuffer;
@@ -52,6 +54,31 @@ constexpr uint32_t kClearColor = 0x001F3F;
 
 static uint32_t min_u32(uint32_t a, uint32_t b) {
     return a < b ? a : b;
+}
+
+static void copy_render_row(uint32_t* dst, const uint32_t* src) {
+    constexpr uint32_t bytes = AME_GPU_DIAG_WIDTH * 4;
+    (void)libk::copy_n(libk::as_bytes(dst, bytes), libk::as_bytes(src, bytes), bytes);
+}
+
+// Sleep between bounded nonblocking kernel steps. No IRQ-disabled polling or
+// CPU busy-wait across a display frame; the kernel pins both scanout arenas.
+static bool scanout_transition(CapHandle control, CapHandle wake, unsigned slot, bool restore) {
+    const auto deadline = mx_clock_ns() + 250000000ull;
+    do {
+        const auto rc = mx_platform_control(
+            control, restore ? MX_PLATFORM_DISPLAY_RESTORE : MX_PLATFORM_DISPLAY_FLIP,
+            restore ? 0 : slot);
+        if (rc == MX_OK) {
+            return true;
+        }
+        if (rc != MX_ERR_BUSY) {
+            return false;
+        }
+        const auto expected = mx_doorbell_read(wake);
+        (void)mx_doorbell_wait_until(wake, expected, mx_clock_ns() + 50000);
+    } while (mx_clock_ns() < deadline);
+    return false;
 }
 
 // Damage accumulated since the last present the appliance accepted. It is
@@ -83,18 +110,23 @@ struct DamageRect {
     // Union in one rectangle, clipped to the framebuffer. An untrusted width is
     // clamped before it is added so it can never wrap the extent.
     void add(uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
-        if (width == 0 || height == 0 || x >= kFbWidth || y >= kFbHeight)
+        if (width == 0 || height == 0 || x >= kFbWidth || y >= kFbHeight) {
             return;
+        }
         const uint32_t cx1 = x + min_u32(width, kFbWidth - x);
         const uint32_t cy1 = y + min_u32(height, kFbHeight - y);
-        if (x < x0)
+        if (x < x0) {
             x0 = x;
-        if (y < y0)
+        }
+        if (y < y0) {
             y0 = y;
-        if (cx1 > x1)
+        }
+        if (cx1 > x1) {
             x1 = cx1;
-        if (cy1 > y1)
+        }
+        if (cy1 > y1) {
             y1 = cy1;
+        }
     }
 
     MxGpuDamageRect rect() const {
@@ -132,13 +164,16 @@ struct ServerState {
 // Push the frame the appliance must show now. Returns without effect when the
 // GPU service is not live, so the local display is always the floor.
 static void present_frame(ServerState& state) {
-    if (!state.gpu)
+    if (!state.gpu) {
         return;
+    }
     state.gpu->poll();
-    if (!state.gpu->live())
+    if (!state.gpu->live()) {
         return;
-    if (!state.gpu_force_full && state.damage.empty())
+    }
+    if (!state.gpu_force_full && state.damage.empty()) {
         return;
+    }
     // This path also runs after draining a batch without FB_PRESENT. Publish
     // Normal NC pixel stores before sending the appliance a present request.
     libk::cpu::data_sync();
@@ -161,8 +196,9 @@ static bool handle_fb_command(ServerState& state, const RingSlot& slot) {
     const auto& raster = state.raster;
     const mochi::framebuffer::Server& endpoint = *state.endpoint;
     DamageRect* damage = state.gpu ? &state.damage : nullptr;
-    if (!mochi::message_valid(slot))
+    if (!mochi::message_valid(slot)) {
         return false;
+    }
     switch (slot.type) {
     case FB_INFO:
         send_info(endpoint);
@@ -171,24 +207,27 @@ static bool handle_fb_command(ServerState& state, const RingSlot& slot) {
         if (slot.length >= sizeof(uint32_t)) {
             const uint32_t color = *reinterpret_cast<const uint32_t*>(slot.payload);
             raster.clear(color);
-            if (damage)
+            if (damage) {
                 damage->whole();
+            }
         }
         return true;
     case FB_FILL_RECT:
         if (slot.length >= sizeof(FbFillRectCmd)) {
             const auto& cmd = *reinterpret_cast<const FbFillRectCmd*>(slot.payload);
             raster.fill_rect(cmd.x, cmd.y, cmd.width, cmd.height, cmd.color);
-            if (damage)
+            if (damage) {
                 damage->add(cmd.x, cmd.y, cmd.width, cmd.height);
+            }
         }
         return true;
     case FB_DRAW_GLYPH:
         if (slot.length >= sizeof(FbDrawGlyphCmd)) {
             const auto& cmd = *reinterpret_cast<const FbDrawGlyphCmd*>(slot.payload);
             raster.draw_glyph(cmd);
-            if (damage)
+            if (damage) {
                 damage->add(cmd.x, cmd.y, glyph_span_width(cmd), glyph_span_height(cmd));
+            }
         }
         return true;
     case FB_DRAW_TEXT:
@@ -208,10 +247,11 @@ static bool handle_fb_command(ServerState& state, const RingSlot& slot) {
         if (slot.length >= sizeof(FbCopyRectCmd)) {
             const auto& cmd = *reinterpret_cast<const FbCopyRectCmd*>(slot.payload);
             raster.copy_rect(cmd);
-            if (damage)
+            if (damage) {
                 damage->add(cmd.dst_x, cmd.dst_y,
                             min_u32(cmd.width, cmd.src_x < kFbWidth ? kFbWidth - cmd.src_x : 0),
                             min_u32(cmd.height, cmd.src_y < kFbHeight ? kFbHeight - cmd.src_y : 0));
+            }
         }
         return true;
     case FB_PRESENT:
@@ -244,17 +284,24 @@ extern "C" [[noreturn]] void _start() {
         mochi::park();
     }
 
+    uint64_t pixel_offset = 0;
+    if (const auto* entry = mochi::boot::find(boot, "fb.offset")) {
+        pixel_offset = entry->aux0;
+    }
     MxCapInfo extent{};
     if (mx_cap_info(fb_arena, &extent) != MX_OK || extent.attr != MX_MMIO_NORMAL_NC ||
-        extent.size < static_cast<uint64_t>(kFbWidth) * kFbHeight * 4)
+        pixel_offset >= 4096 || (pixel_offset & 3) || pixel_offset > extent.size ||
+        extent.size - pixel_offset < static_cast<uint64_t>(kFbWidth) * kFbHeight * 4) {
         mochi::boot::invalid_boot();
+    }
     if (const auto control = mochi::boot::handle(boot, "fb.control")) {
         if (mx_platform_control(control, MX_PLATFORM_CLAIM) != MX_OK ||
-            mx_platform_control(control, MX_PLATFORM_DISPLAY_HANDOFF) != MX_OK)
+            mx_platform_control(control, MX_PLATFORM_DISPLAY_HANDOFF) != MX_OK) {
             mochi::boot::invalid_boot();
+        }
     }
-    const mochi::framebuffer::Raster raster{reinterpret_cast<uint32_t*>(kVaFbPixels), kFbWidth,
-                                            kFbHeight};
+    const mochi::framebuffer::Raster raster{reinterpret_cast<uint32_t*>(kVaFbPixels + pixel_offset),
+                                            kFbWidth, kFbHeight};
     raster.clear(kClearColor);
     libk::cpu::data_sync();
 
@@ -307,22 +354,71 @@ extern "C" [[noreturn]] void _start() {
             gpu_armed = gpu_client.attached();
         }
         for (uint32_t i = 0; gpu_armed && i < kGpuHandshakeBudget; ++i) {
-            if (gpu_client.live())
+            if (gpu_client.live()) {
                 break;
+            }
             gpu_client.poll();
             mx_yield();
         }
         // Bounded: if the service is late (or absent) we boot on and present
         // opportunistically as the terminal works; the local path is unaffected.
     }
-    if (gpu_armed)
+    if (gpu_armed) {
         mochi::log_raw_marker("io.framebuffer: gpu backend armed\n");
+    }
 
     // The first present after arming is always a whole frame, so nothing drawn
     // before the handshake completed can be lost on the appliance.
     ServerState state{raster, &endpoint, gpu_armed ? &gpu_client : nullptr, gpu_armed, {}};
 
     mochi::boot::ready(boot);
+    auto display = mochi::driver::link(boot, "display", mochi::gpu_diag::kDisplayVa);
+    const uint32_t* rendered[AME_GPU_DIAG_TARGETS]{};
+    const auto display_control = mochi::boot::handle(boot, "fb.control");
+    bool direct_scanout = false;
+    uint32_t* saved_pixels = nullptr;
+    if (display.valid()) {
+        bool bound = display_control != MX_NULL_HANDLE;
+        for (unsigned i = 0; i < AME_GPU_DIAG_TARGETS; ++i) {
+            const auto cap = mochi::boot::handle(boot, i ? "render.pixels.1" : "render.pixels");
+            MxCapInfo info{};
+            const auto address = mochi::gpu_diag::kPixelsVa + i * AME_GPU_DIAG_BYTES;
+            if (!cap || mx_cap_info(cap, &info) != MX_OK || info.size != AME_GPU_DIAG_BYTES ||
+                mx_map_page(cap, address, MX_RIGHT_READ) != MX_OK ||
+                kFbWidth < AME_GPU_DIAG_WIDTH || kFbHeight < AME_GPU_DIAG_HEIGHT) {
+                mochi::boot::invalid_boot();
+            }
+            rendered[i] = reinterpret_cast<const uint32_t*>(address);
+            if (display_control &&
+                mx_platform_control(display_control,
+                                    i ? MX_PLATFORM_DISPLAY_BIND1 : MX_PLATFORM_DISPLAY_BIND0,
+                                    cap) != MX_OK) {
+                bound = false;
+            }
+        }
+        direct_scanout = bound;
+        mochi::log_raw_marker(direct_scanout
+                                  ? "io.framebuffer: direct scanout ready, two pinned targets\n"
+                                  : "io.framebuffer: scanout unavailable, CPU presentation\n");
+        if (!direct_scanout) {
+            auto snapshot = mochi::make_state(mochi::gpu_diag::kSnapshotVa, AME_GPU_DIAG_BYTES);
+            saved_pixels = snapshot.alloc<uint32_t>(AME_GPU_DIAG_WIDTH * AME_GPU_DIAG_HEIGHT);
+            if (!saved_pixels) {
+                mochi::boot::invalid_boot();
+            }
+        }
+    }
+    uint64_t overlay_end = 0;
+    bool overlay_blocking = false;
+    ame_gpu_diag_reply overlay_reply{};
+    const uint32_t overlay_x =
+        kFbWidth >= AME_GPU_DIAG_WIDTH ? (kFbWidth - AME_GPU_DIAG_WIDTH) / 2 : 0;
+    const uint32_t overlay_y =
+        kFbHeight >= AME_GPU_DIAG_HEIGHT ? (kFbHeight - AME_GPU_DIAG_HEIGHT) / 2 : 0;
+    mochi::SpscEndpoint readers[2]{};
+    readers[0].rx_ring = endpoint.cmd.ring;
+    readers[0].order = endpoint.cmd.order;
+    readers[1] = display;
     while (true) {
         if (!endpoint.cmd.valid() || endpoint.cmd.doorbell == MX_NULL_HANDLE) {
             mx_yield();
@@ -330,6 +426,109 @@ extern "C" [[noreturn]] void _start() {
         }
 
         RingSlot slot{};
+        if (display.valid()) {
+            auto restore_overlay = [&] {
+                if (direct_scanout) {
+                    if (!scanout_transition(display_control, endpoint.cmd.doorbell, 0, true)) {
+                        return false;
+                    }
+                } else {
+                    for (uint32_t y = 0; y < AME_GPU_DIAG_HEIGHT; ++y) {
+                        copy_render_row(raster.row(overlay_x, overlay_y + y),
+                                        saved_pixels + y * AME_GPU_DIAG_WIDTH);
+                    }
+                    libk::cpu::data_sync();
+                }
+                overlay_end = 0;
+                return true;
+            };
+            if (overlay_end && mx_clock_ns() >= overlay_end) {
+                if (!restore_overlay()) {
+                    overlay_reply.status = MX_ERR_FAULT;
+                    overlay_end = mx_clock_ns() + 100000000ull;
+                }
+                if (overlay_blocking) {
+                    (void)display.tx().push_bounded(AME_GPU_DIAG_REPLY, &overlay_reply,
+                                                    sizeof(overlay_reply),
+                                                    mx_clock_ns() + 1000000000ull);
+                }
+                overlay_blocking = false;
+            }
+            if (!overlay_blocking && display.try_recv(&slot)) {
+                ame_gpu_diag_request request{};
+                if (mochi::message_get(slot, &request, AME_GPU_DIAG_PRESENT)) {
+                    overlay_reply = {request.id, MX_ERR_INVALID, 0, 0, 0, 0};
+                    const unsigned target = (request.reserved & AME_GPU_DIAG_SLOT1) ? 1 : 0;
+                    const unsigned mode = request.reserved & ~AME_GPU_DIAG_SLOT1;
+                    if (request.width == AME_GPU_DIAG_WIDTH &&
+                        request.height == AME_GPU_DIAG_HEIGHT &&
+                        request.duration_ms == AME_GPU_DIAG_DURATION_MS &&
+                        mode <= AME_GPU_DIAG_RESTORE) {
+                        if (mode == AME_GPU_DIAG_RESTORE) {
+                            if (overlay_end && !restore_overlay()) {
+                                overlay_reply.status = MX_ERR_FAULT;
+                                (void)display.tx().push_bounded(AME_GPU_DIAG_REPLY, &overlay_reply,
+                                                                sizeof(overlay_reply),
+                                                                mx_clock_ns() + 1000000000ull);
+                                continue;
+                            }
+                        } else {
+                            if (direct_scanout) {
+                                overlay_end =
+                                    mx_clock_ns() + uint64_t(request.duration_ms) * 1000000;
+                                if (!scanout_transition(display_control, endpoint.cmd.doorbell,
+                                                        target, false)) {
+                                    overlay_reply.status = MX_ERR_FAULT;
+                                    (void)display.tx().push_bounded(
+                                        AME_GPU_DIAG_REPLY, &overlay_reply, sizeof(overlay_reply),
+                                        mx_clock_ns() + 1000000000ull);
+                                    continue;
+                                }
+                            } else {
+                                for (uint32_t y = 0; y < AME_GPU_DIAG_HEIGHT; ++y) {
+                                    auto* row = raster.row(overlay_x, overlay_y + y);
+                                    // Save the console once, before the first animation frame.
+                                    if (!overlay_end) {
+                                        copy_render_row(saved_pixels + y * AME_GPU_DIAG_WIDTH, row);
+                                    }
+                                    // OpenGL readback has its origin at the bottom left.
+                                    copy_render_row(row, rendered[target] +
+                                                             (AME_GPU_DIAG_HEIGHT - 1 - y) *
+                                                                 AME_GPU_DIAG_WIDTH);
+                                }
+                                libk::cpu::data_sync();
+                            }
+                            overlay_end = mx_clock_ns() + uint64_t(request.duration_ms) * 1000000;
+                            overlay_blocking = mode == 0;
+                        }
+                        overlay_reply.status = 0;
+                        if (direct_scanout) {
+                            overlay_reply.flags |= AME_GPU_DIAG_SCANOUT;
+                            overlay_reply.render_ns =
+                                mx_platform_control(display_control, MX_PLATFORM_DISPLAY_STATUS,
+                                                    0) >>
+                                8;
+                        }
+                    }
+                    if (!overlay_blocking) {
+                        (void)display.tx().push_bounded(AME_GPU_DIAG_REPLY, &overlay_reply,
+                                                        sizeof(overlay_reply),
+                                                        mx_clock_ns() + 1000000000ull);
+                    }
+                }
+            }
+            if (!overlay_end) {
+                while (endpoint.try_recv(&slot)) {
+                    (void)handle_fb_command(state, slot);
+                }
+                present_frame(state);
+            }
+            // Hold terminal drawing in its bounded ring during the overlay;
+            // replay it after restoration, so no terminal commands are lost.
+            mochi::driver::idle(readers, 2, endpoint.cmd.doorbell, overlay_end,
+                                overlay_end ? 2u : 3u);
+            continue;
+        }
         while (endpoint.try_recv(&slot)) {
             (void)handle_fb_command(state, slot);
         }

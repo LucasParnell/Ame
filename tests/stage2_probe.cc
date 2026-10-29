@@ -8,10 +8,8 @@ static std::unordered_set<PhysAddr> pages;
 static int allocation_budget = -1;
 namespace mm {
 PhysAddr alloc_page() {
-    if (allocation_budget == 0)
-        return 0;
-    if (allocation_budget > 0)
-        --allocation_budget;
+    if (allocation_budget == 0) return 0;
+    if (allocation_budget > 0) --allocation_budget;
     auto p = reinterpret_cast<PhysAddr>(std::aligned_alloc(PAGE_SIZE, PAGE_SIZE));
     assert(p);
     pages.insert(p);
@@ -21,16 +19,9 @@ void free_page(PhysAddr p) {
     assert(pages.erase(p) == 1);
     std::free(reinterpret_cast<void*>(p));
 }
-} // namespace mm
-namespace vm {
-void metric_inc(VmDebugCounter) {
 }
-} // namespace vm
-namespace libk {
-void* memset(void* p, int c, usize n) {
-    return std::memset(p, c, n);
-}
-} // namespace libk
+namespace vm { void metric_inc(VmDebugCounter) {} }
+namespace libk { void* memset(void* p, int c, usize n) { return std::memset(p, c, n); } }
 
 // Independent stage-2 long-descriptor decoding.  Deliberately duplicated from
 // kernel/vm/stage2.cc so the probe proves the field encodings themselves rather

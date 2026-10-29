@@ -34,8 +34,8 @@
 #include "midix/abi/linux_guest_console.h"
 #include "midix/abi/linux_guest_syscall.h"
 
-void* memcpy(void* dst, const void* src, unsigned long n);
-void* memset(void* dst, int c, unsigned long n);
+void *memcpy(void *dst, const void *src, unsigned long n);
+void *memset(void *dst, int c, unsigned long n);
 
 /* Positive syscall errors arrive negated; EINTR is a retry, not a failure. */
 #define GPUD_EINTR 4
@@ -148,8 +148,8 @@ static void gpud_objects_build(void) {
 
     for (out_index = 0; out_index < g_card.output_count && out_index < GPUD_MAX_OUTPUTS;
          ++out_index) {
-        const struct gdrm_output* source = &g_card.outputs[out_index];
-        struct gpud_output* output = &g_outputs[out_index];
+        const struct gdrm_output *source = &g_card.outputs[out_index];
+        struct gpud_output *output = &g_outputs[out_index];
         uint32_t i;
 
         output->used = 1;
@@ -167,7 +167,7 @@ static void gpud_objects_build(void) {
         memcpy(output->name, source->name, sizeof(output->name));
 
         for (i = 0; i < source->mode_count && mode_index < GPUD_MAX_MODES; ++i, ++mode_index) {
-            struct gpud_mode* mode = &g_modes[mode_index];
+            struct gpud_mode *mode = &g_modes[mode_index];
             mode->used = 1;
             mode->id = gpud_object_id(g_generation, MX_GPU_OBJECT_MODE, mode_index + 1);
             mode->output_slot = out_index;
@@ -178,9 +178,9 @@ static void gpud_objects_build(void) {
     }
 }
 
-static struct gpud_output* gpud_output_lookup(uint64_t id, uint32_t* slot_out) {
+static struct gpud_output *gpud_output_lookup(uint64_t id, uint32_t *slot_out) {
     uint32_t index;
-    struct gpud_output* output;
+    struct gpud_output *output;
     if (gpud_object_index(id, MX_GPU_OBJECT_OUTPUT, g_generation, &index) != 0 ||
         index > GPUD_MAX_OUTPUTS) {
         return 0;
@@ -195,9 +195,9 @@ static struct gpud_output* gpud_output_lookup(uint64_t id, uint32_t* slot_out) {
     return output;
 }
 
-static struct gpud_mode* gpud_mode_lookup(uint64_t id) {
+static struct gpud_mode *gpud_mode_lookup(uint64_t id) {
     uint32_t index;
-    struct gpud_mode* mode;
+    struct gpud_mode *mode;
     if (gpud_object_index(id, MX_GPU_OBJECT_MODE, g_generation, &index) != 0 ||
         index > GPUD_MAX_MODES) {
         return 0;
@@ -209,9 +209,9 @@ static struct gpud_mode* gpud_mode_lookup(uint64_t id) {
     return mode;
 }
 
-static struct gpud_buffer* gpud_buffer_lookup(uint64_t id, uint32_t* slot_out) {
+static struct gpud_buffer *gpud_buffer_lookup(uint64_t id, uint32_t *slot_out) {
     uint32_t index;
-    struct gpud_buffer* buffer;
+    struct gpud_buffer *buffer;
     if (gpud_object_index(id, MX_GPU_OBJECT_BUFFER, g_generation, &index) != 0 ||
         index > GPUD_MAX_BUFFERS) {
         return 0;
@@ -234,7 +234,7 @@ static struct gpud_buffer* gpud_buffer_lookup(uint64_t id, uint32_t* slot_out) {
  * rows and flags that zero-copy can now be switched on. */
 static void gpud_import_report(void) {
     char buf[128];
-    char* p = mx_append_str(buf, "dango-gpud: zero-copy probe cap=");
+    char *p = mx_append_str(buf, "dango-gpud: zero-copy probe cap=");
     p = mx_append_u32(p, (unsigned int)g_import_cap_prime);
     p = mx_append_str(p, " verdict=");
     switch (g_import_verdict) {
@@ -262,8 +262,8 @@ static void gpud_import_report(void) {
 /* Export `region` as a dma-buf and import it as a GEM handle. Returns 0 on
  * success, else the negative errno that refused it (-MX_EINVAL when the export
  * itself failed). */
-static long gpud_region_import(const struct dango_shm_region* region,
-                               unsigned long long boot_generation, uint32_t* handle_out) {
+static long gpud_region_import(const struct dango_shm_region *region,
+                               unsigned long long boot_generation, uint32_t *handle_out) {
     struct dango_shm_export exp;
     long rc;
 
@@ -335,8 +335,8 @@ static void gpud_import_probe(void) {
 /* Use an imported scanout object for `buffer` when the request names the probed
  * region and matches its geometry. Returns 0 when the imported path is taken,
  * -1 when the caller must fall back to the dumb buffer + bounded copy. */
-static int gpud_buffer_import(struct gpud_buffer* buffer,
-                              const struct MxGpuBufferRegisterRequest* in) {
+static int gpud_buffer_import(struct gpud_buffer *buffer,
+                              const struct MxGpuBufferRegisterRequest *in) {
     uint32_t handle = 0;
 
     if (g_import_verdict != GPUD_IMPORT_AVAILABLE || in->shm_id != g_import_region.id ||
@@ -354,17 +354,17 @@ static int gpud_buffer_import(struct gpud_buffer* buffer,
 
 /* --- Handlers ------------------------------------------------------------- */
 
-static void gpud_handle_hello(const struct dango_ring_slot* request,
-                              struct dango_ring_slot* reply) {
-    const struct MxGpuHello* hello;
+static void gpud_handle_hello(const struct dango_ring_slot *request,
+                              struct dango_ring_slot *reply) {
+    const struct MxGpuHello *hello;
     struct MxGpuHelloReply out;
-    const void* payload;
+    const void *payload;
 
     if (gpud_frame_decode(request, GPU_HELLO, (uint32_t)sizeof(*hello), &payload) != 0) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, 0);
         return;
     }
-    hello = (const struct MxGpuHello*)payload;
+    hello = (const struct MxGpuHello *)payload;
     memset(&out, 0, sizeof(out));
     /* Version negotiation: an incompatible major still gets our version back,
      * so the client can decide whether to fall back. */
@@ -377,18 +377,18 @@ static void gpud_handle_hello(const struct dango_ring_slot* request,
     gpud_frame_reply(reply, GPU_HELLO, request->seq, &out, (uint32_t)sizeof(out));
 }
 
-static void gpud_handle_enum_outputs(const struct dango_ring_slot* request,
-                                     struct dango_ring_slot* reply) {
-    const struct MxGpuEnumOutputsRequest* in;
+static void gpud_handle_enum_outputs(const struct dango_ring_slot *request,
+                                     struct dango_ring_slot *reply) {
+    const struct MxGpuEnumOutputsRequest *in;
     struct MxGpuEnumOutputsReply out;
-    const struct gpud_output* output;
-    const void* payload;
+    const struct gpud_output *output;
+    const void *payload;
 
     if (gpud_frame_decode(request, GPU_ENUM_OUTPUTS, (uint32_t)sizeof(*in), &payload) != 0) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, 0);
         return;
     }
-    in = (const struct MxGpuEnumOutputsRequest*)payload;
+    in = (const struct MxGpuEnumOutputsRequest *)payload;
     if (!gpud_generation_ok(in->boot_generation)) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, in->boot_generation);
         return;
@@ -421,19 +421,19 @@ static void gpud_handle_enum_outputs(const struct dango_ring_slot* request,
     gpud_frame_reply(reply, GPU_ENUM_OUTPUTS, request->seq, &out, (uint32_t)sizeof(out));
 }
 
-static void gpud_handle_get_modes(const struct dango_ring_slot* request,
-                                  struct dango_ring_slot* reply) {
-    const struct MxGpuGetModesRequest* in;
+static void gpud_handle_get_modes(const struct dango_ring_slot *request,
+                                  struct dango_ring_slot *reply) {
+    const struct MxGpuGetModesRequest *in;
     struct MxGpuGetModesReply out;
-    const struct gpud_output* output;
-    const struct gpud_mode* mode;
-    const void* payload;
+    const struct gpud_output *output;
+    const struct gpud_mode *mode;
+    const void *payload;
 
     if (gpud_frame_decode(request, GPU_GET_MODES, (uint32_t)sizeof(*in), &payload) != 0) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, 0);
         return;
     }
-    in = (const struct MxGpuGetModesRequest*)payload;
+    in = (const struct MxGpuGetModesRequest *)payload;
     if (!gpud_generation_ok(in->boot_generation)) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, in->boot_generation);
         return;
@@ -461,20 +461,20 @@ static void gpud_handle_get_modes(const struct dango_ring_slot* request,
     gpud_frame_reply(reply, GPU_GET_MODES, request->seq, &out, (uint32_t)sizeof(out));
 }
 
-static void gpud_handle_buffer_register(const struct dango_ring_slot* request,
-                                        struct dango_ring_slot* reply) {
-    const struct MxGpuBufferRegisterRequest* in;
+static void gpud_handle_buffer_register(const struct dango_ring_slot *request,
+                                        struct dango_ring_slot *reply) {
+    const struct MxGpuBufferRegisterRequest *in;
     struct MxGpuBufferRegisterReply out;
-    struct gpud_buffer* buffer = 0;
+    struct gpud_buffer *buffer = 0;
     uint64_t bytes;
     uint32_t slot;
-    const void* payload;
+    const void *payload;
 
     if (gpud_frame_decode(request, GPU_BUFFER_REGISTER, (uint32_t)sizeof(*in), &payload) != 0) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, 0);
         return;
     }
-    in = (const struct MxGpuBufferRegisterRequest*)payload;
+    in = (const struct MxGpuBufferRegisterRequest *)payload;
     if (!gpud_generation_ok(in->boot_generation) || in->reserved0 != 0) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, in->boot_generation);
         return;
@@ -543,18 +543,18 @@ static void gpud_handle_buffer_register(const struct dango_ring_slot* request,
     gpud_frame_reply(reply, GPU_BUFFER_REGISTER, request->seq, &out, (uint32_t)sizeof(out));
 }
 
-static void gpud_handle_buffer_unregister(const struct dango_ring_slot* request,
-                                          struct dango_ring_slot* reply) {
-    const struct MxGpuBufferUnregisterRequest* in;
+static void gpud_handle_buffer_unregister(const struct dango_ring_slot *request,
+                                          struct dango_ring_slot *reply) {
+    const struct MxGpuBufferUnregisterRequest *in;
     struct MxGpuBufferUnregisterReply out;
-    struct gpud_buffer* buffer;
-    const void* payload;
+    struct gpud_buffer *buffer;
+    const void *payload;
 
     if (gpud_frame_decode(request, GPU_BUFFER_UNREGISTER, (uint32_t)sizeof(*in), &payload) != 0) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, 0);
         return;
     }
-    in = (const struct MxGpuBufferUnregisterRequest*)payload;
+    in = (const struct MxGpuBufferUnregisterRequest *)payload;
     if (!gpud_generation_ok(in->boot_generation)) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, in->boot_generation);
         return;
@@ -601,20 +601,20 @@ static void gpud_handle_buffer_unregister(const struct dango_ring_slot* request,
     gpud_frame_reply(reply, GPU_BUFFER_UNREGISTER, request->seq, &out, (uint32_t)sizeof(out));
 }
 
-static void gpud_handle_set_mode(const struct dango_ring_slot* request,
-                                 struct dango_ring_slot* reply) {
-    const struct MxGpuSetModeRequest* in;
+static void gpud_handle_set_mode(const struct dango_ring_slot *request,
+                                 struct dango_ring_slot *reply) {
+    const struct MxGpuSetModeRequest *in;
     struct MxGpuSetModeReply out;
-    struct gpud_output* output;
-    struct gpud_mode* mode;
-    struct gpud_buffer* buffer;
-    const void* payload;
+    struct gpud_output *output;
+    struct gpud_mode *mode;
+    struct gpud_buffer *buffer;
+    const void *payload;
 
     if (gpud_frame_decode(request, GPU_SET_MODE, (uint32_t)sizeof(*in), &payload) != 0) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, 0);
         return;
     }
-    in = (const struct MxGpuSetModeRequest*)payload;
+    in = (const struct MxGpuSetModeRequest *)payload;
     if (!gpud_generation_ok(in->boot_generation) || in->reserved0 != 0) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, in->boot_generation);
         return;
@@ -647,10 +647,11 @@ static void gpud_handle_set_mode(const struct dango_ring_slot* request,
         return;
     }
     if (buffer->fb_id == 0) {
-        int fb_ok = buffer->imported ? gdrm_fb_create_handle(&g_card, buffer->import_handle,
-                                                             buffer->width, buffer->height,
-                                                             buffer->stride, 32, 24, &buffer->fb_id)
-                                     : gdrm_fb_create(&g_card, &buffer->dumb, &buffer->fb_id);
+        int fb_ok = buffer->imported
+                        ? gdrm_fb_create_handle(&g_card, buffer->import_handle, buffer->width,
+                                                buffer->height, buffer->stride, 32, 24,
+                                                &buffer->fb_id)
+                        : gdrm_fb_create(&g_card, &buffer->dumb, &buffer->fb_id);
         if (fb_ok != 0) {
             gpud_frame_error(reply, request, MX_ERR_FAULT, buffer->id, g_generation, 0);
             return;
@@ -673,19 +674,19 @@ static void gpud_handle_set_mode(const struct dango_ring_slot* request,
     gpud_frame_reply(reply, GPU_SET_MODE, request->seq, &out, (uint32_t)sizeof(out));
 }
 
-static void gpud_handle_present(const struct dango_ring_slot* request,
-                                struct dango_ring_slot* reply) {
-    const struct MxGpuPresentRequest* in;
+static void gpud_handle_present(const struct dango_ring_slot *request,
+                                struct dango_ring_slot *reply) {
+    const struct MxGpuPresentRequest *in;
     struct MxGpuPresentReply out;
-    struct gpud_buffer* buffer;
+    struct gpud_buffer *buffer;
     uint32_t slot;
-    const void* payload;
+    const void *payload;
 
     if (gpud_frame_decode(request, GPU_PRESENT, (uint32_t)sizeof(*in), &payload) != 0) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, 0);
         return;
     }
-    in = (const struct MxGpuPresentRequest*)payload;
+    in = (const struct MxGpuPresentRequest *)payload;
     if (!gpud_generation_ok(in->boot_generation)) {
         gpud_frame_error(reply, request, MX_ERR_INVALID, 0, g_generation, in->boot_generation);
         return;
@@ -701,11 +702,11 @@ static void gpud_handle_present(const struct dango_ring_slot* request,
         return;
     }
     if (in->damage_count > MX_GPU_MAX_INLINE_DAMAGE ||
-        (in->damage_count == 1 && (in->damage.width == 0 || in->damage.height == 0 ||
-                                   (uint64_t)in->damage.x + in->damage.width > buffer->width ||
-                                   (uint64_t)in->damage.y + in->damage.height > buffer->height))) {
-        gpud_frame_error(reply, request, MX_ERR_INVALID, buffer->id, g_generation,
-                         in->damage_count);
+        (in->damage_count == 1 &&
+         (in->damage.width == 0 || in->damage.height == 0 ||
+          (uint64_t)in->damage.x + in->damage.width > buffer->width ||
+          (uint64_t)in->damage.y + in->damage.height > buffer->height))) {
+        gpud_frame_error(reply, request, MX_ERR_INVALID, buffer->id, g_generation, in->damage_count);
         return;
     }
     if (g_pending_count >= GPUD_MAX_PENDING) {
@@ -729,7 +730,7 @@ static void gpud_handle_present(const struct dango_ring_slot* request,
 
 /* --- Dispatch ------------------------------------------------------------- */
 
-static int gpud_dispatch(const struct dango_ring_slot* request) {
+static int gpud_dispatch(const struct dango_ring_slot *request) {
     struct dango_ring_slot reply;
 
     /* Opcodes this profile does not implement are answered, never ignored: a
@@ -807,12 +808,12 @@ static void gpud_pending_pop(void) {
 
 /* Copy the registered staging buffer into its dumb buffer, restore scanout if
  * the CRTC stopped scanning it, then publish GPU_PRESENT_COMPLETE. */
-static int gpud_present_finish(const struct gpud_pending* pending) {
-    struct gpud_buffer* buffer = &g_buffers[pending->buffer_slot];
+static int gpud_present_finish(const struct gpud_pending *pending) {
+    struct gpud_buffer *buffer = &g_buffers[pending->buffer_slot];
     struct MxGpuPresentComplete out;
     struct dango_ring_slot frame;
-    const unsigned char* source;
-    unsigned char* dest;
+    const unsigned char *source;
+    unsigned char *dest;
     uint64_t row_bytes;
     uint32_t y;
     int64_t status = MX_OK;
@@ -825,8 +826,7 @@ static int gpud_present_finish(const struct gpud_pending* pending) {
          * so scanout reads it directly and no bytes move. The barrier orders
          * the region writes before the completion the host waits on. */
         __asm__ volatile("dmb ish" ::: "memory");
-    } else if (row_bytes == 0 ||
-               buffer->staging_off + buffer->staging_bytes > g_channel.staging_len ||
+    } else if (row_bytes == 0 || buffer->staging_off + buffer->staging_bytes > g_channel.staging_len ||
                (uint64_t)buffer->height * row_bytes > buffer->dumb.map_len) {
         status = MX_ERR_FAULT;
     } else {
@@ -842,8 +842,9 @@ static int gpud_present_finish(const struct gpud_pending* pending) {
 
     if (status == MX_OK && buffer->has_mode && buffer->crtc_id != 0) {
         int scanning = gdrm_crtc_scanning(&g_card, buffer->crtc_id, buffer->fb_id);
-        if (scanning <= 0 && gdrm_crtc_program(&g_card, buffer->crtc_id, buffer->connector_id,
-                                               buffer->fb_id, &buffer->mode) != 0) {
+        if (scanning <= 0 &&
+            gdrm_crtc_program(&g_card, buffer->crtc_id, buffer->connector_id, buffer->fb_id,
+                              &buffer->mode) != 0) {
             status = MX_ERR_FAULT;
         }
     }

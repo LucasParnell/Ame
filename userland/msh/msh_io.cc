@@ -19,22 +19,19 @@ bool streq(const char* a, const char* b) {
 }
 
 bool svc_registry_valid_snapshot(const mochi::svc::RegistryPage* page) {
-    if (!page)
-        return false;
+    if (!page) return false;
     for (uint32_t tries = 0; tries < 8; ++tries) {
         const mx_u64_t gen = mochi::svc::read_begin(page);
         const bool ok = page->magic == mochi::svc::kRegistryMagic &&
                         page->version == mochi::svc::kRegistryVersion &&
                         page->entry_count <= mochi::svc::kMaxRegistryEntries;
-        if (!mochi::svc::read_retry(page, gen))
-            return ok;
+        if (!mochi::svc::read_retry(page, gen)) return ok;
     }
     return false;
 }
 
 uint16_t svc_registry_entry_count() {
-    if (!g.svc_registry)
-        return 0;
+    if (!g.svc_registry) return 0;
     for (uint32_t tries = 0; tries < 8; ++tries) {
         const mx_u64_t gen = mochi::svc::read_begin(g.svc_registry);
         const uint16_t count = g.svc_registry->entry_count;
@@ -46,19 +43,16 @@ uint16_t svc_registry_entry_count() {
 }
 
 bool svc_registry_copy_entry(uint16_t index, mochi::svc::RegistryEntry* out) {
-    if (!g.svc_registry || !out)
-        return false;
+    if (!g.svc_registry || !out) return false;
     for (uint32_t tries = 0; tries < 8; ++tries) {
         const mx_u64_t gen = mochi::svc::read_begin(g.svc_registry);
         const uint16_t count = g.svc_registry->entry_count;
         if (count > mochi::svc::kMaxRegistryEntries || index >= count) {
-            if (!mochi::svc::read_retry(g.svc_registry, gen))
-                return false;
+            if (!mochi::svc::read_retry(g.svc_registry, gen)) return false;
             continue;
         }
         *out = g.svc_registry->entries[index];
-        if (!mochi::svc::read_retry(g.svc_registry, gen))
-            return true;
+        if (!mochi::svc::read_retry(g.svc_registry, gen)) return true;
     }
     return false;
 }
@@ -67,8 +61,7 @@ bool svc_exists(const char* name) {
     mochi::svc::RegistryEntry e{};
     const uint16_t count = svc_registry_entry_count();
     for (uint16_t i = 0; i < count; ++i) {
-        if (svc_registry_copy_entry(i, &e) && streq(e.name, name))
-            return true;
+        if (svc_registry_copy_entry(i, &e) && streq(e.name, name)) return true;
     }
     return false;
 }
@@ -86,24 +79,23 @@ bool is_digit(char c) {
 }
 
 bool is_name_char(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ||
-           c == '.' || c == '-';
+    return (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') ||
+           c == '_' || c == '.' || c == '-';
 }
 
 uint64_t parse_u64(const char* s, bool* ok) {
     uint64_t value = 0;
     const bool valid = libk::num::parse_u64(s, &value);
-    if (ok)
-        *ok = valid;
+    if (ok) *ok = valid;
     return value;
 }
 
 void put_bytes(const char* data, uint32_t len) {
-    if (!data || len == 0)
-        return;
+    if (!data || len == 0) return;
     if (g.have_terminal && g.term.valid()) {
-        if (!g.term.write_bytes_spinning(data, len, 0xFFFFu))
-            g.output_failed = true;
+        if (!g.term.write_bytes_spinning(data, len, 0xFFFFu)) g.output_failed = true;
     } else {
         sys_debug_puts(data, len);
     }
@@ -131,10 +123,7 @@ void put_hex(uint64_t v) {
 }
 
 void put_status(mx_status_t s) {
-    if (s == MX_OK) {
-        put("OK");
-        return;
-    }
+    if (s == MX_OK) { put("OK"); return; }
     put("err(");
     if (s < 0) {
         put("-");
@@ -155,9 +144,11 @@ const char* boot_type_name(uint32_t type) {
     return mx_boot_entry_type_name(type);
 }
 
+
 bool starts_with(const char* s, const char* prefix) {
     return libk::str::starts_with(s, prefix);
 }
+
 
 int notimpl(const char* what) {
     put("msh: ");

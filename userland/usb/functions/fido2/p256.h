@@ -12,18 +12,14 @@ struct Hash {
     mx_u8_t scratch[128], input[192];
     mx_u32_t size;
     bool valid;
-    Hash() : context{init, update, finish, 64, 32, scratch}, size(0), valid(true) {
-    }
+    Hash() : context{init, update, finish, 64, 32, scratch}, size(0), valid(true) {}
     static void init(const uECC_HashContext* ctx) {
         auto& h = *reinterpret_cast<Hash*>(const_cast<uECC_HashContext*>(ctx));
         h.size = 0;
     }
     static void update(const uECC_HashContext* ctx, const mx_u8_t* data, unsigned size) {
         auto& h = *reinterpret_cast<Hash*>(const_cast<uECC_HashContext*>(ctx));
-        if (size > sizeof(h.input) - h.size) {
-            h.valid = false;
-            return;
-        }
+        if (size > sizeof(h.input) - h.size) { h.valid = false; return; }
         libk::copy_n(libk::as_bytes(h.input + h.size, size), libk::as_bytes(data, size), size);
         h.size += size;
     }
@@ -40,24 +36,19 @@ inline bool public_key(const mx_u8_t private_key[32], mx_u8_t public_key[64]) {
 }
 inline mx_u32_t der_integer(mx_u8_t* out, const mx_u8_t* input) {
     mx_u32_t at = 0;
-    while (at < 31 && !input[at])
-        ++at;
+    while (at < 31 && !input[at]) ++at;
     const bool pad = input[at] & 128;
-    out[0] = 2;
-    out[1] = 32 - at + pad;
-    if (pad)
-        out[2] = 0;
-    libk::copy_n(libk::as_bytes(out + 2 + pad, 32 - at), libk::as_bytes(input + at, 32 - at),
-                 32 - at);
+    out[0] = 2; out[1] = 32 - at + pad;
+    if (pad) out[2] = 0;
+    libk::copy_n(libk::as_bytes(out + 2 + pad, 32 - at), libk::as_bytes(input + at, 32 - at), 32 - at);
     return 2 + 32 - at + pad;
 }
 inline mx_u32_t sign(const mx_u8_t private_key[32], libk::const_bytes message, mx_u8_t der[72]) {
     mx_u8_t digest[32], raw[64];
     integrity::sha256(message.data, message.size, digest);
     Hash hash;
-    const bool ok = uECC_sign_deterministic(private_key, digest, sizeof(digest), &hash.context, raw,
-                                            uECC_secp256r1()) == 1 &&
-                    hash.valid;
+    const bool ok = uECC_sign_deterministic(private_key, digest, sizeof(digest),
+                                            &hash.context, raw, uECC_secp256r1()) == 1 && hash.valid;
     crypto_wipe(&hash, sizeof(hash));
     crypto_wipe(digest, sizeof(digest));
     mx_u32_t size = 0;

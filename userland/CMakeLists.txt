@@ -16,6 +16,90 @@ add_library(mochi_runtime STATIC lib/runtime/cxx_guard.cc)
 set_property(TARGET mochi_runtime PROPERTY AME_USERLAND_SIMD TRUE)
 target_include_directories(mochi_runtime PRIVATE ${MOCHI_INCLUDES})
 
+# libmochi is the native service SDK: capability/IPC helpers plus its runtime.
+add_library(libmochi INTERFACE)
+target_include_directories(libmochi INTERFACE ${MOCHI_INCLUDES})
+target_link_libraries(libmochi INTERFACE libk_user freestanding_memory_user ame_format_user mochi_runtime)
+
+add_library(ame_graphics STATIC libgraphics/transport.cc)
+set_property(TARGET ame_graphics PROPERTY AME_USERLAND_SIMD TRUE)
+target_include_directories(ame_graphics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/libgraphics/include)
+target_link_libraries(ame_graphics PUBLIC libmochi)
+
+add_library(libGLESv2 STATIC libgles/gles.cc)
+set_property(TARGET libGLESv2 PROPERTY AME_USERLAND_SIMD TRUE)
+set_target_properties(libGLESv2 PROPERTIES OUTPUT_NAME GLESv2)
+target_include_directories(libGLESv2 PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/libgles/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/libegl/include)
+target_compile_definitions(libGLESv2 PUBLIC EGL_NO_PLATFORM_SPECIFIC_TYPES=1)
+target_link_libraries(libGLESv2 PUBLIC ame_graphics)
+
+add_library(libEGL STATIC libegl/egl.cc)
+set_property(TARGET libEGL PROPERTY AME_USERLAND_SIMD TRUE)
+set_target_properties(libEGL PROPERTIES OUTPUT_NAME EGL)
+target_link_libraries(libEGL PUBLIC libGLESv2)
+
+# Standard Vulkan 1.0 entry points for native apps, using the GPU guest.
+set(AME_VULKAN_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated/vulkan)
+set(AME_VULKAN_GENERATOR ${CMAKE_SOURCE_DIR}/scripts/vulkan/generate-frontend.py)
+add_custom_command(
+    OUTPUT ${AME_VULKAN_GENERATED}/vk-rpc-types.h
+           ${AME_VULKAN_GENERATED}/vk-rpc-metadata.cc
+           ${AME_VULKAN_GENERATED}/vk-rpc-client.cc
+           ${AME_VULKAN_GENERATED}/vk-rpc-guest.inc
+    COMMAND ${Python3_EXECUTABLE} ${AME_VULKAN_GENERATOR} --output ${AME_VULKAN_GENERATED}
+    DEPENDS ${AME_VULKAN_GENERATOR} ${CMAKE_SOURCE_DIR}/third_party/vulkan/vk.xml
+    VERBATIM)
+add_library(libVulkan STATIC libvulkan/client.cc libvulkan/memory.cc libvulkan/present.cc libvulkan/native_renderer.cc
+    ${AME_VULKAN_GENERATED}/vk-rpc-metadata.cc ${AME_VULKAN_GENERATED}/vk-rpc-client.cc)
+set_property(TARGET libVulkan PROPERTY AME_USERLAND_SIMD TRUE)
+set_target_properties(libVulkan PROPERTIES OUTPUT_NAME vulkan)
+target_include_directories(libVulkan PUBLIC
+    ${CMAKE_SOURCE_DIR}/third_party/vulkan/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/libvulkan/include
+    PRIVATE ${AME_VULKAN_GENERATED} ${CMAKE_CURRENT_SOURCE_DIR}/libvulkan)
+target_link_libraries(libVulkan PUBLIC ame_graphics)
+
+# The triangle client is shared C source, compiled freestanding without libc.
+set(AME_NATIVE_VK_TRIANGLE ${AME_VULKAN_GENERATED}/native-triangle.o)
+set(AME_NATIVE_VK_TARGET)
+if(CMAKE_C_COMPILER_TARGET)
+    list(APPEND AME_NATIVE_VK_TARGET --target=${CMAKE_C_COMPILER_TARGET})
+endif()
+add_custom_command(OUTPUT ${AME_NATIVE_VK_TRIANGLE}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${AME_VULKAN_GENERATED}
+    COMMAND ${CMAKE_C_COMPILER} ${AME_NATIVE_VK_TARGET} -x c -std=c11 -O2 -g
+        -ffreestanding -fno-stack-protector -fno-pic -mcpu=cortex-a53
+        -Wall -Wextra -Werror -DAME_NATIVE_VULKAN=1
+        -I${CMAKE_SOURCE_DIR}/third_party/vulkan/include
+        -I${CMAKE_SOURCE_DIR}/shared/include -I${CMAKE_CURRENT_SOURCE_DIR}/libvulkan
+        -c ${CMAKE_SOURCE_DIR}/linux-artifacts/panvk-renderer/renderer.c -o ${AME_NATIVE_VK_TRIANGLE}
+    DEPENDS ${CMAKE_SOURCE_DIR}/linux-artifacts/panvk-renderer/renderer.c
+        ${CMAKE_SOURCE_DIR}/linux-artifacts/panvk-renderer/renderer.h
+        ${CMAKE_SOURCE_DIR}/shared/include/midix/render/vulkan_triangle_spirv.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/libvulkan/native_renderer_shim.h
+    VERBATIM)
+set_source_files_properties(${AME_NATIVE_VK_TRIANGLE} PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+target_sources(libVulkan PRIVATE ${AME_NATIVE_VK_TRIANGLE})
+
+set(AME_NATIVE_VK_SUITE ${AME_VULKAN_GENERATED}/native-suite.o)
+add_custom_command(OUTPUT ${AME_NATIVE_VK_SUITE}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${AME_VULKAN_GENERATED}
+    COMMAND ${CMAKE_C_COMPILER} ${AME_NATIVE_VK_TARGET} -x c -std=c11 -O2 -g
+        -ffreestanding -fno-stack-protector -fno-pic -mcpu=cortex-a53
+        -Wall -Wextra -Werror -DAME_NATIVE_VULKAN=1
+        -I${CMAKE_SOURCE_DIR}/third_party/vulkan/include
+        -I${CMAKE_SOURCE_DIR}/shared/include -I${CMAKE_CURRENT_SOURCE_DIR}/libvulkan
+        -c ${CMAKE_SOURCE_DIR}/linux-artifacts/panvk-renderer/suite.c -o ${AME_NATIVE_VK_SUITE}
+    DEPENDS ${CMAKE_SOURCE_DIR}/linux-artifacts/panvk-renderer/suite.c
+        ${CMAKE_SOURCE_DIR}/linux-artifacts/panvk-renderer/suite.h
+        ${CMAKE_SOURCE_DIR}/shared/include/midix/render/vulkan_probe_spirv.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/libvulkan/native_renderer_shim.h
+    VERBATIM)
+set_source_files_properties(${AME_NATIVE_VK_SUITE} PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+target_sources(libVulkan PRIVATE ${AME_NATIVE_VK_SUITE})
+
 function(mochi_service name src load_base)
     set(USER_LOAD_BASE ${load_base})
     set(LINKER_SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/${name}.ld)
@@ -31,7 +115,7 @@ function(mochi_service name src load_base)
     # Services must not touch the raw memory floor (libk/string.h); the header
     # rejects AME_MOCHI_SERVICE builds that try.
     target_compile_definitions(${name} PRIVATE AME_MOCHI_SERVICE=1)
-    target_link_libraries(${name} PRIVATE libk_user freestanding_memory_user ame_format_user mochi_runtime)
+    target_link_libraries(${name} PRIVATE libmochi)
     target_link_options(${name} PRIVATE
         -nostdlib -static -fno-pie
         -T ${LINKER_SCRIPT}
@@ -113,16 +197,6 @@ if(DEFINED ANKO_FB_WIDTH AND DEFINED ANKO_FB_HEIGHT)
         ANKO_FB_WIDTH=${ANKO_FB_WIDTH}
         ANKO_FB_HEIGHT=${ANKO_FB_HEIGHT})
 endif()
-# dango/vulkan.h — the native Vulkan session client and the `ame_remote` command
-# marshalling. It is an *object* library: the client is not linked into a service
-# yet (no service drives a remote Vulkan session in V0), but compiling it under
-# the freestanding userland flags proves it carries no Linux/host dependency and
-# no hot-path allocation. The host transport regression links these same sources.
-add_library(dango_vulkan OBJECT
-    lib/vulkan/session_client.cc
-    lib/vulkan/mochi_transport.cc)
-target_include_directories(dango_vulkan PRIVATE ${MOCHI_INCLUDES})
-
 mochi_service(tty.fb0         drivers/tty/main.cc         0x10800000)
 mochi_service(drv.pci         drivers/pci/main.cc         0x10900000)
 mochi_service(drv.usb.xhci    drivers/usb/xhci/main.cc   0x10A00000)
@@ -225,7 +299,9 @@ set(MSH_SOURCES
     msh/msh_power.cc
     msh/msh_apps.cc
 )
-mochi_service(msh "${MSH_SOURCES}" 0x10F00000)
+mochi_service(msh "${MSH_SOURCES}" 0x10F00000 msh/msh_gpu.cc)
+target_link_libraries(msh PRIVATE libEGL libVulkan)
+target_compile_definitions(msh PRIVATE AME_NATIVE_VULKAN=1)
 mochi_service(app.hello   app/hello/main.cc       0x11400000)
 mochi_service(app.stream-test app/stream-test/main.cc 0x12C00000)
 mochi_service(app.stream-metrics app/stream-metrics/main.cc 0x12D00000)
@@ -234,8 +310,8 @@ add_custom_target(stream_test DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/app.stream-tes
 mochi_service(test.anne_smp ${CMAKE_SOURCE_DIR}/tests/kernel/anne_smp.cc 0x11500000)
 
 set(DANGO_LINUX_ARTIFACT_DIR "" CACHE PATH "Optional prebuilt Dango Linux artifact directory")
-set(DANGO_LINUX_PROFILE "hello" CACHE STRING "Dango Linux profile: hello or gpu")
-set_property(CACHE DANGO_LINUX_PROFILE PROPERTY STRINGS hello gpu)
+set(DANGO_LINUX_PROFILE "hello" CACHE STRING "Dango Linux profile: hello, gpu or panfrost")
+set_property(CACHE DANGO_LINUX_PROFILE PROPERTY STRINGS hello gpu panfrost)
 # Which guest userspace the appliance boots. `minimal` is the freestanding
 # appliance initramfs the tree has always built; `lavapipe` is the libc guest
 # carrying a real Vulkan ICD (Mesa lavapipe), which is what the Phase N/O
@@ -253,8 +329,8 @@ if(NOT "${DANGO_LINUX_GUEST}" STREQUAL "${ANKO_GUEST_LAYOUT}")
         "DANGO_LINUX_GUEST (${DANGO_LINUX_GUEST}) must match ANKO_GUEST_LAYOUT "
         "(${ANKO_GUEST_LAYOUT}); both select the same guest layout")
 endif()
-if(NOT DANGO_LINUX_PROFILE MATCHES "^(hello|gpu)$")
-    message(FATAL_ERROR "DANGO_LINUX_PROFILE must be hello or gpu")
+if(NOT DANGO_LINUX_PROFILE MATCHES "^(hello|gpu|panfrost)$")
+    message(FATAL_ERROR "DANGO_LINUX_PROFILE must be hello, gpu or panfrost")
 endif()
 set(DANGO_LINUX_SOURCE_DIR "$ENV{HOME}/Code/linux" CACHE PATH "Linux source tree for guest builds")
 option(DANGO_BUILD_LINUX_ARTIFACTS "Build and package Dango Linux artifacts" OFF)
@@ -331,6 +407,9 @@ if(DANGO_BUILD_LINUX_ARTIFACTS)
             set(DANGO_LINUX_BUILDER "${CMAKE_SOURCE_DIR}/scripts/linux/build-gpu-linux-docker.sh")
         endif()
     endif()
+    if(DANGO_LINUX_PROFILE STREQUAL "panfrost")
+        set(DANGO_LINUX_BUILDER "${CMAKE_SOURCE_DIR}/scripts/linux/build-panfrost-linux.sh")
+    endif()
     add_custom_command(
         OUTPUT ${DANGO_LINUX_ARCHIVE_FILES}
         COMMAND ${CMAKE_COMMAND} -E env
@@ -340,6 +419,9 @@ if(DANGO_BUILD_LINUX_ARTIFACTS)
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         DEPENDS
             ${DANGO_LINUX_BUILDER}
+            ${CMAKE_SOURCE_DIR}/scripts/linux/build-panfrost-linux.sh
+            ${CMAKE_SOURCE_DIR}/linux-artifacts/config/dango_panfrost_arm64.fragment
+            ${CMAKE_SOURCE_DIR}/linux-artifacts/dts/dango-linux-panfrost.dts.in
             ${CMAKE_SOURCE_DIR}/scripts/linux/build-min-linux.sh
             ${CMAKE_SOURCE_DIR}/scripts/linux/build-hello-linux-docker.sh
             ${CMAKE_SOURCE_DIR}/scripts/linux/build-gpu-linux.sh
@@ -372,7 +454,7 @@ endif()
 if(DANGO_LINUX_ARTIFACT_DIR)
     list(APPEND DANGO_LINUX_ARCHIVE_COMMANDS
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/linux/check-profile.py
-                ${DANGO_LINUX_ARTIFACT_DIR} ${DANGO_LINUX_PROFILE})
+                ${DANGO_LINUX_ARTIFACT_DIR} ${DANGO_LINUX_PROFILE} ${DANGO_LINUX_GUEST})
     foreach(name Image initramfs.cpio dango-linux.dtb manifest.toml)
         list(APPEND DANGO_LINUX_ARCHIVE_ENTRIES "linux/${name}")
     endforeach()

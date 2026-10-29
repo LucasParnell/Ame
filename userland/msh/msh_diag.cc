@@ -1,15 +1,16 @@
 // Serial-friendly diagnostics. Explicit EL3 operations can invoke firmware.
 // Everything uses the shell's terminal
 // route, so CDC receives the same report as the framebuffer console.
-#include "msh.h"
 #include "libk/printf.h"
+#include "midix/abi/cpu_limits.h"
 #include "midix/abi/debug_counters.h"
 #include "midix/abi/diagnostics.h"
-#include "midix/abi/cpu_limits.h"
 #include "midix/abi/syscall.h"
+#include "mochi/gpu_diag.h"
+#include "msh.h"
 
 namespace {
-template <typename... Args> void line(const char* format, Args... args) {
+template <typename... Args> void line(const char *format, Args... args) {
     char buffer[256];
     // Include CRLF in one terminal write, leaving room for the formatter's NUL.
     const int length = libk::snprintf(buffer, sizeof(buffer) - 2, format, args...);
@@ -19,20 +20,21 @@ template <typename... Args> void line(const char* format, Args... args) {
     }
     const auto count = static_cast<uint32_t>(length);
     uint32_t used = count < sizeof(buffer) - 2 ? count : sizeof(buffer) - 3;
-    if (used != count)
+    if (used != count) {
         g.output_failed = true;
+    }
     buffer[used++] = '\r';
     buffer[used++] = '\n';
     put_bytes(buffer, used);
 }
 
-void decimal(const char* name, uint64_t value) {
+void decimal(const char *name, uint64_t value) {
     line("%s=%llu", name, static_cast<unsigned long long>(value));
 }
-void hex(const char* name, uint64_t value) {
+void hex(const char *name, uint64_t value) {
     line("%s=0x%llx", name, static_cast<unsigned long long>(value));
 }
-void error(const char* what, int64_t status) {
+void error(const char *what, int64_t status) {
     line("%s: error=%lld", what, static_cast<long long>(status));
 }
 
@@ -46,7 +48,7 @@ RuntimeSample runtime_before{}, runtime_after{};
 uint64_t runtime_delta[MX_DIAG_PROCESS_LIMIT + 1];
 uint8_t runtime_order[MX_DIAG_PROCESS_LIMIT];
 
-bool read_runtime(RuntimeSample& sample) {
+bool read_runtime(RuntimeSample &sample) {
     libk::zero(sample);
     for (uint32_t first = 1; first <= MX_DIAG_PROCESS_LIMIT; first += MX_DIAG_RUNTIME_ROWS) {
         MxDiagRuntimeBatch batch{};
@@ -55,32 +57,35 @@ bool read_runtime(RuntimeSample& sample) {
                               ? first + MX_DIAG_RUNTIME_ROWS
                               : 0;
         if (rc != sizeof(batch) || batch.version != MX_DIAG_VERSION || batch.first_pid != first ||
-            batch.count > MX_DIAG_RUNTIME_ROWS || batch.next_pid != next)
+            batch.count > MX_DIAG_RUNTIME_ROWS || batch.next_pid != next) {
             return false;
+        }
         if (first == 1) {
             sample.sampled_ns = batch.sampled_ns;
             sample.online_mask = batch.online_mask;
         }
-        if (batch.online_mask != sample.online_mask || batch.sampled_ns < sample.sampled_ns)
+        if (batch.online_mask != sample.online_mask || batch.sampled_ns < sample.sampled_ns) {
             return false;
+        }
         sample.skew_ns = batch.sampled_ns - sample.sampled_ns;
         for (uint32_t i = 0; i < batch.count; ++i) {
-            const auto& row = batch.rows[i];
+            const auto &row = batch.rows[i];
             if (row.pid < first || row.pid >= first + MX_DIAG_RUNTIME_ROWS ||
                 row.pid > MX_DIAG_PROCESS_LIMIT || static_cast<uint32_t>(row.identity) != row.pid ||
-                !row.identity || row.reserved || row.name[31] || sample.rows[row.pid].identity)
+                !row.identity || row.reserved || row.name[31] || sample.rows[row.pid].identity) {
                 return false;
+            }
             sample.rows[row.pid] = row;
         }
     }
     return sample.online_mask != 0;
 }
 
-int runtime_profile(int argc, char** argv) {
+int runtime_profile(int argc, char **argv) {
     uint32_t interval_ms = 5000;
     if (argc == 3) {
         interval_ms = 0;
-        for (const char* p = argv[2]; *p; ++p) {
+        for (const char *p = argv[2]; *p; ++p) {
             if (*p < '0' || *p > '9' || interval_ms > 30000) {
                 putln("usage: diag runtime [100..30000 milliseconds]");
                 return 1;
@@ -117,10 +122,11 @@ int runtime_profile(int argc, char** argv) {
     uint64_t total = 0;
     uint32_t count = 0, excluded = 0;
     for (uint32_t pid = 1; pid <= MX_DIAG_PROCESS_LIMIT; ++pid) {
-        const auto& before = runtime_before.rows[pid];
-        const auto& after = runtime_after.rows[pid];
-        if (!after.identity && !before.identity)
+        const auto &before = runtime_before.rows[pid];
+        const auto &after = runtime_after.rows[pid];
+        if (!after.identity && !before.identity) {
             continue;
+        }
         if (!after.identity || before.identity != after.identity || after.flags ||
             after.runtime_ns < before.runtime_ns) {
             ++excluded;
@@ -164,35 +170,40 @@ int runtime_profile(int argc, char** argv) {
     return g.output_failed ? 1 : 0;
 }
 
-bool parse_hex(const char* s, uint64_t* out) {
-    if (!s || !*s)
+bool parse_hex(const char *s, uint64_t *out) {
+    if (!s || !*s) {
         return false;
+    }
     uint64_t v = 0;
     uint32_t digits = 0;
-    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
         s += 2;
+    }
     for (; *s; ++s) {
         uint32_t d;
         const char c = *s;
-        if (c >= '0' && c <= '9')
+        if (c >= '0' && c <= '9') {
             d = static_cast<uint32_t>(c - '0');
-        else if (c >= 'a' && c <= 'f')
+        } else if (c >= 'a' && c <= 'f') {
             d = static_cast<uint32_t>(c - 'a' + 10);
-        else if (c >= 'A' && c <= 'F')
+        } else if (c >= 'A' && c <= 'F') {
             d = static_cast<uint32_t>(c - 'A' + 10);
-        else
+        } else {
             return false;
-        if (++digits > 16)
+        }
+        if (++digits > 16) {
             return false;
+        }
         v = (v << 4) | d;
     }
-    if (digits == 0)
+    if (digits == 0) {
         return false;
+    }
     *out = v;
     return true;
 }
 
-bool system_info(MxDiagSystem& info) {
+bool system_info(MxDiagSystem &info) {
     const auto rc = sys_debug_read(MX_DIAG_SYSTEM, 0, &info, sizeof(info));
     if (rc != sizeof(info)) {
         error("system diagnostics unavailable", rc);
@@ -205,8 +216,8 @@ bool system_info(MxDiagSystem& info) {
     return true;
 }
 
-int cpu_info(const MxDiagSystem& info) {
-    const char* board = "unknown";
+int cpu_info(const MxDiagSystem &info) {
+    const char *board = "unknown";
     switch (info.board) {
     case MX_DIAG_BOARD_ANNE:
         board = "huawei-anne";
@@ -258,6 +269,16 @@ int cpu_info(const MxDiagSystem& info) {
              static_cast<unsigned long long>(state.timer_preempts),
              static_cast<unsigned long long>(state.timer_ticks),
              static_cast<unsigned long long>(state.ipis_handled));
+        MxDiagVmProgress progress{};
+        if (sys_debug_read(MX_DIAG_VM_PROGRESS, cpu, &progress, sizeof(progress)) ==
+            sizeof(progress)) {
+            line("cpu%u vm.stage=%llu sequence=%llu sampled_ns=%llu detail0=0x%llx detail1=0x%llx",
+                 cpu, static_cast<unsigned long long>(progress.stage),
+                 static_cast<unsigned long long>(progress.sequence),
+                 static_cast<unsigned long long>(progress.sampled_ns),
+                 static_cast<unsigned long long>(progress.detail0),
+                 static_cast<unsigned long long>(progress.detail1));
+        }
     }
     putln("EL2 hardware support does not imply an installed Ame monitor.");
     return result;
@@ -380,13 +401,14 @@ struct RpmbWorker {
 };
 RpmbWorker rpmb_workers[2]{};
 
-int64_t rpmb_serve(RpmbWorker& worker) {
+int64_t rpmb_serve(RpmbWorker &worker) {
     // A private timed doorbell avoids consuming terminal input or spinning a
     // CPU between SGIs. SGI 5 is observed through the kernel's atomic counter.
     mx_handle_t wake = kNullCap;
     auto status = mx_doorbell_create(&wake);
-    if (status != MX_OK)
+    if (status != MX_OK) {
         return status;
+    }
     __atomic_store_n(&worker.wake, wake, __ATOMIC_RELEASE);
     int64_t result = 0;
     while (!__atomic_load_n(&worker.cancel, __ATOMIC_ACQUIRE)) {
@@ -426,8 +448,9 @@ int64_t rpmb_serve(RpmbWorker& worker) {
             continue; // FF06 may have produced the next chunk before returning.
         }
         const auto expected = mx_doorbell_read(wake);
-        if (__atomic_load_n(&worker.cancel, __ATOMIC_ACQUIRE))
+        if (__atomic_load_n(&worker.cancel, __ATOMIC_ACQUIRE)) {
             break;
+        }
         status = mx_doorbell_wait_until(wake, expected, mx_clock_ns() + 1000000);
         if (status != MX_OK) {
             result = status;
@@ -440,10 +463,10 @@ int64_t rpmb_serve(RpmbWorker& worker) {
 }
 
 void rpmb_worker(uint64_t index) {
-    auto& worker = rpmb_workers[index];
-    if (worker.continuous)
+    auto &worker = rpmb_workers[index];
+    if (worker.continuous) {
         worker.rc = rpmb_serve(worker);
-    else if (!__atomic_load_n(&worker.cancel, __ATOMIC_ACQUIRE)) {
+    } else if (!__atomic_load_n(&worker.cancel, __ATOMIC_ACQUIRE)) {
         MxDiagEl3Rpmb info{};
         info.action = index == 0 ? MX_RPMB_COUNTER : MX_RPMB_COMPLETE;
         const auto rc = sys_debug_read(MX_DIAG_EL3, 29, &info, sizeof(info));
@@ -451,11 +474,12 @@ void rpmb_worker(uint64_t index) {
     }
     __atomic_store_n(&worker.state, 2u, __ATOMIC_RELEASE);
     sys_thread_exit(0);
-    for (;;)
+    for (;;) {
         sys_yield();
+    }
 }
 
-bool rpmb_read(uint32_t action, MxDiagEl3Rpmb& info) {
+bool rpmb_read(uint32_t action, MxDiagEl3Rpmb &info) {
     info = {};
     info.action = action;
     const auto rc = sys_debug_read(MX_DIAG_EL3, 29, &info, sizeof(info));
@@ -466,8 +490,8 @@ bool rpmb_read(uint32_t action, MxDiagEl3Rpmb& info) {
     return true;
 }
 
-void rpmb_report(const MxDiagEl3Rpmb& info) {
-    constexpr const char* names[] = {"ok",
+void rpmb_report(const MxDiagEl3Rpmb &info) {
+    constexpr const char *names[] = {"ok",
                                      "busy",
                                      "no_request",
                                      "registration_failed",
@@ -514,35 +538,41 @@ void rpmb_report(const MxDiagEl3Rpmb& info) {
     decimal("rpmb.ff06_returned", info.done_returned);
     hex("rpmb.ff06_x0", info.done_result);
     hex("rpmb.ff06_storage_result", info.completion_error);
-    if (info.result == MX_RPMB_NO_REQUEST)
+    if (info.result == MX_RPMB_NO_REQUEST) {
         putln("No SGI 5 notification received; FF06 was not called.");
-    if (info.trigger_returned && !info.events)
+    }
+    if (info.trigger_returned && !info.events) {
         putln(
             "Counter SMC returned without SGI 5; retail firmware may disable this debug service.");
-    if (info.done_returned && !info.done_result)
+    }
+    if (info.done_returned && !info.done_result) {
         line("FF06 returned after a real notification; storage result=0x%llx.",
              static_cast<unsigned long long>(info.completion_error));
+    }
     for (unsigned i = 0; i < 2; ++i) {
-        const auto& worker = rpmb_workers[i];
+        const auto &worker = rpmb_workers[i];
         const auto state = __atomic_load_n(&worker.state, __ATOMIC_ACQUIRE);
         line("rpmb.worker%u state=%u cpu=%llu", i, state,
              static_cast<unsigned long long>(worker.cpu));
-        if (state == 2)
+        if (state == 2) {
             line("rpmb.worker%u result=%lld", i, static_cast<long long>(worker.rc));
+        }
     }
 }
 
-int el3_rpmb(int argc, char** argv) {
+int el3_rpmb(int argc, char **argv) {
     if (argc == 3 && streq(argv[2], "stop")) {
-        auto& worker = rpmb_workers[1];
+        auto &worker = rpmb_workers[1];
         if (__atomic_load_n(&worker.state, __ATOMIC_ACQUIRE) == 1 && worker.continuous) {
             __atomic_store_n(&worker.cancel, 1u, __ATOMIC_RELEASE);
             const auto wake = __atomic_load_n(&worker.wake, __ATOMIC_ACQUIRE);
-            if (wake)
+            if (wake) {
                 mx_doorbell_notify(wake);
+            }
             putln("RPMB service stop requested; an active card/firmware call must return first.");
-        } else
+        } else {
             putln("RPMB service is not running.");
+        }
         return 0;
     }
     const bool counter = argc == 4 && streq(argv[2], "counter");
@@ -550,17 +580,17 @@ int el3_rpmb(int argc, char** argv) {
     const bool serve = argc == 4 && streq(argv[2], "serve");
     const bool provision = argc == 3 && streq(argv[2], "provision-key");
     uint32_t action = MX_RPMB_STATUS;
-    if (argc == 3 && streq(argv[2], "arm"))
+    if (argc == 3 && streq(argv[2], "arm")) {
         action = MX_RPMB_ARM;
-    else if (argc == 3 && streq(argv[2], "arm-emmc"))
+    } else if (argc == 3 && streq(argv[2], "arm-emmc")) {
         action = MX_RPMB_ARM_EMMC;
-    else if (argc == 3 && streq(argv[2], "release"))
+    } else if (argc == 3 && streq(argv[2], "release")) {
         action = MX_RPMB_RELEASE;
-    else if (provision)
+    } else if (provision) {
         action = MX_RPMB_PROVISION_KEY;
-    else if (argc == 3 && streq(argv[2], "key-status"))
+    } else if (argc == 3 && streq(argv[2], "key-status")) {
         action = MX_RPMB_KEY_STATUS;
-    else if (!(argc == 3 && streq(argv[2], "status")) && !counter && !complete && !serve) {
+    } else if (!(argc == 3 && streq(argv[2], "status")) && !counter && !complete && !serve) {
         putln("usage: diag el3-rpmb "
               "arm|arm-emmc|key-status|status|release|provision-key|stop|counter <cpu>|complete "
               "<cpu>|serve <cpu>");
@@ -568,11 +598,13 @@ int el3_rpmb(int argc, char** argv) {
     }
     MxDiagEl3Rpmb info{};
     if (!counter && !complete && !serve) {
-        if (!rpmb_read(action, info))
+        if (!rpmb_read(action, info)) {
             return 1;
+        }
         rpmb_report(info);
-        if (action == MX_RPMB_ARM)
+        if (action == MX_RPMB_ARM) {
             putln("Registration uses the stock-log profile; EXT_CSD region bytes remain assumed.");
+        }
         return info.result == MX_RPMB_OK ? 0 : 1;
     }
     uint64_t cpu = 0;
@@ -587,8 +619,9 @@ int el3_rpmb(int argc, char** argv) {
         putln("Selected worker CPU is unavailable.");
         return 1;
     }
-    if (!rpmb_read(MX_RPMB_STATUS, info))
+    if (!rpmb_read(MX_RPMB_STATUS, info)) {
         return 1;
+    }
     if (!info.armed || !info.registered || info.registering ||
         (serve && (!info.storage_enabled || info.provision_pending || info.done_inflight ||
                    (info.done_returned && info.done_result))) ||
@@ -602,13 +635,13 @@ int el3_rpmb(int argc, char** argv) {
         return 1;
     }
     const unsigned index = counter ? 0 : 1;
-    for (const auto& worker : rpmb_workers) {
+    for (const auto &worker : rpmb_workers) {
         if (__atomic_load_n(&worker.state, __ATOMIC_ACQUIRE) == 1 && worker.cpu == cpu) {
             putln("That CPU already has an outstanding probe worker.");
             return 1;
         }
     }
-    auto& worker = rpmb_workers[index];
+    auto &worker = rpmb_workers[index];
     if (__atomic_load_n(&worker.state, __ATOMIC_ACQUIRE) == 1) {
         putln("This probe worker has not returned.");
         return 1;
@@ -689,7 +722,7 @@ int el3_gv() {
     return 0;
 }
 
-int el3_aa(int argc, char** argv) {
+int el3_aa(int argc, char **argv) {
     if (argc != 4) {
         putln("usage: diag el3-aa <idx 0-31> <x1 hex> <x2 hex>");
         return 1;
@@ -726,7 +759,7 @@ int el3_aa(int argc, char** argv) {
     return 0;
 }
 
-static void print_chunk_line(uint64_t off, const uint8_t* d) {
+static void print_chunk_line(uint64_t off, const uint8_t *d) {
     char buf[16 * 11 + 40];
     int n =
         libk::snprintf(buf, sizeof(buf), "el3s.chunk=0x%llx", static_cast<unsigned long long>(off));
@@ -740,7 +773,7 @@ static void print_chunk_line(uint64_t off, const uint8_t* d) {
     putln(buf);
 }
 
-int el3_share(int argc, char** argv) {
+int el3_share(int argc, char **argv) {
     uint64_t off = 0;
     if (argc != 2 || !parse_hex(argv[1], &off)) {
         putln("usage: diag el3-share <offset hex>");
@@ -787,7 +820,7 @@ int el3_sharedump() {
     return 0;
 }
 
-int el3_ra(int argc, char** argv) {
+int el3_ra(int argc, char **argv) {
     uint64_t tgt = 0;
     if (argc != 2 || !parse_hex(argv[1], &tgt)) {
         putln("usage: diag el3-ra <addr hex>");
@@ -814,7 +847,7 @@ int el3_ra(int argc, char** argv) {
     return 0;
 }
 
-int el3_nn(int argc, char** argv) {
+int el3_nn(int argc, char **argv) {
     uint64_t x1 = 0, x2 = 0, x3 = 0;
     if (argc != 4 || !parse_hex(argv[1], &x1) || !parse_hex(argv[2], &x2) ||
         !parse_hex(argv[3], &x3)) {
@@ -838,7 +871,7 @@ int el3_nn(int argc, char** argv) {
     return 0;
 }
 
-int el3_cc(int argc, char** argv) {
+int el3_cc(int argc, char **argv) {
     uint64_t x1 = 0;
     if (argc != 2 || !parse_hex(argv[1], &x1)) {
         putln("usage: diag el3-cc <x1 hex>");
@@ -859,7 +892,7 @@ int el3_cc(int argc, char** argv) {
     return 0;
 }
 
-int el3_cc2(int argc, char** argv) {
+int el3_cc2(int argc, char **argv) {
     uint64_t a = 0, b = 0;
     if (argc != 3 || !parse_hex(argv[1], &a) || !parse_hex(argv[2], &b)) {
         putln("usage: diag el3-cc2 <a> <b> (hex)");
@@ -903,7 +936,7 @@ int el3_aasweep() {
     return 0;
 }
 
-int el3_socp(int argc, char** argv) {
+int el3_socp(int argc, char **argv) {
     if (argc != 8) {
         putln("usage: diag el3-socp <mode 1-4> <d0> <d1> <d2> <d3> <p1> <p2> (hex)");
         return 1;
@@ -950,7 +983,7 @@ int el3_socp(int argc, char** argv) {
     return 0;
 }
 
-int el3_put(int argc, char** argv) {
+int el3_put(int argc, char **argv) {
     uint64_t off = 0, val = 0;
     if (argc != 3 || !parse_hex(argv[1], &off) || !parse_hex(argv[2], &val)) {
         putln("usage: diag el3-put <off> <val> (hex)");
@@ -973,7 +1006,7 @@ int el3_put(int argc, char** argv) {
     return 0;
 }
 
-int el3_poke(int argc, char** argv) {
+int el3_poke(int argc, char **argv) {
     uint64_t cb = 0;
     if (argc != 2 || !parse_hex(argv[1], &cb)) {
         putln("usage: diag el3-poke <cb hex>");
@@ -1004,7 +1037,7 @@ int el3_poke(int argc, char** argv) {
     return 0;
 }
 
-int el3_svc(int argc, char** argv) {
+int el3_svc(int argc, char **argv) {
     uint64_t fid = 0, x1 = 0, x2 = 0, x3 = 0, x4 = 0, x5 = 0, x6 = 0, x7 = 0;
     if (argc < 5 || argc > 9 || !parse_hex(argv[1], &fid) || !parse_hex(argv[2], &x1) ||
         !parse_hex(argv[3], &x2) || !parse_hex(argv[4], &x3) ||
@@ -1041,7 +1074,7 @@ int el3_svc(int argc, char** argv) {
     return 0;
 }
 
-int el3_win(int argc, char** argv) {
+int el3_win(int argc, char **argv) {
     uint64_t off = 0;
     if (argc != 2 || !parse_hex(argv[1], &off)) {
         putln("usage: diag el3-win <off> (hex)");
@@ -1068,7 +1101,7 @@ int el3_win(int argc, char** argv) {
     return 0;
 }
 
-int el3_wput(int argc, char** argv) {
+int el3_wput(int argc, char **argv) {
     uint64_t off = 0, val = 0;
     if (argc != 3 || !parse_hex(argv[1], &off) || !parse_hex(argv[2], &val)) {
         putln("usage: diag el3-wput <off> <val> (hex)");
@@ -1091,7 +1124,7 @@ int el3_wput(int argc, char** argv) {
     return 0;
 }
 
-int el3_rmap(int argc, char** argv) {
+int el3_rmap(int argc, char **argv) {
     uint64_t addr = 0, size = 0;
     if ((argc != 2 && argc != 3) || !parse_hex(argv[1], &addr)) {
         putln("usage: diag el3-rmap <addr> [size] (hex; size<=0x20000)");
@@ -1161,11 +1194,12 @@ void sac_worker(uint64_t arg) {
     }
     __atomic_store_n(&g_sac.state, 2u, __ATOMIC_RELEASE);
     sys_thread_exit(0);
-    for (;;)
+    for (;;) {
         sys_yield();
+    }
 }
 
-int sac_fire(int argc, char** argv) {
+int sac_fire(int argc, char **argv) {
     uint64_t cpu = 0, fid = 0, x1 = 0, x2 = 0, x3 = 0, x4 = 0, x5 = 0, x6 = 0, x7 = 0;
     if (argc < 6 || argc > 10 || !parse_hex(argv[1], &cpu) || !parse_hex(argv[2], &fid) ||
         !parse_hex(argv[3], &x1) || !parse_hex(argv[4], &x2) || !parse_hex(argv[5], &x3) ||
@@ -1215,7 +1249,7 @@ int sac_fire(int argc, char** argv) {
     return 0;
 }
 
-int sac_stat(int argc, char** argv) {
+int sac_stat(int argc, char **argv) {
     (void)argc;
     (void)argv;
     const uint32_t st = __atomic_load_n(&g_sac.state, __ATOMIC_ACQUIRE);
@@ -1241,7 +1275,7 @@ int sac_stat(int argc, char** argv) {
     return 0;
 }
 
-int el3_rawin(int argc, char** argv) {
+int el3_rawin(int argc, char **argv) {
     uint64_t off = 0;
     if (argc != 2 || !parse_hex(argv[1], &off)) {
         putln("usage: diag el3-rawin <off> (hex) - lock-free window read");
@@ -1268,7 +1302,7 @@ int el3_rawin(int argc, char** argv) {
     return 0;
 }
 
-int el3_rawout(int argc, char** argv) {
+int el3_rawout(int argc, char **argv) {
     uint64_t off = 0, val = 0;
     if (argc != 3 || !parse_hex(argv[1], &off) || !parse_hex(argv[2], &val)) {
         putln("usage: diag el3-rawout <off> <val> (hex) - lock-free window write");
@@ -1291,7 +1325,7 @@ int el3_rawout(int argc, char** argv) {
     return 0;
 }
 
-int el3_wmemset(int argc, char** argv) {
+int el3_wmemset(int argc, char **argv) {
     uint64_t off = 0, len = 0, val = 0;
     if ((argc != 3 && argc != 4) || !parse_hex(argv[1], &off) || !parse_hex(argv[2], &len) ||
         (argc == 4 && !parse_hex(argv[3], &val))) {
@@ -1316,7 +1350,7 @@ int el3_wmemset(int argc, char** argv) {
     return 0;
 }
 
-int el3_ipi(int argc, char** argv) {
+int el3_ipi(int argc, char **argv) {
     uint64_t cpu = 0;
     if (argc != 2 || !parse_hex(argv[1], &cpu)) {
         putln("usage: diag el3-ipi <cpu> (hex)");
@@ -1331,7 +1365,7 @@ int el3_ipi(int argc, char** argv) {
     return 0;
 }
 
-int el3_rprobe(int argc, char** argv) {
+int el3_rprobe(int argc, char **argv) {
     uint64_t addr = 0;
     if (argc != 2 || !parse_hex(argv[1], &addr)) {
         putln("usage: diag el3-rprobe <addr> (hex)");
@@ -1355,7 +1389,7 @@ int el3_rprobe(int argc, char** argv) {
     return 0;
 }
 
-int el3_rscan(int argc, char** argv) {
+int el3_rscan(int argc, char **argv) {
     uint64_t base = 0, len = 0;
     if (argc != 3 || !parse_hex(argv[1], &base) || !parse_hex(argv[2], &len)) {
         putln("usage: diag el3-rscan <base> <len> (hex)");
@@ -1389,7 +1423,7 @@ int el3_rscan(int argc, char** argv) {
     return 0;
 }
 
-int el3_scan(int argc, char** argv) {
+int el3_scan(int argc, char **argv) {
     uint64_t base = 0, len = 0, lo = 0, hi = 0;
     if (argc != 5 || !parse_hex(argv[1], &base) || !parse_hex(argv[2], &len) ||
         !parse_hex(argv[3], &lo) || !parse_hex(argv[4], &hi)) {
@@ -1418,7 +1452,7 @@ int el3_scan(int argc, char** argv) {
     return 0;
 }
 
-int el3tool(int argc, char** argv) {
+int el3tool(int argc, char **argv) {
     if (argc < 2) {
         putln("usage: el3tool scan | dump <base> <len> | sweep | ff06 <x1> <x2> <x3>");
         return 1;
@@ -1545,7 +1579,7 @@ int el3_teeos() {
 
 struct Counter {
     uint64_t id;
-    const char* name;
+    const char *name;
 };
 constexpr Counter counters[] = {
     {DBG_SYSCALL_COUNT, "syscalls"},
@@ -1594,7 +1628,7 @@ constexpr Counter counters[] = {
 };
 // All existing VM debug IDs 32..63, including assignment counters which the
 // older libdango header does not yet name. Keep their wire order explicit.
-constexpr const char* vm_counters[] = {
+constexpr const char *vm_counters[] = {
     "create_calls",
     "created",
     "destroyed",
@@ -1633,40 +1667,47 @@ static_assert(sizeof(vm_counters) / sizeof(vm_counters[0]) == 32);
 int runtime_info() {
     int result = 0;
     putln("--- counters (live samples) ---");
-    for (const auto& counter : counters) {
+    for (const auto &counter : counters) {
         const auto value = sys_debug_counter(counter.id);
         if (value < 0) {
             error(counter.name, value);
             result = 1;
-        } else
+        } else {
             decimal(counter.name, static_cast<uint64_t>(value));
+        }
     }
     for (uint32_t i = 0; i < 32; ++i) {
         const auto value = sys_debug_counter(dango::VM_DEBUG_CREATE_CALLS + i);
         line("vm.%s=%lld", vm_counters[i], static_cast<long long>(value));
-        if (value < 0)
+        if (value < 0) {
             result = 1;
+        }
     }
     putln("--- shell endpoints ---");
     decimal("shell.terminal", g.have_terminal);
     decimal("shell.filesystem", g.have_fs);
     decimal("shell.service_control", g.have_svcctl);
     putln("--- boot resources ---");
-    if (cmd_bootinfo(0, nullptr))
+    if (cmd_bootinfo(0, nullptr)) {
         result = 1;
-    if (cmd_cap(0, nullptr))
+    }
+    if (cmd_cap(0, nullptr)) {
         result = 1;
-    if (cmd_ring(0, nullptr))
+    }
+    if (cmd_ring(0, nullptr)) {
         result = 1;
-    if (cmd_doorbell(0, nullptr))
+    }
+    if (cmd_doorbell(0, nullptr)) {
         result = 1;
+    }
     putln("--- services ---");
-    if (cmd_svc(0, nullptr))
+    if (cmd_svc(0, nullptr)) {
         result = 1;
+    }
     return result;
 }
 
-int boot_log(const MxDiagSystem& info) {
+int boot_log(const MxDiagSystem &info) {
     putln("--- retained boot log ---");
     if (!info.boot_log_capacity) {
         putln("retained boot log unavailable on this board");
@@ -1678,8 +1719,9 @@ int boot_log(const MxDiagSystem& info) {
     }
     decimal("boot_log.bytes", info.boot_log_size);
     decimal("boot_log.capacity", info.boot_log_capacity);
-    if (info.boot_log_size == info.boot_log_capacity)
+    if (info.boot_log_size == info.boot_log_capacity) {
         putln("boot log capacity reached; later records may be missing");
+    }
     // Snapshot length was captured before printing anything. Never follow a
     // moving end or consume records. A debug-console fallback can itself append
     // to this log, whereas the normal terminal/CDC route keeps output separate.
@@ -1712,7 +1754,7 @@ int boot_log(const MxDiagSystem& info) {
 }
 } // namespace
 
-int cmd_ipc(int argc, char** argv) {
+int cmd_ipc(int argc, char **argv) {
     (void)argc;
     (void)argv;
     const SysPair counts = mx_ipc_policy_counts();
@@ -1723,13 +1765,14 @@ int cmd_ipc(int argc, char** argv) {
 }
 
 namespace {
-int power_load(int argc, char** argv) {
+int power_load(int argc, char **argv) {
     uint32_t milliseconds = 500;
     if (argc == 4) {
         milliseconds = 0;
-        for (const char* p = argv[3]; *p; ++p) {
-            if (*p < '0' || *p > '9' || milliseconds > 5000)
+        for (const char *p = argv[3]; *p; ++p) {
+            if (*p < '0' || *p > '9' || milliseconds > 5000) {
                 return 1;
+            }
             milliseconds = milliseconds * 10 + static_cast<uint32_t>(*p - '0');
         }
     }
@@ -1749,22 +1792,27 @@ int power_load(int argc, char** argv) {
             checksum ^= checksum << 17;
         }
         const auto now = mx_clock_ns();
-        if (now - sampled < 20000000)
+        if (now - sampled < 20000000) {
             continue;
+        }
         sampled = now;
-        if (sys_debug_read(MX_DIAG_POWER, 0, &sample, sizeof(sample)) != sizeof(sample))
+        if (sys_debug_read(MX_DIAG_POWER, 0, &sample, sizeof(sample)) != sizeof(sample)) {
             return 1;
-        for (unsigned d = 0; d < sample.domain_count && d < MX_POWER_DOMAINS; ++d)
+        }
+        for (unsigned d = 0; d < sample.domain_count && d < MX_POWER_DOMAINS; ++d) {
             if ((sample.domains[d].flags & MX_FREQ_OBSERVED) &&
-                sample.domains[d].observed_khz > peak[d])
+                sample.domains[d].observed_khz > peak[d]) {
                 peak[d] = sample.domains[d].observed_khz;
+            }
+        }
     }
     line("power load elapsed_ms=%llu checksum=%llx",
          static_cast<unsigned long long>((mx_clock_ns() - begin) / 1000000),
          static_cast<unsigned long long>(checksum));
-    for (unsigned d = 0; d < sample.domain_count && d < MX_POWER_DOMAINS; ++d)
+    for (unsigned d = 0; d < sample.domain_count && d < MX_POWER_DOMAINS; ++d) {
         line("domain%u peak_observed_khz=%u transitions=%u failures=%u", d, peak[d],
              sample.domains[d].transitions, sample.domains[d].failures);
+    }
     return g.output_failed ? 1 : 0;
 }
 int power_info() {
@@ -1776,23 +1824,26 @@ int power_info() {
     }
     line("power sampled_ns=%llu online=0x%llx", static_cast<unsigned long long>(sample.sampled_ns),
          static_cast<unsigned long long>(sample.online_mask));
-    if (sample.flags & MX_POWER_BATTERY_MV)
+    if (sample.flags & MX_POWER_BATTERY_MV) {
         line("battery=%umV", sample.battery_mv);
-    else
+    } else {
         putln("battery unavailable");
-    if (sample.flags & MX_POWER_BATTERY_CURRENT_NOMINAL)
+    }
+    if (sample.flags & MX_POWER_BATTERY_CURRENT_NOMINAL) {
         line("battery_current=%duA (+discharge/-charge, nominal calibration)", sample.battery_ua);
-    if (sample.flags & MX_POWER_CHARGER_VALID)
+    }
+    if (sample.flags & MX_POWER_CHARGER_VALID) {
         line("charger input=%u enabled=%u done=%u source=%u thermal_limited=%u",
              !!(sample.charger_flags & MX_CHARGER_INPUT),
              !!(sample.charger_flags & MX_CHARGER_ENABLED),
              !!(sample.charger_flags & MX_CHARGER_DONE),
              !!(sample.charger_flags & MX_CHARGER_SOURCE),
              !!(sample.charger_flags & MX_CHARGER_THERMAL));
-    else
+    } else {
         putln("charger unavailable");
+    }
     for (uint32_t i = 0; i < sample.domain_count && i < MX_POWER_DOMAINS; ++i) {
-        const auto& d = sample.domains[i];
+        const auto &d = sample.domains[i];
         line("freq%u cpus=0x%llx opps=%u observed=%ukHz target=%ukHz control=%u", i,
              static_cast<unsigned long long>(d.cpu_mask), d.opp_count, d.observed_khz, d.target_khz,
              !!(d.flags & MX_FREQ_CONTROL));
@@ -1802,23 +1853,66 @@ int power_info() {
              d.min_khz, d.max_khz, d.thermal_cap_khz, d.busy_permille, !!(d.flags & MX_FREQ_LOAD),
              !!(d.flags & MX_FREQ_OBSERVED));
     }
-    const char* names[] = {"cluster0", "cluster1", "gpu", "battery"};
+    const char *names[] = {"cluster0", "cluster1", "gpu", "battery"};
     for (uint32_t i = 0; i < 4; ++i) {
-        if (sample.thermals[i].valid)
+        if (sample.thermals[i].valid) {
             line("thermal %s=%dmC", names[i], sample.thermals[i].millicelsius);
-        else
+        } else {
             line("thermal %s unavailable", names[i]);
+        }
     }
-    for (uint32_t cpu = 0; cpu < MX_POWER_CPUS; ++cpu)
-        if (sample.idle_valid_mask & (uint64_t{1} << cpu))
+    for (uint32_t cpu = 0; cpu < MX_POWER_CPUS; ++cpu) {
+        if (sample.idle_valid_mask & (uint64_t{1} << cpu)) {
             line("cpu%u idle_ns=%llu entries=%llu", cpu,
                  static_cast<unsigned long long>(sample.cpus[cpu].idle_ns),
                  static_cast<unsigned long long>(sample.cpus[cpu].idle_entries));
+        }
+    }
     return g.output_failed ? 1 : 0;
 }
 } // namespace
 
-int cmd_diag(int argc, char** argv) {
+namespace {
+int gpu_iommu_report() {
+    MxDiagGpuIommu info{};
+    const auto rc = sys_debug_read(MX_DIAG_EL3, 31, &info, sizeof(info));
+    if (rc != sizeof(info) || info.version != MX_DIAG_VERSION) {
+        error("GPU IOMMU snapshot unavailable", rc);
+        return 1;
+    }
+    hex("gpu.iommu.valid", info.valid);
+    decimal("gpu.iommu.read_faults", info.faults);
+    if (info.valid & 1) {
+        hex("gpu.id", info.gpu_id);
+    }
+    if (info.valid & 2) {
+        hex("gpu.mem_features", info.mem_features);
+    }
+    if (info.valid & 4) {
+        hex("gpu.mmu_features", info.mmu_features);
+        decimal("gpu.mmu.input_bits", info.mmu_features & 255);
+        decimal("gpu.mmu.output_bits", (info.mmu_features >> 8) & 255);
+    }
+    if (info.valid & 8) {
+        hex("gpu.as_present", info.as_present);
+    }
+    if (info.valid & 16) {
+        hex("gpu.pctrl_ctrl8", info.pctrl_ctrl8);
+        decimal("gpu.armid0", info.pctrl_ctrl8 & 31);
+        decimal("gpu.awmid0", (info.pctrl_ctrl8 >> 5) & 31);
+        decimal("gpu.armid1", (info.pctrl_ctrl8 >> 10) & 31);
+        decimal("gpu.awmid1", (info.pctrl_ctrl8 >> 15) & 31);
+    }
+    if (info.valid & 32) {
+        hex("gpu.pctrl_ctrl25", info.pctrl_ctrl25);
+        decimal("gpu.smmu_sec_override", (info.pctrl_ctrl25 >> 11) & 1);
+    }
+    putln("Read-only snapshot; bus master IDs do not establish an external SMMU route.");
+    return info.valid == 63 ? 0 : 1;
+}
+} // namespace
+
+int cmd_diag(int argc, char **argv) {
     if (argc >= 3 && streq(argv[1], "power") && streq(argv[2], "load")) {
         g.output_failed = false;
         return power_load(argc, argv);
@@ -1826,6 +1920,84 @@ int cmd_diag(int argc, char** argv) {
     if (argc == 2 && streq(argv[1], "power")) {
         g.output_failed = false;
         return power_info();
+    }
+    if (argc == 2 && streq(argv[1], "gpu-smmu")) {
+        MxDiagSmmuId info{};
+        const auto rc = sys_debug_read(MX_DIAG_EL3, 33, &info, sizeof(info));
+        if (rc != sizeof(info) || info.version != MX_DIAG_VERSION) {
+            error("SMMU identity snapshot unavailable", rc);
+            return 1;
+        }
+        hex("smmu.candidate_base", info.base);
+        hex("smmu.valid", info.valid);
+        decimal("smmu.read_faults", info.faults);
+        if (info.faults) {
+            hex("smmu.first_esr", info.first_esr);
+            hex("smmu.first_far", info.first_far);
+        }
+        const char *names[] = {"smmu.id0", "smmu.id1", "smmu.id2"};
+        for (uint32_t i = 0; i < 3; ++i) {
+            if (info.valid & (1u << i)) {
+                hex(names[i], info.id[i]);
+            }
+        }
+        putln("Read-only IVP SMMU candidate; identity does not establish a GPU route.");
+        return info.valid == 7 ? 0 : 1;
+    }
+    if (argc == 2 && streq(argv[1], "gpu-dmss")) {
+        MxDiagGpuDmss info{};
+        const auto rc = sys_debug_read(MX_DIAG_EL3, 32, &info, sizeof(info));
+        if (rc != sizeof(info) || info.version != MX_DIAG_VERSION) {
+            error("GPU DMSS snapshot unavailable", rc);
+            return 1;
+        }
+        hex("dmss.valid", info.valid);
+        decimal("dmss.read_faults", info.faults);
+        if (info.faults) {
+            hex("dmss.first_esr", info.first_esr);
+            hex("dmss.first_far", info.first_far);
+        }
+        if (info.valid & 1) {
+            hex("dmss.rtl_version", info.global_version);
+        }
+        if (info.valid & 2) {
+            hex("dmss.rtl_info", info.global_info);
+        }
+        if (info.valid & 4) {
+            hex("dmss.gpu_master_config", info.pctrl_ctrl8);
+        }
+        bool complete = info.valid == 7;
+        const char *names[] = {"region_count", "stat_mask", "stat_cycle", "filter0",
+                               "filter1",      "flux_wr",   "flux_rd",    "sec_status"};
+        for (uint32_t p = 0; p < MX_DIAG_DMSS_PORTS; ++p) {
+            decimal("dmss.asi", p);
+            hex("dmss.asi.valid", info.ports[p].valid);
+            complete = complete && info.ports[p].valid == 255;
+            for (uint32_t r = 0; r < MX_DIAG_DMSS_WORDS; ++r) {
+                if (info.ports[p].valid & (1u << r)) {
+                    hex(names[r], info.ports[p].words[r]);
+                }
+            }
+        }
+        putln("Read-only DMSS observations; counter activity alone does not identify a GPU route.");
+        return complete ? 0 : 1;
+    }
+    if (argc == 2 && streq(argv[1], "gpu-iommu")) {
+        return gpu_iommu_report();
+    }
+    if ((argc == 3 || argc == 4) && streq(argv[1], "gpu") && streq(argv[2], "cts")) {
+        return cmd_diag_gpu_cts(argc == 4 ? argv[3] : "dEQP-VK.info.*");
+    }
+    if (argc == 3 && streq(argv[1], "gpu") && streq(argv[2], "cts-log")) {
+        return cmd_diag_gpu_cts(nullptr, true);
+    }
+    if (argc == 3 && streq(argv[1], "gpu") && streq(argv[2], "vulkan")) {
+        return cmd_diag_gpu_vulkan();
+    }
+    if ((argc == 2 || (argc == 3 && (streq(argv[2], "reset") || streq(argv[2], "upload")))) &&
+        streq(argv[1], "gpu")) {
+        return cmd_diag_gpu(argc == 3 && streq(argv[2], "reset"),
+                            argc == 3 && streq(argv[2], "upload"));
     }
     if (argc >= 2 && streq(argv[1], "el3-rpmb")) {
         g.output_failed = false;
@@ -1866,58 +2038,59 @@ int cmd_diag(int argc, char** argv) {
         g.output_failed = false;
         putln("=== diag begin ===");
         int r = 0;
-        if (streq(argv[1], "el3-aa"))
+        if (streq(argv[1], "el3-aa")) {
             r = el3_aa(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-share"))
+        } else if (streq(argv[1], "el3-share")) {
             r = el3_share(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-ra"))
+        } else if (streq(argv[1], "el3-ra")) {
             r = el3_ra(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-sharedump"))
+        } else if (streq(argv[1], "el3-sharedump")) {
             r = el3_sharedump();
-        else if (streq(argv[1], "el3-nn"))
+        } else if (streq(argv[1], "el3-nn")) {
             r = el3_nn(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-cc"))
+        } else if (streq(argv[1], "el3-cc")) {
             r = el3_cc(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-cc2"))
+        } else if (streq(argv[1], "el3-cc2")) {
             r = el3_cc2(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-aasweep"))
+        } else if (streq(argv[1], "el3-aasweep")) {
             r = el3_aasweep();
-        else if (streq(argv[1], "el3-socp"))
+        } else if (streq(argv[1], "el3-socp")) {
             r = el3_socp(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-put"))
+        } else if (streq(argv[1], "el3-put")) {
             r = el3_put(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-poke"))
+        } else if (streq(argv[1], "el3-poke")) {
             r = el3_poke(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-svc"))
+        } else if (streq(argv[1], "el3-svc")) {
             r = el3_svc(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-win"))
+        } else if (streq(argv[1], "el3-win")) {
             r = el3_win(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-wput"))
+        } else if (streq(argv[1], "el3-wput")) {
             r = el3_wput(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-scan"))
+        } else if (streq(argv[1], "el3-scan")) {
             r = el3_scan(argc - 1, argv + 1);
-        else if (streq(argv[1], "sac"))
+        } else if (streq(argv[1], "sac")) {
             r = sac_fire(argc - 1, argv + 1);
-        else if (streq(argv[1], "sacstat"))
+        } else if (streq(argv[1], "sacstat")) {
             r = sac_stat(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-rawin"))
+        } else if (streq(argv[1], "el3-rawin")) {
             r = el3_rawin(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-rawout"))
+        } else if (streq(argv[1], "el3-rawout")) {
             r = el3_rawout(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-wmemset"))
+        } else if (streq(argv[1], "el3-wmemset")) {
             r = el3_wmemset(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-ipi"))
+        } else if (streq(argv[1], "el3-ipi")) {
             r = el3_ipi(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-rprobe"))
+        } else if (streq(argv[1], "el3-rprobe")) {
             r = el3_rprobe(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-rmap"))
+        } else if (streq(argv[1], "el3-rmap")) {
             r = el3_rmap(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3-rscan"))
+        } else if (streq(argv[1], "el3-rscan")) {
             r = el3_rscan(argc - 1, argv + 1);
-        else if (streq(argv[1], "el3tool"))
+        } else if (streq(argv[1], "el3tool")) {
             r = el3tool(argc - 1, argv + 1);
-        else
+        } else {
             r = el3_teeos();
+        }
         line("=== diag end status=%u ===", static_cast<unsigned>(r));
         return g.output_failed ? 1 : r;
     }
@@ -1933,27 +2106,37 @@ int cmd_diag(int argc, char** argv) {
     MxDiagSystem info{};
     int result = system_info(info) ? 0 : 1;
     if (!result) {
-        if (all || el2)
+        if (all || el2) {
             result |= cpu_info(info);
-        if (all || el3)
+        }
+        if (all || el3) {
             result |= el3_info();
-        if (el3_canary)
+        }
+        if (el3_canary) {
             result |= el3_info(true);
-        if (el3_recon_cmd)
+        }
+        if (el3_recon_cmd) {
             result |= el3_recon();
-        if (el3_done_cmd)
+        }
+        if (el3_done_cmd) {
             result |= el3_done();
-        if (el3_bl31_cmd)
+        }
+        if (el3_bl31_cmd) {
             result |= el3_bl31read();
-        if (el3_gv_cmd)
+        }
+        if (el3_gv_cmd) {
             result |= el3_gv();
-        if (all)
+        }
+        if (all) {
             result |= runtime_info();
-        if (all || log)
+        }
+        if (all || log) {
             result |= boot_log(info);
+        }
     }
-    if (g.output_failed)
+    if (g.output_failed) {
         result = 1;
+    }
     line("=== diag end status=%u ===", static_cast<unsigned>(result));
     return g.output_failed ? 1 : result;
 }

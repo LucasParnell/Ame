@@ -30,6 +30,8 @@
  *     requester into the faulting domain before any page is reused).
  */
 #include <linux/dma-buf.h>
+#include <linux/dma-resv.h>
+#include <linux/jiffies.h>
 #include <linux/fs.h>
 #include <linux/io.h>
 #include <linux/miscdevice.h>
@@ -40,6 +42,9 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#ifdef CONFIG_ARM64
+#include <asm/cacheflush.h>
+#endif
 
 #include "midix/abi/dango_shm_guest.h"
 
@@ -101,10 +106,10 @@ static bool dango_shm_region_by_id(const struct dango_shm* shm, u64 id,
 /* dma-buf export (Phase M)                                                   */
 /* ------------------------------------------------------------------------- */
 
-/* Identity DMA addresses: the host SMMU translates IOVA == guest physical
- * address (linux-artifacts/config/dango_gpu_arm64.fragment), so a mapping's bus
- * address is the region's guest physical address. Only reachable for a
- * SharedGpu-registered region — the gate is in dango_shm_export(). */
+/* Importers receive guest physical DMA addresses. On Anne, the host-owned
+ * Mali shadow MMU translates and validates them against registered SharedGpu
+ * backing; the external SMMU is not enabled. The export gate rejects CPU-only
+ * regions before an importer can reach this path. */
 static struct sg_table* dango_shm_map_dma_buf(struct dma_buf_attachment* attach,
                                               enum dma_data_direction dir) {
     struct dango_shm_export_slot* slot = attach->dmabuf->priv;
@@ -185,7 +190,48 @@ static void dango_shm_dma_buf_vunmap(struct dma_buf* dmabuf, struct iosys_map* m
     iosys_map_clear(map);
 }
 
+/* These external pages are not Linux-managed RAM. Cache maintenance uses the
+ * memremap alias, never pfn_to_page()/phys_to_virt() beyond guest RAM. */
+static int dango_shm_begin_cpu_access(struct dma_buf* dmabuf, enum dma_data_direction dir) {
+    struct dango_shm_export_slot* slot = dmabuf->priv;
+    bool write = dir == DMA_TO_DEVICE || dir == DMA_BIDIRECTIONAL;
+    long waited;
+    /* Linux's generic dma_buf_begin_cpu_access waits AFTER this callback.
+     * Cache invalidation must follow completion of the tracked device writer,
+     * otherwise a CPU can refill stale lines before the generic wait finishes.
+     * Fail closed on timeout: never expose a frame whose writer is still live.
+     */
+    waited = dma_resv_wait_timeout(dmabuf->resv, dma_resv_usage_rw(write), true,
+                                   msecs_to_jiffies(10000));
+    if (waited <= 0) {
+        return waited < 0 ? (int)waited : -ETIMEDOUT;
+    }
+    if (!slot->vmap_va) {
+        slot->vmap_va = memremap(slot->base, slot->size, MEMREMAP_WB);
+        if (!slot->vmap_va) {
+            return -ENOMEM;
+        }
+    }
+#ifdef CONFIG_ARM64
+    if (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL) {
+        dcache_inval_poc((unsigned long)slot->vmap_va, (unsigned long)slot->vmap_va + slot->size);
+    }
+#endif
+    return 0;
+}
+static int dango_shm_end_cpu_access(struct dma_buf* dmabuf, enum dma_data_direction dir) {
+    struct dango_shm_export_slot* slot = dmabuf->priv;
+#ifdef CONFIG_ARM64
+    if (slot->vmap_va && (dir == DMA_TO_DEVICE || dir == DMA_BIDIRECTIONAL)) {
+        dcache_clean_poc((unsigned long)slot->vmap_va, (unsigned long)slot->vmap_va + slot->size);
+    }
+#endif
+    return 0;
+}
+
 static const struct dma_buf_ops dango_shm_dma_buf_ops = {
+    .begin_cpu_access = dango_shm_begin_cpu_access,
+    .end_cpu_access = dango_shm_end_cpu_access,
     .map_dma_buf = dango_shm_map_dma_buf,
     .unmap_dma_buf = dango_shm_unmap_dma_buf,
     .release = dango_shm_dma_buf_release,

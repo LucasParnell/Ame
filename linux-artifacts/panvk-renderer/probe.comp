@@ -1,0 +1,58 @@
+#version 450
+layout(local_size_x=8,local_size_y=8) in;
+layout(constant_id=0) const uint samples=1;
+layout(constant_id=1) const uint layers=1;
+#ifdef INTEGER_SOURCE
+#ifdef MULTISAMPLED
+#ifdef LAYERED_SOURCE
+layout(set=0,binding=0) uniform usampler2DMSArray src;
+#else
+layout(set=0,binding=0) uniform usampler2DMS src;
+#endif
+#else
+#ifdef LAYERED_SOURCE
+layout(set=0,binding=0) uniform usampler2DArray src;
+#else
+layout(set=0,binding=0) uniform usampler2D src;
+#endif
+#endif
+#else
+#ifdef MULTISAMPLED
+#ifdef LAYERED_SOURCE
+layout(set=0,binding=0) uniform sampler2DMSArray src;
+#else
+layout(set=0,binding=0) uniform sampler2DMS src;
+#endif
+#else
+#ifdef LAYERED_SOURCE
+layout(set=0,binding=0) uniform sampler2DArray src;
+#else
+layout(set=0,binding=0) uniform sampler2D src;
+#endif
+#endif
+#endif
+layout(std430,set=0,binding=1) writeonly buffer Result { uvec4 value[]; } dst;
+void main() {
+#ifdef LAYERED_SOURCE
+    ivec3 p=ivec3(gl_GlobalInvocationID);
+#else
+    ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+#endif
+    uint base=(gl_GlobalInvocationID.z*64*64+uint(p.y)*64+uint(p.x))*samples;
+    for (uint s=0;s<samples;s++) {
+        if (any(notEqual(gl_NumWorkGroups,uvec3(8,8,layers)))) {
+            dst.value[base+s]=uvec4(0xdeadbeefu);
+            continue;
+        }
+#ifdef MULTISAMPLED
+        #define FETCH texelFetch(src,p,int(s))
+#else
+        #define FETCH texelFetch(src,p,0)
+#endif
+#ifdef INTEGER_SOURCE
+        dst.value[base+s]=FETCH;
+#else
+        dst.value[base+s]=floatBitsToUint(FETCH);
+#endif
+    }
+}

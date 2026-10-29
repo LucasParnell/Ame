@@ -19,14 +19,12 @@ static kernel::SpinLock g_context_lock{};
 static u32 g_next_sched_context_id = 1;
 
 bool sched_context_available(SchedContext* ctx) {
-    if (!ctx || !ctx->budget_ns)
-        return true;
+    if (!ctx || !ctx->budget_ns) return true;
     return ctx->budget_window.charge(0, sched_clock_ns(), ctx->period_ns).used_ns < ctx->budget_ns;
 }
 
 bool charge_sched_context(SchedContext* ctx, u64 delta, u64 now) {
-    if (!ctx)
-        return false;
+    if (!ctx) return false;
     const auto window = ctx->budget_window.charge(delta, now, ctx->budget_ns ? ctx->period_ns : 0);
     return ctx->budget_ns && window.used_ns >= ctx->budget_ns;
 }
@@ -35,46 +33,31 @@ void refill_sched_context_budgets() {
     kernel::LockGuard guard(g_context_lock);
     const u64 now = sched_clock_ns();
     for (u32 i = 0; i < kMaxSchedContexts; ++i) {
-        if (!g_sched_context_allocated[i])
-            continue;
+        if (!g_sched_context_allocated[i]) continue;
         SchedContext& ctx = g_sched_contexts[i];
-        if (ctx.budget_ns)
-            ctx.budget_window.charge(0, now, ctx.period_ns);
+        if (ctx.budget_ns) ctx.budget_window.charge(0, now, ctx.period_ns);
     }
 }
 
 object::Ref<SchedContext> sched_context_by_id(u32 id) {
     kernel::LockGuard guard(g_context_lock);
-    if (id == 0)
-        return nullptr;
+    if (id == 0) return nullptr;
     for (u32 i = 0; i < kMaxSchedContexts; ++i) {
-        if (g_sched_context_allocated[i] && g_sched_contexts[i].id == id)
-            return object::Ref<SchedContext>(&g_sched_contexts[i]);
+        if (g_sched_context_allocated[i] && g_sched_contexts[i].id == id) return object::Ref<SchedContext>(&g_sched_contexts[i]);
     }
     return nullptr;
 }
 
-cap::Borrow<SchedContext> sched_context_from_cap(Process& caller, CapHandle sched_context_cap,
-                                                 SysError* out_error) {
+cap::Borrow<SchedContext> sched_context_from_cap(Process& caller, CapHandle sched_context_cap, SysError* out_error) {
     cap::Ref e = cap::lookup(*caller.cap_table, sched_context_cap, CAP_SCHED_CONTEXT);
-    if (!e) {
-        if (out_error)
-            *out_error = E_NOTFOUND;
-        return nullptr;
-    }
+    if (!e) { if (out_error) *out_error = E_NOTFOUND; return nullptr; }
     if ((e->rights_mask & RIGHT_SCHED_CONTEXT_CONTROL) == 0) {
-        if (out_error)
-            *out_error = E_PERM;
+        if (out_error) *out_error = E_PERM;
         return nullptr;
     }
     auto* ctx = static_cast<SchedContext*>(e->target);
-    if (!ctx) {
-        if (out_error)
-            *out_error = E_NOTFOUND;
-        return nullptr;
-    }
-    if (out_error)
-        *out_error = E_OK;
+    if (!ctx) { if (out_error) *out_error = E_NOTFOUND; return nullptr; }
+    if (out_error) *out_error = E_OK;
     return cap::Borrow<SchedContext>(e);
 }
 
@@ -83,28 +66,21 @@ static bool valid_sched_band(SchedBand band) {
 }
 
 static bool sanitize_context_for_caller(Process& caller, SchedContext& ctx) {
-    if (!valid_sched_band(ctx.band))
-        return false;
-    if (ctx.budget_ns && (!ctx.period_ns || ctx.budget_ns > ctx.period_ns))
-        return false;
-    if (ctx.weight == 0)
-        ctx.weight = NICE_0_WEIGHT;
-    if (ctx.core_mask == 0)
-        ctx.core_mask = online_mask();
+    if (!valid_sched_band(ctx.band)) return false;
+    if (ctx.budget_ns && (!ctx.period_ns || ctx.budget_ns > ctx.period_ns)) return false;
+    if (ctx.weight == 0) ctx.weight = NICE_0_WEIGHT;
+    if (ctx.core_mask == 0) ctx.core_mask = online_mask();
     ctx.core_mask &= online_mask();
-    if (ctx.core_mask == 0)
-        return false;
+    if (ctx.core_mask == 0) return false;
     if (ctx.home_cpu >= kMaxCpus || ((ctx.core_mask >> ctx.home_cpu) & 1u) == 0)
         ctx.home_cpu = first_allowed_cpu(ctx.core_mask);
 
     // Native hard RT is intentionally not available to sandboxed principals, and
     // VM contexts are never allowed to masquerade as hard RT.
     if (ctx.band == SCHED_BAND_RT_NATIVE && caller.principal_class != PRINCIPAL_KERNEL &&
-        caller.principal_class != PRINCIPAL_NATIVE_TRUSTED)
-        return false;
+        caller.principal_class != PRINCIPAL_NATIVE_TRUSTED) return false;
 
-    if (ctx.principal_id == 0)
-        ctx.principal_id = caller.principal_id;
+    if (ctx.principal_id == 0) ctx.principal_id = caller.principal_id;
     if (caller.principal_class != PRINCIPAL_KERNEL && ctx.principal_id != caller.principal_id)
         return false;
     if (ctx.principal_id >= kMaxPrincipals || !principal_allocated(ctx.principal_id))
@@ -126,68 +102,43 @@ static void dispose_sched_context(void* target) {
 CapHandle sched_context_create(Process& caller, const SchedContext& request, SysError* out_error) {
     SchedContext ctx = request;
     if (!sanitize_context_for_caller(caller, ctx)) {
-        if (out_error)
-            *out_error = E_INVALID;
+        if (out_error) *out_error = E_INVALID;
         return kNullCap;
     }
     u32 slot = kMaxSchedContexts;
     {
         kernel::LockGuard guard(g_context_lock);
-        for (u32 i = 0; i < kMaxSchedContexts; ++i)
-            if (!g_sched_context_allocated[i]) {
-                slot = i;
-                break;
-            }
-        if (slot == kMaxSchedContexts) {
-            if (out_error)
-                *out_error = E_OVERFLOW;
-            return kNullCap;
-        }
+        for (u32 i = 0; i < kMaxSchedContexts; ++i) if (!g_sched_context_allocated[i]) { slot = i; break; }
+        if (slot == kMaxSchedContexts) { if (out_error) *out_error = E_OVERFLOW; return kNullCap; }
         // Transferred context capabilities and bound threads may outlive the
         // process that created the fairness bucket. Keep its ID reserved.
-        if (!retain_principal(ctx.principal_id)) {
-            if (out_error)
-                *out_error = E_DEAD;
-            return kNullCap;
-        }
-        ctx.id = g_next_sched_context_id++;
-        ctx.budget_window.reset(sched_clock_ns());
-        g_sched_contexts[slot] = ctx;
-        g_sched_context_allocated[slot] = true;
+        if (!retain_principal(ctx.principal_id)) { if (out_error) *out_error = E_DEAD; return kNullCap; }
+        ctx.id = g_next_sched_context_id++; ctx.budget_window.reset(sched_clock_ns());
+        g_sched_contexts[slot] = ctx; g_sched_context_allocated[slot] = true;
     }
     auto* root = object::create(&g_sched_contexts[slot], dispose_sched_context);
-    if (!root) {
-        dispose_sched_context(&g_sched_contexts[slot]);
-        if (out_error)
-            *out_error = E_NOMEM;
-        return kNullCap;
-    }
+    if (!root) { dispose_sched_context(&g_sched_contexts[slot]); if (out_error) *out_error = E_NOMEM; return kNullCap; }
     CapHandle h = cap::alloc(*caller.cap_table, CAP_SCHED_CONTEXT, &g_sched_contexts[slot],
-                             RIGHT_READ | RIGHT_DUP | RIGHT_SCHED_CONTEXT_CONTROL);
+                            RIGHT_READ | RIGHT_DUP | RIGHT_SCHED_CONTEXT_CONTROL);
     object::release(root);
-    if (out_error)
-        *out_error = h ? E_OK : E_OVERFLOW;
+    if (out_error) *out_error = h ? E_OK : E_OVERFLOW;
     return h;
 }
 
 static bool bind_thread_to_context(Thread* t, SchedContext* ctx) {
-    if (!t || !ctx)
-        return false;
+    if (!t || !ctx) return false;
     kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
     if (__atomic_load_n(&t->execution_cpu, __ATOMIC_ACQUIRE) != kInvalidCpu ||
-        t->terminate_requested)
-        return false;
+        t->terminate_requested) return false;
     const ThreadState state = t->state;
     if (state == TS_DEAD || state == TS_RUNNING || state == TS_RUNNABLE_PENDING_REMOTE ||
-        state == TS_RUNNABLE_QUEUED || t->on_runqueue)
-        return false;
+        state == TS_RUNNABLE_QUEUED || t->on_runqueue) return false;
     t->principal_id = ctx->principal_id;
     t->principal_generation = principal_generation(ctx->principal_id);
     t->vruntime_ns = 0;
     t->sched_context_id = ctx->id;
     auto* next_context = object::acquire(ctx);
-    object::release(t->sched_context_lifetime);
-    t->sched_context_lifetime = next_context;
+    object::release(t->sched_context_lifetime); t->sched_context_lifetime = next_context;
     t->sched_context = ctx;
     t->sched.sched_class = ctx->band;
     t->sched.weight = ctx->weight ? ctx->weight : NICE_0_WEIGHT;
@@ -195,37 +146,28 @@ static bool bind_thread_to_context(Thread* t, SchedContext* ctx) {
     t->affinity_mask = ctx->core_mask;
     t->home_cpu = ctx->home_cpu;
     t->cpu_id = first_allowed_cpu(ctx->core_mask);
-    if (ctx->band == SCHED_BAND_LATENCY)
-        t->latency_hint = LATENCY_INTERACTIVE;
-    else if (ctx->band == SCHED_BAND_BATCH)
-        t->latency_hint = LATENCY_BATCH;
-    else
-        t->latency_hint = LATENCY_NORMAL;
+    if (ctx->band == SCHED_BAND_LATENCY) t->latency_hint = LATENCY_INTERACTIVE;
+    else if (ctx->band == SCHED_BAND_BATCH) t->latency_hint = LATENCY_BATCH;
+    else t->latency_hint = LATENCY_NORMAL;
     return true;
 }
 
-SysError sched_context_bind_thread(Process& caller, CapHandle thread_cap,
-                                   CapHandle sched_context_cap) {
+SysError sched_context_bind_thread(Process& caller, CapHandle thread_cap, CapHandle sched_context_cap) {
     cap::Ref te = cap::lookup(*caller.cap_table, thread_cap, CAP_THREAD);
-    if (!te)
-        return E_NOTFOUND;
-    if ((te->rights_mask & RIGHT_THREAD_CONTROL) == 0)
-        return E_PERM;
+    if (!te) return E_NOTFOUND;
+    if ((te->rights_mask & RIGHT_THREAD_CONTROL) == 0) return E_PERM;
     auto* t = static_cast<Thread*>(te->target);
     SysError rc = E_OK;
     auto ctx = sched_context_from_cap(caller, sched_context_cap, &rc);
-    if (!ctx)
-        return rc;
+    if (!ctx) return rc;
     return bind_thread_to_context(t, ctx) ? E_OK : E_BUSY;
 }
 
 SysError bind_current_to_sched_context_id(u32 sched_context_id) {
     Thread* t = current();
     auto ctx = sched_context_by_id(sched_context_id);
-    if (!t || !ctx)
-        return E_NOTFOUND;
-    if (!(ctx->core_mask & (1ull << current_cpu_id())))
-        return E_INVALID;
+    if (!t || !ctx) return E_NOTFOUND;
+    if (!(ctx->core_mask & (1ull << current_cpu_id()))) return E_INVALID;
     account_current(current_eki());
     kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
     // Current runner is already running, so bind only fields that affect future
@@ -234,8 +176,7 @@ SysError bind_current_to_sched_context_id(u32 sched_context_id) {
     t->principal_generation = principal_generation(ctx->principal_id);
     t->sched_context_id = ctx->id;
     auto* next_context = object::acquire(ctx);
-    object::release(t->sched_context_lifetime);
-    t->sched_context_lifetime = next_context;
+    object::release(t->sched_context_lifetime); t->sched_context_lifetime = next_context;
     t->sched_context = ctx;
     t->sched.sched_class = ctx->band;
     t->sched.weight = ctx->weight ? ctx->weight : NICE_0_WEIGHT;

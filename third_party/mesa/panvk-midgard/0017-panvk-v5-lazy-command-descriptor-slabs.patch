@@ -1,0 +1,13 @@
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+@@ -505,7 +505,9 @@
+       .create_flags = 0,
+       .slab_size = 64 * 1024,
+       .label = "Command buffer descriptor pool",
+-      .prealloc = true,
++      /* Empty command buffers need no GPU descriptors. In particular, the
++       * CTS 10,000-buffer allocation case must not reserve 640 MiB of slabs. */
++      .prealloc = PAN_ARCH != 5,
+       .owns_bos = true,
+       .needs_locking = false,
+    };

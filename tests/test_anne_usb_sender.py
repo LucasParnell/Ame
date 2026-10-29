@@ -6,6 +6,10 @@ from unittest import mock
 import unittest
 import zlib
 import errno
+import os
+import pty
+import select
+import termios
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts/anne'))
@@ -38,6 +42,23 @@ class Transport:
 
 
 class AnneUsbSender(unittest.TestCase):
+    def test_serial_close_does_not_echo_peer_prompt_back_as_commands(self):
+        master, slave = pty.openpty()
+        try:
+            original = termios.tcgetattr(slave)
+            original[3] |= termios.ECHO | termios.ECHONL
+            termios.tcsetattr(slave, termios.TCSANOW, original)
+            link = serial_console.Serial(os.ttyname(slave))
+            link.close()
+            expected = original[:]
+            expected[3] &= ~(termios.ECHO | termios.ECHONL)
+            self.assertEqual(termios.tcgetattr(slave), expected)
+            os.write(master, b'msh:/$ \r\n')
+            self.assertFalse(select.select([master], [], [], .05)[0])
+        finally:
+            os.close(slave)
+            os.close(master)
+
     def test_interactive_console_reopens_without_replaying_pending_input(self):
         first, second = mock.Mock(fd=17), mock.Mock(fd=23)
         stdin = mock.Mock()

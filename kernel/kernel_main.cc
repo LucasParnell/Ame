@@ -39,36 +39,16 @@
 #include "display_diagnostics.h"
 #endif
 
-namespace drivers::gic {
-void init(PhysAddr dist_base, PhysAddr cpu_base);
-}
-namespace drivers::timer {
-void init(u32 irq_id);
-}
-namespace mm {
-void phys_init(PhysAddr ram_base, usize ram_size);
-void heap_init();
-void vm_init();
-} // namespace mm
-namespace cap {
-void init();
-}
-namespace sched {
-[[noreturn]] void enter();
-void init();
-} // namespace sched
-namespace ipc {
-void init();
-}
-namespace vm {
-void init();
-}
-namespace smp {
-void init(PhysAddr dtb_phys);
-}
-namespace kernel::init {
-void create_init_process();
-}
+namespace drivers::gic   { void init(PhysAddr dist_base, PhysAddr cpu_base); }
+namespace drivers::timer { void init(u32 irq_id); }
+namespace mm             { void phys_init(PhysAddr ram_base, usize ram_size);
+                           void heap_init(); void vm_init(); }
+namespace cap            { void init(); }
+namespace sched          { [[noreturn]] void enter(); void init(); }
+namespace ipc            { void init(); }
+namespace vm             { void init(); }
+namespace smp            { void init(PhysAddr dtb_phys); }
+namespace kernel::init   { void create_init_process(); }
 extern "C" void vectors();
 
 // DTB physical address — saved by entry.S from x0 before calling us.
@@ -77,8 +57,7 @@ extern "C" PhysAddr g_dtb_phys;
 namespace {
 
 u64 read_cells_be(const u8* data, u32 cells, u32 len) {
-    if (!data || cells == 0 || len < cells * 4u)
-        return 0;
+    if (!data || cells == 0 || len < cells * 4u) return 0;
     u64 value = 0;
     for (u32 i = 0; i < cells; ++i) {
         value = (value << 32) | libk::be32(data + i * 4u);
@@ -107,37 +86,33 @@ bool reserve_begin(void* v, const char* name, u32 depth) {
     } else if (parent == 1 || parent == 2) {
         kind = 2;
     }
-    if (depth < 16)
-        ctx.kind[depth] = kind;
+    if (depth < 16) ctx.kind[depth] = kind;
     return true;
 }
 
-void reserve_end(void*, u32) {
-}
+void reserve_end(void*, u32) {}
 
 void reserve_prop(void* v, const char* name, const u8* data, u32 len, u32 depth) {
     auto& ctx = *static_cast<ReserveCtx*>(v);
     const u8 kind = depth < 16 ? ctx.kind[depth] : 0;
-    if (kind != 2 || libk::strcmp(name, "reg") != 0)
-        return;
+    if (kind != 2 || libk::strcmp(name, "reg") != 0) return;
 
     constexpr u32 kAddressCells = 2;
     constexpr u32 kSizeCells = 2;
     constexpr u32 kTupleBytes = (kAddressCells + kSizeCells) * 4u;
     for (u32 off = 0; off + kTupleBytes <= len; off += kTupleBytes) {
         const u64 base = read_cells_be(data + off, kAddressCells, len - off);
-        const u64 size = read_cells_be(data + off + kAddressCells * 4u, kSizeCells,
+        const u64 size = read_cells_be(data + off + kAddressCells * 4u,
+                                       kSizeCells,
                                        len - off - kAddressCells * 4u);
-        if (base == 0 || size == 0)
-            continue;
+        if (base == 0 || size == 0) continue;
         mm::reserve_phys_range(base, size);
         ++ctx.count;
     }
 }
 
 void reserve_dtb_regions(PhysAddr dtb_phys) {
-    if (!dtb_phys)
-        return;
+    if (!dtb_phys) return;
     const auto* dtb = reinterpret_cast<const u8*>(dtb_phys);
     const auto& cached = platform::boot_reservations();
     if (cached.source == dtb) {
@@ -158,8 +133,7 @@ void reserve_dtb_regions(PhysAddr dtb_phys) {
     }
     // No complete batch (including overflow): retain the streaming fallback so
     // a capacity bound or malformed DTB cannot silently drop protected memory.
-    if (libk::be32(dtb) != fdt::kMagic)
-        return;
+    if (libk::be32(dtb) != fdt::kMagic) return;
 
     ReserveCtx memrsv{};
     if (fdt::walk_memreserve(dtb, &memrsv, reserve_memrsv_entry) && memrsv.count) {
@@ -167,17 +141,17 @@ void reserve_dtb_regions(PhysAddr dtb_phys) {
     }
 
     ReserveCtx reserved{};
-    if (fdt::walk(dtb, {&reserved, reserve_begin, reserve_end, reserve_prop}) && reserved.count) {
+    if (fdt::walk(dtb, {&reserved, reserve_begin, reserve_end, reserve_prop}) &&
+        reserved.count) {
         ANKO_LOGF_INFO("kernel/dtb", "reserved-memory regs=%u", reserved.count);
     }
 }
 
 // Blue precedes SD initialization; white follows GIC/timer initialization.
 static void fb_stage(u32 color) {
-    if (!g_hw.has_t210_dc)
-        return;
-    libk::framebuffer_fill({g_hw.t210_dc_fb_phys, g_hw.t210_dc_fb_width, g_hw.t210_dc_fb_height},
-                           color | 0xff000000u);
+    if (!g_hw.has_t210_dc) return;
+    libk::framebuffer_fill({g_hw.t210_dc_fb_phys, g_hw.t210_dc_fb_width,
+                           g_hw.t210_dc_fb_height}, color | 0xff000000u);
     asm volatile("dsb sy" ::: "memory");
 }
 
@@ -191,7 +165,7 @@ extern "C" u64 g_kernel_boot_cntpct = 0;
 extern "C" [[noreturn]] void kernel_main() {
     {
         u64 cnt = 0;
-        asm volatile("mrs %0, CNTPCT_EL0" : "=r"(cnt)::"memory");
+        asm volatile("mrs %0, CNTPCT_EL0" : "=r"(cnt) :: "memory");
         g_kernel_boot_cntpct = cnt;
     }
     ANKO_BOOT_CHECKPOINT(KernelMain);
@@ -214,11 +188,12 @@ extern "C" [[noreturn]] void kernel_main() {
     // path touches counters, stack buffers, and MMIO; if any of that faults
     // before VBAR_EL1 is live, EL1 vectors through address 0x0 and lands at
     // 0x200 on QEMU, which looks like a silent boot hang.
-    asm volatile("msr VBAR_EL1, %0\n"
-                 "isb\n"
-                 :
-                 : "r"(&vectors)
-                 : "memory");
+    asm volatile(
+        "msr VBAR_EL1, %0\n"
+        "isb\n"
+        :
+        : "r"(&vectors)
+        : "memory");
 
 #ifdef ANKO_BOARD_HUAWEI_ANNE
     console::set_secondary_sink(anne::boot_log_putchar);
@@ -233,10 +208,8 @@ extern "C" [[noreturn]] void kernel_main() {
     // Must happen before phys_init so ram_base/ram_size are correct.
     // -----------------------------------------------------------------------
     // Reject unaligned DTB (can happen if U-Boot relocates it onto an odd boundary).
-    ANKO_LOGF_INFO("kernel/probe", "dtb_phys=0x%llx align=%u", (unsigned long long)g_dtb_phys,
-                   (unsigned)(g_dtb_phys & 3));
-    if (g_dtb_phys & 3)
-        g_dtb_phys = 0;
+    ANKO_LOGF_INFO("kernel/probe", "dtb_phys=0x%llx align=%u", (unsigned long long)g_dtb_phys, (unsigned)(g_dtb_phys & 3));
+    if (g_dtb_phys & 3) g_dtb_phys = 0;
 
     ANKO_BOOT_CHECKPOINT(ProbeBegin);
     platform::probe(g_dtb_phys);
@@ -255,20 +228,24 @@ extern "C" [[noreturn]] void kernel_main() {
     {
         const bool sd_ok = fat_log::init();
         ANKO_LOGF_INFO("kernel/fatlog", "sd log init %s", sd_ok ? "OK" : "FAIL");
-        if (sd_ok)
-            fat_log::write("[early] anko booting\n");
+        if (sd_ok) fat_log::write("[early] anko booting\n");
     }
 #endif
 
     ANKO_LOGF_INFO("kernel/probe",
                    "boot_el=%u ram=0x%llx+0x%llx console=0x%llx gic=0x%llx/0x%llx fwcfg=%d pcie=%d "
                    "vblk=%d virtio_n=%u smmu=%d smmu_base=0x%llx",
-                   g_hw.boot_el, static_cast<unsigned long long>(g_hw.ram_base),
+                   g_hw.boot_el,
+                   static_cast<unsigned long long>(g_hw.ram_base),
                    static_cast<unsigned long long>(g_hw.ram_size),
                    static_cast<unsigned long long>(g_hw.console_base),
                    static_cast<unsigned long long>(g_hw.gic_dist_base),
-                   static_cast<unsigned long long>(g_hw.gic_cpu_base), g_hw.has_fwcfg,
-                   g_hw.has_pcie, g_hw.has_virtio_blk, g_hw.virtio_count, g_hw.has_smmu,
+                   static_cast<unsigned long long>(g_hw.gic_cpu_base),
+                   g_hw.has_fwcfg,
+                   g_hw.has_pcie,
+                   g_hw.has_virtio_blk,
+                   g_hw.virtio_count,
+                   g_hw.has_smmu,
                    static_cast<unsigned long long>(g_hw.smmu_base));
 
     ANKO_BOOT_CHECKPOINT(PhysicalBegin);

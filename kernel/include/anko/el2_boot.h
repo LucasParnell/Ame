@@ -19,22 +19,21 @@ struct alignas(ANKO_EL2_BOOT_STRIDE) El2BootCpu {
 static_assert(sizeof(El2BootCpu) == ANKO_EL2_BOOT_STRIDE);
 static_assert(__builtin_offsetof(El2BootCpu, entry_el) == ANKO_EL2_BOOT_ENTRY_OFFSET);
 static_assert(__builtin_offsetof(El2BootCpu, monitor_ready) == ANKO_EL2_BOOT_READY_OFFSET);
-} // namespace vm
+}
 
 extern "C" vm::El2BootCpu g_el2_boot_cpus[MX_HOST_MAX_CPUS];
 
 namespace vm {
 inline u64 entry_level(u32 cpu) {
     return cpu < MX_HOST_MAX_CPUS
-               ? __atomic_load_n(&g_el2_boot_cpus[cpu].entry_el, __ATOMIC_ACQUIRE)
-               : 0;
+        ? __atomic_load_n(&g_el2_boot_cpus[cpu].entry_el, __ATOMIC_ACQUIRE) : 0;
 }
 
 inline bool monitor_ready(u32 cpu) {
     // The assembly publishes readiness with STLR only after vector/register
     // initialization. Padding avoids false sharing during parallel CPU entry.
     return cpu < MX_HOST_MAX_CPUS &&
-           __atomic_load_n(&g_el2_boot_cpus[cpu].monitor_ready, __ATOMIC_ACQUIRE) == 1;
+        __atomic_load_n(&g_el2_boot_cpus[cpu].monitor_ready, __ATOMIC_ACQUIRE) == 1;
 }
-} // namespace vm
+}
 #endif

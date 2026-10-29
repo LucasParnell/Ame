@@ -11,21 +11,21 @@
 #include "mochi/syscall.h"
 
 struct ConsoleBootConfig {
-    static constexpr uint32_t kMagic = 0x434F4E46u; // 'CONF'
+    static constexpr uint32_t kMagic   = 0x434F4E46u; // 'CONF'
     static constexpr uint16_t kVersion = 2u;
     // Kernel rings (one per CPU) + the init ring + one per service. The full
     // huawei-anne-usb profile is 24 services, so 32 was exactly saturated and
     // any new service halted the boot in the console restart path.
     static constexpr uint32_t kMaxRings = 40u;
 
-    uint32_t magic; // written last by init; console spins until set
+    uint32_t magic;             // written last by init; console spins until set
     uint16_t version;
-    uint16_t flags;            // reserved, 0
-    uint32_t total_ring_count; // kernel rings + init ring + service rings
+    uint16_t flags;             // reserved, 0
+    uint32_t total_ring_count;  // kernel rings + init ring + service rings
     uint32_t reserved0;
 
-    uint64_t uart_cap;         // CapHandle of UART cap in console's table
-    uint64_t log_doorbell_cap; // CapHandle of log doorbell in console's table
+    uint64_t uart_cap;          // CapHandle of UART cap in console's table
+    uint64_t log_doorbell_cap;  // CapHandle of log doorbell in console's table
 
     // Optional terminal channel caps for the upcoming serial terminal. Zero
     // means absent. These are deliberately separate from log rings so typed

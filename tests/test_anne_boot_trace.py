@@ -42,7 +42,7 @@ class NativeBootTrace(unittest.TestCase):
     def tearDownClass(cls):
         cls.configure(0)
 
-    def trace(self, el, fault=0, capture=0, cpus=1, workload=False, display=False, iova=False, frame_console=False, reset_at_ready=True, fiq_source=0, watchdog=False, watchdog_control=3, retention=False):
+    def trace(self, el, fault=0, capture=0, cpus=1, workload=False, display=False, iova=False, frame_console=False, reset_at_ready=True, fiq_source=0, watchdog=False, watchdog_control=3, retention=False, firmware_handoff=False):
         preset = "anne-smp-trace-qemu-dev" if workload else "anne-trace-qemu-dev"
         build = ROOT / "out/anne-smp-trace-qemu-dev" if workload else BUILD
         # A readiness capture's interval is a boot deadline, not the runtime
@@ -54,11 +54,26 @@ class NativeBootTrace(unittest.TestCase):
         end_marker = 'RETENTION watchdog.expiry deliberately_requested=1' if retention_wait else 'RESET nmi=0x4' if fault or capture else 'LED g ctl='
         with tempfile.TemporaryDirectory(prefix='ame-boot-trace-') as directory:
             path = Path(directory) / 'record'
+            kernel = build / 'kernel/anko.bin'
+            if firmware_handoff:
+                fixture = Path(directory) / 'handoff.bin'
+                subprocess.run(['clang', '--target=aarch64-none-elf', '-nostdlib',
+                                '-fuse-ld=lld', '-Wl,--oformat=binary', '-Wl,--image-base=0', '-Wl,-Ttext=0',
+                                *(['-DANNE_HANDOFF_EL1=1'] if el == 1 else []),
+                                str(ROOT / 'tests/anne_el2_handoff.S'), '-o', str(fixture)],
+                               check=True, capture_output=True)
+                image = bytearray(kernel.read_bytes())
+                image.extend(bytes(-len(image) % 16))
+                # Redirect only the header branch through the firmware fixture.
+                struct.pack_into('<I', image, 0, 0x14000000 | (len(image) // 4))
+                image.extend(fixture.read_bytes())
+                kernel = Path(directory) / 'firmware-entry.bin'
+                kernel.write_bytes(image)
             command = ['qemu-system-aarch64', '-machine',
-                       f'virt,gic-version=2,virtualization={"on" if el == 2 else "off"}',
+                       f'virt,gic-version=2,virtualization={"on" if el == 2 or firmware_handoff else "off"}',
                        '-cpu', 'cortex-a53', '-m', '128M', '-smp', str(cpus), '-display', 'none',
                        '-serial', 'none', '-monitor', 'none', '-S', '-qmp', 'stdio',
-                       '-kernel', str(build / 'kernel/anko.bin'),
+                       '-kernel', str(kernel),
                        '-device', f'loader,addr=0x47400000,data={fiq_source:#x},data-len=8']
             if watchdog:
                 fixture = bytearray(4096)
@@ -112,6 +127,11 @@ class NativeBootTrace(unittest.TestCase):
                 else: self.fail('Boot trace did not reach expected state:\n' + record[-6000:])
                 self.assertIn(f'AMEANKO1 el={el}', record)
                 self.assertRegex(record, r'CPU_FEATURES midr=0x[0-9a-f]+ mpidr=0x[0-9a-f]+ pfr0=0x[0-9a-f]+ el2_field=[0-9]+')
+                if firmware_handoff:
+                    self.assertRegex(record, r'CPU_FEATURES .* el2_field=[12]\b')
+                    if el == 2:
+                        physical_midr = int(re.search(r'CPU_FEATURES midr=(0x[0-9a-f]+)', record).group(1), 16)
+                        self.assertIn(f'monitor=1 midr={physical_midr:x} ', record)
                 if not fault or fault > 26:
                     self.assertIn(f'boot_entry={el} monitor={1 if el == 2 else 0}', record)
                 self.assertIn(f'FIQ_SOURCE phase=entry word={fiq_source:#018x}', record)
@@ -263,6 +283,10 @@ class NativeBootTrace(unittest.TestCase):
     def test_eight_core_el1_boot(self): self.trace(1, cpus=8)
     def test_eight_core_el2_boot(self): self.trace(2, cpus=8)
     def test_el2_full_boot_logging(self): self.trace(2)
+    @unittest.skipUnless(shutil.which('clang') and shutil.which('ld.lld'), 'requires LLVM')
+    def test_firmware_el2_handoff(self): self.trace(2, cpus=8, workload=True, firmware_handoff=True)
+    @unittest.skipUnless(shutil.which('clang') and shutil.which('ld.lld'), 'requires LLVM')
+    def test_el2_capable_firmware_el1_fallback(self): self.trace(1, firmware_handoff=True)
     def test_capture_reset_at_service_readiness(self): self.trace(1, capture=1)
     def test_fault_before_constructors(self): self.trace(1, fault=4)
     def test_fault_after_mmu_enable(self): self.trace(1, fault=17)

@@ -21,6 +21,8 @@ extern "C" [[noreturn]] void _start() {
         boot, {"serial.out.ring",
                (mochi::va::native_driver::kLinks + 3 * mochi::va::native_driver::kLinkStride),
                "serial.out.doorbell"})};
+    // serial.out.doorbell and this link's rx.db are the same channel
+    // (serial_console_db), so one wait already observes both producers.
     if (!r->stream.valid() || !r->input.valid() || !r->output.valid()) {
         mochi::boot::invalid_boot();
     }

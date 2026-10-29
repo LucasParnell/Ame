@@ -12,22 +12,15 @@ struct DoorbellTag {};
 struct ArenaTag {};
 struct UartTag {};
 
-template <typename Tag = UntypedTag> class Handle {
-  public:
-    constexpr Handle() : h_(MX_NULL_HANDLE) {
-    }
-    explicit constexpr Handle(mx_handle_t h) : h_(h) {
-    }
+template <typename Tag = UntypedTag>
+class Handle {
+public:
+    constexpr Handle() : h_(MX_NULL_HANDLE) {}
+    explicit constexpr Handle(mx_handle_t h) : h_(h) {}
 
-    constexpr mx_handle_t raw() const {
-        return h_;
-    }
-    constexpr bool valid() const {
-        return h_ != MX_NULL_HANDLE;
-    }
-    constexpr explicit operator bool() const {
-        return valid();
-    }
+    constexpr mx_handle_t raw() const { return h_; }
+    constexpr bool valid() const { return h_ != MX_NULL_HANDLE; }
+    constexpr explicit operator bool() const { return valid(); }
 
     // --- capability operations ---------------------------------------------
     // A capability names an object the kernel mediates (a ring, a doorbell, an
@@ -44,14 +37,11 @@ template <typename Tag = UntypedTag> class Handle {
     }
 
     // Human name for type(), from the shared ABI table (no switch here).
-    const char* type_name() const {
-        return mx_cap_type_name(type());
-    }
+    const char* type_name() const { return mx_cap_type_name(type()); }
 
     // Trusted metadata snapshot: base, size, rights, attr, flags, aux0.
     Status info(MxCapInfo* out) const {
-        if (!valid() || !out)
-            return {MX_ERR_INVALID};
+        if (!valid() || !out) return {MX_ERR_INVALID};
         return {mx_cap_info(h_, out)};
     }
 
@@ -59,22 +49,18 @@ template <typename Tag = UntypedTag> class Handle {
     // default `T = void` yields a void*; name the mapped type to skip a cast.
     template <typename T = void>
     mx_status_t map(mx_vaddr_t va, mx_rights_t rights, T** out = nullptr) const {
-        if (!valid())
-            return MX_ERR_INVALID;
+        if (!valid()) return MX_ERR_INVALID;
         const mx_status_t status = mx_map_page(h_, va, rights);
-        if (status == MX_OK && out)
-            *out = reinterpret_cast<T*>(va);
+        if (status == MX_OK && out) *out = reinterpret_cast<T*>(va);
         return status;
     }
 
     // A second handle to the same object, with `rights` (a subset of this one).
     mx_status_t dup(mx_rights_t rights, Handle* out) const {
-        if (!valid())
-            return MX_ERR_INVALID;
+        if (!valid()) return MX_ERR_INVALID;
         mx_handle_t copy = MX_NULL_HANDLE;
         const mx_status_t status = mx_cap_dup(h_, rights, &copy);
-        if (status == MX_OK && out)
-            *out = Handle(copy);
+        if (status == MX_OK && out) *out = Handle(copy);
         return status;
     }
 
@@ -83,7 +69,7 @@ template <typename Tag = UntypedTag> class Handle {
         return valid() ? static_cast<mx_status_t>(sys_cap_revoke(h_)) : MX_ERR_INVALID;
     }
 
-  private:
+private:
     mx_handle_t h_;
 };
 
@@ -114,8 +100,7 @@ inline T* cap_map_when(mx_handle_t cap, mx_i64_t expect, mx_vaddr_t va, mx_right
     for (;;) {
         if (static_cast<mx_i64_t>(h.type()) == expect) {
             T* mapped = nullptr;
-            if (h.map<T>(va, rights, &mapped) == MX_OK)
-                return mapped;
+            if (h.map<T>(va, rights, &mapped) == MX_OK) return mapped;
         }
         mx_yield();
     }
@@ -124,8 +109,7 @@ inline T* cap_map_when(mx_handle_t cap, mx_i64_t expect, mx_vaddr_t va, mx_right
 // Block until `cap` names `expect` (an MX_CAP_* value).
 inline void cap_wait_type(mx_handle_t cap, mx_i64_t expect) {
     Handle<> h(cap);
-    while (static_cast<mx_i64_t>(h.type()) != expect)
-        mx_yield();
+    while (static_cast<mx_i64_t>(h.type()) != expect) mx_yield();
 }
 
 } // namespace mochi

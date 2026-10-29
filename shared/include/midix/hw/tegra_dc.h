@@ -27,11 +27,12 @@ struct Window {
 };
 
 constexpr libk::Framebuffer32 framebuffer(const Window& w, std::uint64_t ram_base,
-                                          std::uint64_t ram_size) {
+                                         std::uint64_t ram_size) {
     const libk::Framebuffer32 fb{w.address, w.size & 0x1fff, (w.size >> 16) & 0x1fff};
     if (!(w.options & kWindowEnabled) || (w.options & (1u << 4)) ||
-        (w.format != 0xc && w.format != 0xd) || w.surface_kind != 0 || w.offset_h || w.offset_v ||
-        (w.stride & 0xffff) != fb.width * 4 || (w.prescaled_size & 0x7fff) != fb.width * 4 ||
+        (w.format != 0xc && w.format != 0xd) || w.surface_kind != 0 ||
+        w.offset_h || w.offset_v || (w.stride & 0xffff) != fb.width * 4 ||
+        (w.prescaled_size & 0x7fff) != fb.width * 4 ||
         ((w.prescaled_size >> 16) & 0x1fff) != fb.height ||
         !libk::framebuffer_fits(fb, ram_base, ram_size) ||
         !libk::framebuffer_fits(fb, 0, std::uint64_t{1} << 32)) {
@@ -50,9 +51,9 @@ inline libk::Framebuffer32 read_active(std::uint64_t ram_base, std::uint64_t ram
     dc[kWindowHeader] = kWindowA;
     dc[kStateAccess] = access | kReadActive;
     asm volatile("dsb sy" ::: "memory");
-    const Window window{dc[kOptions],       dc[kColorDepth], dc[kSize],
-                        dc[kPrescaledSize], dc[kStride],     dc[kBufferStart],
-                        dc[kOffsetH],       dc[kOffsetV],    dc[kSurfaceKind]};
+    const Window window{dc[kOptions], dc[kColorDepth], dc[kSize], dc[kPrescaledSize],
+                        dc[kStride], dc[kBufferStart], dc[kOffsetH], dc[kOffsetV],
+                        dc[kSurfaceKind]};
     dc[kStateAccess] = access;
     dc[kWindowHeader] = header;
     asm volatile("dsb sy" ::: "memory");

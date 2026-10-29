@@ -9,24 +9,24 @@
 #endif
 #include "anko/boot_trace.h"
 #include "anko/hw_info.h"
-#include "anko/irq.h"
-#include "anko/pci.h"
-#include "anko/sched.h"
-#include "anko/smp.h"
-#include "anko/mm.h"
-#include "anko/platform.h"
-#include "anko/smmuv3.h"
 #include "anko/init.h"
-#include "anko/vm.h"
 #include "anko/ipc.h"
+#include "anko/irq.h"
 #include "anko/log.h"
+#include "anko/mm.h"
 #include "anko/panic.h"
 #include "anko/panic_screen.h"
-#include "midix/abi/boot.h"
+#include "anko/pci.h"
+#include "anko/platform.h"
+#include "anko/sched.h"
+#include "anko/smmuv3.h"
+#include "anko/smp.h"
+#include "anko/vm.h"
+#include "fido2_seed.h"
 #include "libk/integer.h"
 #include "libk/printf.h"
 #include "libk/string.h"
-#include "fido2_seed.h"
+#include "midix/abi/boot.h"
 
 namespace drivers::fwcfg {
 bool write_ramfb(PhysAddr pixel_phys, u32 width, u32 height);
@@ -41,9 +41,9 @@ struct XhciInfo {
     bool found;
 };
 XhciInfo find_xhci();
-bool enable_xhci_bus_master(const XhciInfo& info);
-MmioRange* alloc_xhci_mmio(const XhciInfo& info);
-IrqLine* alloc_xhci_irq(const XhciInfo& info);
+bool enable_xhci_bus_master(const XhciInfo &info);
+MmioRange *alloc_xhci_mmio(const XhciInfo &info);
+IrqLine *alloc_xhci_irq(const XhciInfo &info);
 } // namespace drivers::pci_probe
 
 namespace kernel::init {
@@ -57,18 +57,20 @@ constexpr u32 kKernelLogRingOrder = 6;
 
 } // namespace
 
-void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_size,
+void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_size,
                      PhysAddr initrd_phys, usize initrd_size) {
     ANKO_BOOT_CHECKPOINT(CapsEnter);
-    if (!init_proc.cap_table)
+    if (!init_proc.cap_table) {
         panic("init has no cap table");
+    }
     const PhysAddr boot_page = mm::alloc_page_for(init_proc.pid);
     ANKO_BOOT_CHECKPOINT(CapsBootPage);
-    auto* boot_arena = static_cast<Arena*>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
-    if (!boot_page || !boot_arena)
+    auto *boot_arena = static_cast<Arena *>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
+    if (!boot_page || !boot_arena) {
         panic("init BootInfo allocation failed");
+    }
     ANKO_BOOT_CHECKPOINT(CapsSlab);
-    libk::memset(reinterpret_cast<void*>(boot_page), 0, PAGE_SIZE);
+    libk::memset(reinterpret_cast<void *>(boot_page), 0, PAGE_SIZE);
     libk::memset(boot_arena, 0, sizeof(*boot_arena));
     boot_arena->phys_base = boot_page;
     boot_arena->size = PAGE_SIZE;
@@ -76,48 +78,53 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
     boot_arena->rights = RIGHT_READ;
     const CapHandle boot_cap =
         cap::alloc(*init_proc.cap_table, CAP_ARENA, boot_arena, RIGHT_READ | RIGHT_MAP);
-    if (cap_index(boot_cap) != 0 || !boot_cap)
+    if (cap_index(boot_cap) != 0 || !boot_cap) {
         panic("init BootInfo must be slot zero");
+    }
     ANKO_BOOT_CHECKPOINT(CapsSlot0);
-    auto* boot = reinterpret_cast<MxBootInfo*>(boot_page);
+    auto *boot = reinterpret_cast<MxBootInfo *>(boot_page);
     boot->version = MX_BOOT_VERSION;
-    auto add = [&](const char* name, CapHandle handle, u64 size = 0) {
-        if (!handle || boot->entry_count >= MX_BOOT_MAX_ENTRIES)
+    auto add = [&](const char *name, CapHandle handle, u64 size = 0) {
+        if (!handle || boot->entry_count >= MX_BOOT_MAX_ENTRIES) {
             panic("boot capability allocation failed");
-        auto& e = boot->entries[boot->entry_count++];
+        }
+        auto &e = boot->entries[boot->entry_count++];
         e.type = MX_BOOT_ENTRY_HANDLE;
         e.handle = handle;
         e.aux0 = size;
         usize i = 0;
-        for (; name[i] && i + 1 < sizeof(e.name); ++i)
+        for (; name[i] && i + 1 < sizeof(e.name); ++i) {
             e.name[i] = name[i];
+        }
         e.name[i] = 0;
     };
-    auto grant = [&](const char* name, CapType type, void* target, u32 rights) {
+    auto grant = [&](const char *name, CapType type, void *target, u32 rights) {
         const CapHandle h = cap::alloc(*init_proc.cap_table, type, target, rights);
-        const u64 size = type == CAP_PAGE ? static_cast<MemoryObject*>(target)->size : 0;
+        const u64 size = type == CAP_PAGE ? static_cast<MemoryObject *>(target)->size : 0;
         add(name, h, size);
         return h;
     };
 
     ANKO_BOOT_CHECKPOINT(CapsArena);
-    auto* manifest =
-        static_cast<MemoryObject*>(mm::heap_alloc(sizeof(MemoryObject), alignof(MemoryObject)));
-    auto* initrd =
-        static_cast<MemoryObject*>(mm::heap_alloc(sizeof(MemoryObject), alignof(MemoryObject)));
-    if (!manifest || !initrd)
+    auto *manifest =
+        static_cast<MemoryObject *>(mm::heap_alloc(sizeof(MemoryObject), alignof(MemoryObject)));
+    auto *initrd =
+        static_cast<MemoryObject *>(mm::heap_alloc(sizeof(MemoryObject), alignof(MemoryObject)));
+    if (!manifest || !initrd) {
         return;
+    }
 
     const usize manifest_alloc_size =
         libk::align_up(manifest_size ? manifest_size : PAGE_SIZE, PAGE_SIZE);
     const usize manifest_pages = manifest_alloc_size / PAGE_SIZE;
     const PhysAddr manifest_page = mm::alloc_pages_contiguous(manifest_pages);
-    if (!manifest_page)
+    if (!manifest_page) {
         return;
-    libk::memset(reinterpret_cast<void*>(manifest_page), 0, manifest_alloc_size);
+    }
+    libk::memset(reinterpret_cast<void *>(manifest_page), 0, manifest_alloc_size);
     if (manifest_addr) {
-        libk::memcpy(reinterpret_cast<void*>(manifest_page),
-                     reinterpret_cast<const void*>(manifest_addr), manifest_size);
+        libk::memcpy(reinterpret_cast<void *>(manifest_page),
+                     reinterpret_cast<const void *>(manifest_addr), manifest_size);
     }
     ANKO_BOOT_CHECKPOINT(CapsManifest);
     manifest->phys_base = manifest_page;
@@ -127,11 +134,11 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
     initrd->phys_base = initrd_phys;
     initrd->size = initrd_size;
 
-    auto& cpus = boot->entries[boot->entry_count++];
+    auto &cpus = boot->entries[boot->entry_count++];
     cpus.type = MX_BOOT_ENTRY_VALUE;
     cpus.aux0 = smp::cpu_count();
     libk::memcpy(cpus.name, "cpu.count", 10);
-    auto& cpu_mask = boot->entries[boot->entry_count++];
+    auto &cpu_mask = boot->entries[boot->entry_count++];
     cpu_mask.type = MX_BOOT_ENTRY_VALUE;
     cpu_mask.aux0 = sched::online_cpu_mask();
     libk::memcpy(cpu_mask.name, "cpu.mask", 9);
@@ -154,7 +161,7 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
     grant("nameservice", CAP_NAMESERVICE, &init_proc, RIGHT_REGISTER | RIGHT_READ | RIGHT_DUP);
 
     // 5) UART cap
-    grant("uart.mmio", CAP_UART, reinterpret_cast<void*>(g_hw.console_base),
+    grant("uart.mmio", CAP_UART, reinterpret_cast<void *>(g_hw.console_base),
           RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
 
     // 6) VM root authority. Init policy grants reduced VM authority to Dango.
@@ -166,18 +173,20 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
           RIGHT_WRITE | RIGHT_DUP);
 
     // 7) Global log doorbell followed by one kernel log ring per supported CPU.
-    Doorbell* log_db = ipc::doorbell_create_object(init_proc.pid);
-    if (!log_db)
+    Doorbell *log_db = ipc::doorbell_create_object(init_proc.pid);
+    if (!log_db) {
         panic("log doorbell allocation failed");
+    }
     add("log.doorbell",
         ipc::doorbell_cap_alloc(init_proc.pid, log_db, RIGHT_NOTIFY | RIGHT_WAIT | RIGHT_DUP));
 
-    Ring* kernel_log_rings[kMaxCpus]{};
+    Ring *kernel_log_rings[kMaxCpus]{};
     for (u32 cpu = 0; cpu < kMaxCpus; ++cpu) {
-        Ring* ring = ipc::ring_create_object(init_proc.pid, kKernelLogRingOrder, 0);
+        Ring *ring = ipc::ring_create_object(init_proc.pid, kKernelLogRingOrder, 0);
         kernel_log_rings[cpu] = ring;
-        if (!ring)
+        if (!ring) {
             panic("kernel log ring allocation failed");
+        }
         char name[] = "kernel.log.0";
         name[11] = static_cast<char>('0' + cpu);
         add(name, ipc::ring_cap_alloc(init_proc.pid, ring,
@@ -186,9 +195,13 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
     anko::log::attach_console(kernel_log_rings, log_db, kMaxCpus);
 
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    // Dedicated platform authority; no raw GPU/MMU or firmware-mailbox mapping
+    // is granted to userland. Assignment validates VM and vCPU ownership.
+    grant("gpu.platform", CAP_PLATFORM, platform::board_control(platform::Domain::Gpu),
+          RIGHT_READ | RIGHT_WRITE | RIGHT_DUP);
     if (g_hw.has_anne_usb) {
         struct Resource {
-            const char* name;
+            const char *name;
             PhysAddr base;
             u64 bytes;
         };
@@ -200,29 +213,32 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
             // Captured Anne DTB: gpio25, volume-up bit 1, active low.
             {"fido2.presence.mmio", 0xfff0e000, 4096},
         };
-        for (const auto& r : resources) {
-            auto* range =
-                static_cast<MmioRange*>(mm::slab_alloc(sizeof(MmioRange), alignof(MmioRange)));
-            if (!range)
+        for (const auto &r : resources) {
+            auto *range =
+                static_cast<MmioRange *>(mm::slab_alloc(sizeof(MmioRange), alignof(MmioRange)));
+            if (!range) {
                 panic("Anne USB resource allocation failed");
+            }
             *range = {r.base, r.bytes, MX_MMIO_DEVICE_nGnRnE, 0, 0, 0};
             grant(r.name, CAP_MMIO, range, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
         }
         const auto seed_page = mm::alloc_page_for(init_proc.pid);
-        auto* seed_arena = static_cast<Arena*>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
-        if (!seed_page || !seed_arena)
+        auto *seed_arena = static_cast<Arena *>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
+        if (!seed_page || !seed_arena) {
             panic("FIDO2 seed allocation failed");
-        libk::memset(reinterpret_cast<void*>(seed_page), 0, PAGE_SIZE);
-        libk::memcpy(reinterpret_cast<void*>(seed_page), &kFido2Seed, sizeof(kFido2Seed));
+        }
+        libk::memset(reinterpret_cast<void *>(seed_page), 0, PAGE_SIZE);
+        libk::memcpy(reinterpret_cast<void *>(seed_page), &kFido2Seed, sizeof(kFido2Seed));
         *seed_arena = {};
         seed_arena->phys_base = seed_page;
         seed_arena->size = PAGE_SIZE;
         seed_arena->owner_pid = init_proc.pid;
         seed_arena->rights = RIGHT_READ;
         grant("fido2.seed", CAP_ARENA, seed_arena, RIGHT_READ | RIGHT_MAP | RIGHT_DUP);
-        auto* line = static_cast<IrqLine*>(mm::slab_alloc(sizeof(IrqLine), alignof(IrqLine)));
-        if (!line)
+        auto *line = static_cast<IrqLine *>(mm::slab_alloc(sizeof(IrqLine), alignof(IrqLine)));
+        if (!line) {
             panic("Anne USB IRQ allocation failed");
+        }
         *line = {191, 0, 0, 0, 0};
         grant("dwc2.irq", CAP_IRQ, line, RIGHT_READ | RIGHT_WRITE | RIGHT_DUP);
         grant("usb.phy.control", CAP_PLATFORM, platform::board_control(platform::Domain::UsbPhy),
@@ -240,12 +256,15 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
         // attributes. Ordinary filesystem/client arenas stay CPU-cacheable.
         constexpr usize kEmmcDmaPages = 17;
         const PhysAddr emmc_dma_phys = mm::alloc_pages_contiguous(kEmmcDmaPages);
-        auto* emmc_dma = static_cast<Arena*>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
-        if (!emmc_dma || !emmc_dma_phys || emmc_dma_phys + kEmmcDmaPages * PAGE_SIZE > (1ull << 32))
+        auto *emmc_dma = static_cast<Arena *>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
+        if (!emmc_dma || !emmc_dma_phys ||
+            emmc_dma_phys + kEmmcDmaPages * PAGE_SIZE > (1ull << 32)) {
             panic("eMMC DMA allocation failed");
-        if (!mm::register_noncached_range(emmc_dma_phys, kEmmcDmaPages * PAGE_SIZE))
+        }
+        if (!mm::register_noncached_range(emmc_dma_phys, kEmmcDmaPages * PAGE_SIZE)) {
             panic("eMMC DMA memory attributes failed");
-        libk::memset(reinterpret_cast<void*>(emmc_dma_phys), 0, kEmmcDmaPages * PAGE_SIZE);
+        }
+        libk::memset(reinterpret_cast<void *>(emmc_dma_phys), 0, kEmmcDmaPages * PAGE_SIZE);
         *emmc_dma = {};
         emmc_dma->phys_base = emmc_dma_phys;
         emmc_dma->size = kEmmcDmaPages * PAGE_SIZE;
@@ -257,14 +276,26 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
         u64 address = 0;
         u32 width = 0, height = 0, stride = 0;
         if (anne::native_display::framebuffer(address, width, height, stride)) {
-            const usize size = libk::align_up(u64{stride} * height, PAGE_SIZE);
-            if (!mm::register_noncached_range(address, size))
+            // LK's logo scanout is pixel aligned, but not necessarily page aligned.
+            const u64 base = address & ~(u64{PAGE_SIZE} - 1);
+            const u64 offset = address - base;
+            const usize size = libk::align_up(offset + u64{stride} * height, PAGE_SIZE);
+            if (!mm::register_noncached_range(base, size)) {
                 panic("Anne framebuffer attributes failed");
-            auto* range =
-                static_cast<MmioRange*>(mm::slab_alloc(sizeof(MmioRange), alignof(MmioRange)));
-            if (!range)
+            }
+            auto *range =
+                static_cast<MmioRange *>(mm::slab_alloc(sizeof(MmioRange), alignof(MmioRange)));
+            if (!range) {
                 panic("Anne framebuffer allocation failed");
-            *range = {address, size, MX_MMIO_NORMAL_NC, 0, 0, 0};
+            }
+            *range = {base, size, MX_MMIO_NORMAL_NC, 0, 0, 0};
+            if (boot->entry_count >= MX_BOOT_MAX_ENTRIES) {
+                panic("boot capability allocation failed");
+            }
+            auto &pixel_offset = boot->entries[boot->entry_count++];
+            pixel_offset.type = MX_BOOT_ENTRY_VALUE;
+            pixel_offset.aux0 = offset;
+            libk::memcpy(pixel_offset.name, "fb.offset", 10);
             grant("fb.memory", CAP_MMIO, range, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
             grant("fb.control", CAP_PLATFORM, platform::board_control(platform::Domain::Display),
                   RIGHT_WRITE | RIGHT_DUP);
@@ -273,7 +304,7 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
             // shear the image one row further off to the right each line. Painted
             // pixels are cleaned to PoC in case this fires before the NC mapping
             // above is what the framebuffer is mapped with.
-            anko::panic_screen::bind(reinterpret_cast<volatile u32*>(address), width, height,
+            anko::panic_screen::bind(reinterpret_cast<volatile u32 *>(address), width, height,
                                      stride / 4u);
             anko::panic_screen::set_flush_hook(&anne::native_display::panic_flush);
         }
@@ -290,8 +321,8 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
         const usize fb_size =
             static_cast<usize>(g_hw.t210_dc_fb_width) * g_hw.t210_dc_fb_height * 4u;
         const usize fb_size_pages = (fb_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-        auto* fb_range =
-            static_cast<MmioRange*>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
+        auto *fb_range =
+            static_cast<MmioRange *>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
         if (fb_range) {
             fb_range->phys_base = g_hw.t210_dc_fb_phys;
             fb_range->size = fb_size_pages;
@@ -305,7 +336,7 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
             ANKO_LOG_WARN("kernel/init", "T210 fb_range alloc failed");
         }
         // Give the panic path a screen to paint before init owns the framebuffer.
-        anko::panic_screen::bind(reinterpret_cast<volatile u32*>(g_hw.t210_dc_fb_phys),
+        anko::panic_screen::bind(reinterpret_cast<volatile u32 *>(g_hw.t210_dc_fb_phys),
                                  g_hw.t210_dc_fb_width, g_hw.t210_dc_fb_height);
     } else if (g_hw.has_fwcfg) {
         // QEMU ramfb path.
@@ -314,15 +345,16 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
         constexpr usize kFbPages = (kFbWidth * kFbHeight * 4 + PAGE_SIZE - 1) / PAGE_SIZE;
         const PhysAddr fb_phys = mm::alloc_pages_contiguous(kFbPages);
         if (fb_phys) {
-            libk::memset(reinterpret_cast<void*>(fb_phys), 0, kFbPages * PAGE_SIZE);
-            if (!mm::register_noncached_range(fb_phys, kFbPages * PAGE_SIZE))
+            libk::memset(reinterpret_cast<void *>(fb_phys), 0, kFbPages * PAGE_SIZE);
+            if (!mm::register_noncached_range(fb_phys, kFbPages * PAGE_SIZE)) {
                 panic("framebuffer memory attributes failed");
+            }
             const bool ramfb_ok = drivers::fwcfg::write_ramfb(fb_phys, kFbWidth, kFbHeight);
             if (!ramfb_ok) {
                 ANKO_LOG_WARN("kernel/init", "ramfb init failed — framebuffer will be blank");
             }
-            auto* fb_range =
-                static_cast<MmioRange*>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
+            auto *fb_range =
+                static_cast<MmioRange *>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
             if (fb_range) {
                 fb_range->phys_base = fb_phys;
                 fb_range->size = kFbPages * PAGE_SIZE;
@@ -334,7 +366,8 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
                       RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
             }
             // Give the panic path a screen to paint before init owns the framebuffer.
-            anko::panic_screen::bind(reinterpret_cast<volatile u32*>(fb_phys), kFbWidth, kFbHeight);
+            anko::panic_screen::bind(reinterpret_cast<volatile u32 *>(fb_phys), kFbWidth,
+                                     kFbHeight);
         } else {
             ANKO_LOG_WARN("kernel/init", "framebuffer RAM alloc failed");
         }
@@ -368,13 +401,14 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
         constexpr PhysAddr kXusbBase = 0x7009'0000ull;
         constexpr usize kXusbSize = 0x8000u; // 32 KiB xHCI register window
         constexpr usize kXhciDmaPages = 64;
-        auto* xhci_mmio =
-            static_cast<MmioRange*>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
+        auto *xhci_mmio =
+            static_cast<MmioRange *>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
         const PhysAddr xhci_dma_phys = mm::alloc_pages_contiguous_aligned(kXhciDmaPages, 16);
-        auto* xhci_dma = static_cast<Arena*>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
+        auto *xhci_dma = static_cast<Arena *>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
         if (xhci_mmio && xhci_dma_phys && xhci_dma) {
-            if (!mm::register_noncached_range(xhci_dma_phys, kXhciDmaPages * PAGE_SIZE))
+            if (!mm::register_noncached_range(xhci_dma_phys, kXhciDmaPages * PAGE_SIZE)) {
                 panic("xhci DMA memory attributes failed");
+            }
             xhci_mmio->phys_base = kXusbBase;
             xhci_mmio->size = kXusbSize;
             xhci_mmio->attr = MX_MMIO_DEVICE_nGnRnE;
@@ -382,7 +416,7 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
             xhci_mmio->device_hint = 0;
             xhci_mmio->region_index = 0;
 
-            libk::memset(reinterpret_cast<void*>(xhci_dma_phys), 0, kXhciDmaPages * PAGE_SIZE);
+            libk::memset(reinterpret_cast<void *>(xhci_dma_phys), 0, kXhciDmaPages * PAGE_SIZE);
             xhci_dma->base_va = 0;
             xhci_dma->phys_base = xhci_dma_phys;
             xhci_dma->size = kXhciDmaPages * PAGE_SIZE;
@@ -397,8 +431,8 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
             // Slot 13: placeholder IRQ cap — keeps slot numbering consistent
             // with the QEMU path.  irq_id=0xFFFFFFFF signals no real IRQ;
             // the xhci driver uses polling mode via ANKO_XHCI_NORESET.
-            auto* t210_irq =
-                static_cast<IrqLine*>(mm::heap_alloc(sizeof(IrqLine), alignof(IrqLine)));
+            auto *t210_irq =
+                static_cast<IrqLine *>(mm::heap_alloc(sizeof(IrqLine), alignof(IrqLine)));
             if (t210_irq) {
                 t210_irq->irq_id = 0xFFFF'FFFFu; // sentinel: invalid
                 t210_irq->trigger = 0;
@@ -426,14 +460,15 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
             ANKO_LOGF_INFO("kernel/init", "pci: contained %u assignable function(s)", contained);
         }
         if (xhci.found) {
-            MmioRange* xhci_mmio = drivers::pci_probe::alloc_xhci_mmio(xhci);
-            IrqLine* xhci_irq = drivers::pci_probe::alloc_xhci_irq(xhci);
+            MmioRange *xhci_mmio = drivers::pci_probe::alloc_xhci_mmio(xhci);
+            IrqLine *xhci_irq = drivers::pci_probe::alloc_xhci_irq(xhci);
             const PhysAddr xhci_dma_phys = mm::alloc_pages_contiguous_aligned(kXhciDmaPages, 16);
-            Arena* xhci_dma = static_cast<Arena*>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
+            Arena *xhci_dma = static_cast<Arena *>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
             if (xhci_mmio && xhci_irq && xhci_dma_phys && xhci_dma) {
-                if (!mm::register_noncached_range(xhci_dma_phys, kXhciDmaPages * PAGE_SIZE))
+                if (!mm::register_noncached_range(xhci_dma_phys, kXhciDmaPages * PAGE_SIZE)) {
                     panic("xhci DMA memory attributes failed");
-                libk::memset(reinterpret_cast<void*>(xhci_dma_phys), 0, kXhciDmaPages * PAGE_SIZE);
+                }
+                libk::memset(reinterpret_cast<void *>(xhci_dma_phys), 0, kXhciDmaPages * PAGE_SIZE);
                 xhci_dma->base_va = 0;
                 xhci_dma->phys_base = xhci_dma_phys;
                 xhci_dma->size = kXhciDmaPages * PAGE_SIZE;
@@ -508,17 +543,18 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
 
     // 15..16) Virtio-blk block device (QEMU only — T210 uses AmeFS via SATA/SD).
     if (g_hw.has_virtio_blk) {
-        auto* blk_mmio =
-            static_cast<MmioRange*>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
+        auto *blk_mmio =
+            static_cast<MmioRange *>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
         constexpr usize kBlkDmaPages = 64;
         const PhysAddr blk_dma_phys = mm::alloc_pages_contiguous(kBlkDmaPages);
-        Arena* blk_dma = static_cast<Arena*>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
+        Arena *blk_dma = static_cast<Arena *>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
         if (blk_mmio && blk_dma_phys && blk_dma) {
             // Virtio and io.fs share this physical arena with the device.
             // Register before the first write so kernel and EL0 aliases agree;
             // ordering barriers cannot repair cached/noncached aliasing.
-            if (!mm::register_noncached_range(blk_dma_phys, kBlkDmaPages * PAGE_SIZE))
+            if (!mm::register_noncached_range(blk_dma_phys, kBlkDmaPages * PAGE_SIZE)) {
                 panic("virtio-blk DMA noncached registration failed");
+            }
             blk_mmio->phys_base = g_hw.virtio_base;
             blk_mmio->size = platform::kVirtioMmioSize;
             blk_mmio->attr = MX_MMIO_DEVICE_nGnRnE;
@@ -526,7 +562,7 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
             blk_mmio->device_hint = 0;
             blk_mmio->region_index = 0;
 
-            libk::memset(reinterpret_cast<void*>(blk_dma_phys), 0, kBlkDmaPages * PAGE_SIZE);
+            libk::memset(reinterpret_cast<void *>(blk_dma_phys), 0, kBlkDmaPages * PAGE_SIZE);
             blk_dma->base_va = 0;
             blk_dma->phys_base = blk_dma_phys;
             blk_dma->size = kBlkDmaPages * PAGE_SIZE;
@@ -547,12 +583,13 @@ void issue_boot_caps(Process& init_proc, PhysAddr manifest_addr, usize manifest_
     __atomic_store_n(&boot->magic, MX_BOOT_MAGIC, __ATOMIC_RELEASE);
 }
 
-Process* spawn_image(const void* elf_data, usize elf_size, PrincipalClass principal,
-                     u32 supervisor_pid, u32 flags, Thread** out_main_thread) {
-    if (!elf_data || elf_size == 0)
+Process *spawn_image(const void *elf_data, usize elf_size, PrincipalClass principal,
+                     u32 supervisor_pid, u32 flags, Thread **out_main_thread) {
+    if (!elf_data || elf_size == 0) {
         return nullptr;
+    }
 
-    Process* p = sched::process_create(principal, supervisor_pid);
+    Process *p = sched::process_create(principal, supervisor_pid);
     if (!p) {
         ANKO_LOG_ERROR("kernel/loader", "process allocation failed");
         return nullptr;
@@ -579,9 +616,10 @@ Process* spawn_image(const void* elf_data, usize elf_size, PrincipalClass princi
     u32 mapped = 0;
     for (; mapped < kInitialStackPages; ++mapped) {
         const PhysAddr stack = mm::alloc_page_for(p->pid);
-        if (!stack)
+        if (!stack) {
             break;
-        libk::memset(reinterpret_cast<void*>(stack), 0, PAGE_SIZE);
+        }
+        libk::memset(reinterpret_cast<void *>(stack), 0, PAGE_SIZE);
         if (!mm::vm_map_owned(space, stack_base + static_cast<VirtAddr>(mapped) * PAGE_SIZE, stack,
                               RIGHT_READ | RIGHT_WRITE)) {
             mm::free_page_for(p->pid, stack);
@@ -601,30 +639,35 @@ Process* spawn_image(const void* elf_data, usize elf_size, PrincipalClass princi
     p->next_stack_slot = kInitialStackPages;
 
     const u32 thread_flags = (flags & SPAWN_SUSPENDED) ? THREAD_SUSPENDED : 0;
-    Thread* t = sched::thread_create(p->pid, entry, sp_top, PRIO_SERVICE, 0, thread_flags);
+    Thread *t = sched::thread_create(p->pid, entry, sp_top, PRIO_SERVICE, 0, thread_flags);
     if (!t) {
         sched::process_destroy(p);
         return nullptr;
     }
-    if (out_main_thread)
+    if (out_main_thread) {
         *out_main_thread = t;
-    if (!(flags & SPAWN_SUSPENDED))
+    }
+    if (!(flags & SPAWN_SUSPENDED)) {
         sched::enqueue(t);
+    }
     return p;
 }
 
-Process* spawn_service(const char* service_name, PrincipalClass principal, u32 supervisor_pid,
-                       u32 flags, Thread** out_main_thread) {
-    if (!service_name)
+Process *spawn_service(const char *service_name, PrincipalClass principal, u32 supervisor_pid,
+                       u32 flags, Thread **out_main_thread) {
+    if (!service_name) {
         return nullptr;
+    }
 
-    const void* blob = nullptr;
+    const void *blob = nullptr;
     usize blob_size = 0;
-    if (!archive_get(service_name, &blob, &blob_size))
+    if (!archive_get(service_name, &blob, &blob_size)) {
         return nullptr;
-    Process* p = spawn_image(blob, blob_size, principal, supervisor_pid, flags, out_main_thread);
-    if (p)
+    }
+    Process *p = spawn_image(blob, blob_size, principal, supervisor_pid, flags, out_main_thread);
+    if (p) {
         sched::process_set_name(p, service_name);
+    }
     return p;
 }
 
@@ -638,17 +681,19 @@ void create_init_process() {
         panic("no external system bundle");
     }
     ANKO_BOOT_CHECKPOINT(BundleLoaded);
-    if (!init_archive(initrd_base, initrd_size))
+    if (!init_archive(initrd_base, initrd_size)) {
         panic("system bundle authentication failed");
+    }
     ANKO_BOOT_CHECKPOINT(BundleAuthenticated);
 
-    const void* manifest_blob = nullptr;
+    const void *manifest_blob = nullptr;
     usize manifest_size = 0;
-    if (!archive_get("manifest.json", &manifest_blob, &manifest_size))
+    if (!archive_get("manifest.json", &manifest_blob, &manifest_size)) {
         panic("missing authenticated manifest");
+    }
 
     ANKO_BOOT_CHECKPOINT(InitSpawnBegin);
-    Process* init_proc = spawn_service("init", PRINCIPAL_NATIVE_TRUSTED, /*supervisor=*/0);
+    Process *init_proc = spawn_service("init", PRINCIPAL_NATIVE_TRUSTED, /*supervisor=*/0);
     if (!init_proc) {
         ANKO_LOG_ERROR("kernel/init", "spawn failed");
         return;

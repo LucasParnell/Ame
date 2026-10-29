@@ -7,6 +7,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Arena(unittest.TestCase):
+    def test_graphics_arena_mapping_reclaims_and_reuses_every_page(self):
+        with tempfile.TemporaryDirectory(prefix='ame-arena-mapping-') as work:
+            probe = str(Path(work) / 'probe')
+            result = subprocess.run([
+                'clang++', '-std=c++23', '-O1', '-g', '-DANKO_HOST_TEST',
+                '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                '-I' + str(ROOT / 'kernel/include'),
+                '-I' + str(ROOT / 'shared/include'),
+                '-idirafter', str(ROOT / 'lib/include'),
+                str(ROOT / 'tests/kernel/arena_mapping_probe.cc'),
+                str(ROOT / 'kernel/mm/arena.cc'), '-o', probe],
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = subprocess.run([probe], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_arena_is_bounded_and_refuses_growth(self):
         # mochi/arena.h is the libc-allocation replacement: bounded, aligned,
         # never grows, refuses an unsatisfiable request. Prove it under

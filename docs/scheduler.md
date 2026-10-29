@@ -65,7 +65,7 @@ threads into its own queues. Thread state uses acquire/release publication too;
 state publication alone does not transfer frame ownership.
 
 Doorbell delivery uses `wake_ipc` to apply metadata, select a CPU, and publish
-under one lifecycle guard. The [IPC implementation notes](ipc.md) describe its
+under one lifecycle guard. The [IPC implementation notes](ipc.md#ipc) describe its
 cached identities, CPU-owned statistics, and batched payload transport.
 
 Wake selection considers hard affinity, wake-affine hints, doorbell home CPU,

@@ -86,6 +86,45 @@ intx_spi="$(macro_dec DANGO_GPU_INTX_SPI)"
 # header aliases it rather than restating the number).
 bar4_ipa="$(layout_dec DANGO_GPU_MMIO_BASE)"
 bar4_size="$(macro_dec DANGO_GPU_BAR4_SIZE)"
+# Synthetic Mali appliance binding (shared/include/midix/abi/anne_gpu.h). The
+# guest GPU node and the host mediator must agree on these, so both are read
+# from that one header rather than retyped in the template.
+MALI_HEADER="${DANGO_MALI_HEADER:-${AME}/shared/include/midix/abi/anne_gpu.h}"
+if [[ ! -f "${MALI_HEADER}" ]]; then
+    echo "error: Mali appliance header not found: ${MALI_HEADER}" >&2
+    exit 1
+fi
+read_mali() {
+    sed -n -e "s/^#[[:space:]]*define[[:space:]][[:space:]]*$1[[:space:]][[:space:]]*\([^[:space:]/]*\).*/\1/p" \
+        "${MALI_HEADER}" | head -n 1
+}
+# mali_dec NAME -> decimal, rejecting anything that is not an integer literal.
+mali_dec() {
+    local name="$1" raw value
+    raw="$(read_mali "${name}")"
+    value="${raw}"
+    # The appliance header spells values like 0x60000000ULL; strip every integer
+    # suffix character, not just one.
+    while [[ "${value}" == *[uUlL] ]]; do value="${value%[uUlL]}"; done
+    if [[ -z "${value}" ]] || ! [[ "${value}" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]]; then
+        echo "error: ${name} is missing or not an integer literal in ${MALI_HEADER} (got '${raw}')" >&2
+        exit 1
+    fi
+    printf '%d' "$(( value ))"
+}
+mali_base="$(mali_dec AME_MALI_GUEST_BASE)"
+mali_bytes="$(mali_dec AME_MALI_REG_BYTES)"
+# The DTS `interrupts` cell of the Mali node carries SPIs, not the INTIDs the
+# host GIC uses. Derive the SPI numbers instead of restating them.
+job_spi=$(( $(mali_dec AME_MALI_JOB_IRQ) - spi_base ))
+mmu_spi=$(( $(mali_dec AME_MALI_MMU_IRQ) - spi_base ))
+gpu_spi=$(( $(mali_dec AME_MALI_GPU_IRQ) - spi_base ))
+for pair in "JOB:${job_spi}" "MMU:${mmu_spi}" "GPU:${gpu_spi}"; do
+    if (( ${pair#*:} <= 0 )); then
+        echo "error: Mali ${pair%%:*} SPI must be positive (spi_base=${spi_base})" >&2
+        exit 1
+    fi
+done
 stg_base="$(layout_dec DANGO_GPU_STAGING_BASE)"
 stg_size="$(layout_dec DANGO_GPU_STAGING_SIZE)"
 shm_base="$(layout_dec DANGO_SHM_GUEST_BASE)"
@@ -157,3 +196,16 @@ emit DANGO_GPU_STAGING_SIZE  '0x%08x' "${stg_size}"
 emit DANGO_SHM_GUEST_BASE   '0x%08x' "${shm_base}"
 emit DANGO_SHM_GUEST_SIZE   '0x%x'   "${shm_size}"
 emit DANGO_GPU_INTX_SPI      '0x%02x' "${intx_spi}"
+# Synthetic Mali (render-only appliance). The host mediator emulates exactly
+# this window; the guest DTS describes it only when the hardware binding is
+# enabled, because QEMU does not model a Mali-T830.
+emit AME_MALI_GUEST_BASE_UA  '%08x'   "${mali_base}"
+emit AME_MALI_GUEST_BASE     '0x%08x' "${mali_base}"
+emit AME_MALI_REG_BYTES      '0x%x'   "${mali_bytes}"
+emit AME_MALI_JOB_IRQ_SPI    '%d'     "${job_spi}"
+emit AME_MALI_MMU_IRQ_SPI    '%d'     "${mmu_spi}"
+emit AME_MALI_GPU_IRQ_SPI    '%d'     "${gpu_spi}"
+emit AME_MALI_JOB_IRQ        '%d'     "$(( job_spi + spi_base ))"
+emit AME_MALI_MMU_IRQ        '%d'     "$(( mmu_spi + spi_base ))"
+emit AME_MALI_GPU_IRQ        '%d'     "$(( gpu_spi + spi_base ))"
+emit AME_MALI_REG_BYTES_HEX  '0x%x'   "${mali_bytes}"

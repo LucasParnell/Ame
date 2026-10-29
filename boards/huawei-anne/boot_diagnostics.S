@@ -16,6 +16,10 @@ anne_diag_install_early_vectors:
 anne_diag_vectors:
     .set anne_vector_index, 0
     .rept 16
+    // Keep recovery-sensitive registers before assigning diagnostic scratch.
+    sub sp, sp, #32
+    stp x4, x9, [sp, #0]
+    stp x10, x11, [sp, #16]
     mov x4, #anne_vector_index
     b anne_diag_fault_entry
     .balign 128
@@ -33,6 +37,8 @@ anne_diag_fault_entry:
     ldr  x10, [x9]
     cbnz x10, anne_diag_probe_take
 anne_diag_fault_fatal:
+    // All board entry callers saved 32 bytes before setting the vector index.
+    add sp, sp, #32
     adrp x9, anne_diag_fault_active
     add x9, x9, :lo12:anne_diag_fault_active
     mrs x11, tpidr_el1
@@ -119,6 +125,11 @@ anne_diag_probe_take:
     ldp x13, x14, [sp, #32]
     ldr x15,      [sp, #48]
     ldp x9,  x10, [sp], #64
+    // The entry hook used x9/x10 and the vector slot used x4. Restore their
+    // pre-exception values too, not the diagnostic scratch saved afterwards.
+    ldp x4, x9, [sp, #0]
+    ldp x10, x11, [sp, #16]
+    add sp, sp, #32
     eret
 
 .global anne_diag_reset

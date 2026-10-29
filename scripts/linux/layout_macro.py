@@ -20,21 +20,23 @@ def main() -> int:
     if layout not in ('minimal', 'lavapipe'):
         sys.stderr.write(f'layout_macro.py: unknown layout {layout!r}\n')
         return 1
-    lavapipe = layout == 'lavapipe'
+    in_layout = False
 
     active = True
     values: dict[str, str] = {}
     with open(header) as handle:
         for line in handle:
             stripped = line.strip()
-            if stripped.startswith('#if'):
-                active = lavapipe if 'DANGO_GUEST_LAYOUT_LAVAPIPE' in stripped else True
+            if stripped == '#if defined(DANGO_GUEST_LAYOUT_LAVAPIPE)':
+                in_layout = True
+                active = layout == 'lavapipe'
                 continue
-            if stripped.startswith('#else'):
-                active = not lavapipe
+            if in_layout and stripped.startswith('#else'):
+                active = layout == 'minimal'
                 continue
-            if stripped.startswith('#endif'):
+            if in_layout and stripped.startswith('#endif'):
                 active = True
+                in_layout = False
                 continue
             if not active:
                 continue

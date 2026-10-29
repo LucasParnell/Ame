@@ -12,8 +12,7 @@
 #include "mochi/va_layout.h"
 #include "mochi/inbox.h"
 
-static void no_close(uint32_t) {
-}
+static void no_close(uint32_t) {}
 
 // Resolve against init's fixed export table, then grant only the advertised rights.
 static mx_status_t resolve(const MxSessionDirectory& directory, mx_u32_t client,
@@ -24,21 +23,15 @@ static mx_status_t resolve(const MxSessionDirectory& directory, mx_u32_t client,
         return MX_ERR_BAD_PROTOCOL;
     }
     for (const auto& entry : directory.exports) {
-        if (!entry.name[0] || !mochi::boot::streq(entry.name, request.name))
-            continue;
+        if (!entry.name[0] || !mochi::boot::streq(entry.name, request.name)) continue;
         const auto process = __atomic_load_n(&entry.process, __ATOMIC_ACQUIRE);
-        if (!process || sys_cap_identify(process) != MX_CAP_PROCESS)
-            return MX_ERR_SERVICE_UNAVAILABLE;
+        if (!process || sys_cap_identify(process) != MX_CAP_PROCESS) return MX_ERR_SERVICE_UNAVAILABLE;
         mx_handle_t granted = MX_NULL_HANDLE;
-        const mx_status_t status =
-            mx_cap_grant(directory.slots[client].client, process, entry.rights, &granted);
+        const mx_status_t status = mx_cap_grant(directory.slots[client].client, process,
+                                               entry.rights, &granted);
         if (status == MX_OK) {
-            *result = {MX_ENDPOINT_MAGIC,
-                       MX_ENDPOINT_VERSION,
-                       1,
-                       entry.protocol,
-                       MX_ENDPOINT_FLAG_CLIENT_ALLOCATED,
-                       {granted, 0, 0, 0}};
+            *result = {MX_ENDPOINT_MAGIC, MX_ENDPOINT_VERSION, 1, entry.protocol,
+                       MX_ENDPOINT_FLAG_CLIENT_ALLOCATED, {granted, 0, 0, 0}};
         }
         return status;
     }
@@ -49,31 +42,26 @@ extern "C" [[noreturn]] void _start() {
     auto* boot = mochi::boot::map();
     (void)mochi::log_map_from_boot(boot, mochi::va::nameservice::kVaLogRing, "nameservice");
     static mochi::ServerSessions sessions;
-    if (!sessions.map(boot))
-        mochi::boot::invalid_boot();
+    if (!sessions.map(boot)) mochi::boot::invalid_boot();
     const auto wake = mochi::boot::require_handle(boot, "sessions.doorbell");
-    for (uint32_t i = 0; i < sessions.directory->count; ++i)
-        sessions.refresh(i, no_close);
+    for (uint32_t i = 0; i < sessions.directory->count; ++i) sessions.refresh(i, no_close);
     mochi::boot::ready(boot);
     for (;;) {
         const auto expected = sys_doorbell_read(wake);
         bool progress = false;
         for (uint32_t i = 0; i < sessions.directory->count; ++i) {
             const bool live = sessions.refresh(i, no_close);
-            if (!live)
-                continue;
+            if (!live) continue;
             const auto& endpoint = sessions.endpoints[i];
             RingSlot slot{};
-            if (!endpoint.try_recv(&slot))
-                continue;
+            if (!endpoint.try_recv(&slot)) continue;
             progress = true;
             MxEndpointDesc result{};
             const mx_status_t status = resolve(*sessions.directory, i, slot, &result);
             const mx_u64_t deadline = mx_clock_ns() + mochi::kSessionReplyTimeoutNs;
-            const bool sent =
-                (status == MX_OK)
-                    ? endpoint.send_bounded(MSG_NS_RESOLVE_REPLY, &result, sizeof(result), deadline)
-                    : endpoint.send_bounded(MSG_NS_ERROR, &status, sizeof(status), deadline);
+            const bool sent = (status == MX_OK)
+                ? endpoint.send_bounded(MSG_NS_RESOLVE_REPLY, &result, sizeof(result), deadline)
+                : endpoint.send_bounded(MSG_NS_ERROR, &status, sizeof(status), deadline);
             if (!sent) {
                 // Peer dead or stalled: drop the slot; init re-establishes it
                 // with a newer generation. The resolve result is discarded.

@@ -56,6 +56,11 @@ void frame(Runtime& r) {
         if (s.attached) {
             event(s, INPUT_SOURCE_RESET);
         }
+        // HELLO opens a new host session and restarts its sequence numbering at
+        // 1. The stale-sequence guard above exempts HELLO, so without clearing
+        // the high-water mark here the trailing update below cannot lower it and
+        // every later key of the new session is rejected as already seen.
+        s.wire_sequence = 0;
         s.generation = mx_clock_ns();
         s.sequence = 0;
         event(s, INPUT_SOURCE_ATTACHED);
@@ -116,8 +121,9 @@ bool service(Runtime& r) {
                                   0,
                                   static_cast<mx_u8_t>(s.configured ? MX_FUNCTION_CONFIGURED : 0),
                                   {}};
-            if (!r.apps.tx().try_push_msg(MX_FUNCTION_RESET, reset))
+            if (!r.apps.tx().try_push_msg(MX_FUNCTION_RESET, reset)) {
                 return progress;
+            }
             s.app_reset = false;
             progress = true;
         }
@@ -127,8 +133,9 @@ bool service(Runtime& r) {
             MxFunctionChunk chunk{s.usb_generation, 0, static_cast<mx_u16_t>(count), 0, 0, {}};
             libk::copy_n(libk::as_bytes(chunk.data),
                          libk::as_bytes(s.parser.bytes + s.app_offset, count), count);
-            if (!r.apps.tx().try_push_msg(MX_FUNCTION_RX, chunk))
+            if (!r.apps.tx().try_push_msg(MX_FUNCTION_RX, chunk)) {
                 return progress;
+            }
             s.app_offset += count;
             if (s.app_offset == size) {
                 s.app_pending = false;
@@ -162,8 +169,9 @@ bool service(Runtime& r) {
         if (slot.type == MX_FUNCTION_RESET) {
             MxFunctionChunk reset{};
             if (!mochi::message_get(slot, &reset, MX_FUNCTION_RESET) || !reset.generation ||
-                reset.length || (reset.flags & ~MX_FUNCTION_CONFIGURED))
+                reset.length || (reset.flags & ~MX_FUNCTION_CONFIGURED)) {
                 return progress;
+            }
             s.usb_generation = reset.generation;
             s.configured = (reset.flags & MX_FUNCTION_CONFIGURED) != 0;
             s.app_reset = r.apps.valid();
@@ -217,8 +225,9 @@ extern "C" [[noreturn]] void _start() {
     r->source.generation = mx_clock_ns();
     if (mochi::boot::handle(boot, "apps.tx")) {
         r->apps = mochi::driver::link(boot, "apps", mochi::va::native_driver::kLinks + 0x40000);
-        if (!r->apps.valid())
+        if (!r->apps.valid()) {
             mochi::boot::invalid_boot();
+        }
     }
     mochi::boot::ready(boot);
     for (;;) {

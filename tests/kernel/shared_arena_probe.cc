@@ -36,6 +36,11 @@
 // VM_*, kSharedArenaFlagNone); the probe reads best at the kernel's own level.
 using namespace vm;
 
+// Descriptor publication belongs to the channel layer, outside this fixture.
+namespace vm {
+void publish_shared_regions(Vm&) {}
+}
+
 // --- kernel page allocator + memset stubs ----------------------------------
 namespace {
 std::vector<PhysAddr> g_mm_pages;

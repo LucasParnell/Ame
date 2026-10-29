@@ -1,0 +1,128 @@
+Add synchronized, fault-only job decoding for JM hardware diagnosis.
+Successful chains are not decoded; normal execution is unchanged without opt-in.
+
+diff --git a/src/panfrost/vulkan/panvk_instance.h b/src/panfrost/vulkan/panvk_instance.h
+--- a/src/panfrost/vulkan/panvk_instance.h
++++ b/src/panfrost/vulkan/panvk_instance.h
+@@ -23,6 +23,7 @@
+    PANVK_DEBUG_NO_KNOWN_WARN = 1 << 7,
+    PANVK_DEBUG_CS = 1 << 8,
+    PANVK_DEBUG_COPY_GFX = 1 << 9,
++   PANVK_DEBUG_TRACE_FAULT = 1 << 10,
+ };
+ 
+ #if defined(VK_USE_PLATFORM_WAYLAND_KHR) || \
+diff --git a/src/panfrost/vulkan/panvk_instance.c b/src/panfrost/vulkan/panvk_instance.c
+--- a/src/panfrost/vulkan/panvk_instance.c
++++ b/src/panfrost/vulkan/panvk_instance.c
+@@ -32,6 +32,7 @@
+    {"startup", PANVK_DEBUG_STARTUP},
+    {"nir", PANVK_DEBUG_NIR},
+    {"trace", PANVK_DEBUG_TRACE},
++   {"trace_fault", PANVK_DEBUG_TRACE_FAULT},
+    {"sync", PANVK_DEBUG_SYNC},
+    {"afbc", PANVK_DEBUG_AFBC},
+    {"linear", PANVK_DEBUG_LINEAR},
+diff --git a/src/panfrost/vulkan/panvk_device.h b/src/panfrost/vulkan/panvk_device.h
+--- a/src/panfrost/vulkan/panvk_device.h
++++ b/src/panfrost/vulkan/panvk_device.h
+@@ -75,7 +75,7 @@
+    struct panvk_instance *instance =
+       to_panvk_instance(device->vk.physical->instance);
+ 
+-   if (instance->debug_flags & (PANVK_DEBUG_DUMP | PANVK_DEBUG_TRACE))
++   if (instance->debug_flags & (PANVK_DEBUG_DUMP | PANVK_DEBUG_TRACE | PANVK_DEBUG_TRACE_FAULT))
+       bo_flags &= ~PAN_KMOD_BO_FLAG_NO_MMAP;
+ 
+    return bo_flags;
+diff --git a/src/panfrost/vulkan/panvk_device_memory.c b/src/panfrost/vulkan/panvk_device_memory.c
+--- a/src/panfrost/vulkan/panvk_device_memory.c
++++ b/src/panfrost/vulkan/panvk_device_memory.c
+@@ -119,7 +119,7 @@
+    }
+ 
+    if (device->debug.decode_ctx) {
+-      if (instance->debug_flags & (PANVK_DEBUG_DUMP | PANVK_DEBUG_TRACE)) {
++      if (instance->debug_flags & (PANVK_DEBUG_DUMP | PANVK_DEBUG_TRACE | PANVK_DEBUG_TRACE_FAULT)) {
+          mem->debug.host_mapping =
+             pan_kmod_bo_mmap(mem->bo, 0, pan_kmod_bo_size(mem->bo),
+                              PROT_READ | PROT_WRITE, MAP_SHARED, NULL);
+diff --git a/src/panfrost/vulkan/panvk_vX_device.c b/src/panfrost/vulkan/panvk_vX_device.c
+--- a/src/panfrost/vulkan/panvk_vX_device.c
++++ b/src/panfrost/vulkan/panvk_vX_device.c
+@@ -227,7 +227,7 @@
+    }
+ 
+    if (instance->debug_flags &
+-       (PANVK_DEBUG_TRACE | PANVK_DEBUG_SYNC | PANVK_DEBUG_DUMP))
++       (PANVK_DEBUG_TRACE | PANVK_DEBUG_SYNC | PANVK_DEBUG_DUMP | PANVK_DEBUG_TRACE_FAULT))
+       device->debug.decode_ctx = pandecode_create_context(false);
+ 
+    /* 32bit address space, with the lower 32MB reserved. We clamp
+diff --git a/src/panfrost/vulkan/jm/panvk_vX_queue.c b/src/panfrost/vulkan/jm/panvk_vX_queue.c
+--- a/src/panfrost/vulkan/jm/panvk_vX_queue.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_queue.c
+@@ -29,6 +29,18 @@
+ 
+ #include "drm-uapi/panfrost_drm.h"
+ 
++/* Called after a synchronized submission. Decode only failed chains when
++ * requested, keeping successful diagnostic cases within the console budget. */
++static bool
++panvk_batch_has_fault(struct panvk_batch *batch)
++{
++   util_dynarray_foreach(&batch->jobs, void *, job) {
++      if (((volatile uint32_t *)*job)[0] > 1)
++         return true;
++   }
++   return false;
++}
++
+ static VkResult
+ panvk_queue_submit_batch(struct panvk_queue *queue, struct panvk_batch *batch,
+                          uint32_t *bos, unsigned nr_bos, uint32_t *in_fences,
+@@ -81,14 +93,15 @@
+       if (ret)
+          return vk_queue_set_lost(&queue->vk, "DRM submission/synchronization failed: %m");
+ 
+-      if (debug & (PANVK_DEBUG_TRACE | PANVK_DEBUG_SYNC)) {
++      if (debug & (PANVK_DEBUG_TRACE | PANVK_DEBUG_SYNC | PANVK_DEBUG_TRACE_FAULT)) {
+          ret = drmSyncobjWait(dev->vk.drm_fd, &submit.out_sync, 1, INT64_MAX, 0,
+                               NULL);
+          if (ret)
+             return vk_queue_set_lost(&queue->vk, "DRM submission/synchronization failed: %m");
+       }
+ 
+-      if (debug & PANVK_DEBUG_TRACE) {
++      if ((debug & PANVK_DEBUG_TRACE) ||
++          ((debug & PANVK_DEBUG_TRACE_FAULT) && panvk_batch_has_fault(batch))) {
+          pandecode_jc(dev->debug.decode_ctx, batch->vtc_jc.first_job,
+                       phys_dev->kmod.props.gpu_prod_id);
+       }
+@@ -121,14 +134,15 @@
+       ret = drmIoctl(dev->vk.drm_fd, DRM_IOCTL_PANFROST_SUBMIT, &submit);
+       if (ret)
+          return vk_queue_set_lost(&queue->vk, "DRM submission/synchronization failed: %m");
+-      if (debug & (PANVK_DEBUG_TRACE | PANVK_DEBUG_SYNC)) {
++      if (debug & (PANVK_DEBUG_TRACE | PANVK_DEBUG_SYNC | PANVK_DEBUG_TRACE_FAULT)) {
+          ret = drmSyncobjWait(dev->vk.drm_fd, &submit.out_sync, 1, INT64_MAX, 0,
+                               NULL);
+          if (ret)
+             return vk_queue_set_lost(&queue->vk, "DRM submission/synchronization failed: %m");
+       }
+ 
+-      if (debug & PANVK_DEBUG_TRACE)
++      if ((debug & PANVK_DEBUG_TRACE) ||
++          ((debug & PANVK_DEBUG_TRACE_FAULT) && panvk_batch_has_fault(batch)))
+          pandecode_jc(dev->debug.decode_ctx, batch->frag_jc.first_job,
+                       phys_dev->kmod.props.gpu_prod_id);
+ 
+@@ -140,7 +154,7 @@
+                                   phys_dev->kmod.props.gpu_prod_id);
+    }
+ 
+-   if (debug & PANVK_DEBUG_TRACE)
++   if (debug & (PANVK_DEBUG_TRACE | PANVK_DEBUG_TRACE_FAULT))
+       pandecode_next_frame(dev->debug.decode_ctx);
+ 
+    batch->issued = true;

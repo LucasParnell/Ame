@@ -30,13 +30,12 @@ using mochi::va::console::kWindows;
 struct Uart {
     volatile uint32_t* regs;
 
-    static constexpr uint32_t kDr = 0x00u / 4u;  // data register
-    static constexpr uint32_t kFr = 0x18u / 4u;  // flag register
-    static constexpr uint32_t kFrTxFf = 1u << 5; // FR.TXFF: transmit FIFO full
+    static constexpr uint32_t kDr     = 0x00u / 4u; // data register
+    static constexpr uint32_t kFr     = 0x18u / 4u; // flag register
+    static constexpr uint32_t kFrTxFf = 1u << 5;    // FR.TXFF: transmit FIFO full
 
     void put(char c) const {
-        while (regs[kFr] & kFrTxFf) {
-        }
+        while (regs[kFr] & kFrTxFf) { }
         regs[kDr] = static_cast<uint32_t>(static_cast<unsigned char>(c));
     }
     void write(const char* data, uint32_t len) const {
@@ -45,16 +44,14 @@ struct Uart {
         // console so they can be read after restoring the shared Huawei kernel.
         sys_debug_puts(data, len);
 #else
-        for (uint32_t i = 0; i < len; ++i)
-            put(data[i]);
+        for (uint32_t i = 0; i < len; ++i) put(data[i]);
 #endif
     }
     // One line in the shared log format.
     void line(mochi::LogLevel level, const char* component, const char* msg) const {
         char buf[256];
         bool truncated = false;
-        const uint32_t n =
-            mochi::log_format_line(buf, sizeof(buf), level, component, msg, &truncated);
+        const uint32_t n = mochi::log_format_line(buf, sizeof(buf), level, component, msg, &truncated);
         (void)truncated;
         write(buf, n);
     }
@@ -93,8 +90,8 @@ mochi::RingReaderSet open_logs(const ConsoleBootConfig* cfg, RingPage** storage)
 mochi::terminal::OutputSink open_mirror(const MxBootInfo* boot) {
     mochi::terminal::OutputSink sink{};
     sink.order = kLogRingOrder;
-    sink.ring = mochi::boot::map_ring(boot, "tty.mirror.ring", kWindows.mirror_ring, kLogRingOrder,
-                                      &sink.order);
+    sink.ring = mochi::boot::map_ring(boot, "tty.mirror.ring", kWindows.mirror_ring,
+                                      kLogRingOrder, &sink.order);
     sink.doorbell = mochi::boot::handle(boot, "tty.mirror.doorbell");
     return sink;
 }
@@ -105,8 +102,7 @@ struct EmitSlot {
     const mochi::terminal::OutputSink& mirror;
 
     void operator()(const RingSlot& slot) const {
-        if (!mochi::message_valid(slot))
-            return;
+        if (!mochi::message_valid(slot)) return;
         const char* bytes = reinterpret_cast<const char*>(slot.payload);
         uart.write(bytes, slot.length);
         (void)mirror.try_write_bytes(bytes, slot.length);
@@ -133,7 +129,6 @@ extern "C" [[noreturn]] void _start() {
 
     // Blocking drain loop; RingReaderSet owns the sleep/wake protocol.
     for (;;) {
-        if (!logs.wait(emit))
-            sys_yield();
+        if (!logs.wait(emit)) sys_yield();
     }
 }

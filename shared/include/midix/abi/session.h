@@ -17,8 +17,8 @@ struct MxSessionSlot {
     mx_handle_t request_doorbell;
     mx_handle_t reply_doorbell;
     mx_u32_t order;
-    mx_u32_t reserved;              // MX_SESSION_* policy flags, written only by init
-    mx_handle_t write_arena;        // server-local, optional 64 KiB FS upload arena
+    mx_u32_t reserved; // MX_SESSION_* policy flags, written only by init
+    mx_handle_t write_arena;      // server-local, optional 64 KiB FS upload arena
     mx_handle_t client_write_arena; // client-local token, never used as server authority
 };
 struct MxServiceExport {

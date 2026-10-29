@@ -1,26 +1,33 @@
 #include "anko/vm.h"
+#include "anko/mali.h"
 #include "anko/log.h"
 #include "anko/interrupt_mask.h"
 #include "anko/el2_boot.h"
+#include "anko/el2_cache.h"
 #include "libk/string.h"
 #include "libk/printf.h"
 
 namespace drivers::timer {
 u64 tick_count();
 }
+extern "C" u64 g_el2_run_state[MX_HOST_MAX_CPUS];
+extern "C" char g_el2_stacks[];
 
 namespace vm {
 static u32 g_call_lock;
 CallGuard::CallGuard(bool active) : active_(active), irq_(0) {
-    if (!active_)
+    if (!active_) {
         return;
+    }
     asm volatile("mrs %0, DAIF; msr DAIFSet, #2" : "=r"(irq_)::"memory");
-    while (__atomic_exchange_n(&g_call_lock, 1u, __ATOMIC_ACQUIRE))
+    while (__atomic_exchange_n(&g_call_lock, 1u, __ATOMIC_ACQUIRE)) {
         asm volatile("yield" ::: "memory");
+    }
 }
 CallGuard::~CallGuard() {
-    if (!active_)
+    if (!active_) {
         return;
+    }
     __atomic_store_n(&g_call_lock, 0u, __ATOMIC_RELEASE);
     asm volatile("msr DAIF, %0" ::"r"(kernel::host_interrupt_state(irq_)) : "memory");
 }
@@ -29,8 +36,9 @@ static void dispose_vm(void* target) {
     // The shared-arena descriptor page outlives every channel on the VM, so it
     // is released here rather than in dispose_channel (stage2_destroy has
     // already dropped the mappings that referenced it by this point).
-    if (v->shm_page)
+    if (v->shm_page) {
         mm::free_page(v->shm_page);
+    }
     mm::slab_free(target, sizeof(Vm), alignof(Vm));
 }
 
@@ -92,8 +100,9 @@ bool is_vm_live(const Vm* v) {
 
 u32 find_free_vm_slot() {
     for (u32 i = 0; i < kMaxVms; ++i) {
-        if (!is_vm_live(g_vms[i]))
+        if (!is_vm_live(g_vms[i])) {
             return i;
+        }
     }
     return kMaxVms;
 }
@@ -101,6 +110,10 @@ u32 find_free_vm_slot() {
 } // namespace
 
 void init() {
+    // Publish the BSS clear before uncached EL2 accesses. Do this before SMP
+    // startup, while no secondary monitor can be using its private stack.
+    el2_cache::clean(reinterpret_cast<PhysAddr>(g_el2_run_state), sizeof(g_el2_run_state), true);
+    el2_cache::clean(reinterpret_cast<PhysAddr>(g_el2_stacks), MX_HOST_MAX_CPUS * 16384, true);
     u64 current_el = 0;
     asm volatile("mrs %0, CurrentEL" : "=r"(current_el));
     g_el_current = (current_el >> 2) & 0x3ull;
@@ -201,15 +214,18 @@ void note_error() {
 }
 
 void poll_blocked_vcpu_timers() {
-    if (__atomic_exchange_n(&g_call_lock, 1u, __ATOMIC_ACQUIRE))
+    if (__atomic_exchange_n(&g_call_lock, 1u, __ATOMIC_ACQUIRE)) {
         return;
+    }
     for (u32 i = 0; i < kMaxVms; ++i) {
         Vm* v = g_vms[i];
-        if (!is_vm_live(v))
+        if (!is_vm_live(v)) {
             continue;
+        }
         for (u32 j = 0; j < v->vcpu_count; ++j) {
-            if (v->vcpus[j])
+            if (v->vcpus[j]) {
                 poll_vcpu_timer(*v->vcpus[j]);
+            }
         }
     }
     __atomic_store_n(&g_call_lock, 0u, __ATOMIC_RELEASE);
@@ -312,33 +328,38 @@ void metric_inc(VmDebugCounter id) {
 cap::Ref require_cap(Process& caller, CapHandle handle, CapType type, u32 need_rights,
                      SysError* out_error) {
     if (!caller.cap_table) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_NOTFOUND;
+        }
         note_error();
         return nullptr;
     }
 
     cap::Ref e = cap::lookup_any(*caller.cap_table, handle);
     if (!e) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_NOTFOUND;
+        }
         note_error();
         return nullptr;
     }
     if (e->type_tag != type) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_BADTYPE;
+        }
         note_error();
         return nullptr;
     }
     if (!has_rights(e, need_rights)) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_PERM;
+        }
         note_error();
         return nullptr;
     }
-    if (out_error)
+    if (out_error) {
         *out_error = E_OK;
+    }
     return e;
 }
 
@@ -347,8 +368,9 @@ cap::Borrow<Vm> vm_from_cap(Process& caller, CapHandle vm_cap, u32 need_rights,
     cap::Ref e = require_cap(caller, vm_cap, CAP_VM, need_rights, out_error);
     auto* v = e ? static_cast<Vm*>(e->target) : nullptr;
     if (!is_vm_live(v)) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_DEAD;
+        }
         note_error();
         return nullptr;
     }
@@ -360,8 +382,9 @@ cap::Borrow<Vcpu> vcpu_from_cap(Process& caller, CapHandle vcpu_cap, u32 need_ri
     cap::Ref e = require_cap(caller, vcpu_cap, CAP_VCPU, need_rights, out_error);
     auto* vcpu = e ? static_cast<Vcpu*>(e->target) : nullptr;
     if (!vcpu || vcpu->state == VCPU_DEAD) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_DEAD;
+        }
         note_error();
         return nullptr;
     }
@@ -373,8 +396,9 @@ cap::Borrow<VmMemory> memory_from_cap(Process& caller, CapHandle memory_cap, u32
     cap::Ref e = require_cap(caller, memory_cap, CAP_VM_MEMORY, need_rights, out_error);
     auto* mem = e ? static_cast<VmMemory*>(e->target) : nullptr;
     if (!mem || mem->dead) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_DEAD;
+        }
         note_error();
         return nullptr;
     }
@@ -386,8 +410,9 @@ cap::Borrow<VmChannel> channel_from_cap(Process& caller, CapHandle channel_cap, 
     cap::Ref e = require_cap(caller, channel_cap, CAP_VM_CHANNEL, need_rights, out_error);
     auto* channel = e ? static_cast<VmChannel*>(e->target) : nullptr;
     if (!channel || channel->dead) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_DEAD;
+        }
         note_error();
         return nullptr;
     }
@@ -395,25 +420,29 @@ cap::Borrow<VmChannel> channel_from_cap(Process& caller, CapHandle channel_cap, 
 }
 
 Vm* find_vm_by_id(u32 vm_id) {
-    if (vm_id == 0)
+    if (vm_id == 0) {
         return nullptr;
+    }
     for (u32 i = 0; i < kMaxVms; ++i) {
-        if (g_vms[i] && g_vms[i]->vm_id == vm_id)
+        if (g_vms[i] && g_vms[i]->vm_id == vm_id) {
             return g_vms[i];
+        }
     }
     return nullptr;
 }
 
 Vm* owner_for_vcpu(Vcpu* vcpu) {
-    if (!vcpu || vcpu->state == VCPU_DEAD)
+    if (!vcpu || vcpu->state == VCPU_DEAD) {
         return nullptr;
+    }
 
     if (vcpu->owner_vm_id != 0) {
         Vm* by_id = find_vm_by_id(vcpu->owner_vm_id);
         if (by_id && is_vm_live(by_id)) {
             for (u32 i = 0; i < by_id->vcpu_count; ++i) {
-                if (by_id->vcpus[i] == vcpu)
+                if (by_id->vcpus[i] == vcpu) {
                     return by_id;
+                }
             }
         }
     }
@@ -424,8 +453,9 @@ Vm* owner_for_vcpu(Vcpu* vcpu) {
     // metadata in the hot path.
     for (u32 i = 0; i < kMaxVms; ++i) {
         Vm* candidate = g_vms[i];
-        if (!is_vm_live(candidate))
+        if (!is_vm_live(candidate)) {
             continue;
+        }
         for (u32 j = 0; j < candidate->vcpu_count; ++j) {
             if (candidate->vcpus[j] == vcpu) {
                 vcpu->owner_vm_id = candidate->vm_id;
@@ -438,8 +468,9 @@ Vm* owner_for_vcpu(Vcpu* vcpu) {
 }
 
 void refresh_vm_state(Vm* v) {
-    if (!v || v->state == VM_DEAD)
+    if (!v || v->state == VM_DEAD) {
         return;
+    }
 
     bool has_mapped_memory = false;
     for (u32 i = 0; i < v->memory_count; ++i) {
@@ -454,22 +485,24 @@ void refresh_vm_state(Vm* v) {
     bool has_ready_vcpu = false;
     for (u32 i = 0; i < v->vcpu_count; ++i) {
         Vcpu* vcpu = v->vcpus[i];
-        if (!vcpu || vcpu->state == VCPU_DEAD)
+        if (!vcpu || vcpu->state == VCPU_DEAD) {
             continue;
+        }
         has_vcpu = true;
         if (vcpu->state == VCPU_READY || vcpu->state == VCPU_CONFIGURED) {
             has_ready_vcpu = true;
         }
     }
 
-    if (!has_mapped_memory)
+    if (!has_mapped_memory) {
         v->state = VM_CREATED;
-    else if (!has_vcpu)
+    } else if (!has_vcpu) {
         v->state = VM_MEMORY_READY;
-    else if (!has_ready_vcpu)
+    } else if (!has_ready_vcpu) {
         v->state = VM_VCPU_READY;
-    else
+    } else {
         v->state = VM_READY;
+    }
 }
 
 CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* out_error) {
@@ -478,14 +511,16 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
     SysError cap_error = E_OK;
     cap::Ref root = require_cap(caller, root_cap, CAP_VM_ROOT, RIGHT_VM_CREATE, &cap_error);
     if (!root) {
-        if (out_error)
+        if (out_error) {
             *out_error = cap_error;
+        }
         return kNullCap;
     }
     if (root->target != &g_root) {
         ANKO_LOG_ERROR("kernel/vm", "sys_vm_create root target mismatch");
-        if (out_error)
+        if (out_error) {
             *out_error = E_NOTFOUND;
+        }
         note_error();
         return kNullCap;
     }
@@ -493,8 +528,9 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
     const u32 slot = find_free_vm_slot();
     if (slot >= kMaxVms) {
         ANKO_LOG_ERROR("kernel/vm", "sys_vm_create no free vm slot");
-        if (out_error)
+        if (out_error) {
             *out_error = E_OVERFLOW;
+        }
         note_error();
         return kNullCap;
     }
@@ -502,8 +538,9 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
     Vm* v = static_cast<Vm*>(mm::slab_alloc(sizeof(Vm), alignof(Vm)));
     if (!v) {
         ANKO_LOG_ERROR("kernel/vm", "sys_vm_create heap alloc failed");
-        if (out_error)
+        if (out_error) {
             *out_error = E_NOMEM;
+        }
         note_error();
         return kNullCap;
     }
@@ -522,8 +559,9 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
                         static_cast<int>(s2));
         v->state = VM_DEAD;
         mm::slab_free(v, sizeof(Vm), alignof(Vm));
-        if (out_error)
+        if (out_error) {
             *out_error = s2;
+        }
         note_error();
         return kNullCap;
     }
@@ -532,8 +570,9 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
     if (!v->lifetime) {
         stage2_destroy(&v->stage2);
         dispose_vm(v);
-        if (out_error)
+        if (out_error) {
             *out_error = E_NOMEM;
+        }
         return kNullCap;
     }
     const CapHandle cap_h = cap::alloc(*caller.cap_table, CAP_VM, v,
@@ -544,22 +583,36 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
         v->state = VM_DEAD;
         stage2_destroy(&v->stage2);
         object::release(v->lifetime);
-        if (out_error)
+        if (out_error) {
             *out_error = E_OVERFLOW;
+        }
         note_error();
         return kNullCap;
     }
 
+    __atomic_store_n(&caller.created_vm, true, __ATOMIC_RELEASE);
     g_vms[slot] = v;
     metric_inc(VM_DEBUG_CREATED);
-    if (out_error)
+    if (out_error) {
         *out_error = E_OK;
+    }
     return cap_h;
 }
 
 static void retire_vm(Vm* v) {
-    if (!is_vm_live(v))
+    if (!is_vm_live(v)) {
         return;
+    }
+    // An assigned GPU must give up the VM before anything it can still DMA from
+    // is destroyed: reset the device, drain its shadow tables, then power off.
+    // A refused reset leaves the VM live and fully reproducible so a later
+    // destroy can retry; recycling DMA backing on a software flag alone is not
+    // an option. This runs before the state change below, so a failed release
+    // leaves the VM observable through inspect rather than half-dead.
+    if (!mali::release(*v)) {
+        ANKO_LOG_ERROR("kernel/vm", "GPU reset incomplete; VM retained");
+        return;
+    }
     v->state = VM_DEAD;
     // Device assignments bound to this VM must be revoked (DMA-safe, §8.12)
     // before the stage-2 tables and RAM pages backing their BAR mappings and
@@ -569,16 +622,18 @@ static void retire_vm(Vm* v) {
     stage2_destroy(&v->stage2);
     for (u32 i = 0; i < v->memory_count; ++i) {
         auto* mem = v->memory_objects[i];
-        if (!mem)
+        if (!mem) {
             continue;
+        }
         sched::sweep_process_caps(mem);
         object::release(mem->lifetime);
         v->memory_objects[i] = nullptr;
     }
     for (u32 i = 0; i < v->vcpu_count; ++i) {
         auto* cpu = v->vcpus[i];
-        if (!cpu)
+        if (!cpu) {
             continue;
+        }
         cpu->state = VCPU_DEAD;
         sched::sweep_process_caps(cpu);
         object::release(cpu->lifetime);
@@ -586,8 +641,9 @@ static void retire_vm(Vm* v) {
     }
     for (u32 i = 0; i < v->channel_count; ++i) {
         auto* channel = v->channels[i];
-        if (!channel)
+        if (!channel) {
             continue;
+        }
         channel->dead = true;
         sched::sweep_process_caps(channel);
         // Ring and doorbell endpoints are capabilities whose target is the
@@ -598,15 +654,18 @@ static void retire_vm(Vm* v) {
         {
             void* const endpoints[] = {channel->host_to_guest, channel->guest_to_host,
                                        channel->host_doorbell, channel->guest_doorbell};
-            for (void* endpoint : endpoints)
+            for (void* endpoint : endpoints) {
                 sched::sweep_process_caps(endpoint);
+            }
         }
         object::release(channel->lifetime);
         v->channels[i] = nullptr;
     }
-    for (auto& slot : g_vms)
-        if (slot == v)
+    for (auto& slot : g_vms) {
+        if (slot == v) {
             slot = nullptr;
+        }
+    }
     sched::sweep_process_caps(v);
     metric_inc(VM_DEBUG_DESTROYED);
     object::release(v->lifetime);
@@ -615,27 +674,34 @@ static void retire_vm(Vm* v) {
 void destroy_owned_process(u64 identity) {
     CallGuard guard(true);
     device_owner_died(identity);
-    for (auto* v : g_vms)
-        if (v && v->owner_identity == identity)
+    for (auto* v : g_vms) {
+        if (v && v->owner_identity == identity) {
             retire_vm(v);
+        }
+    }
 }
 
 SysError destroy_vm(Process& caller, CapHandle vm_cap) {
     SysError rc = E_OK;
     auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_DESTROY, &rc);
-    if (!v)
+    if (!v) {
         return rc;
+    }
     retire_vm(v);
-    return E_OK;
+    // retire_vm refuses to tear down a GPU owner whose reset timed out. The VM
+    // is still live in that case, which is precisely what E_BUSY reports.
+    return is_vm_live(v) ? E_BUSY : E_OK;
 }
 
 SysError inspect_vm(Process& caller, CapHandle vm_cap, VmInfo* out) {
-    if (!out)
+    if (!out) {
         return E_INVALID;
+    }
     SysError rc = E_OK;
     auto v = vm_from_cap(caller, vm_cap, RIGHT_VM_INSPECT, &rc);
-    if (!v)
+    if (!v) {
         return rc;
+    }
 
     VmInfo info{};
     info.vm_id = v->vm_id;

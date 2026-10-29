@@ -11,9 +11,18 @@ mochi::terminal::SessionSink input;
 mochi::Ring output;
 char tail[192]{};
 mx_u32_t used;
+char capture_line[2048]{};
+mx_u32_t capture_used;
 mx_u64_t generation = 1;
 mx_handle_t idle_wake;
 bool done, exited;
+
+void flush_capture() {
+    if (capture_used) {
+        sys_debug_puts(capture_line, capture_used);
+        capture_used = 0;
+    }
+}
 
 [[noreturn]] void fail(const char* phase) {
     constexpr char prefix[] = "APP TERMINAL TEST FAILED: ";
@@ -45,8 +54,12 @@ void receive(const char* text, bool benchmark = false) {
         if (!mochi::terminal::session_bytes(slot, MX_TERM_SESSION_OUTPUT_BYTES, &session, &bytes) ||
             session != generation)
             continue;
-        sys_debug_puts(reinterpret_cast<const char*>(bytes.data), bytes.size);
         for (mx_u32_t i = 0; i < bytes.size; ++i) {
+            // Emit complete lines atomically to the debug UART. Logging each
+            // serial packet allowed unrelated boot diagnostics inside JSON.
+            capture_line[capture_used++] = bytes.data[i];
+            if (bytes.data[i] == '\n' || capture_used == sizeof(capture_line))
+                flush_capture();
             if (used == sizeof(tail) - 1) {
                 for (mx_u32_t j = 1; j < used; ++j)
                     tail[j - 1] = tail[j];
@@ -56,8 +69,10 @@ void receive(const char* text, bool benchmark = false) {
             tail[used] = 0;
             done |= ends("IPC_BENCH_DONE");
             exited |= ends("msh: exec: child exited, status=0");
-            if (ends(text) && (!benchmark || (done && exited)))
+            if (ends(text) && (!benchmark || (done && exited))) {
+                flush_capture();
                 return;
+            }
         }
     }
 }

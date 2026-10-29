@@ -17,6 +17,7 @@ class AppSystem(unittest.TestCase):
     def test_preinstalled_rejection_repeated_exec_and_both_placements(self):
         build = ROOT / 'out/app-system-smoke'
         configure = ['cmake', '-S', str(ROOT), '-B', str(build), '-G', 'Ninja',
+            '-DPython3_EXECUTABLE=' + sys.executable,
             '-DCMAKE_TOOLCHAIN_FILE=' + str(ROOT / 'scripts/build/toolchain-aarch64.cmake'),
             '-DCMAKE_BUILD_TYPE=Release', '-DANKO_BOARD=qemu-virt', '-DANKO_BUILD_DEV=ON',
             '-DDANGO_BUILD_LINUX_ARTIFACTS=OFF',
@@ -24,8 +25,9 @@ class AppSystem(unittest.TestCase):
             '-DAME_IPC_BENCH_SAMPLES=32', '-DAME_IPC_BENCH_ROUNDS=3',
             '-DAME_IPC_BENCH_WINDOW=16', '-DAME_IPC_BENCH_SPIN=1']
         with tempfile.TemporaryDirectory(prefix='ame-app-system-') as work:
-            for server_cpu, cpus in ((0, 1), (0, 4), (1, 4)):
-                with self.subTest(server_cpu=server_cpu, cpus=cpus):
+            for server_cpu, cpus, entry_el in ((0, 1, 1), (0, 1, 2), (0, 4, 1),
+                                               (0, 4, 2), (1, 4, 2)):
+                with self.subTest(server_cpu=server_cpu, cpus=cpus, entry_el=entry_el):
                     commands = [configure + [f'-DAME_IPC_BENCH_SERVER_CPU={server_cpu}'],
                         ['cmake', '--build', str(build), '--target', 'anko', 'app_system_regressions',
                          'app_terminal_regressions', '-j', '4']]
@@ -41,6 +43,7 @@ class AppSystem(unittest.TestCase):
                     run = subprocess.run([sys.executable, str(ROOT / 'scripts/test/boot.py'),
                         '--build', str(build), '--bundle', str(build / 'app-system.mxb'),
                         '--cpu', 'cortex-a53', '--cpus', str(cpus), '--timeout', '30', '--disk', str(disk),
+                        '--entry-el', str(entry_el),
                         '--marker', 'app system regression passed', '--output', str(output)],
                         capture_output=True, text=True, timeout=40)
                     serial = (output / 'host.log').read_text()
@@ -57,6 +60,7 @@ class AppSystem(unittest.TestCase):
                     run = subprocess.run([sys.executable, str(ROOT / 'scripts/test/boot.py'),
                         '--build', str(build), '--bundle', str(build / 'app-terminal.mxb'),
                         '--cpu', 'cortex-a53', '--cpus', str(cpus), '--timeout', '40', '--disk', str(disk),
+                        '--entry-el', str(entry_el),
                         '--marker', 'app terminal regression passed', '--output', str(terminal_output)],
                         capture_output=True, text=True, timeout=50)
                     serial = (terminal_output / 'host.log').read_text()

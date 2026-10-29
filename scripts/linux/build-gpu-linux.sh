@@ -4,7 +4,7 @@
 #
 # Same shape as build-min-linux.sh, but merges the GPU fragment on top of the
 # minimal hello fragment and enforces the minimal-configuration policy
-# (docs/LINUX_APPLIANCE_MINIMAL.md) on the resolved .config before building.
+# (docs/linux-appliances.md#linux_appliance_minimal) on the resolved .config before building.
 #
 # Env:
 #   DANGO_LINUX_SRC   Linux source tree (default: $HOME/Code/linux)

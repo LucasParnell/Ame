@@ -24,13 +24,12 @@ int main(int argc, char** argv) {
     std::vector<unsigned char> data;
     unsigned char buf[4096];
     size_t n;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
-        data.insert(data.end(), buf, buf + n);
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) data.insert(data.end(), buf, buf + n);
     std::fclose(f);
 
     std::vector<unsigned char> out(anko::lzma::bound(static_cast<u32>(data.size())) + 16);
-    const u32 written = anko::lzma::compress(data.data(), static_cast<u32>(data.size()), out.data(),
-                                             static_cast<u32>(out.size()));
+    const u32 written = anko::lzma::compress(data.data(), static_cast<u32>(data.size()),
+                                             out.data(), static_cast<u32>(out.size()));
     if (written == 0) {
         std::fprintf(stderr, "compress failed (in=%zu cap=%zu)\n", data.size(), out.size());
         return 1;

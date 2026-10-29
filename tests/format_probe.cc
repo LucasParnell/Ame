@@ -18,11 +18,7 @@ int main(int argc, char** argv) {
     const std::string mode(argv[1]);
     if (mode == "archive") {
         libk::const_bytes entry{};
-        return midix::format::archive_find(libk::as_bytes(data.data(), data.size()), "init",
-                                           &entry) &&
-                       entry.size
-                   ? 0
-                   : 1;
+        return midix::format::archive_find(libk::as_bytes(data.data(), data.size()), "init", &entry) && entry.size ? 0 : 1;
     }
     if (mode == "json") {
         return midix::json::parse(reinterpret_cast<const char*>(data.data()), data.size()) ? 0 : 1;
@@ -49,15 +45,13 @@ int main(int argc, char** argv) {
     if (mode == "bundle-progress") {
         progress = {[](void* state) { ++*static_cast<std::size_t*>(state); }, &polls};
     }
-    auto error = midix::format::verify_bundle(data.data(), data.size(),
-                                              reinterpret_cast<const uint8_t (*)[32]>(key.data()),
-                                              1, bundle, progress);
+    auto error = midix::format::verify_bundle(
+        data.data(), data.size(), reinterpret_cast<const uint8_t (*)[32]>(key.data()), 1, bundle,
+        progress);
     if (error) {
         std::cerr << error << '\n';
     }
-    if (!error && mode == "bundle-progress" && polls < data.size() / 4096)
-        return 2;
-    if (error && bundle.data)
-        return 2; // Hooks never publish a rejected bundle.
+    if (!error && mode == "bundle-progress" && polls < data.size() / 4096) return 2;
+    if (error && bundle.data) return 2; // Hooks never publish a rejected bundle.
     return error ? 1 : 0;
 }

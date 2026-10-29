@@ -11,34 +11,27 @@ static void wake_guest(VmChannel& channel) {
 
 void channel_publish(VmChannel& channel) {
     ++channel.messages_host_to_guest;
-    if (channel.armed)
-        wake_guest(channel);
+    if (channel.armed) wake_guest(channel);
 }
 
 bool channel_hvc(Vcpu& cpu, Vm& owner) {
     const u64 fn = cpu.el2.regs[0];
-    if (fn != DANGO_CH_HVC_NOTIFY && fn != DANGO_CH_HVC_ARM)
-        return false;
+    if (fn != DANGO_CH_HVC_NOTIFY && fn != DANGO_CH_HVC_ARM) return false;
     // HVC is only a doorbell, never authority to map pages or select another VM.
     VmChannel* channel = nullptr;
     for (u32 i = 0; i < owner.channel_count; ++i) {
         auto* candidate = owner.channels[i];
         if (candidate && !candidate->dead && candidate->target == &cpu &&
-            candidate->channel_id == cpu.el2.regs[1]) {
-            channel = candidate;
-            break;
-        }
+            candidate->channel_id == cpu.el2.regs[1]) { channel = candidate; break; }
     }
     i64 result = E_NOTFOUND;
     // A channel from a previous appliance boot is stale: its captured
     // generation no longer matches the appliance's live one, so HVC has no
     // authority over it (spec §13.3).
-    if (channel && !channel_generation_current(owner, *channel))
-        channel = nullptr;
+    if (channel && !channel_generation_current(owner, *channel)) channel = nullptr;
     if (channel) {
         if (fn == DANGO_CH_HVC_NOTIFY) {
-            if (cpu.el2.regs[2] != 2)
-                result = E_INVALID; // RING_PUBLISH
+            if (cpu.el2.regs[2] != 2) result = E_INVALID; // RING_PUBLISH
             else if (channel->guest_to_host && channel_ring_full(*channel->guest_to_host)) {
                 // Guest->host ring is full: back-pressure the guest instead of
                 // counting a publish the host has nowhere to drain.
@@ -52,8 +45,7 @@ bool channel_hvc(Vcpu& cpu, Vm& owner) {
             // with host notification, closing the empty -> sleep race even if
             // publication precedes ARM. The guest never supplies a host pointer.
             channel->armed = true;
-            const auto* header =
-                reinterpret_cast<const RingHeader*>(channel->host_to_guest->phys_base);
+            const auto* header = reinterpret_cast<const RingHeader*>(channel->host_to_guest->phys_base);
             if (__atomic_load_n(&header->head.head, __ATOMIC_ACQUIRE) != cpu.el2.regs[2])
                 wake_guest(*channel);
             result = E_OK;

@@ -16,6 +16,9 @@ compile_commands.json
 *.bin
 *.img
 *.iso
+# Local crash and GPU decoder captures
+/*.core
+/pandecode.dump.*
 
 # generated linux artifacts
 linux/Image

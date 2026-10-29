@@ -17,7 +17,6 @@
 
 #include "mochi/ring.h"
 #include "midix/abi/protocols/gpu_service.h"
-#include "vulkan_broker.h"
 
 namespace drv::gpu::linux {
 
@@ -31,8 +30,8 @@ struct Endpoint {
     CapHandle reply_doorbell;   // client WAIT,   service NOTIFY
 
     bool valid() const {
-        return request_ring && reply_ring && request_doorbell != kNullCap &&
-               reply_doorbell != kNullCap;
+        return request_ring && reply_ring &&
+               request_doorbell != kNullCap && reply_doorbell != kNullCap;
     }
 };
 
@@ -46,29 +45,23 @@ struct Endpoint {
 // handshake can never leave the shell without a display.
 // ---------------------------------------------------------------------------
 enum class ClientState : uint32_t {
-    Idle = 0, // endpoint present; INFO not sent yet
+    Idle = 0,     // endpoint present; INFO not sent yet
     AwaitInfo,
     AwaitRegister,
     Live,
-    Failed, // permanent: refused, or the reply ring stopped draining
+    Failed,       // permanent: refused, or the reply ring stopped draining
 };
 
 class Client {
-  public:
+public:
     // Attach to the endpoint and the appliance window geometry the client
     // renders for (built by the caller from the shared Dango binding). An
     // invalid endpoint puts the client straight into Failed, where it stays.
     void attach(const Endpoint& endpoint, const MxGpuServiceRegisterStagingRequest& window);
 
-    bool attached() const {
-        return endpoint_.valid();
-    }
-    ClientState state() const {
-        return state_;
-    }
-    bool live() const {
-        return state_ == ClientState::Live;
-    }
+    bool attached() const { return endpoint_.valid(); }
+    ClientState state() const { return state_; }
+    bool live() const { return state_ == ClientState::Live; }
 
     // Advance the handshake and absorb any completed presents. Never blocks.
     void poll();
@@ -78,10 +71,8 @@ class Client {
     // damage so the next present still carries it) or the service is not Live.
     bool submit_present(const MxGpuDamageRect* damage, bool full_frame);
 
-  private:
-    void fail() {
-        state_ = ClientState::Failed;
-    }
+private:
+    void fail() { state_ = ClientState::Failed; }
     bool push(uint32_t type, const void* payload, uint32_t length);
 
     Endpoint endpoint_{};
@@ -124,32 +115,21 @@ constexpr uint32_t kMaxConsecutivePresentFailures = 3;
 constexpr uint32_t kMaxConsecutiveDroppedPresents = 64;
 
 class Server {
-  public:
+public:
     void init(const Endpoint& endpoint, const ServerConfig& config);
 
     // Publish the opaque buffer token clients must present with. Set once the
     // appliance exchange names the registered staging buffer; before that a
     // present is refused with MX_ERR_SERVICE_UNAVAILABLE.
     void set_buffer(uint64_t buffer_id, uint64_t boot_generation);
-    bool buffer_ready() const {
-        return buffer_id_ != 0;
-    }
-
-    // Bind the Vulkan session broker this endpoint serves (spec §14.7). The
-    // broker owns one logical session per client identity on this ring and
-    // enforces every quota; `backend` executes a session's work (the guest
-    // dango-vkd in production). Passing a backend with no functions brokers
-    // sessions that advertise no Vulkan device, so a submit is refused and the
-    // native client keeps its local path -- it never fakes a present.
-    void init_vulkan(const VulkanBackend& backend, mx_u32_t client_id);
+    bool buffer_ready() const { return buffer_id_ != 0; }
 
     // Serve one request, blocking on the request doorbell between requests.
     // Returns false only when the endpoint is unusable.
     bool serve_once(PresentFn present, void* ctx);
 
-  private:
+private:
     bool reply(uint32_t type, const void* payload, uint32_t length);
-    bool reply_frame(const MxVkFrame& frame);
     void error(uint32_t opcode, mx_status_t status, uint64_t detail);
 
     Endpoint endpoint_{};
@@ -158,9 +138,6 @@ class Server {
     uint64_t boot_generation_ = 0;
     uint64_t frame_index_ = 0;
     uint32_t consecutive_failures_ = 0;
-    VulkanSessionBroker vk_{};
-    mx_u32_t vk_client_id_ = 0;
-    bool vk_enabled_ = false;
 };
 
 } // namespace drv::gpu::linux

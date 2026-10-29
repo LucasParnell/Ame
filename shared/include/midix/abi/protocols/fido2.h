@@ -21,12 +21,8 @@ struct MxFido2Seed {
 // Dedicated authenticator -> tty channel; USB bytes never approve a request.
 constexpr mx_u32_t MX_FIDO2_PROMPT = 0x46494402;
 enum MxFido2PromptState : mx_u8_t {
-    MX_FIDO2_WAITING = 1,
-    MX_FIDO2_APPROVED = 2,
-    MX_FIDO2_CANCELLED = 3,
-    MX_FIDO2_EXPIRED = 4,
-    MX_FIDO2_REJECTED = 5,
-    MX_FIDO2_SELECTED = 6,
+    MX_FIDO2_WAITING = 1, MX_FIDO2_APPROVED = 2, MX_FIDO2_CANCELLED = 3,
+    MX_FIDO2_EXPIRED = 4, MX_FIDO2_REJECTED = 5, MX_FIDO2_SELECTED = 6,
 };
 constexpr mx_u8_t MX_FIDO2_SELECT = 3;
 constexpr mx_u64_t MX_FIDO2_PRESENCE_NS = 30'000'000'000ull;

@@ -20,7 +20,7 @@ constexpr uint32_t CAP_VM = MX_CAP_VM;
 constexpr uint32_t CAP_VCPU = MX_CAP_VCPU;
 constexpr uint32_t CAP_VM_MEMORY = MX_CAP_VM_MEMORY;
 constexpr uint32_t CAP_VM_CHANNEL = MX_CAP_VM_CHANNEL;
-constexpr uint32_t CAP_VM_SHARED = MX_CAP_VM_SHARED; // attached shared arena (Phase L)
+constexpr uint32_t CAP_VM_SHARED = MX_CAP_VM_SHARED;   // attached shared arena (Phase L)
 constexpr uint32_t CAP_SCHED_CONTEXT = MX_CAP_SCHED_CONTEXT;
 
 // Phase L: dynamic shared arenas (spec §12.3). SYSCALL surface:

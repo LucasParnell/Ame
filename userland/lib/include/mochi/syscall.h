@@ -283,6 +283,9 @@ static inline int64_t sys_vm_assign_route_irq(CapHandle assignment, CapHandle ir
 static inline int64_t sys_vm_assign_destroy(CapHandle assignment) {
     return _svc1(NR_VM_ASSIGN_DESTROY, assignment);
 }
+static inline int64_t sys_vm_mali_attach(CapHandle vm, CapHandle vcpu, CapHandle authority) {
+    return _svc3(NR_VM_MALI_ATTACH, vm, vcpu, authority);
+}
 static inline int64_t sys_vm_create(CapHandle vm_root, uint64_t flags) {
     return _svc2(NR_VM_CREATE, vm_root, flags);
 }
@@ -392,10 +395,12 @@ static inline mx_status_t mx_cap_info(mx_handle_t cap, MxCapInfo* out) {
 
 // mx_* wrappers --------------------------------------------------------------
 static inline mx_status_t mx_status_from_value(int64_t value, mx_handle_t* out = nullptr) {
-    if (value < 0)
+    if (value < 0) {
         return value;
-    if (out)
+    }
+    if (out) {
         *out = static_cast<mx_handle_t>(value);
+    }
     return MX_OK;
 }
 
@@ -448,10 +453,12 @@ static inline mx_status_t mx_arena_create(uint64_t size, uint32_t flags, mx_hand
 }
 static inline mx_status_t mx_cap_identify(mx_handle_t cap, mx_i64_t* out_type) {
     const int64_t rc = sys_cap_identify(cap);
-    if (rc < 0)
+    if (rc < 0) {
         return rc;
-    if (out_type)
+    }
+    if (out_type) {
         *out_type = rc;
+    }
     return MX_OK;
 }
 static inline mx_status_t mx_cap_grant(mx_handle_t process, mx_handle_t src, mx_rights_t rights,
@@ -503,12 +510,15 @@ static inline mx_status_t mx_spawn(const void* image, uint64_t image_size, uint3
                                    mx_handle_t supervisor, uint32_t flags, const char* name,
                                    mx_handle_t* out_proc, mx_handle_t* out_thread) {
     const SysPair p = sys_spawn(image, image_size, principal, supervisor, flags, name);
-    if (p.value < 0)
+    if (p.value < 0) {
         return p.value;
-    if (out_proc)
+    }
+    if (out_proc) {
         *out_proc = static_cast<mx_handle_t>(p.value);
-    if (out_thread)
+    }
+    if (out_thread) {
         *out_thread = static_cast<mx_handle_t>(p.detail);
+    }
     return MX_OK;
 }
 

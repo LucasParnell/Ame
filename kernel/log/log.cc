@@ -47,38 +47,28 @@ u64 read_counter_freq() {
 
 char level_char(Level level) {
     switch (level) {
-    case Level::Trace:
-        return 'T';
-    case Level::Debug:
-        return 'D';
-    case Level::Info:
-        return 'I';
-    case Level::Warn:
-        return 'W';
-    case Level::Error:
-        return 'E';
-    case Level::Fatal:
-        return 'F';
+    case Level::Trace: return 'T';
+    case Level::Debug: return 'D';
+    case Level::Info:  return 'I';
+    case Level::Warn:  return 'W';
+    case Level::Error: return 'E';
+    case Level::Fatal: return 'F';
     }
     return '?';
 }
 
 void uart_write(const char* s, usize len) {
-    if (!g_uart_ready || !s)
-        return;
+    if (!g_uart_ready || !s) return;
 #ifdef ANKO_BOARD_HUAWEI_ANNE
     anne::boot_log_write(s, len);
 #else
-    for (usize i = 0; i < len; ++i)
-        console::putchar(s[i]);
+    for (usize i = 0; i < len; ++i) console::putchar(s[i]);
 #endif
 }
 
 void uart_write_cstr_limited(const char* s, usize max_len) {
-    if (!g_uart_ready)
-        return;
-    if (!s)
-        s = "(null)";
+    if (!g_uart_ready) return;
+    if (!s) s = "(null)";
     for (usize i = 0; i < max_len && s[i]; ++i) {
         console::putchar(s[i]);
     }
@@ -103,10 +93,8 @@ void emit_early_direct(Level level, const char* component, const char* msg) {
         return;
     }
     usize i = 0;
-    while (i < kMaxMessage && msg[i])
-        ++i;
-    if (i == 0 || msg[i - 1] != '\n')
-        console::putchar('\n');
+    while (i < kMaxMessage && msg[i]) ++i;
+    if (i == 0 || msg[i - 1] != '\n') console::putchar('\n');
 }
 
 struct Writer {
@@ -125,10 +113,8 @@ void append_char(Writer& w, char c) {
 }
 
 void append_str(Writer& w, const char* s) {
-    if (!s)
-        s = "(null)";
-    while (*s)
-        append_char(w, *s++);
+    if (!s) s = "(null)";
+    while (*s) append_char(w, *s++);
 }
 
 void append_u64(Writer& w, u64 value, u32 base, bool upper) {
@@ -139,8 +125,7 @@ void append_u64(Writer& w, u64 value, u32 base, bool upper) {
         tmp[n++] = digits[value % base];
         value /= base;
     } while (value && n < sizeof(tmp));
-    while (n)
-        append_char(w, tmp[--n]);
+    while (n) append_char(w, tmp[--n]);
 }
 
 void append_u64_padded(Writer& w, u64 value, u32 width) {
@@ -150,10 +135,8 @@ void append_u64_padded(Writer& w, u64 value, u32 width) {
         tmp[n++] = static_cast<char>('0' + (value % 10));
         value /= 10;
     } while (value && n < sizeof(tmp));
-    while (n < width && n < sizeof(tmp))
-        tmp[n++] = '0';
-    while (n)
-        append_char(w, tmp[--n]);
+    while (n < width && n < sizeof(tmp)) tmp[n++] = '0';
+    while (n) append_char(w, tmp[--n]);
 }
 
 void append_u64_space_padded(Writer& w, u64 value, u32 width) {
@@ -167,8 +150,7 @@ void append_u64_space_padded(Writer& w, u64 value, u32 width) {
         append_char(w, ' ');
         --width;
     }
-    while (n)
-        append_char(w, tmp[--n]);
+    while (n) append_char(w, tmp[--n]);
 }
 
 void append_timestamp(Writer& w) {
@@ -197,18 +179,15 @@ void append_i64(Writer& w, i64 value) {
 }
 
 usize finish(Writer& w) {
-    if (w.cap == 0)
-        return 0;
-    if (w.len >= w.cap)
-        w.len = w.cap - 1;
+    if (w.cap == 0) return 0;
+    if (w.len >= w.cap) w.len = w.cap - 1;
     w.out[w.len] = '\0';
     return w.len;
 }
 
 usize vformat(char* out, usize cap, const char* fmt, va_list ap, bool* truncated) {
     Writer w{out, cap, 0, false};
-    if (!fmt)
-        fmt = "(null)";
+    if (!fmt) fmt = "(null)";
     while (*fmt) {
         const char c = *fmt++;
         if (c != '%') {
@@ -242,33 +221,22 @@ usize vformat(char* out, usize cap, const char* fmt, va_list ap, bool* truncated
             break;
         case 'd':
         case 'i':
-            if (lenmod >= 2)
-                append_i64(w, va_arg(ap, long long));
-            else if (lenmod == 1)
-                append_i64(w, va_arg(ap, long));
-            else
-                append_i64(w, va_arg(ap, int));
+            if (lenmod >= 2) append_i64(w, va_arg(ap, long long));
+            else if (lenmod == 1) append_i64(w, va_arg(ap, long));
+            else append_i64(w, va_arg(ap, int));
             break;
         case 'u':
-            if (lenmod >= 2)
-                append_u64(w, va_arg(ap, unsigned long long), 10, false);
-            else if (lenmod == 1)
-                append_u64(w, va_arg(ap, unsigned long), 10, false);
-            else if (lenmod == 3)
-                append_u64(w, va_arg(ap, usize), 10, false);
-            else
-                append_u64(w, va_arg(ap, unsigned int), 10, false);
+            if (lenmod >= 2) append_u64(w, va_arg(ap, unsigned long long), 10, false);
+            else if (lenmod == 1) append_u64(w, va_arg(ap, unsigned long), 10, false);
+            else if (lenmod == 3) append_u64(w, va_arg(ap, usize), 10, false);
+            else append_u64(w, va_arg(ap, unsigned int), 10, false);
             break;
         case 'x':
         case 'X':
-            if (lenmod >= 2)
-                append_u64(w, va_arg(ap, unsigned long long), 16, conv == 'X');
-            else if (lenmod == 1)
-                append_u64(w, va_arg(ap, unsigned long), 16, conv == 'X');
-            else if (lenmod == 3)
-                append_u64(w, va_arg(ap, usize), 16, conv == 'X');
-            else
-                append_u64(w, va_arg(ap, unsigned int), 16, conv == 'X');
+            if (lenmod >= 2) append_u64(w, va_arg(ap, unsigned long long), 16, conv == 'X');
+            else if (lenmod == 1) append_u64(w, va_arg(ap, unsigned long), 16, conv == 'X');
+            else if (lenmod == 3) append_u64(w, va_arg(ap, usize), 16, conv == 'X');
+            else append_u64(w, va_arg(ap, unsigned int), 16, conv == 'X');
             break;
         case 'p':
             append_str(w, "0x");
@@ -276,14 +244,12 @@ usize vformat(char* out, usize cap, const char* fmt, va_list ap, bool* truncated
             break;
         default:
             append_char(w, '%');
-            if (conv)
-                append_char(w, conv);
+            if (conv) append_char(w, conv);
             break;
         }
     }
     const usize len = finish(w);
-    if (truncated)
-        *truncated = w.truncated;
+    if (truncated) *truncated = w.truncated;
     return len;
 }
 
@@ -300,22 +266,21 @@ RingSlot* ring_slots(RingHeader* header) {
 }
 
 bool push_bytes(Ring* ring, const char* data, usize len) {
-    if (!ring || !data)
-        return false;
-    if (len == 0)
-        return true;
+    if (!ring || !data) return false;
+    if (len == 0) return true;
 
     RingHeader* header = reinterpret_cast<RingHeader*>(ring->phys_base);
     constexpr usize kPayloadSize = 48;
     const usize chunks = (len + kPayloadSize - 1) / kPayloadSize;
-    if (!ring_has_capacity(header, ring->order, chunks))
-        return false;
+    if (!ring_has_capacity(header, ring->order, chunks)) return false;
 
     const u64 mask = (1ull << ring->order) - 1ull;
     u64 head = __atomic_load_n(&header->head.head, __ATOMIC_RELAXED);
     usize off = 0;
     while (off < len) {
-        const usize chunk = (len - off) > kPayloadSize ? kPayloadSize : (len - off);
+        const usize chunk = (len - off) > kPayloadSize
+                                ? kPayloadSize
+                                : (len - off);
         RingSlot* slot = ring_slots(header) + (head & mask);
         slot->type = kLogSlotType;
         slot->length = static_cast<u32>(chunk);
@@ -339,6 +304,7 @@ bool push_bytes(Ring* ring, const char* data, usize len) {
 bool console_attached_for(u32 cpu) {
     return g_doorbell && cpu < g_ring_count && g_rings[cpu] != nullptr;
 }
+
 
 void emit_line(const char* line, usize len, bool force_uart) {
     const u32 cpu = cpu_index();
@@ -389,23 +355,19 @@ usize append_log_body(Writer& w, const char* component, const char* msg) {
     append_str(w, ": ");
 
     usize msg_len = 0;
-    if (!msg)
-        msg = "(null)";
-    while (msg[msg_len])
-        ++msg_len;
+    if (!msg) msg = "(null)";
+    while (msg[msg_len]) ++msg_len;
     if (msg_len > kMaxMessage) {
         msg_len = kMaxMessage;
         w.truncated = true;
     }
-    for (usize i = 0; i < msg_len; ++i)
-        append_char(w, msg[i]);
-    if (msg_len == 0 || msg[msg_len - 1] != '\n')
-        append_char(w, '\n');
+    for (usize i = 0; i < msg_len; ++i) append_char(w, msg[i]);
+    if (msg_len == 0 || msg[msg_len - 1] != '\n') append_char(w, '\n');
     return msg_len;
 }
 
-usize make_prefixed_line(Level level, const char* component, const char* msg, char* out, usize cap,
-                         bool* truncated) {
+usize make_prefixed_line(Level level, const char* component, const char* msg,
+                         char* out, usize cap, bool* truncated) {
     Writer w{out, cap, 0, false};
     append_timestamp(w);
     append_str(w, " [");
@@ -417,10 +379,10 @@ usize make_prefixed_line(Level level, const char* component, const char* msg, ch
     (void)append_log_body(w, component, msg);
 
     const usize len = finish(w);
-    if (truncated)
-        *truncated = w.truncated;
+    if (truncated) *truncated = w.truncated;
     return len;
 }
+
 
 } // namespace
 
@@ -484,8 +446,7 @@ void writef(Level level, const char* component, const char* fmt, ...) {
 }
 
 void raw(const char* msg) {
-    if (!msg)
-        msg = "(null)\n";
+    if (!msg) msg = "(null)\n";
     write(Level::Info, "kernel", msg);
 }
 
@@ -519,10 +480,8 @@ void vformat_to(char* out, usize cap, const char* fmt, va_list ap) {
 }
 
 void panic_dump(const char* text) {
-    if (!text)
-        return;
-    for (usize i = 0; text[i]; ++i)
-        console::putchar(text[i]);
+    if (!text) return;
+    for (usize i = 0; text[i]; ++i) console::putchar(text[i]);
 }
 
 u64 dropped_count() {

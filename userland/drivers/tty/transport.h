@@ -10,12 +10,9 @@ struct InputBuffer {
     libk::ByteCursor pending;
     MxTermControl control;
     bool control_pending;
-    bool retained() const {
-        return control_pending || !pending.empty();
-    }
+    bool retained() const { return control_pending || !pending.empty(); }
     bool hold_control(const MxTermControl& next) {
-        if (retained())
-            return false;
+        if (retained()) return false;
         control = next;
         control_pending = true;
         return true;
@@ -32,8 +29,7 @@ struct InputBuffer {
     }
     bool flush(const terminal::InputSink& sink) {
         if (control_pending) {
-            if (!sink.try_push_msg(MX_TERM_CONTROL, control))
-                return false;
+            if (!sink.try_push_msg(MX_TERM_CONTROL, control)) return false;
             control_pending = false;
             return true;
         }
@@ -47,13 +43,17 @@ struct InputBuffer {
     }
 };
 struct SerialMirror {
+    static constexpr mx_u64_t kStallBudgetNs = 1000000000ull;
     terminal::SessionSink output;
     MxRingSlot slot;
     libk::ByteCursor pending;
     mx_u64_t generation;
+    mx_u64_t blocked_at, dropped_output;
+    bool backpressured, output_stalled;
     void change(mx_u64_t next) {
         generation = next;
         pending.reset(); // delayed old output retains its old generation or is discarded
+        backpressured = output_stalled = false;
     }
     bool hold(const MxRingSlot& incoming) {
         if (!pending.empty()) {
@@ -65,19 +65,37 @@ struct SerialMirror {
         if (!message_valid(incoming) || incoming.type != MX_TERM_OUTPUT_BYTES) {
             return false;
         }
+        if (output_stalled) {
+            dropped_output += incoming.length;
+            return true; // the local terminal remains the primary output
+        }
         slot = incoming;
         pending.reset(libk::as_bytes(slot.payload, slot.length));
         return true;
     }
-    bool flush() {
+    bool flush(mx_u64_t now = 0) {
         bool progress = false;
         while (!pending.empty()) {
             const auto accepted = output.try_write(MX_TERM_SESSION_OUTPUT_BYTES, generation,
                                                    pending.next(terminal::kSessionRunBytes));
             if (!accepted) {
+                // Preserve ordinary serial backpressure briefly, then stop
+                // mirroring for this session. A dead USB consumer must not
+                // hold the phone's renderer and shell producer indefinitely.
+                if (!backpressured) {
+                    blocked_at = now;
+                    backpressured = true;
+                } else if (now - blocked_at >= kStallBudgetNs) {
+                    dropped_output += pending.remaining();
+                    pending.reset();
+                    backpressured = false;
+                    output_stalled = true;
+                    return true;
+                }
                 break;
             }
             (void)pending.advance(accepted);
+            backpressured = false;
             progress = true;
         }
         return progress;

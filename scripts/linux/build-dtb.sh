@@ -59,7 +59,15 @@ fi
 # Templates without a given placeholder are unaffected by its substitution.
 "${AME}/scripts/linux/gen-dango-binding.sh" > "${DANGO_BINDING_SED}"
 
+mali_status=disabled
+case "${DANGO_PANFROST_HARDWARE:-0}" in
+    0) ;;
+    1) mali_status=okay ;;
+    *) echo "error: DANGO_PANFROST_HARDWARE must be 0 or 1" >&2; exit 1 ;;
+esac
+
 sed \
+  -e "s/@MALI_STATUS@/${mali_status}/g" \
   -e "s/@BOOTARGS@/${bootargs_escaped}/g" \
   -e "s/@DANGO_TIMER_FREQUENCY@/${timer_property}/g" \
   -e "s/@INITRD_START_HI@/$(fmt32 "${start_hi}")/g" \

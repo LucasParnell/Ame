@@ -27,6 +27,6 @@ static void tegra_putchar(char c) {
     g_tegra_base[0] = static_cast<u32>(static_cast<unsigned char>(c));
 }
 
-extern const ConsoleOps kTegraUartOps = {tegra_early_init, tegra_putchar};
+extern const ConsoleOps kTegraUartOps = { tegra_early_init, tegra_putchar };
 
 } // namespace drivers::uart

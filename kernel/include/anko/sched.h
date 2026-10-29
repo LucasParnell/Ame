@@ -436,6 +436,9 @@ struct alignas(64) Process {
     u32 supervisor_pid;
     char name[32];
     bool kill_with_supervisor;
+    // Monotonic: unrelated service exits must not wait on a running guest's
+    // global VM call lock with IRQs masked. Set before publishing the first VM.
+    bool created_vm;
 };
 static_assert(alignof(Process) == 64 && sizeof(Process) == 192);
 static_assert(__builtin_offsetof(Process, runtime_ns) == 64);

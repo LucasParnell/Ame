@@ -7,8 +7,7 @@
 inline int64_t sys_thread_get_cpu() {
     return 0;
 }
-inline void sys_thread_exit(int32_t) {
-}
+inline void sys_thread_exit(int32_t) {}
 static unsigned host_thread_creates;
 inline int64_t sys_thread_create(CapHandle, uint64_t, uint64_t, uint32_t) {
     ++host_thread_creates;
@@ -24,10 +23,20 @@ static unsigned revoked;
 #include "../userland/msh/msh_diag.cc"
 
 Shell g{};
+int cmd_diag_gpu(bool, bool) {
+    return 1;
+}
+int cmd_diag_gpu_vulkan() {
+    return 1;
+}
+int cmd_diag_gpu_cts(const char*, bool) {
+    return 1;
+}
 static std::string output, retained;
 static uint64_t entry_el = 1, monitor = 0, capability = 1, capacity = 4096;
 static unsigned reads, resources;
 static bool fail_read, grow_log, bad_version, early_eof;
+static bool progress_supported;
 static bool el3_available = true;
 static uint64_t canary_result;
 static uint32_t done_aborted;
@@ -40,8 +49,9 @@ static unsigned pumped;
 static int64_t read_diag(uint64_t request, uint64_t index, void* out, uint64_t size) {
     assert(size && size <= MX_DIAG_READ_MAX);
     ++reads;
-    if (fail_read)
+    if (fail_read) {
         return MX_ERR_NOT_IMPLEMENTED;
+    }
     if (request == MX_DIAG_RUNTIME) {
         MxDiagRuntimeBatch batch{};
         batch.version = MX_DIAG_VERSION;
@@ -54,21 +64,25 @@ static int64_t read_diag(uint64_t request, uint64_t index, void* out, uint64_t s
         const bool after = host_now >= 1000000000;
         if (index == 1) {
             for (unsigned pid = 1; pid <= 7; ++pid) {
-                if (pid == 6 && after)
+                if (pid == 6 && after) {
                     continue;
+                }
                 auto& row = batch.rows[batch.count++];
                 row.pid = pid;
                 row.identity = ((pid == 3 && after ? 2ull : 1ull) << 32) | pid;
                 row.runtime_ns = 100 + host_now / (pid == 2 ? 10 : 100);
-                if (pid == 4 && after)
+                if (pid == 4 && after) {
                     row.runtime_ns = 0;
-                if (pid == 5 && after)
+                }
+                if (pid == 5 && after) {
                     row.flags = 1;
+                }
                 std::strcpy(row.name, pid == 2 ? "busy" : "quiet");
             }
         }
-        if (bad_runtime_batch)
+        if (bad_runtime_batch) {
             batch.count = MX_DIAG_RUNTIME_ROWS + 1;
+        }
         std::memcpy(out, &batch, sizeof(batch));
         return sizeof(batch);
     }
@@ -85,6 +99,13 @@ static int64_t read_diag(uint64_t request, uint64_t index, void* out, uint64_t s
         std::memcpy(out, &info, sizeof(info));
         return sizeof(info);
     }
+    if (request == MX_DIAG_VM_PROGRESS) {
+        if (!progress_supported) return MX_ERR_NOT_IMPLEMENTED;
+        MxDiagVmProgress progress{MX_DIAG_VERSION, static_cast<mx_u32_t>(index),
+                                 4, MX_VM_PROGRESS_MALI_READ, 123, 0x1000, 0};
+        std::memcpy(out, &progress, sizeof(progress));
+        return sizeof(progress);
+    }
     if (request == MX_DIAG_CPU) {
         assert(index < 8);
         MxDiagCpu cpu{};
@@ -96,10 +117,46 @@ static int64_t read_diag(uint64_t request, uint64_t index, void* out, uint64_t s
         std::memcpy(out, &cpu, sizeof(cpu));
         return sizeof(cpu);
     }
+    if (request == MX_DIAG_EL3 && index == 33) {
+        MxDiagSmmuId info{};
+        info.version = bad_version ? 99 : MX_DIAG_VERSION;
+        info.base = 0xe8dc0000;
+        info.valid = 3;
+        info.id[0] = 0x60000000;
+        info.id[1] = 8;
+        info.faults = 1;
+        info.first_esr = 0x96000210;
+        info.first_far = info.base + 0x28;
+        std::memcpy(out, &info, sizeof(info));
+        return sizeof(info);
+    }
+    if (request == MX_DIAG_EL3 && index == 32) {
+        MxDiagGpuDmss info{};
+        info.version = bad_version ? 99 : MX_DIAG_VERSION;
+        // Model one real external access fault, not a successfully read zero.
+        info.valid = 3;
+        info.faults = 1;
+        info.first_esr = 0x96000010;
+        info.first_far = 0xe8a09c0c;
+        info.ports[0].valid = 1;
+        info.ports[0].words[0] = 14;
+        std::memcpy(out, &info, sizeof(info));
+        return sizeof(info);
+    }
+    if (request == MX_DIAG_EL3 && index == 31) {
+        MxDiagGpuIommu info{};
+        info.version = bad_version ? 99 : MX_DIAG_VERSION;
+        info.valid = 63;
+        info.mmu_features = 0x2820;
+        info.pctrl_ctrl8 = 1 | (2 << 5) | (3 << 10) | (4 << 15);
+        std::memcpy(out, &info, sizeof(info));
+        return sizeof(info);
+    }
     if (request == MX_DIAG_EL3) {
         if (index == 29) {
-            if (!el3_available)
+            if (!el3_available) {
                 return MX_ERR_NOT_IMPLEMENTED;
+            }
             const auto action = static_cast<MxDiagEl3Rpmb*>(out)->action;
             if (pump_mode && action == MX_RPMB_COMPLETE) {
                 ++pumped;
@@ -141,13 +198,15 @@ static int64_t read_diag(uint64_t request, uint64_t index, void* out, uint64_t s
         return sizeof(info);
     }
     assert(request == MX_DIAG_BOOT_LOG);
-    if (early_eof)
+    if (early_eof) {
         return 0;
+    }
     assert(index < retained.size());
     const size_t count = std::min<size_t>(size, retained.size() - index);
     std::memcpy(out, retained.data() + index, count);
-    if (grow_log)
+    if (grow_log) {
         retained.append("new record\n");
+    }
     return count;
 }
 bool streq(const char* a, const char* b) {
@@ -218,10 +277,13 @@ int main() {
     assert(run("el2") == 0 && contains("el2.hardware_field=1\r\n"));
     assert(contains("cpu0 online=1 mpidr=0x0 boot_entry_el=1 monitor_ready=0"));
     assert(contains("cpu7 online=0 mpidr=0x0 boot_entry_el=0 monitor_ready=0"));
-    assert(resources == 0 && reads == 9);
+    assert(resources == 0 && reads == 17);
+    assert(!contains("vm.stage=")); // Old kernels need not support checkpoints.
     entry_el = 2;
     monitor = 1;
+    progress_supported = true;
     assert(run("el2") == 0 && contains("boot_entry_el=2 monitor_ready=1"));
+    assert(contains("cpu1 vm.stage=11 sequence=4 sampled_ns=123 detail0=0x1000"));
     assert(contains("host.current_el=1")); // Host drops to EL1 after monitor install.
     assert(run("el3") == 0 && contains("el3.shared_base=0x34a21000\r\n"));
     assert(contains("el3.rpmb_request=0x34a29000\r\n"));
@@ -337,10 +399,11 @@ int main() {
            revoked == 2);
     rpmb_model.events = rpmb_model.completed_events;
     host_on_wait = []() -> int64_t {
-        if (!pumped)
+        if (!pumped) {
             ++rpmb_model.events;
-        else
+        } else {
             rpmb_workers[1].cancel = 1;
+        }
         return MX_OK;
     };
     pumped = 0;
@@ -354,6 +417,16 @@ int main() {
     el3_available = false;
     assert(run_rpmb("status") == 1 && contains("lifecycle diagnostic unavailable"));
     el3_available = true;
+    assert(run("gpu-iommu") == 0 && contains("gpu.mmu.input_bits=32"));
+    assert(contains("gpu.mmu.output_bits=40") && contains("gpu.awmid1=4"));
+    assert(contains("do not establish an external SMMU route"));
+    assert(run("gpu-dmss") == 1 && contains("dmss.first_esr=0x96000010"));
+    assert(contains("region_count=0xe") && !contains("dmss.gpu_master_config="));
+    assert(run("gpu-smmu") == 1 && contains("smmu.id0=0x60000000"));
+    assert(contains("smmu.first_far=0xe8dc0028") && !contains("smmu.id2="));
+    assert(contains("identity does not establish a GPU route"));
     bad_version = true;
+    assert(run("gpu-smmu") == 1 && contains("snapshot unavailable"));
+    assert(run("gpu-dmss") == 1 && contains("snapshot unavailable"));
     assert(run_rpmb("status") == 1);
 }

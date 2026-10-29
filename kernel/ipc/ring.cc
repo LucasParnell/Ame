@@ -15,12 +15,10 @@ namespace ipc {
 static void destroy_ring(void* target) {
     auto* ring = static_cast<Ring*>(target);
     const u64 bytes = sizeof(RingHeader) + (1ull << ring->order) * sizeof(RingSlot);
-    for (u64 off = 0; off < bytes; off += PAGE_SIZE)
-        mm::free_page_for_identity((static_cast<u64>(ring->owner_generation) << 32) |
-                                       ring->producer_pid,
-                                   ring->phys_base + off);
+    for (u64 off = 0; off < bytes; off += PAGE_SIZE) mm::free_page_for_identity((static_cast<u64>(ring->owner_generation) << 32) | ring->producer_pid, ring->phys_base + off);
     mm::slab_free(ring, sizeof(Ring), alignof(Ring));
 }
+
 
 void init() {
     // V0 keeps ring objects heap-allocated; no global registry required.
@@ -31,22 +29,18 @@ static cap::Ref resolve_ring_entry(u32 pid, CapHandle ring_cap, u32 need_rights)
 }
 
 Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
-    if (flags & ~MX_RING_PACKED_FRAMES)
-        return nullptr;
-    if (order < MX_RING_ORDER_MIN || order > MX_RING_ORDER_MAX)
-        return nullptr;
+    if (flags & ~MX_RING_PACKED_FRAMES) return nullptr;
+    if (order < MX_RING_ORDER_MIN || order > MX_RING_ORDER_MAX) return nullptr;
 
     auto owner = process_reference(pid);
-    if (!owner || !owner->cap_table)
-        return nullptr;
+    if (!owner || !owner->cap_table) return nullptr;
 
     const usize slots = (1u << order);
     const usize bytes = sizeof(RingHeader) + slots * sizeof(RingSlot);
     const usize pages = (bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 
     const PhysAddr base = mm::alloc_pages_contiguous_for(pid, pages);
-    if (!base)
-        return nullptr;
+    if (!base) return nullptr;
     libk::memset(reinterpret_cast<void*>(base), 0, pages * PAGE_SIZE);
     reinterpret_cast<RingHeader*>(base)->space.features = flags;
 
@@ -64,60 +58,47 @@ Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
     ring->owner_generation = owner->generation;
 
     ring->lifetime = object::create(ring, destroy_ring);
-    if (!ring->lifetime) {
-        destroy_ring(ring);
-        return nullptr;
-    }
+    if (!ring->lifetime) { destroy_ring(ring); return nullptr; }
     return ring;
 }
 
 CapHandle ring_cap_alloc(u32 target_pid, Ring* ring, u32 rights) {
-    if (!ring)
-        return kNullCap;
+    if (!ring) return kNullCap;
     auto target = process_reference(target_pid);
-    if (!target || !target->cap_table)
-        return kNullCap;
+    if (!target || !target->cap_table) return kNullCap;
 
     const u32 allowed = RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP;
     const u32 requested = rights & allowed;
-    if (requested == 0)
-        return kNullCap;
+    if (requested == 0) return kNullCap;
     return cap::alloc(*target->cap_table, CAP_SHARED_RING, ring, requested, ring->lifetime);
 }
 
 CapHandle ring_create(u32 pid, u32 order, u32 flags) {
     Ring* ring = ring_create_object(pid, order, flags);
-    if (!ring)
-        return kNullCap;
+    if (!ring) return kNullCap;
     CapHandle handle = ring_cap_alloc(pid, ring, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
     object::release(ring->lifetime); // transfer the creator root to the capability
     return handle;
 }
 
-CapHandle ring_share(u32 owner_pid, CapHandle ring_cap, u32 target_pid, u32 rights) {
+CapHandle ring_share(u32 owner_pid, CapHandle ring_cap,
+                     u32 target_pid, u32 rights) {
     cap::Ref src = resolve_ring_entry(owner_pid, ring_cap, RIGHT_DUP);
-    if (!src)
-        return kNullCap;
+    if (!src) return kNullCap;
     Ring* ring = static_cast<Ring*>(src->target);
-    if (!ring)
-        return kNullCap;
+    if (!ring) return kNullCap;
 
     auto target = process_reference(target_pid);
-    if (!target || !target->cap_table)
-        return kNullCap;
+    if (!target || !target->cap_table) return kNullCap;
 
     const u32 allowed = RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP;
     const u32 requested = rights & allowed;
-    if (requested == 0)
-        return kNullCap;
-    if ((requested & src->rights_mask) != requested)
-        return kNullCap;
-    const CapHandle h =
-        cap::alloc(*target->cap_table, CAP_SHARED_RING, ring, requested, src->object);
-    if (h == kNullCap)
-        return kNullCap;
+    if (requested == 0) return kNullCap;
+    if ((requested & src->rights_mask) != requested) return kNullCap;
+    const CapHandle h = cap::alloc(*target->cap_table, CAP_SHARED_RING, ring, requested, src->object);
+    if (h == kNullCap) return kNullCap;
     __atomic_compare_exchange_n(&ring->consumer_pid, &owner_pid, target_pid, false,
-                                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+                                 __ATOMIC_RELAXED, __ATOMIC_RELAXED);
     return h;
 }
 

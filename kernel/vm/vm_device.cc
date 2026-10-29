@@ -118,8 +118,7 @@ const iommu::IommuBackendOps* assignment_backend(const VmDeviceAssignment& assig
         // One domain spans only one translation controller. Multiple routed
         // controllers need separate domains, not a shared root by assumption.
         if (!route || (backend && (backend->ctx != route->ctx ||
-                                   backend->attach_stream != route->attach_stream)))
-            return nullptr;
+            backend->attach_stream != route->attach_stream))) return nullptr;
         backend = route;
     }
     return backend;
@@ -135,10 +134,9 @@ u32 find_msi_cap(const pci::PciFunctionInfo& fn, bool* out_msix) {
     if ((status & pci::kStatusCapabilitiesList) == 0) {
         return 0; // capabilities list not present
     }
-    u32 off =
-        pci::cfg_read_byte(fn.bus, fn.device, fn.function, pci::kRegCapPtr) & pci::kCfgCapPtrMask;
-    for (u32 guard = 0;
-         guard < pci::kMaxCapabilityWalk && off >= pci::kCfgCapMin && off <= pci::kCfgCapMax;
+    u32 off = pci::cfg_read_byte(fn.bus, fn.device, fn.function, pci::kRegCapPtr) & pci::kCfgCapPtrMask;
+    for (u32 guard = 0; guard < pci::kMaxCapabilityWalk && off >= pci::kCfgCapMin &&
+                      off <= pci::kCfgCapMax;
          ++guard) {
         const u32 header = pci::cfg_read_byte(fn.bus, fn.device, fn.function, off);
         const u32 cap_id = header & 0xFFu;
@@ -174,8 +172,8 @@ void expose_function(VmDeviceAssignment* a, u32 fn_index) {
     // assignment is ACTIVE.
     space[pci::kRegCommand] = static_cast<u8>(pci::kPciCmdMemoryEnable);
     space[pci::kRegCommand + 1] = 0x00;
-    space[pci::kRegRevisionId] =
-        pci::cfg_read_byte(fn.bus, fn.device, fn.function, pci::kRegRevisionId);
+    space[pci::kRegRevisionId] = pci::cfg_read_byte(fn.bus, fn.device, fn.function,
+                                                   pci::kRegRevisionId);
     space[pci::kRegClassCode] = static_cast<u8>(fn.class_code);
     space[pci::kRegClassCode + 1] = static_cast<u8>(fn.class_code >> 8);
     space[pci::kRegClassCode + 2] = static_cast<u8>(fn.class_code >> 16);
@@ -209,8 +207,7 @@ SysError collect_vm_ram(VmDeviceAssignment* a) {
         if (!mem || mem->dead || !mem->mapped_stage2 || !mem->pages) {
             continue;
         }
-        if (mem->shared_staging)
-            continue; // staging pages are never DMA-authorizable
+        if (mem->shared_staging) continue; // staging pages are never DMA-authorizable
         u64 p = 0;
         while (p < mem->page_count) {
             const PhysAddr start = mem->pages[p];
@@ -459,8 +456,7 @@ SysError step_quiesce(VmDeviceAssignment* a) {
 
 SysError step_domain(VmDeviceAssignment* a) {
     const auto* backend = assignment_backend(*a);
-    if (!backend)
-        return E_NOTIMPL;
+    if (!backend) return E_NOTIMPL;
     iommu::IommuOwnerOps owner{};
     owner.query = appliance_owner_query;
     owner.release = appliance_release;
@@ -642,10 +638,8 @@ SysError device_attach(VmDeviceAssignment* a, const DeviceAssignSpec& spec) {
         return E_INVALID;
     }
     SysError rc = step_claim(a, spec);
-    if (rc == E_OK)
-        rc = step_contain(a);
-    if (rc == E_OK)
-        rc = step_assign_bars(a);
+    if (rc == E_OK) rc = step_contain(a);
+    if (rc == E_OK) rc = step_assign_bars(a);
     if (rc == E_OK) {
         rc = step_quiesce(a);
     }
@@ -760,13 +754,10 @@ SysError device_mediate_command(VmDeviceAssignment* a, u32 fn_index, u16 value) 
 
 SysError device_mediate_config_write(VmDeviceAssignment* a, u32 fn_index, u32 offset, u64 value,
                                      u32 size) {
-    if (!a || fn_index >= a->fn_count)
-        return E_INVALID;
-    if (!a->active || a->state != VM_DEV_ACTIVE)
-        return E_DEAD;
+    if (!a || fn_index >= a->fn_count) return E_INVALID;
+    if (!a->active || a->state != VM_DEV_ACTIVE) return E_DEAD;
     if (offset >= pci::kRegBar0 && offset < pci::kRegBarEnd &&
-        pci::config_bar_write(a->cfg, fn_index, offset, static_cast<u32>(value), size))
-        return E_OK;
+        pci::config_bar_write(a->cfg, fn_index, offset, static_cast<u32>(value), size)) return E_OK;
     const pci::CfgWriteAction action = pci::classify_config_write(a->cfg, fn_index, offset, size);
     switch (action) {
     case pci::CfgWriteAction::Reject:
@@ -784,7 +775,7 @@ SysError device_mediate_config_write(VmDeviceAssignment* a, u32 fn_index, u32 of
         for (u32 i = 0; i < size && offset + i < pci::kRegCommand + 2; ++i) {
             const u32 shift = (offset + i - pci::kRegCommand) * 8;
             command = static_cast<u16>((command & ~(0xffu << shift)) |
-                                       (((value >> (i * 8)) & 0xffu) << shift));
+                      (((value >> (i * 8)) & 0xffu) << shift));
         }
         return device_mediate_command(a, fn_index, command);
     }
@@ -817,8 +808,7 @@ SysError device_secure_attach(Process& caller, CapHandle vm_cap, const pci::Host
 
     if (!iommu::backend_for({static_cast<u32>(host_fn.info.segment), host_fn.info.requester_id}))
         return E_NOTIMPL;
-    if (flags & ~kAssignFlagAssignBars)
-        return E_INVALID;
+    if (flags & ~kAssignFlagAssignBars) return E_INVALID;
 
     // Derive the isolation group from the inventory and require the named
     // function to be in it; assign the whole group or reject (§6.3).
@@ -828,8 +818,7 @@ SysError device_secure_attach(Process& caller, CapHandle vm_cap, const pci::Host
     }
     // CallGuard serializes claims; reject a live owner before touching host state.
     for (const auto& existing : g_pool.slots) {
-        if (!existing.lifetime || existing.state == VM_DEV_REVOKED)
-            continue;
+        if (!existing.lifetime || existing.state == VM_DEV_REVOKED) continue;
         for (u32 i = 0; i < existing.fn_count; ++i) {
             const auto& fn = existing.fns[i].info;
             if (pci::isolation_group_id(fn.segment, fn.bus, fn.device) == group.group_id)
@@ -865,11 +854,9 @@ SysError device_secure_attach(Process& caller, CapHandle vm_cap, const pci::Host
     // Policy input for the attach machine: authorise the VM's mapped RAM as the
     // appliance DMA aperture before the domain is populated (§8.2, §8.5).
     rc = collect_vm_ram(a);
-    if (rc == E_OK)
-        rc = device_attach(a, spec);
+    if (rc == E_OK) rc = device_attach(a, spec);
     if (rc != E_OK) {
-        if (a->state != VM_DEV_QUARANTINED)
-            object::release(a->lifetime);
+        if (a->state != VM_DEV_QUARANTINED) object::release(a->lifetime);
         return rc;
     }
     const CapHandle cap_h =
@@ -913,7 +900,8 @@ SysError device_map_bar_internal(VmDeviceAssignment* a, u32 bar_index, u32 bar_o
         return E_NOTFOUND;
     }
     if ((bar.type != pci::BarType::Mmio32 && bar.type != pci::BarType::Mmio64) ||
-        bar_offset >= bar.size || size > bar.size - bar_offset || bar.base > ~0ull - bar.size) {
+        bar_offset >= bar.size || size > bar.size - bar_offset ||
+        bar.base > ~0ull - bar.size) {
         return E_INVALID;
     }
     const PhysAddr host_base = bar.base + bar_offset;
@@ -936,14 +924,12 @@ SysError device_map_bar_internal(VmDeviceAssignment* a, u32 bar_index, u32 bar_o
     u8 host[pci::kCfgSpaceBytes];
     for (u32 offset = 0; offset < sizeof(host); ++offset)
         host[offset] = pci::cfg_read_byte(fn.bus, fn.device, fn.function, offset);
-    if (!pci::bar_range_safe(host, fn.bars, bar_index, bar_offset, size))
-        return E_PERM;
+    if (!pci::bar_range_safe(host, fn.bars, bar_index, bar_offset, size)) return E_PERM;
     // Publish a BAR only when its complete aperture is mapped. Commit the
     // synthetic record after all stage-2 mappings succeed.
     auto config = a->cfg;
     if (bar_offset == 0 && size == bar.size &&
-        !pci::config_set_bar(config, 0, bar_index, guest_ipa, bar))
-        return E_INVALID;
+        !pci::config_set_bar(config, 0, bar_index, guest_ipa, bar)) return E_INVALID;
     const u64 pages = size / PAGE_SIZE;
     u64 i = 0;
     while (i < pages) {
@@ -1053,14 +1039,12 @@ SysError device_route_irq(Process& caller, CapHandle assign_cap, CapHandle irq_c
 SysError device_expose_ecam(Process& caller, CapHandle assign_cap, u64 ipa, u64 size) {
     SysError rc = E_OK;
     auto a = assignment_from_cap(caller, assign_cap, RIGHT_VM_CONTROL, &rc);
-    if (!a)
-        return rc;
+    if (!a) return rc;
     return device_expose_ecam_internal(a.get(), ipa, size);
 }
 
 SysError device_expose_ecam_internal(VmDeviceAssignment* a, u64 ipa, u64 size) {
-    if (!a || !a->owner_vm || !a->active || a->state != VM_DEV_ACTIVE)
-        return E_DEAD;
+    if (!a || !a->owner_vm || !a->active || a->state != VM_DEV_ACTIVE) return E_DEAD;
     if (a->ecam_size || size != pci::kGuestEcamSize || (ipa & (size - 1)) ||
         ipa < kMinDeviceGuestIpa || ipa >= (1ull << a->owner_vm->stage2.ipa_bits) ||
         size > (1ull << a->owner_vm->stage2.ipa_bits) - ipa)
@@ -1068,18 +1052,15 @@ SysError device_expose_ecam_internal(VmDeviceAssignment* a, u64 ipa, u64 size) {
     auto config = a->cfg;
     // The bootstrap transport is one synthetic device, with contiguous functions.
     for (u32 i = 0; i < a->fn_count; ++i) {
-        if (a->fns[i].info.function != i)
-            return E_NOTIMPL;
+        if (a->fns[i].info.function != i) return E_NOTIMPL;
         u8 host[pci::kCfgSpaceBytes];
         const auto& fn = a->fns[i].info;
         for (u32 offset = 0; offset < sizeof(host); ++offset)
             host[offset] = pci::cfg_read_byte(fn.bus, fn.device, fn.function, offset);
-        if (!pci::config_filter_virtio_caps(config, i, host))
-            return E_INVALID;
+        if (!pci::config_filter_virtio_caps(config, i, host)) return E_INVALID;
     }
     const auto rc = stage2_reserve_trap(&a->owner_vm->stage2, ipa, size);
-    if (rc != E_OK)
-        return rc;
+    if (rc != E_OK) return rc;
     a->cfg = config;
     a->ecam_ipa = ipa;
     a->ecam_size = size;
@@ -1087,19 +1068,15 @@ SysError device_expose_ecam_internal(VmDeviceAssignment* a, u64 ipa, u64 size) {
 }
 
 bool device_emulate_ecam(Vm& owner, u64 ipa, u32 size, bool write, u64* value) {
-    if (!value)
-        return false;
+    if (!value) return false;
     for (auto& a : g_pool.slots) {
-        if (!a.lifetime || a.owner_vm != &owner || !a.ecam_size || ipa < a.ecam_ipa ||
-            ipa - a.ecam_ipa >= a.ecam_size)
-            continue;
+        if (!a.lifetime || a.owner_vm != &owner || !a.ecam_size ||
+            ipa < a.ecam_ipa || ipa - a.ecam_ipa >= a.ecam_size) continue;
         pci::EcamAddress address{};
-        if (!pci::decode_ecam(ipa - a.ecam_ipa, size, &address))
-            return false;
+        if (!pci::decode_ecam(ipa - a.ecam_ipa, size, &address)) return false;
         if (!a.active || a.state != VM_DEV_ACTIVE || !address.assigned_device ||
             address.function >= a.fn_count) {
-            if (!write)
-                *value = 0xffffffffu;
+            if (!write) *value = 0xffffffffu;
             return true;
         }
         if (write) {

@@ -24,31 +24,29 @@
 #include "rpmb_diagnostics.h"
 #endif
 
-namespace drivers::timer {
-void handle_tick();
-}
+namespace drivers::timer { void handle_tick(); }
 
 namespace drivers::gic {
 
 // GICv2 distributor register offsets
-constexpr u32 GICD_CTLR = 0x000;
-constexpr u32 GICD_ISENABLER = 0x100;  // +n*4 for IRQs 32n..32n+31
-constexpr u32 GICD_ICENABLER = 0x180;  // write-1-to-clear enable
-constexpr u32 GICD_ISPENDR = 0x200;    // write-1-to-set pending
-constexpr u32 GICD_ICPENDR = 0x280;    // write-1-to-clear pending
+constexpr u32 GICD_CTLR      = 0x000;
+constexpr u32 GICD_ISENABLER = 0x100; // +n*4 for IRQs 32n..32n+31
+constexpr u32 GICD_ICENABLER = 0x180; // write-1-to-clear enable
+constexpr u32 GICD_ISPENDR   = 0x200; // write-1-to-set pending
+constexpr u32 GICD_ICPENDR   = 0x280; // write-1-to-clear pending
 constexpr u32 GICD_IPRIORITYR = 0x400; // byte per IRQ
-constexpr u32 GICD_ITARGETSR = 0x800;  // byte per IRQ (SPIs)
-constexpr u32 GICD_ICFGR = 0xC00;      // 2 bits per IRQ; bit+1 = edge
-constexpr u32 GICD_SGIR = 0xF00;
+constexpr u32 GICD_ITARGETSR = 0x800; // byte per IRQ (SPIs)
+constexpr u32 GICD_ICFGR     = 0xC00; // 2 bits per IRQ; bit+1 = edge
+constexpr u32 GICD_SGIR      = 0xF00;
 
 // GICv2 CPU interface register offsets
 constexpr u32 GICC_CTLR = 0x000;
-constexpr u32 GICC_PMR = 0x004;
-constexpr u32 GICC_IAR = 0x00C;
+constexpr u32 GICC_PMR  = 0x004;
+constexpr u32 GICC_IAR  = 0x00C;
 constexpr u32 GICC_EOIR = 0x010;
 
 static volatile u32* g_dist = nullptr;
-static volatile u32* g_cpu = nullptr;
+static volatile u32* g_cpu  = nullptr;
 static u32 g_cpu_targets[MX_HOST_MAX_CPUS]{};
 
 static void enable_firmware_rpmb_sgi() {
@@ -71,8 +69,7 @@ static void record_cpu_target() {
 #ifndef ANKO_HOST_TEST
     asm volatile("mrs %0, tpidr_el1" : "=r"(logical));
 #endif
-    if (logical >= MX_HOST_MAX_CPUS)
-        return;
+    if (logical >= MX_HOST_MAX_CPUS) return;
     u32 target = 0;
     // SGI/PPI target bytes are banked and identify this CPU's GIC interface.
     for (u32 i = 0; i < 8 && !target; ++i) {
@@ -83,8 +80,7 @@ static void record_cpu_target() {
 }
 
 u32 cpu_target(u32 logical) {
-    return logical < MX_HOST_MAX_CPUS ? __atomic_load_n(&g_cpu_targets[logical], __ATOMIC_ACQUIRE)
-                                      : 0;
+    return logical < MX_HOST_MAX_CPUS ? __atomic_load_n(&g_cpu_targets[logical], __ATOMIC_ACQUIRE) : 0;
 }
 
 void init(PhysAddr dist_base, PhysAddr cpu_base) {
@@ -101,8 +97,7 @@ void init(PhysAddr dist_base, PhysAddr cpu_base) {
 }
 
 void init_cpu() {
-    if (!g_cpu)
-        return;
+    if (!g_cpu) return;
     g_cpu[GICC_CTLR / 4] = 0;
     g_cpu[GICC_PMR / 4] = 0xFF;
     g_cpu[GICC_CTLR / 4] = 1;
@@ -111,8 +106,7 @@ void init_cpu() {
 }
 
 void irq_enable(u32 irq_id) {
-    if (!g_dist)
-        return;
+    if (!g_dist) return;
     g_dist[(GICD_ISENABLER / 4) + (irq_id / 32)] = 1u << (irq_id % 32);
     if (irq_id >= 32) {
         g_dist[(GICD_ITARGETSR / 4) + irq_id] = 0x01;
@@ -121,8 +115,7 @@ void irq_enable(u32 irq_id) {
 
 void send_sgi(u32 cpu_id, u32 sgi_id) {
     const u32 target = cpu_target(cpu_id);
-    if (!g_dist || !target || sgi_id >= 16)
-        return;
+    if (!g_dist || !target || sgi_id >= 16) return;
 #ifndef ANKO_HOST_TEST
     libk::cpu::data_store_sync();
 #endif
@@ -149,18 +142,15 @@ static void dist_write_byte(u32 base, u32 irq_id, u8 value) {
 }
 
 void spi_configure(u32 irq_id, u32 trigger, u32 target_cpu) {
-    if (!g_dist || irq_id < 32 || irq_id >= 1020)
-        return;
+    if (!g_dist || irq_id < 32 || irq_id >= 1020) return;
     dist_write_byte(GICD_IPRIORITYR, irq_id, 0xA0); // below PMR (0xFF)
     // ICFGR: bit (2*(n%16)+1) = 1 selects edge, 0 selects level.
     {
         const u32 word = (GICD_ICFGR / 4) + (irq_id / 16);
         const u32 bit = ((irq_id % 16) * 2u) + 1u;
         u32 v = g_dist[word];
-        if (trigger)
-            v |= (1u << bit);
-        else
-            v &= ~(1u << bit);
+        if (trigger) v |= (1u << bit);
+        else         v &= ~(1u << bit);
         g_dist[word] = v;
     }
     const u32 targets = (target_cpu < 8) ? (1u << target_cpu) : 1u;
@@ -171,45 +161,38 @@ void spi_configure(u32 irq_id, u32 trigger, u32 target_cpu) {
 }
 
 void spi_enable(u32 irq_id) {
-    if (!g_dist || irq_id < 32 || irq_id >= 1020)
-        return;
+    if (!g_dist || irq_id < 32 || irq_id >= 1020) return;
     dist_write_bit(GICD_ISENABLER, irq_id);
 }
 
 void spi_disable(u32 irq_id) {
-    if (!g_dist || irq_id < 32 || irq_id >= 1020)
-        return;
+    if (!g_dist || irq_id < 32 || irq_id >= 1020) return;
     dist_write_bit(GICD_ICENABLER, irq_id);
 }
 
 void spi_set_pending(u32 irq_id) {
-    if (!g_dist || irq_id < 32 || irq_id >= 1020)
-        return;
+    if (!g_dist || irq_id < 32 || irq_id >= 1020) return;
     dist_write_bit(GICD_ISPENDR, irq_id);
 }
 
 void spi_clear_pending(u32 irq_id) {
-    if (!g_dist || irq_id < 32 || irq_id >= 1020)
-        return;
+    if (!g_dist || irq_id < 32 || irq_id >= 1020) return;
     dist_write_bit(GICD_ICPENDR, irq_id);
 }
 
 u32 iar_id() {
-    if (!g_cpu)
-        return 1023;
+    if (!g_cpu) return 1023;
     return g_cpu[GICC_IAR / 4] & 0x3FFu;
 }
 
 void eoi(u32 irq_id) {
-    if (!g_cpu || irq_id >= 1023)
-        return;
+    if (!g_cpu || irq_id >= 1023) return;
     g_cpu[GICC_EOIR / 4] = irq_id;
 }
 
 // Called from EL1h IRQ vector.
 void handle_irq() {
-    if (!g_cpu)
-        return;
+    if (!g_cpu) return;
     const u32 iar = g_cpu[GICC_IAR / 4];
     const u32 irq_id = iar & 0x3FFu;
     bool rpmb_request = false;

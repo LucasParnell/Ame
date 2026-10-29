@@ -1,0 +1,24 @@
+# Ame development USB access for a non-root console user.
+#
+# Two nodes matter:
+#   1. the CDC ACM serial port used by `screen` and scripts/anne/usb-input.py
+#   2. the raw USB device node, needed by the vendor bulk interface (pyusb)
+#
+# Matched on VID/PID rather than ttyACM<N> or bus numbers: Ame re-enumerates
+# after every boot and the node index changes.
+#
+# The tty rule deliberately uses ATTR{}, not ATTRS{}. ATTRS{} walks up the
+# device chain and matches the FIRST ancestor carrying those attributes, which
+# for a tty is the xHCI host controller (1d6b:"xHCI Host Controller") - so an
+# ATTRS{idVendor}=="1209" test silently never matches and the rule appears to
+# do nothing even though `udevadm test` shows it being read. The tty device
+# itself already carries ID_VENDOR_ID/ID_MODEL_ID from its parent, so plain
+# ATTR{} on those properties is both correct and cheaper.
+#
+# Install:  sudo install -m 0644 scripts/anne/udev/99-ame-serial.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload-rules
+#           (then re-plug, or sudo udevadm trigger --action=add)
+#
+# Replace OWNER with your own login if it is not lucas.
+SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*", ATTR{idVendor}=="1209", ATTR{idProduct}=="0001", OWNER="lucas", MODE="0600", SYMLINK+="ame"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="0001", OWNER="lucas", MODE="0600"

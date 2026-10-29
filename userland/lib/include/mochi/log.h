@@ -41,18 +41,12 @@ inline LogSink& default_log_sink() {
 
 static inline char log_level_char(LogLevel level) {
     switch (level) {
-    case LogLevel::Trace:
-        return 'T';
-    case LogLevel::Debug:
-        return 'D';
-    case LogLevel::Info:
-        return 'I';
-    case LogLevel::Warn:
-        return 'W';
-    case LogLevel::Error:
-        return 'E';
-    case LogLevel::Fatal:
-        return 'F';
+    case LogLevel::Trace: return 'T';
+    case LogLevel::Debug: return 'D';
+    case LogLevel::Info:  return 'I';
+    case LogLevel::Warn:  return 'W';
+    case LogLevel::Error: return 'E';
+    case LogLevel::Fatal: return 'F';
     }
     return '?';
 }
@@ -68,8 +62,8 @@ static inline void log_set_sink(const LogSink& sink) {
     default_log_sink() = sink;
 }
 
-static inline void log_set_sink(RingPage* ring, uint32_t order, CapHandle doorbell,
-                                const char* component) {
+static inline void log_set_sink(RingPage* ring, uint32_t order,
+                                CapHandle doorbell, const char* component) {
     LogSink sink{};
     sink.ring = ring;
     sink.order = order;
@@ -80,8 +74,7 @@ static inline void log_set_sink(RingPage* ring, uint32_t order, CapHandle doorbe
 }
 
 static inline bool log_has_capacity(const LogSink& sink, uint32_t chunks) {
-    if (!ring_valid(sink.ring, sink.order))
-        return false;
+    if (!ring_valid(sink.ring, sink.order)) return false;
     const uint64_t tail = __atomic_load_n(&sink.ring->tail.v, __ATOMIC_ACQUIRE);
     const uint64_t head = __atomic_load_n(&sink.ring->head.v, __ATOMIC_RELAXED);
     const uint64_t used = head - tail;
@@ -90,28 +83,25 @@ static inline bool log_has_capacity(const LogSink& sink, uint32_t chunks) {
 }
 
 static inline bool log_try_push_bytes(LogSink& sink, const char* data, uint32_t len) {
-    if (!sink.ready || !data)
-        return false;
-    if (len == 0)
-        return true;
+    if (!sink.ready || !data) return false;
+    if (len == 0) return true;
 
     const auto chunks = static_cast<uint32_t>(libk::div_round_up(len, MX_RING_INLINE_PAYLOAD));
-    if (!log_has_capacity(sink, chunks))
-        return false;
+    if (!log_has_capacity(sink, chunks)) return false;
 
     // Same chunking as every other byte-stream producer (mochi/ring.h).
     return ring_push_bytes(sink.ring, sink.order, 1, data, len, sink.doorbell) == len;
 }
 
 static inline void log_emit_drop_notice(LogSink& sink) {
-    if (sink.emitting_notice || (sink.dropped == 0 && sink.truncated == 0))
-        return;
+    if (sink.emitting_notice || (sink.dropped == 0 && sink.truncated == 0)) return;
     sink.emitting_notice = true;
 
     char storage[112];
     libk::str::Buffer line(storage);
     log_append_timestamp(line);
-    line.format(" [W] %s: dropped=%llu truncated=%llu\n", sink.component ? sink.component : "mochi",
+    line.format(" [W] %s: dropped=%llu truncated=%llu\n",
+                sink.component ? sink.component : "mochi",
                 static_cast<unsigned long long>(sink.dropped),
                 static_cast<unsigned long long>(sink.truncated));
 
@@ -124,8 +114,7 @@ static inline void log_emit_drop_notice(LogSink& sink) {
 
 static inline void log_emit_bytes(const char* data, uint32_t len) {
     LogSink& sink = default_log_sink();
-    if (!sink.ready)
-        return;
+    if (!sink.ready) return;
     log_emit_drop_notice(sink);
     if (!log_try_push_bytes(sink, data, len)) {
         ++sink.dropped;
@@ -140,34 +129,33 @@ static inline uint32_t log_format_line(char* line, uint32_t cap, LogLevel level,
     out.format(" [%c] %s: ", log_level_char(level), component ? component : "mochi");
 
     constexpr uint32_t kMaxMessageLength = 192;
-    if (!msg)
-        msg = "(null)";
+    if (!msg) msg = "(null)";
     const auto scanned = libk::str::length_n(msg, kMaxMessageLength + 1);
     const auto length = scanned > kMaxMessageLength ? kMaxMessageLength : scanned;
     out.append(msg, length);
-    if (length == 0 || msg[length - 1] != '\n')
-        out.append('\n');
-    if (out_truncated)
-        *out_truncated = out.truncated || scanned > kMaxMessageLength;
+    if (length == 0 || msg[length - 1] != '\n') out.append('\n');
+    if (out_truncated) *out_truncated = out.truncated || scanned > kMaxMessageLength;
     return static_cast<uint32_t>(out.length);
 }
 
 static inline void log_write(LogLevel level, const char* msg) {
     LogSink& sink = default_log_sink();
-    if (!sink.ready)
-        return;
+    if (!sink.ready) return;
 
     char line[256];
     bool truncated = false;
-    const uint32_t n = log_format_line(line, sizeof(line), level, sink.component, msg, &truncated);
-    if (truncated)
-        ++sink.truncated;
+    const uint32_t n = log_format_line(line,
+                                       sizeof(line),
+                                       level,
+                                       sink.component,
+                                       msg,
+                                       &truncated);
+    if (truncated) ++sink.truncated;
     log_emit_bytes(line, n);
 }
 
 static inline void log_raw_marker(const char* msg) {
-    if (!msg)
-        return;
+    if (!msg) return;
     log_write(LogLevel::Info, msg);
 }
 
@@ -175,8 +163,7 @@ static inline void log_counter(const char* key, uint64_t value) {
     char storage[96];
     libk::str::Buffer line(storage);
     line.format("%s=%llu\n", key ? key : "metric", static_cast<unsigned long long>(value));
-    if (line.truncated)
-        ++default_log_sink().truncated;
+    if (line.truncated) ++default_log_sink().truncated;
     log_write(LogLevel::Info, line.data);
 }
 

@@ -7,11 +7,11 @@
 
 #include "midix/abi/types.h"
 
-constexpr mx_u32_t MX_IMAGE_MAGIC = 0x3149584du; // 'MXI1'
+constexpr mx_u32_t MX_IMAGE_MAGIC = 0x3149584du;    // 'MXI1'
 constexpr mx_u16_t MX_IMAGE_VERSION = 1;
 constexpr mx_u32_t MX_IMAGE_ABI_VERSION = 2;
 
-constexpr mx_u32_t MX_BUNDLE_MAGIC = 0x3142584du; // 'MXB1'
+constexpr mx_u32_t MX_BUNDLE_MAGIC = 0x3142584du;   // 'MXB1'
 constexpr mx_u16_t MX_BUNDLE_VERSION = 2;
 
 constexpr mx_u32_t MX_SIGNED_MANIFEST_MAGIC = 0x314d584du; // 'MXM1'
@@ -87,7 +87,7 @@ struct MxBundleHeader {
     mx_u32_t hash_algorithm;
     mx_u32_t signature_algorithm;
     mx_u32_t checksum_algorithm;
-    mx_u8_t reserved[48];
+    mx_u8_t  reserved[48];
 };
 static_assert(sizeof(MxBundleHeader) == 128, "MXB1 header must stay stable");
 
@@ -97,7 +97,7 @@ struct MxBundleObject {
     mx_u64_t offset;
     mx_u64_t size;
     mx_u64_t alignment;
-    mx_u8_t sha256[MX_SHA256_SIZE];
+    mx_u8_t  sha256[MX_SHA256_SIZE];
     mx_u32_t crc32c;
     mx_u32_t flags;
     mx_u64_t reserved;
@@ -116,9 +116,9 @@ struct MxSignedManifestHeader {
     mx_u64_t body_size;
     mx_u64_t signature_offset;
     mx_u64_t signature_size;
-    mx_u8_t body_sha256[MX_SHA256_SIZE];
-    mx_u8_t public_key_id[MX_ED25519_PUBLIC_KEY_SIZE];
-    mx_u8_t reserved[8];
+    mx_u8_t  body_sha256[MX_SHA256_SIZE];
+    mx_u8_t  public_key_id[MX_ED25519_PUBLIC_KEY_SIZE];
+    mx_u8_t  reserved[8];
 };
 static_assert(sizeof(MxSignedManifestHeader) == 128, "MXM1 header must stay stable");
 
@@ -145,7 +145,7 @@ struct MxImageHeader {
     mx_u64_t string_table_size;
     mx_u32_t image_crc32c;
     mx_u32_t checksum_algorithm;
-    mx_u8_t reserved[8];
+    mx_u8_t  reserved[8];
 };
 static_assert(sizeof(MxImageHeader) == 128, "MXI1 header must stay stable");
 
@@ -158,7 +158,7 @@ struct MxImageSegment {
     mx_rights_t rights;
     mx_u32_t flags;
     mx_u32_t reserved0;
-    mx_u8_t reserved[12];
+    mx_u8_t  reserved[12];
 };
 static_assert(sizeof(MxImageSegment) == 64, "MXI1 segment must stay stable");
 
@@ -171,7 +171,7 @@ struct MxImageRequirement {
     mx_u32_t protocol_version;
     mx_u64_t aux0;
     mx_u64_t aux1;
-    mx_u8_t reserved[24];
+    mx_u8_t  reserved[24];
 };
 static_assert(sizeof(MxImageRequirement) == 64, "MXI1 requirement must stay stable");
 
@@ -188,7 +188,7 @@ struct MxPolicyRecord {
     mx_u32_t library_allowlist_offset;
     mx_u32_t cap_grant_offset;
     mx_u32_t cap_grant_count;
-    mx_u8_t reserved[72];
+    mx_u8_t  reserved[72];
 };
 static_assert(sizeof(MxPolicyRecord) == 128, "MX policy record must stay stable");
 
@@ -200,6 +200,6 @@ struct MxPolicyCapGrant {
     mx_u32_t source_offset;
     mx_u64_t aux0;
     mx_u64_t aux1;
-    mx_u8_t reserved[32];
+    mx_u8_t  reserved[32];
 };
 static_assert(sizeof(MxPolicyCapGrant) == 64, "MX policy cap grant must stay stable");

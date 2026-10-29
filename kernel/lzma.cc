@@ -15,13 +15,13 @@ namespace anko::lzma {
 namespace {
 
 constexpr u32 kNumStates = 12;
-constexpr u32 kNumPosStates = 1u << kPb;   // 4
-constexpr u32 kNumLitContexts = 1u << kLc; // 8
+constexpr u32 kNumPosStates = 1u << kPb;             // 4
+constexpr u32 kNumLitContexts = 1u << kLc;           // 8
 constexpr u32 kLitProbs = 0x300;
 constexpr u32 kAlignBits = 4;
-constexpr u32 kAlignSize = 1u << kAlignBits; // 16
+constexpr u32 kAlignSize = 1u << kAlignBits;         // 16
 constexpr u32 kEndPosModelIndex = 14;
-constexpr u32 kNumFullDistances = 1u << (kEndPosModelIndex >> 1); // 128
+constexpr u32 kNumFullDistances = 1u << (kEndPosModelIndex >> 1);   // 128
 constexpr u32 kNumPosSlotProbs = 64;
 constexpr u32 kSpecPosProbs = kNumFullDistances - kEndPosModelIndex; // 114
 constexpr u32 kNumLenToPosStates = 4;
@@ -96,8 +96,7 @@ struct RangeEncoder {
     void encode_direct(u32 value, u32 nbits) {
         for (u32 i = nbits; i > 0; --i) {
             range >>= 1;
-            if ((value >> (i - 1)) & 1u)
-                low += range;
+            if ((value >> (i - 1)) & 1u) low += range;
             while (range < (1u << 24)) {
                 range <<= 8;
                 shift_low();
@@ -106,36 +105,21 @@ struct RangeEncoder {
     }
 
     void flush() {
-        for (u32 i = 0; i < 5; ++i)
-            shift_low();
+        for (u32 i = 0; i < 5; ++i) shift_low();
     }
 };
 
 void reset_probs() {
-    for (auto& row : g_is_match)
-        for (u16& p : row)
-            p = kProbInit;
-    for (u16& p : g_is_rep)
-        p = kProbInit;
-    for (auto& row : g_literal)
-        for (u16& p : row)
-            p = kProbInit;
+    for (auto& row : g_is_match) for (u16& p : row) p = kProbInit;
+    for (u16& p : g_is_rep) p = kProbInit;
+    for (auto& row : g_literal) for (u16& p : row) p = kProbInit;
     g_len_choice = g_len_choice2 = kProbInit;
-    for (auto& row : g_len_low)
-        for (u16& p : row)
-            p = kProbInit;
-    for (auto& row : g_len_mid)
-        for (u16& p : row)
-            p = kProbInit;
-    for (u16& p : g_len_high)
-        p = kProbInit;
-    for (auto& row : g_pos_slot)
-        for (u16& p : row)
-            p = kProbInit;
-    for (u16& p : g_spec_pos)
-        p = kProbInit;
-    for (u16& p : g_align)
-        p = kProbInit;
+    for (auto& row : g_len_low) for (u16& p : row) p = kProbInit;
+    for (auto& row : g_len_mid) for (u16& p : row) p = kProbInit;
+    for (u16& p : g_len_high) p = kProbInit;
+    for (auto& row : g_pos_slot) for (u16& p : row) p = kProbInit;
+    for (u16& p : g_spec_pos) p = kProbInit;
+    for (u16& p : g_align) p = kProbInit;
 }
 
 void tree_encode(RangeEncoder& rc, u16* probs, u32 nbits, u32 symbol) {
@@ -201,19 +185,16 @@ void encode_len(RangeEncoder& rc, u32 len, u32 pos_state) {
 }
 
 u32 pos_slot_of(u32 dist) {
-    if (dist < 4)
-        return dist;
+    if (dist < 4) return dist;
     u32 bits = 0;
-    while ((dist >> bits) > 1u)
-        ++bits; // index of the highest set bit
+    while ((dist >> bits) > 1u) ++bits;   // index of the highest set bit
     return (bits << 1) + ((dist >> (bits - 1)) & 1u);
 }
 
 void encode_distance(RangeEncoder& rc, u32 dist, u32 len_to_pos_state) {
     const u32 slot = pos_slot_of(dist);
     tree_encode(rc, g_pos_slot[len_to_pos_state], 6, slot);
-    if (slot < 4)
-        return;
+    if (slot < 4) return;
     const u32 footer = (slot >> 1) - 1u;
     const u32 base = (2u | (slot & 1u)) << footer;
     const u32 reduced = dist - base;
@@ -227,13 +208,10 @@ void encode_distance(RangeEncoder& rc, u32 dist, u32 len_to_pos_state) {
 
 } // namespace
 
-u32 bound(u32 input_len) {
-    return input_len + input_len / 8u + 64u;
-}
+u32 bound(u32 input_len) { return input_len + input_len / 8u + 64u; }
 
 u32 compress(const u8* data, u32 len, u8* out, u32 cap) {
-    if (!data || len == 0 || !out || cap == 0)
-        return 0;
+    if (!data || len == 0 || !out || cap == 0) return 0;
     g_data = data;
     reset_probs();
 
@@ -255,13 +233,11 @@ u32 compress(const u8* data, u32 len, u8* out, u32 cap) {
         u32 best_dist = 0;
         for (u32 back = 1; back <= window; ++back) {
             u32 l = 0;
-            while (l < max_len && data[pos - back + l] == data[pos + l])
-                ++l;
+            while (l < max_len && data[pos - back + l] == data[pos + l]) ++l;
             if (l > best_len) {
                 best_len = l;
                 best_dist = back;
-                if (l == max_len)
-                    break;
+                if (l == max_len) break;
             }
         }
 
@@ -289,8 +265,7 @@ u32 compress(const u8* data, u32 len, u8* out, u32 cap) {
     }
 
     rc.flush();
-    if (rc.overflow)
-        return 0;
+    if (rc.overflow) return 0;
     return rc.len;
 }
 

@@ -18,11 +18,9 @@ struct InboxWait {
     // compare-and-sleep in the kernel. Both kinds of wake survive that gap.
     // deadline == 0 means no timer; expiry is a normal wake to recheck policy.
     mx_status_t wait(uint64_t expected, uint64_t deadline = 0) const {
-        if (!doorbell)
-            return MX_ERR_INVALID;
+        if (!doorbell) return MX_ERR_INVALID;
         for (uint32_t i = 0; i < count; ++i) {
-            if (!rings[i])
-                continue;
+            if (!rings[i]) continue;
             ring_publish_sleep(rings[i], expected);
         }
         bool pending = false;

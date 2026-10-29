@@ -51,15 +51,18 @@ struct MxBootEntryTypeName {
     const char* name;
 };
 inline constexpr MxBootEntryTypeName kMxBootEntryTypeNames[] = {
-    {MX_BOOT_ENTRY_NONE, "none"},         {MX_BOOT_ENTRY_HANDLE, "handle"},
-    {MX_BOOT_ENTRY_RING, "ring"},         {MX_BOOT_ENTRY_DOORBELL, "doorbell"},
-    {MX_BOOT_ENTRY_MMIO, "mmio"},         {MX_BOOT_ENTRY_ARENA, "arena"},
-    {MX_BOOT_ENTRY_ENDPOINT, "endpoint"}, {MX_BOOT_ENTRY_VALUE, "value"},
+    {MX_BOOT_ENTRY_NONE, "none"},
+    {MX_BOOT_ENTRY_HANDLE, "handle"},
+    {MX_BOOT_ENTRY_RING, "ring"},
+    {MX_BOOT_ENTRY_DOORBELL, "doorbell"},
+    {MX_BOOT_ENTRY_MMIO, "mmio"},
+    {MX_BOOT_ENTRY_ARENA, "arena"},
+    {MX_BOOT_ENTRY_ENDPOINT, "endpoint"},
+    {MX_BOOT_ENTRY_VALUE, "value"},
 };
 inline const char* mx_boot_entry_type_name(mx_u32_t type) {
     for (const MxBootEntryTypeName& row : kMxBootEntryTypeNames) {
-        if (row.type == type)
-            return row.name;
+        if (row.type == type) return row.name;
     }
     return "unknown";
 }

@@ -4,7 +4,7 @@
 
 extern "C" char __text_start[], __kernel_end[];
 extern "C" void boot_cache_restore(const u64* state, u64 kernel_begin, u64 kernel_end,
-                                   u64 dtb_begin, u64 dtb_end);
+                                    u64 dtb_begin, u64 dtb_end);
 
 namespace mm {
 namespace {
@@ -18,7 +18,7 @@ void invalidate(u64 begin, u64 end) {
     asm volatile("mrs %0, ctr_el0" : "=r"(ctr));
     const u64 line = 4ull << ((ctr >> 16) & 15);
     for (u64 p = begin & ~(line - 1); p < end; p += line) {
-        asm volatile("dc ivac, %0" ::"r"(p) : "memory");
+        asm volatile("dc ivac, %0" :: "r"(p) : "memory");
     }
 }
 } // namespace
@@ -29,16 +29,13 @@ BootDtbCache::BootDtbCache(PhysAddr dtb) {
     u64 sctlr, daif;
     asm volatile("mrs %0, sctlr_el1; mrs %1, daif" : "=r"(sctlr), "=r"(daif));
     if ((sctlr & 5) || (daif & 0x3c0) != 0x3c0 || !dtb || (dtb & 3) ||
-        dtb > boot_cache::kLimit - 40)
-        return;
+        dtb > boot_cache::kLimit - 40) return;
     const auto* bytes = reinterpret_cast<const u8*>(dtb);
-    if (libk::be32(bytes) != fdt::kMagic)
-        return;
+    if (libk::be32(bytes) != fdt::kMagic) return;
     const u32 size = libk::be32(bytes + 4);
     if (size < 40 || size > 16 * 1024 * 1024 ||
         !boot_cache::build(tables, reinterpret_cast<u64>(__text_start),
-                           reinterpret_cast<u64>(__kernel_end), dtb, size))
-        return;
+                           reinterpret_cast<u64>(__kernel_end), dtb, size)) return;
 
     saved[0] = sctlr;
     asm volatile("mrs %0, tcr_el1; mrs %1, mair_el1; mrs %2, ttbr0_el1; mrs %3, ttbr1_el1"
@@ -52,8 +49,8 @@ BootDtbCache::BootDtbCache(PhysAddr dtb) {
     invalidate(reinterpret_cast<u64>(__text_start), reinterpret_cast<u64>(__kernel_end));
     invalidate(blob_begin, blob_end);
     constexpr u64 mair = 0x00ff; // Normal WBWA [0], Device-nGnRnE [1]
-    constexpr u64 tcr = 16ull | (1ull << 8) | (1ull << 10) | (3ull << 12) | (1ull << 23) |
-                        (2ull << 32); // 48-bit VA, 4K, EPD1, 40-bit PA
+    constexpr u64 tcr = 16ull | (1ull << 8) | (1ull << 10) | (3ull << 12) |
+                        (1ull << 23) | (2ull << 32); // 48-bit VA, 4K, EPD1, 40-bit PA
     asm volatile("dsb sy\n"
                  "msr mair_el1, %0\n"
                  "msr tcr_el1, %1\n"
@@ -64,8 +61,8 @@ BootDtbCache::BootDtbCache(PhysAddr dtb) {
                  "dsb sy\n"
                  "isb\n"
                  "msr sctlr_el1, %3\n"
-                 "isb\n" ::"r"(mair),
-                 "r"(tcr), "r"(&tables), "r"(sctlr | 0x1005)
+                 "isb\n"
+                 :: "r"(mair), "r"(tcr), "r"(&tables), "r"(sctlr | 0x1005)
                  : "memory");
     active_ = true;
 }

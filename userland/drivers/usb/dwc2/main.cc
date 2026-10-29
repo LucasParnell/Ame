@@ -39,9 +39,7 @@ bool transition(Runtime& r) {
         if (r.role == MxUsbRole::Host && !r.host.quiesce()) {
             return true;
         }
-        if (r.role == MxUsbRole::Device) {
-            r.device.quiesce();
-        }
+        if (r.role == MxUsbRole::Device && !r.device.quiesce()) return true;
         if (r.role == MxUsbRole::Detached && r.desired == MxUsbRole::Detached) {
             r.stage = TransitionStep::Complete;
         } else {
@@ -165,14 +163,13 @@ extern "C" [[noreturn]] void _start() {
              mochi::message_get(slot, &request, MX_ROLE_QUERY))) {
             r->reply = {request.id, MX_OK, 0, 0, 0};
             if (slot.type == MX_ROLE_QUERY) {
-                if (request.reserved || request.value)
-                    r->reply.status = MX_ERR_INVALID;
+                if (request.reserved || request.value) r->reply.status = MX_ERR_INVALID;
                 r->reply.value = static_cast<mx_u32_t>(r->host.sequence);
                 r->reply.flags = (r->host.active ? MX_ROLE_HOST_ACTIVE : 0u) |
-                                 (r->host.connected ? MX_ROLE_DATA_CONNECTED : 0u);
+                                  (r->host.connected ? MX_ROLE_DATA_CONNECTED : 0u);
                 r->pending = true;
             } else if (request.reserved || request.value > 2 ||
-                       (r->role != MxUsbRole::Detached && request.value)) {
+                (r->role != MxUsbRole::Detached && request.value)) {
                 r->reply.status = MX_ERR_BUSY;
                 r->pending = true;
             } else {

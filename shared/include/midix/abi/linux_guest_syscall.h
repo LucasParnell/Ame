@@ -99,8 +99,7 @@ static inline long mx_ioctl(int fd, unsigned long request, void* arg) {
     return mx_syscall6(MX_NR_IOCTL, fd, (long)request, (long)arg, 0, 0, 0);
 }
 
-static inline long mx_mmap(void* addr, unsigned long len, int prot, int flags, int fd,
-                           long offset) {
+static inline long mx_mmap(void* addr, unsigned long len, int prot, int flags, int fd, long offset) {
     return mx_syscall6(MX_NR_MMAP, (long)addr, (long)len, prot, flags, fd, offset);
 }
 

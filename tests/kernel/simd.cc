@@ -6,10 +6,7 @@
 #include "libk/str.h"
 
 namespace {
-struct alignas(16) State {
-    uint64_t v[32][2];
-    uint32_t fpsr, fpcr;
-};
+struct alignas(16) State { uint64_t v[32][2]; uint32_t fpsr, fpcr; };
 extern "C" void test_simd_seed(uint64_t seed, uint64_t fpcr, uint64_t fpsr);
 extern "C" void test_simd_capture(State* state);
 CapHandle completion, park, migrate_gate;
@@ -21,23 +18,17 @@ uint64_t witness[10];
     sys_debug_puts("TEST FAILED: SIMD ", 18);
     sys_debug_puts(message, libk::str::length(message));
     sys_debug_puts("\n", 1);
-    for (;;)
-        sys_yield();
+    for (;;) sys_yield();
 }
-void check(bool condition, const char* message) {
-    if (!condition)
-        fail(message);
-}
+void check(bool condition, const char* message) { if (!condition) fail(message); }
 void zero_state() {
-    State state;
-    test_simd_capture(&state);
+    State state; test_simd_capture(&state);
     for (const auto& reg : state.v)
         check(!reg[0] && !reg[1], "new thread inherited vector data");
     check(!state.fpcr && !state.fpsr, "new thread inherited control/status");
 }
 void verify(uint64_t seed, uint32_t fpcr, uint32_t fpsr) {
-    State state;
-    test_simd_capture(&state);
+    State state; test_simd_capture(&state);
     for (uint32_t i = 0; i < 32; ++i) {
         const uint64_t expected = ((seed + i) & 255) * 0x0101010101010101ull;
         check(state.v[i][0] == expected && state.v[i][1] == expected, "vector register corruption");
@@ -60,14 +51,12 @@ void worker(uint64_t id) {
         // leaving the final preemption assertion dependent on IRQ phase. Give
         // every worker one sustained computation before the shorter rounds.
         const uint32_t iterations = round == 0 ? 10000000 : 100000;
-        for (uint32_t i = 0; i < iterations; ++i)
-            sum = sum * 6364136223846793005ull + i;
+        for (uint32_t i = 0; i < iterations; ++i) sum = sum * 6364136223846793005ull + i;
         witness[id] = sum;
         verify(seed, fpcr, fpsr);
         if (!(round % 8)) {
             const auto expected = sys_doorbell_read(worker_park[id]);
-            check(mx_doorbell_wait_until(worker_park[id], expected, mx_clock_ns() + 200000) ==
-                      MX_OK,
+            check(mx_doorbell_wait_until(worker_park[id], expected, mx_clock_ns() + 200000) == MX_OK,
                   "timed blocking wait");
             verify(seed, fpcr, fpsr);
         }
@@ -75,8 +64,7 @@ void worker(uint64_t id) {
     __atomic_fetch_add(&completed, 1u, __ATOMIC_RELEASE);
     sys_notify(completion);
     sys_thread_exit(0);
-    for (;;)
-        sys_yield();
+    for (;;) sys_yield();
 }
 void migrator(uint64_t) {
     zero_state();
@@ -93,56 +81,46 @@ void migrator(uint64_t) {
     __atomic_store_n(&phase, cpu_count * 2 + 1, __ATOMIC_RELEASE);
     sys_notify(completion);
     sys_thread_exit(0);
-    for (;;)
-        sys_yield();
+    for (;;) sys_yield();
 }
 CapHandle create(void (*entry)(uint64_t), uint64_t id, uint32_t cpu) {
-    const auto thread =
-        sys_thread_create(0, reinterpret_cast<uint64_t>(entry), id, MX_THREAD_SUSPENDED);
+    const auto thread = sys_thread_create(0, reinterpret_cast<uint64_t>(entry), id, MX_THREAD_SUSPENDED);
     check(thread > 0, "thread create");
     check(!sys_sched_context_bind_thread(thread, contexts[cpu]), "initial context binding");
     check(!sys_thread_resume(thread), "thread resume");
     return thread;
 }
-} // namespace
+}
 extern "C" [[noreturn]] void _start() {
     zero_state();
     const auto* boot = mochi::boot::map();
     const auto* count = mochi::boot::find(boot, "cpu.count");
     check(count && count->aux0 && count->aux0 <= 8, "CPU count");
     cpu_count = count->aux0;
-    completion = sys_doorbell_create();
-    park = sys_doorbell_create();
-    migrate_gate = sys_doorbell_create();
+    completion = sys_doorbell_create(); park = sys_doorbell_create(); migrate_gate = sys_doorbell_create();
     check(completion && park && migrate_gate, "doorbell create");
     for (uint32_t cpu = 0; cpu < cpu_count; ++cpu) {
         dango::SchedContext context{};
-        context.band = dango::SCHED_BAND_LATENCY;
-        context.weight = 1024;
-        context.core_mask = uint64_t{1} << cpu;
-        context.home_cpu = cpu;
+        context.band = dango::SCHED_BAND_LATENCY; context.weight = 1024;
+        context.core_mask = uint64_t{1} << cpu; context.home_cpu = cpu;
         const auto cap = sys_sched_context_create(&context, sizeof(context));
-        check(cap > 0, "context create");
-        contexts[cpu] = cap;
+        check(cap > 0, "context create"); contexts[cpu] = cap;
     }
     // At least two contenders on CPU0, plus a pattern holder on every CPU.
     for (uint32_t id = 0; id < cpu_count + 1; ++id) {
         const auto bell = sys_doorbell_create();
-        check(bell > 0, "worker doorbell");
-        worker_park[id] = bell;
+        check(bell > 0, "worker doorbell"); worker_park[id] = bell;
         create(worker, id, id % cpu_count);
     }
     for (;;) {
         const auto expected = sys_doorbell_read(completion);
-        if (__atomic_load_n(&completed, __ATOMIC_ACQUIRE) == cpu_count + 1)
-            break;
+        if (__atomic_load_n(&completed, __ATOMIC_ACQUIRE) == cpu_count + 1) break;
         check(!sys_wait_doorbell(completion, expected), "completion wait");
     }
     // A new thread created after the pattern holders still starts clean.
     const auto thread = create(migrator, 0, 0);
     for (uint32_t turn = 0; turn < cpu_count * 2; ++turn) {
-        while (__atomic_load_n(&phase, __ATOMIC_ACQUIRE) != turn + 1)
-            sys_yield();
+        while (__atomic_load_n(&phase, __ATOMIC_ACQUIRE) != turn + 1) sys_yield();
         const auto destination = (turn + 1) % cpu_count;
         const auto deadline = mx_clock_ns() + 2000000000ull;
         mx_status_t rc;
@@ -150,26 +128,22 @@ extern "C" [[noreturn]] void _start() {
         // and released execution ownership on its old CPU.
         do {
             rc = sys_sched_context_bind_thread(thread, contexts[destination]);
-            if (rc == MX_OK)
-                break;
+            if (rc == MX_OK) break;
             check(rc == MX_ERR_BUSY && mx_clock_ns() < deadline, "migration binding");
             sys_yield();
         } while (true);
         __atomic_store_n(&target_cpu, destination, __ATOMIC_RELEASE);
         check(!sys_notify(migrate_gate), "migration notify");
     }
-    while (__atomic_load_n(&phase, __ATOMIC_ACQUIRE) != cpu_count * 2 + 1)
-        sys_yield();
+    while (__atomic_load_n(&phase, __ATOMIC_ACQUIRE) != cpu_count * 2 + 1) sys_yield();
     uint64_t preempts = 0;
     for (uint32_t cpu = 0; cpu < cpu_count; ++cpu) {
         MxDiagCpu info{};
-        check(sys_debug_read(MX_DIAG_CPU, cpu, &info, sizeof(info)) == sizeof(info),
-              "CPU diagnostics");
+        check(sys_debug_read(MX_DIAG_CPU, cpu, &info, sizeof(info)) == sizeof(info), "CPU diagnostics");
         preempts += info.timer_preempts;
     }
     check(preempts != 0, "workload did not exercise timer preemption");
     const char marker[] = "userland SIMD regression passed\n";
     sys_debug_puts(marker, sizeof(marker) - 1);
-    for (;;)
-        sys_wait_doorbell(park, sys_doorbell_read(park));
+    for (;;) sys_wait_doorbell(park, sys_doorbell_read(park));
 }

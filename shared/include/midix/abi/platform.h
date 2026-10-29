@@ -20,14 +20,20 @@ enum MxPlatformOp : mx_u32_t {
     // Read-only: argument is one of SYSTEM_OFF/RESET/FASTBOOT. Returns status
     // before init stops services; unsupported transitions must leave them live.
     MX_PLATFORM_SYSTEM_CHECK = 13,
+    MX_PLATFORM_GPU_RATE = 14,      // arg=0: observed MHz; 120/240/360/480: firmware DVFS request
+    MX_PLATFORM_DISPLAY_BIND0 = 15, // arg=owned CAP_ARENA; fixed 512x512 RGB geometry
+    MX_PLATFORM_DISPLAY_BIND1 = 16,
+    MX_PLATFORM_DISPLAY_FLIP = 17,    // arg=0/1; BUSY until a fresh display timing edge
+    MX_PLATFORM_DISPLAY_RESTORE = 18, // arg=0; same completion/retirement rule
+    MX_PLATFORM_DISPLAY_STATUS = 19,  // ready/live/fault bits, completed transitions above bit 7
     // Exclusive charger observer publishes two raw bytes (STATUS0, CHG_REG0).
-    MX_PLATFORM_CHARGER_SAMPLE = 14,
-    MX_PLATFORM_CHARGER_INVALIDATE = 15,
+    MX_PLATFORM_CHARGER_SAMPLE = 20,
+    MX_PLATFORM_CHARGER_INVALIDATE = 21,
     // System owner: upper 32 bits = frequency domain, lower 32 = requested kHz.
-    MX_PLATFORM_CPU_FREQUENCY = 16,
+    MX_PLATFORM_CPU_FREQUENCY = 22,
     // Exclusive eMMC owner, arg=0: inspect fixed board clock/gate/reset fields.
     // Returns the active input frequency in Hz, or a negative status.
-    MX_PLATFORM_EMMC_CLOCK = 17,
+    MX_PLATFORM_EMMC_CLOCK = 23,
 };
 constexpr mx_u32_t MX_ANNE_USB_RESETS = (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) |
                                         (1u << 12) | (1u << 13) | (1u << 14) | (1u << 27);

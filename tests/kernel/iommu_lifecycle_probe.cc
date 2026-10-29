@@ -73,14 +73,10 @@ bool owner_query(void*, PhysAddr pa, iommu::PageOwnership* out) {
 }
 
 int g_release_calls = 0;
-void owner_release(void*, PhysAddr, u64) {
-    ++g_release_calls;
-}
+void owner_release(void*, PhysAddr, u64) { ++g_release_calls; }
 
 bool g_sync_fail = false;
-SysError be_sync(void*) {
-    return g_sync_fail ? E_FAULT : E_OK;
-}
+SysError be_sync(void*) { return g_sync_fail ? E_FAULT : E_OK; }
 
 iommu::IommuOwnerOps owner_ops() {
     iommu::IommuOwnerOps ops{};
@@ -113,8 +109,7 @@ iommu::IommuDomain* create_domain(u32* out_index) {
     iommu::IommuDomain* d = nullptr;
     assert(iommu::domain_create(kOwner, owner_ops(), backend_ops(), &d) == E_OK);
     assert(d);
-    if (out_index)
-        *out_index = iommu::domain_index(*d);
+    if (out_index) *out_index = iommu::domain_index(*d);
     return d;
 }
 } // namespace
@@ -140,7 +135,8 @@ int main() {
     u32 quarantined_index = 0;
     {
         iommu::IommuDomain* d = create_domain(&quarantined_index);
-        const iommu::IommuMap mm = make_map(0x6000'0000, g_owned_page, PAGE_SIZE, kPermRW);
+        const iommu::IommuMap mm =
+            make_map(0x6000'0000, g_owned_page, PAGE_SIZE, kPermRW);
         assert(iommu::domain_map_batch(*d, &mm, 1) == E_OK);
 
         const int releases0 = g_release_calls;
@@ -178,7 +174,8 @@ int main() {
         assert(filled == iommu::kMaxIommuDomains - 2);
 
         // A quarantined context can never accept new translations.
-        const iommu::IommuMap again = make_map(0x6000'0000, g_owned_page, PAGE_SIZE, kPermRW);
+        const iommu::IommuMap again =
+            make_map(0x6000'0000, g_owned_page, PAGE_SIZE, kPermRW);
         assert(iommu::domain_map_batch(*d, &again, 1) == E_PERM);
 
         // (d) Once the backend is provably quiesced the slot is reclaimed once.
@@ -204,7 +201,8 @@ int main() {
         assert(iommu::stream_domain(dev) == d);
         assert(iommu::domain_detach(*d, dev) == E_OK);
         assert(iommu::stream_domain(dev) == iommu::quarantine_domain());
-        const iommu::IommuMap qm = make_map(0x6000'0000, g_owned_page, PAGE_SIZE, kPermRW);
+        const iommu::IommuMap qm =
+            make_map(0x6000'0000, g_owned_page, PAGE_SIZE, kPermRW);
         assert(iommu::domain_map_batch(*iommu::quarantine_domain(), &qm, 1) == E_PERM);
         iommu::domain_destroy(d);
     }

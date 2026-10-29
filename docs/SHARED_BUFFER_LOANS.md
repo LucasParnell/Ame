@@ -22,7 +22,7 @@ a `LoanWriter` or `LoanReader`; check `valid()` before use. Reserve a page-align
 mapping window large enough for the arena. Pools support up
 to 64 slots. Slots have a cache-line-aligned stride; the app factory rounds the
 requested maximum buffer size upward. Allocation remains subject to the kernel's
-arena limit (currently 256 KiB). The factory returns allocation errors rather
+arena limit (currently 1 MiB). The factory returns allocation errors rather
 than silently shrinking the pool.
 
 ```cpp

@@ -15,42 +15,42 @@
 //
 // init is policy. The kernel does not know service names (spec §11).
 
-#include "mochi/syscall.h"
-#include "mochi/state.h"
 #include "libk/bytes.h"
 #include "libk/endian.h"
-#include "libk/text.h"
 #include "libk/str.h"
-#include "midix/abi/session.h"
+#include "libk/text.h"
 #include "midix/abi/platform.h"
-#include "mochi/boot.h"
-#include "midix/format/json.h"
+#include "midix/abi/session.h"
 #include "midix/format/bundle.h"
 #include "midix/format/integrity.h"
+#include "midix/format/json.h"
+#include "mochi/boot.h"
+#include "mochi/state.h"
+#include "mochi/syscall.h"
 using integrity::bytes_equal;
 using integrity::sha256;
-#include "mochi/ring.h"
-#include "mochi/inbox.h"
-#include "midix/abi/protocols/fido2.h"
-#include "mochi/log.h"
-#include "mochi/fs.h"
-#include "mochi/ipc_profile.h"
 #include "ipc_profile_blob.h"
-#include "mochi/console_config.h"
-#include "midix/abi/dango_guest_layout.h" // guest layout: VA spans
-#include "mochi/svc_registry.h"
-#include "mochi/svc_control.h"
 #include "midix/abi/boot.h"
-#include "midix/abi/service.h"
-#include "midix/abi/image.h"
-#include "midix/abi/protocols/nameservice.h"
-#include "midix/abi/protocols/fs.h"
+#include "midix/abi/cpu_limits.h"
+#include "midix/abi/dango_guest_layout.h" // guest layout: VA spans
 #include "midix/abi/diagnostics.h"
+#include "midix/abi/image.h"
+#include "midix/abi/protocols/fido2.h"
+#include "midix/abi/protocols/fs.h"
 #include "midix/abi/protocols/gpu_service.h"
+#include "midix/abi/protocols/nameservice.h"
+#include "midix/abi/service.h"
+#include "mochi/console_config.h"
+#include "mochi/fs.h"
+#include "mochi/inbox.h"
+#include "mochi/ipc_profile.h"
+#include "mochi/log.h"
+#include "mochi/ring.h"
+#include "mochi/svc_control.h"
+#include "mochi/svc_registry.h"
+#include "mochi/va_layout.h"
 #include "supervision.h"
 #include "system_channels.h"
-#include "mochi/va_layout.h"
-#include "midix/abi/cpu_limits.h"
 
 constexpr uint32_t PRINCIPAL_NATIVE_TRUSTED = 1;
 constexpr uint32_t PRINCIPAL_NATIVE_SANDBOXED = 2;
@@ -69,6 +69,7 @@ static CapHandle kCapManifest, kCapInitrd, kCapSupervisor, kCapUart;
 static CapHandle kCapSystemControl = kNullCap;
 static CapHandle kCapVmRoot, kCapLogDoorbell, kCapFbMemory, kCapXhciMmio, kCapXhciIrq, kCapXhciDma;
 static CapHandle kCapVirtioBlkMmio, kCapVirtioBlkDma;
+static CapHandle kCapGpuPlatform;
 static CapHandle kCapGpuFunction, kCapGpuIrq; // Phase E: appliance GPU authority
 constexpr uint32_t kKernelLogRingCount = MX_HOST_MAX_CPUS;
 static CapHandle kKernelLogRings[kKernelLogRingCount];
@@ -76,6 +77,7 @@ static uint64_t g_manifest_size = 0;
 static uint64_t g_bundle_size = 0;
 static uint32_t g_cpu_count = 1;
 static uint64_t g_cpu_mask = 1;
+static uint64_t g_fb_offset = 0;
 static int64_t set_service_affinity(CapHandle thread, uint64_t preferred) {
     return sys_thread_set_affinity(thread, (preferred & g_cpu_mask) ? (preferred & g_cpu_mask)
                                                                     : g_cpu_mask);
@@ -97,8 +99,8 @@ struct ProfMailbox {
 constexpr uint32_t kProfIdle = 0, kProfLoad = 1, kProfStore = 2;
 constexpr mx_vaddr_t kProfStoreVa = 0x1b000000, kProfLoadVa = 0x1b010000;
 static CapHandle g_prof_load, g_prof_store, g_prof_req, g_prof_ack;
-static ProfMailbox* g_prof_store_va = nullptr;
-static ProfMailbox* g_prof_load_va = nullptr;
+static ProfMailbox *g_prof_store_va = nullptr;
+static ProfMailbox *g_prof_load_va = nullptr;
 static bool g_profile_synced = false;
 static bool g_profile_learned = false;
 static uint64_t g_boot_ns = 0;
@@ -112,7 +114,7 @@ struct ServiceSpec {
     char principal[24];
     char restart[16];
     char caps[64];
-    const uint8_t* image_data;
+    const uint8_t *image_data;
     uint64_t image_size;
     CapHandle image_arena;
     CapHandle proc;
@@ -143,17 +145,17 @@ struct ServiceSpec {
     bool stopping;
     CapHandle log_ring;
     CapHandle boot_arena;
-    MxBootInfo* boot_info;
+    MxBootInfo *boot_info;
     uint8_t image_sha256[MX_SHA256_SIZE];
     bool image_sha256_valid;
 };
-static void wire_profiler(ServiceSpec& svc);
+static void wire_profiler(ServiceSpec &svc);
 
 struct InitRuntime {
-    const MxBootInfo* boot;
-    ServiceSpec* services;
+    const MxBootInfo *boot;
+    ServiceSpec *services;
     uint32_t service_count;
-    mochi::svc::RegistryPage* svc_registry;
+    mochi::svc::RegistryPage *svc_registry;
     CapHandle svc_registry_cap;
 
     struct Channel {
@@ -179,54 +181,57 @@ struct InitRuntime {
 
 static InitRuntime g_rt{};
 
-static CapHandle channel(ChannelId id) {
-    return g_rt.channels[static_cast<unsigned>(id)].handle;
-}
+static CapHandle channel(ChannelId id) { return g_rt.channels[static_cast<unsigned>(id)].handle; }
 
-static int channel_index(const char* name) {
+static int channel_index(const char *name) {
     for (unsigned i = 0; i < static_cast<unsigned>(ChannelId::count); ++i) {
-        if (libk::str::equal(name, kChannelNames[i].name))
+        if (libk::str::equal(name, kChannelNames[i].name)) {
             return static_cast<int>(i);
+        }
     }
     return -1;
 }
 
-static uint32_t slen(const char* s) {
-    return static_cast<uint32_t>(libk::str::length(s));
-}
+static uint32_t slen(const char *s) { return static_cast<uint32_t>(libk::str::length(s)); }
 
-static bool streq(const char* a, const char* b) {
-    return libk::str::equal(a, b);
-}
+static bool streq(const char *a, const char *b) { return libk::str::equal(a, b); }
 
-static bool parse_service_bindings(midix::json::Value obj, ServiceSpec& svc) {
+static bool parse_service_bindings(midix::json::Value obj, ServiceSpec &svc) {
     using namespace midix;
     uint64_t cpu = 0;
     auto affinity = json::member(obj, "affinity");
-    if (affinity && (!json::number(affinity, cpu) || cpu >= 64))
+    if (affinity && (!json::number(affinity, cpu) || cpu >= 64)) {
         return false;
+    }
     svc.affinity = affinity ? (uint64_t{1} << cpu) : 0;
     auto bindings = json::member(obj, "bindings");
-    if (bindings && *bindings.begin != '[')
+    if (bindings && *bindings.begin != '[') {
         return false;
+    }
     for (uint32_t i = 0;; ++i) {
         auto binding = json::element(bindings, i);
-        if (!binding)
+        if (!binding) {
             break;
-        if (i >= sizeof(svc.bindings) / sizeof(svc.bindings[0]))
+        }
+        if (i >= sizeof(svc.bindings) / sizeof(svc.bindings[0])) {
             return false;
-        auto& grant = svc.bindings[i];
+        }
+        auto &grant = svc.bindings[i];
         char channel_name[48];
         if (!json::string(json::member(binding, "name"), grant.name, sizeof(grant.name)) ||
-            !grant.name[0])
+            !grant.name[0]) {
             return false;
-        for (uint32_t j = 0; j < i; ++j)
-            if (streq(svc.bindings[j].name, grant.name))
+        }
+        for (uint32_t j = 0; j < i; ++j) {
+            if (streq(svc.bindings[j].name, grant.name)) {
                 return false;
+            }
+        }
         if (const auto value = json::member(binding, "value")) {
             if (json::member(binding, "boot") || json::member(binding, "channel") ||
-                !json::number(value, grant.value))
+                !json::number(value, grant.value)) {
                 return false;
+            }
             grant.is_value = true;
             ++svc.binding_count;
             continue;
@@ -236,21 +241,26 @@ static bool parse_service_bindings(midix::json::Value obj, ServiceSpec& svc) {
         if (resource) {
             if (json::member(binding, "channel") ||
                 !json::string(json::member(binding, "boot"), grant.resource,
-                              sizeof(grant.resource)))
+                              sizeof(grant.resource))) {
                 return false;
+            }
         } else {
-            if (!json::string(json::member(binding, "channel"), channel_name, sizeof(channel_name)))
+            if (!json::string(json::member(binding, "channel"), channel_name,
+                              sizeof(channel_name))) {
                 return false;
+            }
             index = channel_index(channel_name);
-            if (index < 0)
+            if (index < 0) {
                 return false;
+            }
         }
         grant.channel = static_cast<uint32_t>(index);
         auto rights = json::member(binding, "rights");
-        if (!rights || *rights.begin != '[')
+        if (!rights || *rights.begin != '[') {
             return false;
+        }
         struct NamedRight {
-            const char* name;
+            const char *name;
             uint32_t value;
             bool ring;
         };
@@ -260,52 +270,60 @@ static bool parse_service_bindings(midix::json::Value obj, ServiceSpec& svc) {
         };
         for (uint32_t j = 0;; ++j) {
             auto right = json::element(rights, j);
-            if (!right)
+            if (!right) {
                 break;
+            }
             uint32_t value = json::equals(right, "duplicate") ? RIGHT_DUP : 0;
-            for (const auto& known : named_rights) {
+            for (const auto &known : named_rights) {
                 if ((resource || known.ring == (kChannelNames[index].ring ||
                                                 kChannelNames[index].arena_bytes)) &&
                     json::equals(right, known.name)) {
                     value = known.value;
                 }
             }
-            if (!value || (grant.rights & value))
+            if (!value || (grant.rights & value)) {
                 return false;
+            }
             grant.rights |= value;
         }
-        if (!grant.rights)
+        if (!grant.rights) {
             return false;
+        }
         ++svc.binding_count;
     }
     return true;
 }
 
-static uint32_t parse_manifest_json_services(const char* manifest, ServiceSpec* out) {
+static uint32_t parse_manifest_json_services(const char *manifest, ServiceSpec *out) {
     using namespace midix;
-    if (!g_manifest_size || g_manifest_size > kManifestScanLimit || manifest[g_manifest_size - 1])
+    if (!g_manifest_size || g_manifest_size > kManifestScanLimit || manifest[g_manifest_size - 1]) {
         return 0;
+    }
     // Duplicate-key rejection costs ~11x the parse itself. These bytes were
     // signature-verified by the kernel and mksystem.py refuses duplicate keys,
     // so the structural scan buys nothing here.
     auto doc = json::parse(manifest, g_manifest_size - 1, false);
     uint64_t schema = 0;
-    if (!doc || !json::number(json::member(doc, "schema"), schema) || schema != 2)
+    if (!doc || !json::number(json::member(doc, "schema"), schema) || schema != 2) {
         return 0;
+    }
     auto entries = json::member(doc, "services");
-    if (!entries || *entries.begin != '[')
+    if (!entries || *entries.begin != '[') {
         return 0;
+    }
     uint32_t count = 0;
-    const char* cursor = json::array_cursor(entries);
+    const char *cursor = json::array_cursor(entries);
     for (; count < kMaxManifestServices; ++count) {
         midix::json::Value obj;
-        if (!json::array_next(cursor, entries, obj))
+        if (!json::array_next(cursor, entries, obj)) {
             return count;
-        auto& svc = out[count];
+        }
+        auto &svc = out[count];
         auto activation = json::member(obj, "activation");
         if (activation && !json::equals(activation, "boot") &&
-            !json::equals(activation, "usb-host") && !json::equals(activation, "manual"))
+            !json::equals(activation, "usb-host") && !json::equals(activation, "manual")) {
             return 0;
+        }
         // manual: wired and supervised like any other service, but never started
         // by the boot pass - `msh` starts it on demand.
         const bool manual = activation && json::equals(activation, "manual");
@@ -314,149 +332,173 @@ static uint32_t parse_manifest_json_services(const char* manifest, ServiceSpec* 
         if (!json::string(json::member(obj, "name"), svc.name, sizeof(svc.name)) ||
             !json::string(json::member(obj, "object"), svc.image, sizeof(svc.image)) ||
             !json::string(json::member(obj, "principal"), svc.principal, sizeof(svc.principal)) ||
-            !json::string(json::member(obj, "restart"), svc.restart, sizeof(svc.restart)))
+            !json::string(json::member(obj, "restart"), svc.restart, sizeof(svc.restart))) {
             return 0;
-        if (svc.usb_host_activation && !streq(svc.name, "usb.fn.fido2"))
+        }
+        if (svc.usb_host_activation && !streq(svc.name, "usb.fn.fido2")) {
             return 0;
+        }
         if ((!streq(svc.principal, "native_trusted") &&
              !streq(svc.principal, "native_sandboxed")) ||
-            (!streq(svc.restart, "always") && !streq(svc.restart, "never")))
+            (!streq(svc.restart, "always") && !streq(svc.restart, "never"))) {
             return 0;
-        for (uint32_t i = 0; i < count; ++i)
-            if (streq(out[i].name, svc.name))
+        }
+        for (uint32_t i = 0; i < count; ++i) {
+            if (streq(out[i].name, svc.name)) {
                 return 0;
-        if (!parse_service_bindings(obj, svc))
+            }
+        }
+        if (!parse_service_bindings(obj, svc)) {
             return 0;
+        }
         auto uses = json::member(obj, "uses");
         for (uint32_t i = 0;; ++i) {
             auto entry = json::element(uses, i);
-            if (!entry)
+            if (!entry) {
                 break;
+            }
             char name[32];
-            if (!json::string(entry, name, sizeof(name)))
+            if (!json::string(entry, name, sizeof(name))) {
                 return 0;
-            if (streq(name, "fs"))
+            }
+            if (streq(name, "fs")) {
                 svc.uses |= 1;
-            else if (streq(name, "nameservice"))
+            } else if (streq(name, "nameservice")) {
                 svc.uses |= 2;
-            else
+            } else {
                 return 0;
+            }
         }
         auto caps = json::member(obj, "caps");
-        if (!caps || *caps.begin != '[')
+        if (!caps || *caps.begin != '[') {
             return 0;
+        }
         libk::str::Buffer names(svc.caps);
         for (uint32_t i = 0;; ++i) {
             auto cap = json::element(caps, i);
-            if (!cap)
+            if (!cap) {
                 break;
+            }
             char name[32];
-            if (!json::string(cap, name, sizeof(name)))
+            if (!json::string(cap, name, sizeof(name))) {
                 return 0;
-            if (names.length)
+            }
+            if (names.length) {
                 names.append(',');
-            if (!names.append(name))
+            }
+            if (!names.append(name)) {
                 return 0;
+            }
         }
-        if (!names.length)
+        if (!names.length) {
             names.append('-');
+        }
     }
     return json::element(entries, count) ? 0 : count;
 }
 
 static CapHandle as_cap(int64_t v) {
-    if (v <= 0)
+    if (v <= 0) {
         return kNullCap;
+    }
     return static_cast<CapHandle>(v);
 }
 
-static void console_log(const char* msg) {
-    mochi::log_raw_marker(msg);
-}
+static void console_log(const char *msg) { mochi::log_raw_marker(msg); }
 
-static const uint8_t* archive_find(const uint8_t* base, const char* wanted, uint64_t* size,
+static const uint8_t *archive_find(const uint8_t *base, const char *wanted, uint64_t *size,
                                    uint8_t hash[MX_SHA256_SIZE]) {
-    if (!base || g_bundle_size < sizeof(MxBundleHeader))
+    if (!base || g_bundle_size < sizeof(MxBundleHeader)) {
         return nullptr;
+    }
     midix::format::Bundle bundle{};
     bundle.data = base;
     bundle.size = g_bundle_size;
-    const auto* src = reinterpret_cast<const uint8_t*>(base);
+    const auto *src = reinterpret_cast<const uint8_t *>(base);
     (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)),
                        libk::as_bytes(src, sizeof(bundle.header)), sizeof(bundle.header));
     if (bundle.header.bundle_size != g_bundle_size ||
-        bundle.header.object_count > midix::format::kMaxObjects)
+        bundle.header.object_count > midix::format::kMaxObjects) {
         return nullptr;
+    }
     MxBundleObject object{};
-    if (!midix::format::find_object(bundle, wanted, object))
+    if (!midix::format::find_object(bundle, wanted, object)) {
         return nullptr;
-    if (size)
+    }
+    if (size) {
         *size = object.size;
-    if (hash)
+    }
+    if (hash) {
         libk::copy_exact(libk::as_bytes(hash, MX_SHA256_SIZE), libk::as_bytes(object.sha256));
+    }
     return base + object.offset;
 }
 
-static uint32_t principal_id(const char* principal) {
+static uint32_t principal_id(const char *principal) {
     if (streq(principal, "native_trusted") || streq(principal, "trusted")) {
         return PRINCIPAL_NATIVE_TRUSTED;
     }
     return PRINCIPAL_NATIVE_SANDBOXED;
 }
 
-static bool spawn_service(ServiceSpec& spec, uint32_t flags) {
-    if (!spec.image_data || spec.image_size == 0)
+static bool spawn_service(ServiceSpec &spec, uint32_t flags) {
+    if (!spec.image_data || spec.image_size == 0) {
         return false;
+    }
     SysPair spawned = sys_spawn(spec.image_data, spec.image_size, principal_id(spec.principal),
                                 kCapSupervisor, flags, spec.name);
     spec.proc = as_cap(spawned.value);
     spec.main_thread = as_cap(spawned.detail);
     MxCapInfo info{};
-    if (spec.proc && sys_cap_info(spec.proc, &info, sizeof(info)) == 0)
+    if (spec.proc && sys_cap_info(spec.proc, &info, sizeof(info)) == 0) {
         spec.identity = info.base;
+    }
     return spec.proc != kNullCap && spec.main_thread != kNullCap;
 }
 
-static ServiceSpec* find_service(ServiceSpec* specs, uint32_t count, const char* name) {
+static ServiceSpec *find_service(ServiceSpec *specs, uint32_t count, const char *name) {
     for (uint32_t i = 0; i < count; ++i) {
-        if (streq(specs[i].name, name))
+        if (streq(specs[i].name, name)) {
             return &specs[i];
+        }
     }
     return nullptr;
 }
 
-static uint32_t service_ordinal(const ServiceSpec* svc);
+static uint32_t service_ordinal(const ServiceSpec *svc);
 
-extern "C" [[noreturn]] void fail_halt(const char* marker) {
+extern "C" [[noreturn]] void fail_halt(const char *marker) {
     sys_debug_puts(marker, slen(marker));
     while (true) {
         sys_yield();
     }
 }
 
-static void require_ok(int64_t rc, const char* marker) {
-    if (rc < 0)
+static void require_ok(int64_t rc, const char *marker) {
+    if (rc < 0) {
         fail_halt(marker);
+    }
 }
 
-static bool cap_is_slot_zero(CapHandle h) {
-    return (h & 0xFFFF'FFFFull) == 0;
-}
+static bool cap_is_slot_zero(CapHandle h) { return (h & 0xFFFF'FFFFull) == 0; }
 
-static void boot_add(ServiceSpec& svc, MxBootEntryType type, const char* name, CapHandle handle,
+static void boot_add(ServiceSpec &svc, MxBootEntryType type, const char *name, CapHandle handle,
                      uint64_t aux0 = 0, uint64_t aux1 = 0, uint32_t flags = 0) {
-    if (!svc.boot_info)
+    if (!svc.boot_info) {
         fail_halt("init: bootinfo failed\n");
-    if (svc.boot_info->entry_count >= MX_BOOT_MAX_ENTRIES)
+    }
+    if (svc.boot_info->entry_count >= MX_BOOT_MAX_ENTRIES) {
         fail_halt("init: bootinfo full\n");
+    }
     if (!name || !name[0] || libk::str::length_n(name, MX_BOOT_NAME_MAX) >= MX_BOOT_NAME_MAX) {
         fail_halt("init: invalid boot entry name\n");
     }
     for (uint32_t i = 0; i < svc.boot_info->entry_count; ++i) {
-        if (streq(svc.boot_info->entries[i].name, name))
+        if (streq(svc.boot_info->entries[i].name, name)) {
             fail_halt("init: duplicate boot entry\n");
+        }
     }
-    MxBootEntry& e = svc.boot_info->entries[svc.boot_info->entry_count++];
+    MxBootEntry &e = svc.boot_info->entries[svc.boot_info->entry_count++];
     e.type = static_cast<uint32_t>(type);
     e.flags = flags;
     e.handle = handle;
@@ -465,24 +507,26 @@ static void boot_add(ServiceSpec& svc, MxBootEntryType type, const char* name, C
     libk::str::copy_into(e.name, MX_BOOT_NAME_MAX, name);
 }
 
-static void boot_publish(ServiceSpec& svc) {
-    if (!svc.boot_info)
+static void boot_publish(ServiceSpec &svc) {
+    if (!svc.boot_info) {
         fail_halt("init: bootinfo failed\n");
+    }
     svc.boot_info->version = MX_BOOT_VERSION;
     __atomic_store_n(&svc.boot_info->magic, MX_BOOT_MAGIC, __ATOMIC_RELEASE);
 }
 
-static void boot_init_for_service(ServiceSpec& svc, uint32_t ordinal,
+static void boot_init_for_service(ServiceSpec &svc, uint32_t ordinal,
                                   CapHandle nameservice = kNullCap) {
     if (svc.boot_arena == kNullCap || !svc.boot_info) {
         svc.boot_arena = as_cap(sys_arena_create(4096, 0));
-        if (svc.boot_arena == kNullCap)
+        if (svc.boot_arena == kNullCap) {
             fail_halt("init: bootinfo failed\n");
+        }
         const uint64_t va = kVaBootInfoBase + (static_cast<uint64_t>(ordinal) * 0x10000ull);
         if (sys_map_page(svc.boot_arena, va, RIGHT_READ | RIGHT_WRITE) != 0) {
             fail_halt("init: bootinfo failed\n");
         }
-        svc.boot_info = reinterpret_cast<MxBootInfo*>(va);
+        svc.boot_info = reinterpret_cast<MxBootInfo *>(va);
     }
     libk::zero(*svc.boot_info);
     svc.boot_info->version = MX_BOOT_VERSION;
@@ -497,22 +541,26 @@ static void boot_init_for_service(ServiceSpec& svc, uint32_t ordinal,
         fail_halt("init: bootinfo slot failed\n");
     }
 
-    if (!svc.ready_db)
+    if (!svc.ready_db) {
         svc.ready_db = as_cap(sys_doorbell_create());
-    if (!svc.ready_db)
+    }
+    if (!svc.ready_db) {
         fail_halt("init: readiness create failed\n");
+    }
     svc.ready_counter = sys_doorbell_read(svc.ready_db);
     const CapHandle ready = as_cap(sys_cap_grant(svc.proc, svc.ready_db, RIGHT_NOTIFY));
-    if (!ready)
+    if (!ready) {
         fail_halt("init: readiness grant failed\n");
+    }
     boot_add(svc, MX_BOOT_ENTRY_DOORBELL, "service.ready", ready);
     boot_add(svc, MX_BOOT_ENTRY_VALUE, "cpu.count", kNullCap, g_cpu_count);
     boot_add(svc, MX_BOOT_ENTRY_VALUE, "cpu.mask", kNullCap, g_cpu_mask);
     boot_add(svc, MX_BOOT_ENTRY_VALUE, "launch.id", kNullCap, ordinal, 0);
     wire_profiler(svc);
     const uint16_t budget = g_ipc_profile.lookup(mochi::profile_name_hash(svc.name), 0xffff);
-    if (budget != 0xffff)
+    if (budget != 0xffff) {
         boot_add(svc, MX_BOOT_ENTRY_VALUE, "ipc.budget", kNullCap, budget);
+    }
     if (svc.image_sha256_valid) {
         boot_add(svc, MX_BOOT_ENTRY_VALUE, "image.sha256", kNullCap,
                  libk::load_le<uint64_t>(svc.image_sha256),
@@ -525,106 +573,124 @@ static void boot_init_for_service(ServiceSpec& svc, uint32_t ordinal,
     }
 }
 
-static CapHandle grant_to(ServiceSpec& svc, CapHandle cap, uint32_t rights, MxBootEntryType type,
-                          const char* name, uint64_t aux0 = 0, uint64_t aux1 = 0,
+static CapHandle grant_to(ServiceSpec &svc, CapHandle cap, uint32_t rights, MxBootEntryType type,
+                          const char *name, uint64_t aux0 = 0, uint64_t aux1 = 0,
                           uint32_t flags = 0) {
     const CapHandle child = as_cap(sys_cap_grant(svc.proc, cap, rights));
-    if (child == kNullCap)
+    if (child == kNullCap) {
         fail_halt("init: grant failed\n");
+    }
     boot_add(svc, type, name, child, aux0, aux1, flags);
     return child;
 }
 
-static CapHandle share_ring_to(ServiceSpec& svc, CapHandle ring, const char* name,
+static CapHandle share_ring_to(ServiceSpec &svc, CapHandle ring, const char *name,
                                uint64_t aux0 = kRingOrder) {
     const CapHandle child =
         as_cap(sys_ring_share(ring, svc.proc, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP));
-    if (child == kNullCap)
+    if (child == kNullCap) {
         fail_halt("init: ring share failed\n");
+    }
     boot_add(svc, MX_BOOT_ENTRY_RING, name, child, aux0, 0);
     return child;
 }
 
-static CapHandle share_ring_to_with_rights(ServiceSpec& svc, CapHandle ring, const char* name,
+static CapHandle share_ring_to_with_rights(ServiceSpec &svc, CapHandle ring, const char *name,
                                            uint32_t rights, uint64_t aux0 = kRingOrder) {
     const CapHandle child = as_cap(sys_ring_share(ring, svc.proc, rights));
-    if (child == kNullCap)
+    if (child == kNullCap) {
         fail_halt("init: ring share failed\n");
+    }
     boot_add(svc, MX_BOOT_ENTRY_RING, name, child, aux0, 0);
     return child;
 }
 
-static CapHandle share_doorbell_to(ServiceSpec& svc, CapHandle db, const char* name,
+static CapHandle share_doorbell_to(ServiceSpec &svc, CapHandle db, const char *name,
                                    uint32_t rights = RIGHT_WAIT | RIGHT_NOTIFY | RIGHT_DUP) {
     const CapHandle child = as_cap(sys_doorbell_share(db, svc.proc, rights));
-    if (child == kNullCap)
+    if (child == kNullCap) {
         fail_halt("init: doorbell share failed\n");
+    }
     boot_add(svc, MX_BOOT_ENTRY_DOORBELL, name, child, 0, 0);
     return child;
 }
 
-static void wire_profiler(ServiceSpec& svc) {
-    if (!streq(svc.name, "ipc.profiler") || g_prof_store)
+static void wire_profiler(ServiceSpec &svc) {
+    if (!streq(svc.name, "ipc.profiler") || g_prof_store) {
         return;
+    }
     g_prof_load = as_cap(sys_arena_create(4096, 0));
     g_prof_store = as_cap(sys_arena_create(4096, 0));
-    if (!g_prof_load || !g_prof_store)
+    if (!g_prof_load || !g_prof_store) {
         fail_halt("init: profiler arena failed\n");
+    }
     grant_to(svc, g_prof_load, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, MX_BOOT_ENTRY_ARENA,
              "prof.load");
     grant_to(svc, g_prof_store, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, MX_BOOT_ENTRY_ARENA,
              "prof.store");
     g_prof_req = as_cap(sys_doorbell_create());
     g_prof_ack = as_cap(sys_doorbell_create());
-    if (!g_prof_req || !g_prof_ack)
+    if (!g_prof_req || !g_prof_ack) {
         fail_halt("init: profiler doorbell failed\n");
+    }
     share_doorbell_to(svc, g_prof_req, "prof.req", RIGHT_WAIT);
     share_doorbell_to(svc, g_prof_ack, "prof.ack", RIGHT_NOTIFY);
     if (sys_map_page(g_prof_store, kProfStoreVa, RIGHT_READ | RIGHT_WRITE) != 0 ||
-        sys_map_page(g_prof_load, kProfLoadVa, RIGHT_READ | RIGHT_WRITE) != 0)
+        sys_map_page(g_prof_load, kProfLoadVa, RIGHT_READ | RIGHT_WRITE) != 0) {
         fail_halt("init: profiler map failed\n");
-    g_prof_store_va = reinterpret_cast<ProfMailbox*>(kProfStoreVa);
-    g_prof_load_va = reinterpret_cast<ProfMailbox*>(kProfLoadVa);
+    }
+    g_prof_store_va = reinterpret_cast<ProfMailbox *>(kProfStoreVa);
+    g_prof_load_va = reinterpret_cast<ProfMailbox *>(kProfLoadVa);
 }
 
 // One bounded request/reply with the profiler. Returns false on timeout.
-static bool profiler_call(uint32_t op, uint32_t* out_len) {
-    if (out_len)
+static bool profiler_call(uint32_t op, uint32_t *out_len) {
+    if (out_len) {
         *out_len = 0;
+    }
     // A timed-out worker may still own the mailbox. Never overwrite its input
     // or mistake its late ACK for completion of another request.
-    if (!g_prof_store_va || __atomic_load_n(&g_prof_store_va->op, __ATOMIC_ACQUIRE) != kProfIdle)
+    if (!g_prof_store_va || __atomic_load_n(&g_prof_store_va->op, __ATOMIC_ACQUIRE) != kProfIdle) {
         return false;
+    }
     __atomic_store_n(&g_prof_store_va->op, op, __ATOMIC_RELEASE);
-    if (sys_notify(g_prof_req) < 0)
+    if (sys_notify(g_prof_req) < 0) {
         return false;
+    }
     const uint64_t deadline = mx_clock_ns() + 200000000ull;
     while (__atomic_load_n(&g_prof_store_va->op, __ATOMIC_ACQUIRE) != kProfIdle) {
         const uint64_t expected = sys_doorbell_read(g_prof_ack);
-        if (__atomic_load_n(&g_prof_store_va->op, __ATOMIC_ACQUIRE) == kProfIdle)
+        if (__atomic_load_n(&g_prof_store_va->op, __ATOMIC_ACQUIRE) == kProfIdle) {
             break;
-        if (mx_clock_ns() >= deadline)
+        }
+        if (mx_clock_ns() >= deadline) {
             return false;
-        if (mx_doorbell_wait_until(g_prof_ack, expected, deadline) < 0)
+        }
+        if (mx_doorbell_wait_until(g_prof_ack, expected, deadline) < 0) {
             return false;
+        }
     }
-    if (out_len)
+    if (out_len) {
         *out_len = g_prof_load_va->len;
+    }
     return true;
 }
 
 // The supervisor counters are pid-addressed; the runtime diagnostic table is
 // the only place a name maps to a live pid.
-static uint32_t service_pid(const char* name) {
+static uint32_t service_pid(const char *name) {
     static MxDiagRuntimeBatch batch;
     uint32_t first = 1;
     while (first && first <= MX_DIAG_PROCESS_LIMIT) {
         const int64_t rc = sys_debug_read(MX_DIAG_RUNTIME, first, &batch, sizeof(batch));
-        if (rc < 0)
+        if (rc < 0) {
             return 0;
-        for (uint32_t i = 0; i < batch.count && i < MX_DIAG_RUNTIME_ROWS; ++i)
-            if (streq(batch.rows[i].name, name))
+        }
+        for (uint32_t i = 0; i < batch.count && i < MX_DIAG_RUNTIME_ROWS; ++i) {
+            if (streq(batch.rows[i].name, name)) {
                 return batch.rows[i].pid;
+            }
+        }
         first = batch.next_pid;
     }
     return 0;
@@ -639,11 +705,13 @@ static uint64_t g_manifest_hash_ns = 0;
 static uint64_t g_archive_resolve_ns = 0;
 
 static void sync_profile() {
-    if (g_profile_synced || !g_prof_store_va)
+    if (g_profile_synced || !g_prof_store_va) {
         return;
-    const ServiceSpec* prof = find_service(g_rt.services, g_rt.service_count, "ipc.profiler");
-    if (!prof || !prof->ready)
+    }
+    const ServiceSpec *prof = find_service(g_rt.services, g_rt.service_count, "ipc.profiler");
+    if (!prof || !prof->ready) {
         return;
+    }
     g_profile_synced = true;
     uint32_t loaded = 0;
     const bool replied = profiler_call(kProfLoad, &loaded);
@@ -662,33 +730,40 @@ static void sync_profile() {
 // Second pass, after the system has run long enough to have counters: read each
 // child, pick a budget from its park ratio, apply it and persist the result.
 static void learn_profile() {
-    if (g_profile_learned || !g_profile_synced || !g_prof_store_va)
+    if (g_profile_learned || !g_profile_synced || !g_prof_store_va) {
         return;
-    if (!g_boot_ns || mx_clock_ns() - g_boot_ns < 2000000000ull)
+    }
+    if (!g_boot_ns || mx_clock_ns() - g_boot_ns < 2000000000ull) {
         return;
+    }
     g_profile_learned = true;
     uint32_t applied = 0;
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-        ServiceSpec& svc = g_rt.services[i];
-        if (!svc.ready || !svc.proc || !svc.name[0])
+        ServiceSpec &svc = g_rt.services[i];
+        if (!svc.ready || !svc.proc || !svc.name[0]) {
             continue;
+        }
         const uint32_t pid = service_pid(svc.name);
-        if (!pid)
+        if (!pid) {
             continue;
+        }
         const SysPair counts = mx_ipc_policy_counts_for(pid);
-        if (counts.value < 0)
+        if (counts.value < 0) {
             continue;
+        }
         const uint64_t parks = static_cast<uint64_t>(counts.value);
         const uint64_t wakes = static_cast<uint64_t>(counts.detail);
         uint32_t budget = 0;
-        if (parks && parks * 2 >= wakes)
+        if (parks && parks * 2 >= wakes) {
             budget = 1024; // parking dominates
-        else if (wakes > parks * 8)
+        } else if (wakes > parks * 8) {
             budget = 0; // bulk: no spin
-        else
+        } else {
             continue; // dead band: keep
-        if (mx_ipc_policy_set_for(pid, budget) < 0)
+        }
+        if (mx_ipc_policy_set_for(pid, budget) < 0) {
             continue;
+        }
         (void)g_ipc_profile.set(mochi::profile_name_hash(svc.name), budget);
         ++applied;
     }
@@ -696,8 +771,9 @@ static void learn_profile() {
     const uint32_t size = g_ipc_profile.encode(blob, sizeof(blob));
     if (size && size <= sizeof(g_prof_store_va->data) &&
         __atomic_load_n(&g_prof_store_va->op, __ATOMIC_ACQUIRE) == kProfIdle) {
-        for (uint32_t i = 0; i < size; ++i)
+        for (uint32_t i = 0; i < size; ++i) {
             g_prof_store_va->data[i] = blob[i];
+        }
         g_prof_store_va->len = size;
         uint32_t stored = 0;
         (void)profiler_call(kProfStore, &stored);
@@ -708,28 +784,30 @@ static void learn_profile() {
     console_log(line.data);
 }
 
-static void share_service_log(ServiceSpec& svc, CapHandle console_db) {
+static void share_service_log(ServiceSpec &svc, CapHandle console_db) {
     share_ring_to_with_rights(svc, svc.log_ring, "log.ring", RIGHT_READ | RIGHT_WRITE | RIGHT_MAP);
     share_doorbell_to(svc, console_db, "log.doorbell", RIGHT_NOTIFY);
 }
 
-static CapHandle create_service_registry(ServiceSpec* services, uint32_t service_count) {
+static CapHandle create_service_registry(ServiceSpec *services, uint32_t service_count) {
     const CapHandle arena = as_cap(sys_arena_create(sizeof(mochi::svc::RegistryPage), 0));
-    if (arena == kNullCap)
+    if (arena == kNullCap) {
         fail_halt("init: svc registry create failed\n");
+    }
     if (sys_map_page(arena, kVaSvcRegistry, RIGHT_READ | RIGHT_WRITE) != 0) {
         fail_halt("init: svc registry map failed\n");
     }
-    auto* reg = reinterpret_cast<mochi::svc::RegistryPage*>(kVaSvcRegistry);
+    auto *reg = reinterpret_cast<mochi::svc::RegistryPage *>(kVaSvcRegistry);
     libk::zero(*reg);
     reg->version = mochi::svc::kRegistryVersion;
     reg->generation = 1;
-    if (service_count > mochi::svc::kMaxRegistryEntries)
+    if (service_count > mochi::svc::kMaxRegistryEntries) {
         fail_halt("init: service registry capacity exceeded\n");
+    }
     const uint32_t count = service_count;
     reg->entry_count = static_cast<uint16_t>(count);
     for (uint32_t i = 0; i < count; ++i) {
-        mochi::svc::RegistryEntry& e = reg->entries[i];
+        mochi::svc::RegistryEntry &e = reg->entries[i];
         libk::str::copy_into(e.name, sizeof(e.name), services[i].name);
         libk::str::copy_into(e.image, sizeof(e.image), services[i].image);
         libk::str::copy_into(e.principal, sizeof(e.principal), services[i].principal);
@@ -749,11 +827,12 @@ static CapHandle create_service_registry(ServiceSpec* services, uint32_t service
     return arena;
 }
 
-static void publish_resume_service(ServiceSpec& svc) {
+static void publish_resume_service(ServiceSpec &svc) {
     boot_publish(svc);
-    if (svc.affinity)
+    if (svc.affinity) {
         require_ok(set_service_affinity(svc.main_thread, svc.affinity),
                    "init: service affinity failed\n");
+    }
     require_ok(sys_thread_resume(svc.main_thread), "init: driver resume failed\n");
 }
 
@@ -762,41 +841,49 @@ static void publish_resume_service(ServiceSpec& svc) {
 // covered by the FS image load below (which is the only real consumer of fs).
 // Drop them outright.
 
-static uint32_t service_ordinal(const ServiceSpec* svc) {
-    if (!svc || !g_rt.services)
+static uint32_t service_ordinal(const ServiceSpec *svc) {
+    if (!svc || !g_rt.services) {
         return 0;
+    }
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-        if (&g_rt.services[i] == svc)
+        if (&g_rt.services[i] == svc) {
             return i;
+        }
     }
     return 0;
 }
 
-static mochi::svc::RegistryEntry* registry_entry_for(const ServiceSpec* svc) {
-    if (!svc || !g_rt.services || !g_rt.svc_registry)
+static mochi::svc::RegistryEntry *registry_entry_for(const ServiceSpec *svc) {
+    if (!svc || !g_rt.services || !g_rt.svc_registry) {
         return nullptr;
+    }
     for (uint32_t i = 0; i < g_rt.service_count && i < g_rt.svc_registry->entry_count; ++i) {
-        if (&g_rt.services[i] == svc)
+        if (&g_rt.services[i] == svc) {
             return &g_rt.svc_registry->entries[i];
+        }
     }
     return nullptr;
 }
 
-static uint32_t registry_state_for(const ServiceSpec& svc) {
+static uint32_t registry_state_for(const ServiceSpec &svc) {
     uint32_t state = 0;
-    if (svc.proc != kNullCap)
+    if (svc.proc != kNullCap) {
         state |= mochi::svc::kStateSpawned;
-    if (svc.proc != kNullCap && svc.boot_info && svc.boot_info->magic == MX_BOOT_MAGIC)
+    }
+    if (svc.proc != kNullCap && svc.boot_info && svc.boot_info->magic == MX_BOOT_MAGIC) {
         state |= mochi::svc::kStateBootPublished;
-    if (svc.ready)
+    }
+    if (svc.ready) {
         state |= mochi::svc::kStateRunning;
+    }
     return state;
 }
 
-static void registry_sync(ServiceSpec& svc) {
-    mochi::svc::RegistryEntry* e = registry_entry_for(&svc);
-    if (!e)
+static void registry_sync(ServiceSpec &svc) {
+    mochi::svc::RegistryEntry *e = registry_entry_for(&svc);
+    if (!e) {
         return;
+    }
     mochi::svc::write_begin(g_rt.svc_registry);
     e->process = svc.proc;
     e->main_thread = svc.main_thread;
@@ -805,21 +892,21 @@ static void registry_sync(ServiceSpec& svc) {
 }
 
 static void console_config_reset() {
-    auto* cfg = reinterpret_cast<ConsoleBootConfig*>(kVaConsoleConfig);
+    auto *cfg = reinterpret_cast<ConsoleBootConfig *>(kVaConsoleConfig);
     libk::zero(*cfg);
 }
 
 struct ClientSession {
-    ServiceSpec* client;
+    ServiceSpec *client;
     CapHandle request, reply, request_db, reply_db;
     CapHandle write_arena;
     uint64_t identity;
 };
 struct SessionServer {
-    const char* name;
+    const char *name;
     uint32_t use;
     CapHandle arena;
-    MxSessionDirectory* directory;
+    MxSessionDirectory *directory;
     ClientSession clients[MX_MAX_SESSIONS];
     uint64_t exports[MX_MAX_EXPORTS];
     CapHandle wake;
@@ -829,9 +916,10 @@ static SessionServer g_servers[2]{{"io.fs", 1, 0, nullptr, {}, {}, 0},
 
 static void create_sessions() {
     for (uint32_t index = 0; index < 2; ++index) {
-        auto& server = g_servers[index];
-        if (!find_service(g_rt.services, g_rt.service_count, server.name))
+        auto &server = g_servers[index];
+        if (!find_service(g_rt.services, g_rt.service_count, server.name)) {
             continue;
+        }
         server.arena = as_cap(sys_arena_create(4096, 0));
         const uint64_t va = kVaSessions + index * 0x10000;
         if (!server.arena) {
@@ -842,21 +930,24 @@ static void create_sessions() {
             // failure: a layout that moves the windows can collide with it.
             fail_halt("init: sessions map failed (va out of window?)\n");
         }
-        server.directory = reinterpret_cast<MxSessionDirectory*>(va);
+        server.directory = reinterpret_cast<MxSessionDirectory *>(va);
         *server.directory = {};
         server.directory->magic = MX_SESSION_MAGIC;
         // One wake source per server; request payloads remain in separate SPSC
         // rings. Both discovery and filesystem can sleep without polling clients.
         server.wake = as_cap(sys_doorbell_create());
-        if (!server.wake)
+        if (!server.wake) {
             fail_halt("init: session wake create failed\n");
+        }
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-            auto& svc = g_rt.services[i];
-            if (!(svc.uses & server.use))
+            auto &svc = g_rt.services[i];
+            if (!(svc.uses & server.use)) {
                 continue;
-            if (server.directory->count == MX_MAX_SESSIONS)
+            }
+            if (server.directory->count == MX_MAX_SESSIONS) {
                 fail_halt("init: too many sessions\n");
-            auto& client = server.clients[server.directory->count++];
+            }
+            auto &client = server.clients[server.directory->count++];
             client.client = &svc;
             client.request = as_cap(sys_ring_create(kRingOrder, 0));
             client.reply = as_cap(sys_ring_create(kRingOrder, 0));
@@ -864,28 +955,33 @@ static void create_sessions() {
             client.reply_db = as_cap(sys_doorbell_create());
             if (server.use == 1) {
                 client.write_arena = as_cap(sys_arena_create(FS_TRANSFER_MAX, 0));
-                if (!client.write_arena)
+                if (!client.write_arena) {
                     fail_halt("init: FS transfer arena create failed\n");
+                }
             }
-            if (!client.request || !client.reply || !client.request_db || !client.reply_db)
+            if (!client.request || !client.reply || !client.request_db || !client.reply_db) {
                 fail_halt("init: session create failed\n");
+            }
         }
     }
 }
 
 static void refresh_exports() {
-    auto& server = g_servers[1];
-    auto* nameservice = find_service(g_rt.services, g_rt.service_count, server.name);
-    if (!server.directory || !nameservice || !nameservice->proc)
+    auto &server = g_servers[1];
+    auto *nameservice = find_service(g_rt.services, g_rt.service_count, server.name);
+    if (!server.directory || !nameservice || !nameservice->proc) {
         return;
+    }
     // Never grant into a child before its BootInfo arena has claimed slot 0.
-    if (!nameservice->boot_info)
+    if (!nameservice->boot_info) {
         return;
+    }
     for (uint32_t i = 0; i < g_rt.service_count && i < MX_MAX_EXPORTS; ++i) {
-        auto& svc = g_rt.services[i];
-        auto& entry = server.directory->exports[i];
-        if (server.exports[i] == svc.identity)
+        auto &svc = g_rt.services[i];
+        auto &entry = server.directory->exports[i];
+        if (server.exports[i] == svc.identity) {
             continue;
+        }
         libk::str::copy_into(entry.name, MX_BOOT_NAME_MAX, svc.name);
         entry.rights = RIGHT_READ;
         entry.protocol = streq(svc.name, "io.fs") ? MX_PROTOCOL_FS : 0;
@@ -910,14 +1006,15 @@ static void refresh_exports() {
     }
 }
 
-static void wire_session_server(ServiceSpec& svc, SessionServer& server) {
+static void wire_session_server(ServiceSpec &svc, SessionServer &server) {
     grant_to(svc, server.arena, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, MX_BOOT_ENTRY_ARENA,
              "sessions");
-    if (server.wake)
+    if (server.wake) {
         share_doorbell_to(svc, server.wake, "sessions.doorbell", RIGHT_WAIT);
+    }
     for (uint32_t i = 0; i < server.directory->count; ++i) {
-        auto& client = server.clients[i];
-        auto& slot = server.directory->slots[i];
+        auto &client = server.clients[i];
+        auto &slot = server.directory->slots[i];
         slot.reserved = server.use == 1 && streq(client.client->name, "usb.fn.fido2")
                             ? MX_SESSION_FIDO2_PRIVATE
                             : 0;
@@ -942,24 +1039,28 @@ static void wire_session_server(ServiceSpec& svc, SessionServer& server) {
         __atomic_add_fetch(&slot.generation, 1ull, __ATOMIC_RELEASE);
     }
     if (server.use == 2) {
-        for (auto& identity : server.exports)
+        for (auto &identity : server.exports) {
             identity = ~0ull;
+        }
         refresh_exports();
     }
 }
 
-static bool wire_client_sessions(ServiceSpec& svc) {
-    for (auto& server : g_servers) {
-        if (!(svc.uses & server.use))
+static bool wire_client_sessions(ServiceSpec &svc) {
+    for (auto &server : g_servers) {
+        if (!(svc.uses & server.use)) {
             continue;
-        auto* service = find_service(g_rt.services, g_rt.service_count, server.name);
-        if (!service || !service->ready)
+        }
+        auto *service = find_service(g_rt.services, g_rt.service_count, server.name);
+        if (!service || !service->ready) {
             return false;
+        }
         for (uint32_t i = 0; i < server.directory->count; ++i) {
-            auto& client = server.clients[i];
-            if (client.client != &svc)
+            auto &client = server.clients[i];
+            if (client.client != &svc) {
                 continue;
-            auto& slot = server.directory->slots[i];
+            }
+            auto &slot = server.directory->slots[i];
             if (client.identity != svc.identity) {
                 slot.client =
                     as_cap(sys_cap_grant(service->proc, svc.proc, RIGHT_READ | RIGHT_SPAWN));
@@ -967,14 +1068,16 @@ static bool wire_client_sessions(ServiceSpec& svc) {
                 __atomic_add_fetch(&slot.generation, 1ull, __ATOMIC_RELEASE);
                 // The server can be asleep with no queued request. Generation
                 // publication must wake it before we await acknowledgement.
-                if (server.wake)
+                if (server.wake) {
                     require_ok(sys_notify(server.wake), "init: session wake failed\n");
+                }
             }
             const auto generation = __atomic_load_n(&slot.generation, __ATOMIC_ACQUIRE);
             const auto deadline = mx_clock_ns() + 5000000000ull;
             while (__atomic_load_n(&slot.acknowledged, __ATOMIC_ACQUIRE) != generation) {
-                if (mx_clock_ns() >= deadline || sys_cap_identify(service->proc) < 0)
+                if (mx_clock_ns() >= deadline || sys_cap_identify(service->proc) < 0) {
                     return false;
+                }
                 sys_yield();
             }
             const bool fs = server.use == 1;
@@ -1000,24 +1103,26 @@ static bool wire_client_sessions(ServiceSpec& svc) {
 }
 
 // Flat binding records come from the signed manifest; restart reuses the same grants.
-static void wire_service_channels(ServiceSpec& svc) {
+static void wire_service_channels(ServiceSpec &svc) {
     for (uint32_t i = 0; i < svc.binding_count; ++i) {
-        const auto& grant = svc.bindings[i];
+        const auto &grant = svc.bindings[i];
         if (grant.is_value) {
             boot_add(svc, MX_BOOT_ENTRY_VALUE, grant.name, 0, grant.value);
             continue;
         }
         if (grant.resource[0]) {
-            const auto* entry = mochi::boot::find(g_rt.boot, grant.resource);
-            if (!entry || !entry->handle)
+            const auto *entry = mochi::boot::find(g_rt.boot, grant.resource);
+            if (!entry || !entry->handle) {
                 fail_halt("init: missing bound hardware resource\n");
+            }
             grant_to(svc, entry->handle, grant.rights, static_cast<MxBootEntryType>(entry->type),
                      grant.name);
             continue;
         }
-        const auto& resource = g_rt.channels[grant.channel];
-        if (!resource.handle)
+        const auto &resource = g_rt.channels[grant.channel];
+        if (!resource.handle) {
             fail_halt("init: missing bound channel\n");
+        }
         if (kChannelNames[grant.channel].ring) {
             share_ring_to_with_rights(svc, resource.handle, grant.name, grant.rights,
                                       resource.order);
@@ -1029,9 +1134,10 @@ static void wire_service_channels(ServiceSpec& svc) {
     }
 }
 
-static bool wire_and_resume_service(ServiceSpec& svc) {
-    if (!wire_client_sessions(svc))
+static bool wire_and_resume_service(ServiceSpec &svc) {
+    if (!wire_client_sessions(svc)) {
         return false;
+    }
     wire_service_channels(svc);
     if (streq(svc.name, "dev.apps") || streq(svc.name, "msh")) {
         const auto delegated = as_cap(sys_supervisor_delegate(kCapSupervisor, svc.proc));
@@ -1053,7 +1159,7 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
     }
     if (streq(svc.name, "io.console")) {
         console_config_reset();
-        auto* cfg = reinterpret_cast<ConsoleBootConfig*>(kVaConsoleConfig);
+        auto *cfg = reinterpret_cast<ConsoleBootConfig *>(kVaConsoleConfig);
         (void)grant_to(svc, g_rt.config_arena, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP,
                        MX_BOOT_ENTRY_ARENA, "console.config");
         const CapHandle cons_uart = grant_to(svc, kCapUart, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP,
@@ -1064,24 +1170,28 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
         for (uint32_t cpu = 0; cpu < kKernelLogRingCount; ++cpu) {
             const CapHandle h = as_cap(sys_ring_share(kKernelLogRings[cpu], svc.proc,
                                                       RIGHT_READ | RIGHT_WRITE | RIGHT_MAP));
-            if (h == kNullCap || ring_idx >= ConsoleBootConfig::kMaxRings)
+            if (h == kNullCap || ring_idx >= ConsoleBootConfig::kMaxRings) {
                 fail_halt("init: console restart failed\n");
+            }
             cfg->log_ring_caps[ring_idx++] = h;
         }
         {
             const CapHandle h = as_cap(sys_ring_share(channel(ChannelId::init_log_ring), svc.proc,
                                                       RIGHT_READ | RIGHT_WRITE | RIGHT_MAP));
-            if (h == kNullCap || ring_idx >= ConsoleBootConfig::kMaxRings)
+            if (h == kNullCap || ring_idx >= ConsoleBootConfig::kMaxRings) {
                 fail_halt("init: console restart failed\n");
+            }
             cfg->log_ring_caps[ring_idx++] = h;
         }
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-            if (g_rt.services[i].log_ring == kNullCap)
+            if (g_rt.services[i].log_ring == kNullCap) {
                 continue;
+            }
             const CapHandle h = as_cap(sys_ring_share(g_rt.services[i].log_ring, svc.proc,
                                                       RIGHT_READ | RIGHT_WRITE | RIGHT_MAP));
-            if (h == kNullCap || ring_idx >= ConsoleBootConfig::kMaxRings)
+            if (h == kNullCap || ring_idx >= ConsoleBootConfig::kMaxRings) {
                 fail_halt("init: console restart failed\n");
+            }
             cfg->log_ring_caps[ring_idx++] = h;
         }
         cfg->uart_cap = cons_uart;
@@ -1106,6 +1216,10 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
         grant_to(svc, kCapInitrd, RIGHT_READ | RIGHT_MAP, MX_BOOT_ENTRY_HANDLE, "boot.initrd");
         // Phase E: pass the assignable GPU function (and its INTx) to Dango so it
         // can build the appliance assignment (spec §6.1, §20 Phase E).
+        if (kCapGpuPlatform != kNullCap) {
+            grant_to(svc, kCapGpuPlatform, RIGHT_READ | RIGHT_WRITE, MX_BOOT_ENTRY_HANDLE,
+                     "gpu.platform");
+        }
         if (kCapGpuFunction != kNullCap) {
             grant_to(svc, kCapGpuFunction, RIGHT_READ | RIGHT_WRITE, MX_BOOT_ENTRY_HANDLE,
                      "gpu.function");
@@ -1127,6 +1241,7 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
             if (sys_cap_identify(kCapFbMemory) == kCapTypeMmio) {
                 grant_to(svc, kCapFbMemory, RIGHT_READ | RIGHT_MAP, MX_BOOT_ENTRY_MMIO,
                          "fb.memory");
+                boot_add(svc, MX_BOOT_ENTRY_VALUE, "fb.offset", kNullCap, g_fb_offset);
             }
         }
         publish_resume_service(svc);
@@ -1143,9 +1258,11 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
     }
     if (streq(svc.name, "io.framebuffer")) {
         share_service_log(svc, g_rt.console_db);
-        if (sys_cap_identify(kCapFbMemory) == kCapTypeMmio)
+        if (sys_cap_identify(kCapFbMemory) == kCapTypeMmio) {
             grant_to(svc, kCapFbMemory, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, MX_BOOT_ENTRY_MMIO,
                      "fb.memory");
+            boot_add(svc, MX_BOOT_ENTRY_VALUE, "fb.offset", kNullCap, g_fb_offset);
+        }
         // Phase J: the client half of the appliance endpoint. Absent without the
         // GPU function, so the framebuffer stays ramfb-only on every other boot.
         if (g_rt.gpu_cmd_ring != kNullCap) {
@@ -1219,24 +1336,28 @@ static bool wire_and_resume_service(ServiceSpec& svc) {
 
 static void create_channels() {
     using namespace midix;
-    const auto doc = json::parse(reinterpret_cast<const char*>(kVaManifest), g_manifest_size - 1);
+    const auto doc = json::parse(reinterpret_cast<const char *>(kVaManifest), g_manifest_size - 1);
     const auto channels = json::member(doc, "channels");
-    if (!channels || *channels.begin != '[')
+    if (!channels || *channels.begin != '[') {
         fail_halt("init: missing channels\n");
+    }
     for (uint32_t i = 0;; ++i) {
         const auto entry = json::element(channels, i);
-        if (!entry)
+        if (!entry) {
             break;
+        }
         char name[48];
         if (!json::string(json::member(entry, "name"), name, sizeof(name))) {
             fail_halt("init: invalid channel name\n");
         }
         const int index = channel_index(name);
-        if (index < 0)
+        if (index < 0) {
             fail_halt("init: unknown channel\n");
-        auto& channel = g_rt.channels[index];
-        if (channel.handle)
+        }
+        auto &channel = g_rt.channels[index];
+        if (channel.handle) {
             fail_halt("init: duplicate channel\n");
+        }
         if (kChannelNames[index].ring) {
             uint64_t order = 0;
             if (!json::equals(json::member(entry, "kind"), "ring") ||
@@ -1250,8 +1371,9 @@ static void create_channels() {
             uint64_t bytes = 0;
             if (!json::equals(json::member(entry, "kind"), "arena") ||
                 !json::number(json::member(entry, "bytes"), bytes) ||
-                bytes != kChannelNames[index].arena_bytes)
+                bytes != kChannelNames[index].arena_bytes) {
                 fail_halt("init: incompatible shared arena\n");
+            }
             channel.handle = as_cap(sys_arena_create(bytes, 0));
         } else {
             if (!json::equals(json::member(entry, "kind"), "doorbell")) {
@@ -1259,12 +1381,16 @@ static void create_channels() {
             }
             channel.handle = as_cap(sys_doorbell_create());
         }
-        if (!channel.handle)
-            fail_halt("init: channel allocation failed\n");
+        if (!channel.handle) {
+            console_log("init: channel allocation failed: ");
+            console_log(name);
+            fail_halt("\n");
+        }
     }
-    for (const auto& channel : g_rt.channels) {
-        if (!channel.handle)
+    for (const auto &channel : g_rt.channels) {
+        if (!channel.handle) {
             fail_halt("init: missing channel\n");
+        }
     }
     if (g_rt.channels[static_cast<unsigned>(ChannelId::svc_ctl_req_ring)].order !=
         g_rt.channels[static_cast<unsigned>(ChannelId::svc_ctl_reply_ring)].order) {
@@ -1282,8 +1408,9 @@ static void create_channels() {
 // halves, exactly as the log and session rings are. Without the appliance the
 // endpoint does not exist at all, and every GPU path stays off.
 static void create_gpu_service_channels() {
-    if (kCapGpuFunction == kNullCap)
+    if (kCapGpuFunction == kNullCap) {
         return;
+    }
     g_rt.gpu_cmd_ring = as_cap(sys_ring_create(kRingOrder, 0));
     g_rt.gpu_reply_ring = as_cap(sys_ring_create(kRingOrder, 0));
     g_rt.gpu_cmd_db = as_cap(sys_doorbell_create());
@@ -1297,42 +1424,53 @@ static void parse_dependencies() {
     using namespace midix;
     // Same signature-verified bytes as the service parse: skip the duplicate scan
     // and walk the array once instead of rescanning it for every index.
-    auto doc = json::parse(reinterpret_cast<const char*>(kVaManifest), g_manifest_size - 1, false);
+    auto doc = json::parse(reinterpret_cast<const char *>(kVaManifest), g_manifest_size - 1, false);
     auto entries = json::member(doc, "services");
-    const char* cursor = json::array_cursor(entries);
+    const char *cursor = json::array_cursor(entries);
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
         json::Value obj;
-        if (!json::array_next(cursor, entries, obj))
+        if (!json::array_next(cursor, entries, obj)) {
             fail_halt("init: missing dependencies\n");
+        }
         auto deps = json::member(obj, "start_after");
-        if (!deps || *deps.begin != '[')
+        if (!deps || *deps.begin != '[') {
             fail_halt("init: missing dependencies\n");
+        }
         for (uint32_t j = 0;; ++j) {
             auto dep = json::element(deps, j);
-            if (!dep)
+            if (!dep) {
                 break;
+            }
             char name[32];
-            if (!json::string(dep, name, sizeof(name)))
+            if (!json::string(dep, name, sizeof(name))) {
                 fail_halt("init: invalid dependency\n");
-            auto* other = find_service(g_rt.services, g_rt.service_count, name);
-            if (!other || other == &g_rt.services[i])
+            }
+            auto *other = find_service(g_rt.services, g_rt.service_count, name);
+            if (!other || other == &g_rt.services[i]) {
                 fail_halt("init: unknown dependency\n");
+            }
             g_rt.services[i].dependencies |= 1u << service_ordinal(other);
         }
     }
     uint32_t done = 0;
-    for (uint32_t pass = 0; pass < g_rt.service_count; ++pass)
-        for (uint32_t i = 0; i < g_rt.service_count; ++i)
-            if (!(g_rt.services[i].dependencies & ~done))
+    for (uint32_t pass = 0; pass < g_rt.service_count; ++pass) {
+        for (uint32_t i = 0; i < g_rt.service_count; ++i) {
+            if (!(g_rt.services[i].dependencies & ~done)) {
                 done |= 1u << i;
-    if (done != (1u << g_rt.service_count) - 1)
+            }
+        }
+    }
+    if (done != (1u << g_rt.service_count) - 1) {
         fail_halt("init: dependency cycle\n");
+    }
 }
 
-static bool dependencies_ready(const ServiceSpec& svc) {
-    for (uint32_t i = 0; i < g_rt.service_count; ++i)
-        if ((svc.dependencies & (1u << i)) && !g_rt.services[i].ready)
+static bool dependencies_ready(const ServiceSpec &svc) {
+    for (uint32_t i = 0; i < g_rt.service_count; ++i) {
+        if ((svc.dependencies & (1u << i)) && !g_rt.services[i].ready) {
             return false;
+        }
+    }
     return true;
 }
 
@@ -1340,19 +1478,22 @@ static bool drain_exits() {
     bool progress = false;
     for (;;) {
         const auto event = sys_supervisor_poll(kCapSupervisor);
-        if (event.value <= 0)
+        if (event.value <= 0) {
             break;
+        }
         progress = true;
         // Exit records are generation-tagged: match the record to the exact
         // incarnation that died, never to a same-named later one.
         uint64_t identities[kMaxManifestServices];
-        for (uint32_t i = 0; i < g_rt.service_count; ++i)
+        for (uint32_t i = 0; i < g_rt.service_count; ++i) {
             identities[i] = g_rt.services[i].identity;
+        }
         const uint32_t index = supervision::match_identity(identities, g_rt.service_count,
                                                            static_cast<uint64_t>(event.value));
-        if (index == g_rt.service_count)
+        if (index == g_rt.service_count) {
             continue; // stale/foreign record
-        auto& svc = g_rt.services[index];
+        }
+        auto &svc = g_rt.services[index];
         svc.proc = svc.main_thread = kNullCap;
         svc.identity = 0;
         svc.ready = false;
@@ -1360,11 +1501,13 @@ static bool drain_exits() {
             supervision::restart_decision(svc.stopping, svc.desired, streq(svc.restart, "always"),
                                           svc.restart_pending, svc.failures);
         svc.stopping = false;
-        if (decision.failed && svc.failures < supervision::kFailureCap)
+        if (decision.failed && svc.failures < supervision::kFailureCap) {
             ++svc.failures;
+        }
         svc.restart_pending = decision.restart;
-        if (decision.delay_ns)
+        if (decision.delay_ns) {
             svc.retry_at = mx_clock_ns() + decision.delay_ns;
+        }
         registry_sync(svc);
     }
     return progress;
@@ -1375,11 +1518,14 @@ static bool await_stopped(uint32_t mask) {
     while (mx_clock_ns() < deadline) {
         drain_exits();
         bool stopped = true;
-        for (uint32_t i = 0; i < g_rt.service_count; ++i)
-            if ((mask & (1u << i)) && g_rt.services[i].proc)
+        for (uint32_t i = 0; i < g_rt.service_count; ++i) {
+            if ((mask & (1u << i)) && g_rt.services[i].proc) {
                 stopped = false;
-        if (stopped)
+            }
+        }
+        if (stopped) {
             return true;
+        }
         sys_yield();
     }
     return false;
@@ -1387,20 +1533,23 @@ static bool await_stopped(uint32_t mask) {
 
 static uint32_t dependent_mask(uint32_t mask) {
     uint32_t dependencies[kMaxManifestServices];
-    for (uint32_t i = 0; i < g_rt.service_count; ++i)
+    for (uint32_t i = 0; i < g_rt.service_count; ++i) {
         dependencies[i] = g_rt.services[i].dependencies;
+    }
     return supervision::dependent_closure(dependencies, g_rt.service_count, mask);
 }
 
 static bool stop_mask(uint32_t mask) {
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-        auto& svc = g_rt.services[i];
-        if (!(mask & (1u << i)))
+        auto &svc = g_rt.services[i];
+        if (!(mask & (1u << i))) {
             continue;
+        }
         svc.ready = false;
         svc.restart_pending = svc.desired;
-        if (!svc.proc)
+        if (!svc.proc) {
             continue;
+        }
         // Mark the kill as deliberate so drain_exits() does not charge it to the
         // crash-loop backoff: an intended stop must not look like a failure.
         svc.stopping = true;
@@ -1412,7 +1561,7 @@ static bool stop_mask(uint32_t mask) {
     return await_stopped(mask);
 }
 
-static bool await_ready(ServiceSpec& svc) {
+static bool await_ready(ServiceSpec &svc) {
     const uint64_t deadline = mx_clock_ns() + 30000000000ull;
     for (;;) {
         if (sys_doorbell_read(svc.ready_db) != svc.ready_counter) {
@@ -1423,10 +1572,12 @@ static bool await_ready(ServiceSpec& svc) {
             return true;
         }
         drain_exits();
-        if (!svc.proc)
+        if (!svc.proc) {
             return false;
-        if (mx_clock_ns() >= deadline)
+        }
+        if (mx_clock_ns() >= deadline) {
             break;
+        }
         // Park on the readiness doorbell. Yielding in a loop kept init on a CPU
         // for the whole launch window, competing with the services it waits on.
         (void)mx_doorbell_wait_until(svc.ready_db, svc.ready_counter, deadline);
@@ -1454,7 +1605,7 @@ static uint64_t g_boot_init_ns = 0;
 static uint64_t g_refresh_ns = 0;
 static uint64_t g_wire_ns = 0;
 
-static bool prepare_service_now(ServiceSpec& svc) {
+static bool prepare_service_now(ServiceSpec &svc) {
     svc.desired = true;
     // A control request can race a death: the incarnation is gone but its exit
     // record has not been drained yet. Drop the stale generation before granting
@@ -1464,8 +1615,9 @@ static bool prepare_service_now(ServiceSpec& svc) {
         svc.identity = 0;
         svc.ready = false;
     }
-    if (!svc.proc && !spawn_service(svc, MX_SPAWN_SUSPENDED))
+    if (!svc.proc && !spawn_service(svc, MX_SPAWN_SUSPENDED)) {
         return false;
+    }
     // Order is load-bearing: BootInfo must claim the child's cap slot 0 before any
     // other capability is granted into it (mochi::boot::kBootInfoCap == slot 0).
     // refresh_exports() grants peer process caps into the nameservice child, so it
@@ -1484,39 +1636,44 @@ static bool prepare_service_now(ServiceSpec& svc) {
 
 // Charge a failed start like a crash so a persistent start failure backs off
 // instead of spinning; the cleanup kill is marked planned and leaves retry_at.
-static void charge_start_failure(ServiceSpec& svc) {
-    if (svc.failures < supervision::kFailureCap)
+static void charge_start_failure(ServiceSpec &svc) {
+    if (svc.failures < supervision::kFailureCap) {
         ++svc.failures;
+    }
     svc.retry_at = mx_clock_ns() + supervision::backoff_ns(svc.failures);
     svc.restart_pending = true;
     (void)stop_mask(1u << service_ordinal(&svc));
 }
 
-static bool start_service_now(ServiceSpec& svc) {
-    if (svc.ready || !dependencies_ready(svc))
+static bool start_service_now(ServiceSpec &svc) {
+    if (svc.ready || !dependencies_ready(svc)) {
         return false;
+    }
     if (!prepare_service_now(svc)) {
         // Spawn failures keep the fast retry (nothing came up); wiring failures
         // after a spawn are charged like a failed start.
-        if (svc.proc)
+        if (svc.proc) {
             charge_start_failure(svc);
+        }
         return false;
     }
-    if (await_ready(svc))
+    if (await_ready(svc)) {
         return true;
+    }
     charge_start_failure(svc);
     return false;
 }
 
-static bool stop_service_now(ServiceSpec& svc) {
-    if (!svc.proc)
+static bool stop_service_now(ServiceSpec &svc) {
+    if (!svc.proc) {
         return false;
+    }
     svc.desired = false;
     svc.restart_pending = false;
     return stop_mask(dependent_mask(1u << service_ordinal(&svc)));
 }
 
-static bool restart_service_now(ServiceSpec& svc) {
+static bool restart_service_now(ServiceSpec &svc) {
     svc.desired = true;
     return stop_mask(dependent_mask(1u << service_ordinal(&svc)));
 }
@@ -1524,17 +1681,19 @@ static bool restart_service_now(ServiceSpec& svc) {
 static void launch_prepared_services() {
     const uint64_t started = mx_clock_ns();
     uint64_t longest_wait = 0;
-    const char* slowest = "none";
+    const char *slowest = "none";
     uint32_t remaining = 0;
-    for (uint32_t i = 0; i < g_rt.service_count; ++i)
+    for (uint32_t i = 0; i < g_rt.service_count; ++i) {
         remaining += g_rt.services[i].desired;
+    }
     for (uint32_t pass = 0; pass < g_rt.service_count; ++pass) {
         // Phase A: prepare and resume every service whose dependencies are
         // ready. Nothing waits here, so independent services boot in parallel.
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-            auto& svc = g_rt.services[i];
-            if (!svc.desired || svc.ready || svc.launching || !dependencies_ready(svc))
+            auto &svc = g_rt.services[i];
+            if (!svc.desired || svc.ready || svc.launching || !dependencies_ready(svc)) {
                 continue;
+            }
             // Explicit activation is separate from log mirroring.
             if (!prepare_service_now(svc)) {
                 sys_debug_puts("init: failed service: ", 22);
@@ -1547,9 +1706,10 @@ static void launch_prepared_services() {
         // Phase B: wait for every launched service. Dependents pick their
         // prerequisites up on the next pass once these report ready.
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-            auto& svc = g_rt.services[i];
-            if (svc.ready || !svc.launching)
+            auto &svc = g_rt.services[i];
+            if (svc.ready || !svc.launching) {
                 continue;
+            }
             const uint64_t wait_started = mx_clock_ns();
             if (!await_ready(svc)) {
                 sys_debug_puts("init: failed service: ", 22);
@@ -1573,8 +1733,9 @@ static void launch_prepared_services() {
             --remaining;
         }
     }
-    if (remaining)
+    if (remaining) {
         fail_halt("init: services not ready\n");
+    }
     // Boot-only summary: observed waits include concurrent service work, not
     // exclusive CPU time. Keep profiling state off steady-state service rows.
     char timing[160];
@@ -1589,7 +1750,7 @@ static void launch_prepared_services() {
 static bool supervise_services() {
     bool progress = drain_exits();
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-        auto& svc = g_rt.services[i];
+        auto &svc = g_rt.services[i];
         // A replacement gadget must observe its own host request. Do not carry
         // a previous USB incarnation's demand through dependency recovery.
         if (svc.usb_host_activation && svc.desired && !dependencies_ready(svc)) {
@@ -1602,18 +1763,20 @@ static bool supervise_services() {
     uint32_t affected = 0;
     bool prepared = false;
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-        auto& svc = g_rt.services[i];
-        if (!svc.proc && svc.restart_pending)
+        auto &svc = g_rt.services[i];
+        if (!svc.proc && svc.restart_pending) {
             affected |= 1u << i;
+        }
         prepared |= svc.proc && !svc.ready && svc.desired && svc.restart_pending;
     }
     // A prepared child can precede its dependency in manifest order. Keep
     // launching across progress passes even after every process is allocated.
-    if (!affected && !prepared)
+    if (!affected && !prepared) {
         return progress;
+    }
     const uint32_t dependents = affected ? dependent_mask(affected) & ~affected : 0;
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-        auto& svc = g_rt.services[i];
+        auto &svc = g_rt.services[i];
         if ((dependents & (1u << i)) && svc.proc) {
             (void)stop_mask(dependents);
             break;
@@ -1621,7 +1784,7 @@ static bool supervise_services() {
     }
     // Prepare all replacements first: discovery grants refer to the new generation.
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-        auto& svc = g_rt.services[i];
+        auto &svc = g_rt.services[i];
         if (!svc.proc && svc.desired && svc.restart_pending && mx_clock_ns() >= svc.retry_at) {
             if (!spawn_service(svc, MX_SPAWN_SUSPENDED)) {
                 svc.retry_at = mx_clock_ns() + 1000000000ull;
@@ -1630,7 +1793,7 @@ static bool supervise_services() {
         }
     }
     for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-        auto& svc = g_rt.services[i];
+        auto &svc = g_rt.services[i];
         if (svc.proc && !svc.ready && svc.desired && svc.restart_pending &&
             dependencies_ready(svc)) {
             if (streq(svc.name, "tty.fb0")) {
@@ -1651,8 +1814,9 @@ static void system_power_now(uint32_t operation) {
     // Let the caller consume its acknowledgement and the terminal drain before
     // stopping the shell/USB services. This is a bounded cold-path grace period.
     const uint64_t deadline = mx_clock_ns() + 100000000ull;
-    while (mx_clock_ns() < deadline)
+    while (mx_clock_ns() < deadline) {
         sys_yield();
+    }
     console_log("system power transition requested\n");
     if (!stop_mask((1u << g_rt.service_count) - 1)) {
         console_log("power transition aborted: services did not stop\n");
@@ -1670,8 +1834,9 @@ static void system_power_now(uint32_t operation) {
 }
 
 static bool handle_svc_control_requests() {
-    if (!g_rt.svcctl.valid())
+    if (!g_rt.svcctl.valid()) {
         return false;
+    }
     bool handled = false;
     RingSlot slot{};
     while (g_rt.svcctl.try_recv(&slot)) {
@@ -1684,7 +1849,7 @@ static bool handle_svc_control_requests() {
         // Request::name is a fixed 32-byte field with no NUL guarantee; force
         // termination before any streq() walks off the end of the struct.
         req.name[sizeof(req.name) - 1] = '\0';
-        ServiceSpec* svc = nullptr;
+        ServiceSpec *svc = nullptr;
         const uint32_t power_op = mochi::svcctl::power_operation(slot.type);
         if (!power_op) {
             svc = find_service(g_rt.services, g_rt.service_count, req.name);
@@ -1720,18 +1885,21 @@ static bool handle_svc_control_requests() {
         } else {
             status = MX_ERR_BAD_PROTOCOL;
         }
-        if (svc)
+        if (svc) {
             reply_state = registry_state_for(*svc);
-        if (g_rt.svcctl.send_reply(status, reply_state) && do_power)
+        }
+        if (g_rt.svcctl.send_reply(status, reply_state) && do_power) {
             system_power_now(power_op);
+        }
     }
     return handled;
 }
 
 static bool handle_fido2_demand() {
-    auto* svc = find_service(g_rt.services, g_rt.service_count, "usb.fn.fido2");
-    if (!svc || !svc->usb_host_activation || !g_rt.fido2_demand.valid())
+    auto *svc = find_service(g_rt.services, g_rt.service_count, "usb.fn.fido2");
+    if (!svc || !svc->usb_host_activation || !g_rt.fido2_demand.valid()) {
         return false;
+    }
     bool progress = false;
     RingSlot slot{};
     // Coalesce queued lifecycle edges before spawning: a host that disconnected
@@ -1741,16 +1909,18 @@ static bool handle_fido2_demand() {
         progress = true;
         MxFido2Demand demand{};
         if (!mochi::message_get(slot, &demand, MX_FIDO2_DEMAND) || !demand.generation ||
-            demand.reserved || demand.active > 1 || demand.generation < g_rt.fido2_generation)
+            demand.reserved || demand.active > 1 || demand.generation < g_rt.fido2_generation) {
             continue;
+        }
         latest = demand;
         g_rt.fido2_generation = demand.generation;
     }
-    if (!latest.generation)
+    if (!latest.generation) {
         return progress;
+    }
     uint64_t previous_generation = 0;
     for (uint32_t i = 0; i < svc->binding_count; ++i) {
-        auto& binding = svc->bindings[i];
+        auto &binding = svc->bindings[i];
         if (binding.is_value && streq(binding.name, "usb.generation")) {
             previous_generation = binding.value;
             binding.value = latest.generation;
@@ -1766,43 +1936,54 @@ static bool handle_fido2_demand() {
         svc->restart_pending = true;
         svc->retry_at = mx_clock_ns();
     }
-    if (!svc->desired)
+    if (!svc->desired) {
         svc->restart_pending = false;
+    }
     return progress;
 }
 
 extern "C" [[noreturn]] void _start() {
     const uint64_t started = mx_clock_ns();
     g_boot_ns = started;
-    const MxBootInfo* boot = mochi::boot::map();
+    const MxBootInfo *boot = mochi::boot::map();
     // Image-provisioned poll budgets: decode once, forward per service below.
-    if (kIpcProfileBlobSize)
+    if (kIpcProfileBlobSize) {
         (void)g_ipc_profile.decode(kIpcProfileBlob, kIpcProfileBlobSize);
+    }
     g_rt.boot = boot;
-    if (const auto* entry = mochi::boot::find(boot, "cpu.count"))
+    if (const auto *entry = mochi::boot::find(boot, "cpu.count")) {
         g_cpu_count = entry->aux0;
-    if (!g_cpu_count || g_cpu_count > MX_HOST_MAX_CPUS)
+    }
+    if (!g_cpu_count || g_cpu_count > MX_HOST_MAX_CPUS) {
         fail_halt("init: invalid CPU count\n");
+    }
     g_cpu_mask = (uint64_t{1} << g_cpu_count) - 1;
-    if (const auto* entry = mochi::boot::find(boot, "cpu.mask"))
+    if (const auto *entry = mochi::boot::find(boot, "cpu.mask")) {
         g_cpu_mask = entry->aux0;
+    }
     if (!g_cpu_mask || (g_cpu_mask >> MX_HOST_MAX_CPUS) ||
-        static_cast<uint32_t>(__builtin_popcountll(g_cpu_mask)) != g_cpu_count)
+        static_cast<uint32_t>(__builtin_popcountll(g_cpu_mask)) != g_cpu_count) {
         fail_halt("init: invalid CPU mask\n");
+    }
     kCapManifest = mochi::boot::require_handle(boot, "manifest");
     kCapInitrd = mochi::boot::require_handle(boot, "boot.initrd");
     kCapSupervisor = mochi::boot::require_handle(boot, "supervisor");
     kCapSystemControl = mochi::boot::handle(boot, "system.control");
-    if (kCapSystemControl != kNullCap)
+    if (kCapSystemControl != kNullCap) {
         (void)mx_platform_control(kCapSystemControl, MX_PLATFORM_CLAIM);
+    }
     kCapUart = mochi::boot::require_handle(boot, "uart.mmio");
     kCapVmRoot = mochi::boot::handle(boot, "vm.root");
     kCapLogDoorbell = mochi::boot::require_handle(boot, "log.doorbell");
     kCapFbMemory = mochi::boot::handle(boot, "fb.memory");
+    if (const auto *entry = mochi::boot::find(boot, "fb.offset")) {
+        g_fb_offset = entry->aux0;
+    }
     kCapXhciMmio = mochi::boot::handle(boot, "xhci.mmio");
     kCapXhciIrq = mochi::boot::handle(boot, "xhci.irq");
     kCapXhciDma = mochi::boot::handle(boot, "xhci.dma");
     kCapVirtioBlkMmio = mochi::boot::handle(boot, "virtio.blk.mmio");
+    kCapGpuPlatform = mochi::boot::handle(boot, "gpu.platform");
     kCapGpuFunction = mochi::boot::handle(boot, "gpu.function");
     kCapGpuIrq = mochi::boot::handle(boot, "gpu.irq");
     kCapVirtioBlkDma = mochi::boot::handle(boot, "virtio.blk.dma");
@@ -1819,28 +2000,30 @@ extern "C" [[noreturn]] void _start() {
     // Service definitions and their capability bindings are writable policy
     // state, so retain them in a registered arena rather than image BSS.
     auto service_state = mochi::make_state(kVaServiceState, 128 * 1024);
-    auto* manifest_services = service_state.alloc<ServiceSpec>(kMaxManifestServices);
-    if (!manifest_services)
+    auto *manifest_services = service_state.alloc<ServiceSpec>(kMaxManifestServices);
+    if (!manifest_services) {
         fail_halt("init: service state allocation failed\n");
+    }
     uint32_t service_count = 0;
     if (manifest_map == 0) {
-        const char* manifest_text = reinterpret_cast<const char*>(kVaManifest);
+        const char *manifest_text = reinterpret_cast<const char *>(kVaManifest);
         const uint64_t parse_started = mx_clock_ns();
         service_count = parse_manifest_json_services(manifest_text, manifest_services);
         g_parse_json_ns = mx_clock_ns() - parse_started;
         const uint64_t hash_started = mx_clock_ns();
-        sha256(reinterpret_cast<const uint8_t*>(manifest_text), slen(manifest_text),
+        sha256(reinterpret_cast<const uint8_t *>(manifest_text), slen(manifest_text),
                g_policy_sha256);
         g_manifest_hash_ns = mx_clock_ns() - hash_started;
         g_policy_sha256_valid = true;
     }
-    if (service_count == 0)
+    if (service_count == 0) {
         fail_halt("init: manifest failed\n");
-    ServiceSpec* services = manifest_services;
+    }
+    ServiceSpec *services = manifest_services;
     g_rt.services = services;
     g_rt.service_count = service_count;
 
-    const auto* initrd = reinterpret_cast<const uint8_t*>(initrd_map == 0 ? kVaInitrd : 0);
+    const auto *initrd = reinterpret_cast<const uint8_t *>(initrd_map == 0 ? kVaInitrd : 0);
     const uint64_t archive_started = mx_clock_ns();
     for (uint32_t i = 0; i < service_count; ++i) {
         services[i].image_data = archive_find(initrd, services[i].image, &services[i].image_size,
@@ -1854,19 +2037,21 @@ extern "C" [[noreturn]] void _start() {
         if (!services[i].image_data || services[i].image_size == 0) {
             fail_halt("init: manifest failed\n");
         }
-        if (services[i].desired && !spawn_service(services[i], MX_SPAWN_SUSPENDED))
+        if (services[i].desired && !spawn_service(services[i], MX_SPAWN_SUSPENDED)) {
             fail_halt("init: spawn failed\n");
+        }
     }
 
     const uint64_t spawned = mx_clock_ns();
     const CapHandle registry = create_service_registry(services, service_count);
     g_rt.svc_registry_cap = registry;
-    g_rt.svc_registry = reinterpret_cast<mochi::svc::RegistryPage*>(kVaSvcRegistry);
+    g_rt.svc_registry = reinterpret_cast<mochi::svc::RegistryPage *>(kVaSvcRegistry);
     g_rt.console_db = kCapLogDoorbell;
     g_rt.config_arena = as_cap(sys_arena_create(4096, 0));
     if (!g_rt.config_arena ||
-        sys_map_page(g_rt.config_arena, kVaConsoleConfig, RIGHT_READ | RIGHT_WRITE))
+        sys_map_page(g_rt.config_arena, kVaConsoleConfig, RIGHT_READ | RIGHT_WRITE)) {
         fail_halt("init: console config failed\n");
+    }
     uint64_t setup = mx_clock_ns();
     create_channels();
     create_gpu_service_channels();
@@ -1877,14 +2062,15 @@ extern "C" [[noreturn]] void _start() {
     setup = mx_clock_ns();
     for (uint32_t i = 0; i < service_count; ++i) {
         services[i].log_ring = as_cap(sys_ring_create(kRingOrder, 0));
-        if (!services[i].log_ring)
+        if (!services[i].log_ring) {
             fail_halt("init: log ring failed\n");
+        }
     }
     g_rings_ns = mx_clock_ns() - setup;
     require_ok(
         sys_map_page(channel(ChannelId::init_log_ring), kVaInitLogRing, RIGHT_READ | RIGHT_WRITE),
         "init: log map failed\n");
-    mochi::log_set_sink(reinterpret_cast<RingPage*>(kVaInitLogRing), kRingOrder, g_rt.console_db,
+    mochi::log_set_sink(reinterpret_cast<RingPage *>(kVaInitLogRing), kRingOrder, g_rt.console_db,
                         "init");
     require_ok(sys_map_page(channel(ChannelId::svc_ctl_req_ring), kVaSvcCtlReqRing,
                             RIGHT_READ | RIGHT_WRITE),
@@ -1892,15 +2078,15 @@ extern "C" [[noreturn]] void _start() {
     require_ok(sys_map_page(channel(ChannelId::svc_ctl_reply_ring), kVaSvcCtlReplyRing,
                             RIGHT_READ | RIGHT_WRITE),
                "init: control map failed\n");
-    g_rt.svcctl.ep = {reinterpret_cast<RingPage*>(kVaSvcCtlReplyRing),
-                      reinterpret_cast<RingPage*>(kVaSvcCtlReqRing),
+    g_rt.svcctl.ep = {reinterpret_cast<RingPage *>(kVaSvcCtlReplyRing),
+                      reinterpret_cast<RingPage *>(kVaSvcCtlReqRing),
                       g_rt.channels[static_cast<unsigned>(ChannelId::svc_ctl_req_ring)].order,
                       channel(ChannelId::svc_ctl_reply_db), channel(ChannelId::svc_ctl_req_db)};
     if (find_service(services, service_count, "usb.fn.fido2")) {
         require_ok(sys_map_page(channel(ChannelId::usb_fido_demand), kVaFido2Demand,
                                 RIGHT_READ | RIGHT_WRITE),
                    "init: FIDO2 demand map failed\n");
-        g_rt.fido2_demand = {reinterpret_cast<RingPage*>(kVaFido2Demand),
+        g_rt.fido2_demand = {reinterpret_cast<RingPage *>(kVaFido2Demand),
                              g_rt.channels[static_cast<unsigned>(ChannelId::usb_fido_demand)].order,
                              channel(ChannelId::svc_ctl_req_db)};
     }
@@ -1938,32 +2124,38 @@ extern "C" [[noreturn]] void _start() {
         sync_profile();
         learn_profile();
         bool progress = handle_svc_control_requests();
-        if (handle_fido2_demand())
+        if (handle_fido2_demand()) {
             progress = true;
-        if (supervise_services())
+        }
+        if (supervise_services()) {
             progress = true;
-        if (progress)
+        }
+        if (progress) {
             continue;
+        }
 
         // Only pending respawns need a timer. In the healthy steady state the
         // wait is indefinite: there is no periodic scan of cold ServiceSpecs.
         uint64_t deadline = 0;
         for (uint32_t i = 0; i < g_rt.service_count; ++i) {
-            const auto& svc = g_rt.services[i];
-            if (svc.proc || !svc.desired || !svc.restart_pending)
+            const auto &svc = g_rt.services[i];
+            if (svc.proc || !svc.desired || !svc.restart_pending) {
                 continue;
+            }
             const auto retry = svc.retry_at ? svc.retry_at : mx_clock_ns();
-            if (!deadline || retry < deadline)
+            if (!deadline || retry < deadline) {
                 deadline = retry;
+            }
         }
         // A pending learning pass needs a timer, otherwise the steady-state
         // wait is indefinite and the pass would never run.
         if (!g_profile_learned) {
             const uint64_t soon = mx_clock_ns() + 100000000ull;
-            if (!deadline || soon < deadline)
+            if (!deadline || soon < deadline) {
                 deadline = soon;
+            }
         }
-        RingPage* incoming[] = {g_rt.svcctl.ep.rx_ring, g_rt.fido2_demand.ring};
+        RingPage *incoming[] = {g_rt.svcctl.ep.rx_ring, g_rt.fido2_demand.ring};
         require_ok(mochi::InboxWait{incoming, g_rt.fido2_demand.valid() ? 2u : 1u, kRingOrder,
                                     g_rt.svcctl.ep.rx_doorbell}
                        .wait(expected, deadline),

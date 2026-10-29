@@ -9,8 +9,9 @@ struct Bus {
     bool fail = false, mismatch = false;
     bool write(mx_u8_t reg, mx_u8_t value) {
         assert(reg == 2);
-        if (fail)
+        if (fail) {
             return false;
+        }
         selected = value;
         ++writes;
         return true;
@@ -29,20 +30,24 @@ struct ConfigBus {
     bool mismatch = false;
     bool transaction(libk::const_bytes out, libk::bytes in) {
         ++transactions;
-        if (transactions == fail_at)
+        if (transactions == fail_at) {
             return false;
+        }
         assert(out.size && out.data[0] < 4);
         const auto first = out.data[0];
         if (in.size) {
             assert(out.size == 1 && first + in.size <= 4);
-            for (unsigned i = 0; i < in.size; ++i)
+            for (unsigned i = 0; i < in.size; ++i) {
                 in.data[i] = registers[first + i];
-            if (mismatch && first == 2)
+            }
+            if (mismatch && first == 2) {
                 in.data[1] ^= 2;
+            }
         } else {
             assert(first + out.size - 1 <= 4);
-            for (unsigned i = 1; i < out.size; ++i)
+            for (unsigned i = 1; i < out.size; ++i) {
                 registers[first + i - 1] = out.data[i];
+            }
         }
         return true;
     }
@@ -92,8 +97,9 @@ static void decoding() {
     for (unsigned status = 0; status < 256; ++status) {
         for (unsigned type = 0; type < 256; ++type) {
             const auto reply = decode(status, type);
-            if (!reply.value)
+            if (!reply.value) {
                 continue;
+            }
             assert(status & 1);
             assert(((status >> 4) & 3) == 1 || ((status >> 4) & 3) == 2);
             assert((type & 0x1b) == 8 || (type & 0x1b) == 16);
@@ -114,8 +120,14 @@ static void mac_and_keyboard() {
         assert(port.observe(bus, 0x1d, 8, 0, i * kSinkPreferenceNs, false).value == 2);
     }
     assert(bus.writes == 1);
+    // A stale detach latch with a still-attached source must not reprogram CC
+    // or disconnect an enumerated gadget.
+    assert(port.observe(bus, 0x1d, 8, 2, 99 * kSinkPreferenceNs + 1, false).value == 2);
+    assert(port.observe(bus, 0x29, 16, 0, 99 * kSinkPreferenceNs + 2, false).value == 2);
+    assert(bus.writes == 1);
     auto reply = port.observe(bus, 0, 0, 2, 100 * kSinkPreferenceNs, false);
     assert(!reply.value && bus.selected == kSinkMode);
+    assert(bus.writes == 1); // Detach policy does not rewrite an existing Sink.
     const auto start = 100 * kSinkPreferenceNs;
     assert(!port.observe(bus, 0, 0, 0, start + kSinkPreferenceNs - 1, false).value);
     assert(bus.selected == kSinkMode);
@@ -203,8 +215,22 @@ static void stable_roles() {
     policy.observe(mac, true, false, MxUsbRole::Detached, 6 * kAttachStableNs);
     assert(policy.observe(mac, true, false, MxUsbRole::Detached, 7 * kAttachStableNs) ==
            MxUsbRole::Device);
-    assert(policy.observe(decode(0x21, 8), true, false, MxUsbRole::Device,
-                          7 * kAttachStableNs + 1) == MxUsbRole::Detached);
+    assert(policy.observe({}, false, false, MxUsbRole::Device, 7 * kAttachStableNs + 1) ==
+           MxUsbRole::Device);
+    // Neither a role/orientation glitch nor an old detach interrupt authorizes
+    // a role switch while the cable is still attached with external VBUS.
+    assert(policy.observe(decode(0x19, 16), true, false, MxUsbRole::Device,
+                          7 * kAttachStableNs + 2) == MxUsbRole::Device);
+    assert(policy.observe(decode(8, 0), true, false, MxUsbRole::Device, 7 * kAttachStableNs + 3) ==
+           MxUsbRole::Device);
+    const auto lost = 8 * kAttachStableNs;
+    assert(policy.observe(decode(0x21, 8), true, false, MxUsbRole::Device, lost) ==
+           MxUsbRole::Device);
+    assert(policy.observe(mac, true, false, MxUsbRole::Device, lost + 1) == MxUsbRole::Device);
+    assert(policy.observe(decode(0, 0), true, false, MxUsbRole::Device, lost + 2) ==
+           MxUsbRole::Device);
+    assert(policy.observe(decode(0, 0), true, false, MxUsbRole::Device,
+                          lost + 2 + kDeviceDetachStableNs) == MxUsbRole::Detached);
 }
 
 static void source_disconnect_and_mac_replacement() {

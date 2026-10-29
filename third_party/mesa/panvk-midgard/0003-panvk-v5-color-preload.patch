@@ -1,0 +1,281 @@
+Midgard color attachment LOAD preloads via injected wallpaper tiler jobs.
+
+Use modern internal shader caching, image view texture payloads and descriptor
+pools, following the maintained Gallium v5 preloader's job and varying layout.
+Propagate allocation/compile failures to command recording; do not apply
+Bifrost frame shader descriptors on Midgard. Z/S, MSAA, layered and formats
+requiring shader blending remain explicitly unsupported.
+
+diff --git a/src/panfrost/vulkan/midgard/panvk_v5_cmd_fb_preload.c b/src/panfrost/vulkan/midgard/panvk_v5_cmd_fb_preload.c
+--- a/src/panfrost/vulkan/midgard/panvk_v5_cmd_fb_preload.c
++++ b/src/panfrost/vulkan/midgard/panvk_v5_cmd_fb_preload.c
+@@ -1,14 +1,238 @@
+-/* SPDX-License-Identifier: MIT */
++/*
++ * Copyright (C) 2020-2021 Collabora, Ltd.
++ * SPDX-License-Identifier: MIT
++ *
++ * Midgard wallpaper jobs follow the maintained Gallium pan_fb_preload.c path.
++ * Bifrost's pre/post frame descriptors are not available on architecture 5.
++ */
++#include "panvk_cmd_alloc.h"
+ #include "panvk_cmd_fb_preload.h"
+-VkResult panvk_v5_cmd_fb_preload(struct panvk_cmd_buffer *cmdbuf)
++#include "panvk_meta.h"
++#include "panvk_shader.h"
++
++#include "nir_builder.h"
++#include "pan_encoder.h"
++#include "pan_shader.h"
++#include "pan_texture.h"
++
++struct preload_key {
++   enum panvk_meta_object_key_type type;
++   uint32_t color_mask;
++};
++
++static VkResult
++get_shader(struct panvk_device *dev, uint32_t color_mask,
++           struct panvk_internal_shader **out)
+ {
+-   const struct pan_fb_info *fb = &cmdbuf->state.gfx.render.fb.info;
+-   bool preload = fb->zs.preload.z || fb->zs.preload.s;
+-   for (unsigned i = 0; i < fb->rt_count; i++)
+-      preload |= fb->rts[i].preload;
+-   if (preload) {
+-      vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+-      return VK_ERROR_FEATURE_NOT_PRESENT;
+-   }
++   const struct preload_key key = {
++      .type = PANVK_META_OBJECT_KEY_FB_PRELOAD_SHADER,
++      .color_mask = color_mask,
++   };
++   VkShaderEXT handle = (VkShaderEXT)vk_meta_lookup_object(
++      &dev->meta, VK_OBJECT_TYPE_SHADER_EXT, &key, sizeof(key));
++   if (handle != VK_NULL_HANDLE) {
++      *out = panvk_internal_shader_from_handle(handle);
++      return VK_SUCCESS;
++   }
++
++   nir_builder b = nir_builder_init_simple_shader(
++      MESA_SHADER_FRAGMENT, GENX(pan_shader_get_compiler_options)(),
++      "panvk-midgard-preload-%x", color_mask);
++   nir_def *bary = nir_load_barycentric(
++      &b, nir_intrinsic_load_barycentric_pixel, INTERP_MODE_SMOOTH);
++   nir_def *coord = nir_load_interpolated_input(
++      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0,
++      .dest_type = nir_type_float32, .io_semantics.location = VARYING_SLOT_VAR0,
++      .io_semantics.num_slots = 1);
++
++   unsigned tex_idx = 0;
++   u_foreach_bit(rt, color_mask) {
++      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
++      tex->op = nir_texop_txl;
++      tex->dest_type = nir_type_float32;
++      tex->texture_index = tex_idx++;
++      tex->sampler_index = 0;
++      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
++      tex->coord_components = 2;
++      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
++      nir_def_init(&tex->instr, &tex->def, 4, 32);
++      nir_builder_instr_insert(&b, &tex->instr);
++      nir_store_output(&b, &tex->def, nir_imm_int(&b, 0), .base = tex_idx - 1,
++                       .src_type = nir_type_float32,
++                       .io_semantics.location = FRAG_RESULT_DATA0 + rt,
++                       .io_semantics.num_slots = 1, .write_mask = 0xf);
++   }
++
++   nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
++   for (unsigned i = 0; i < tex_idx; i++)
++      BITSET_SET(b.shader->info.textures_used, i);
++   struct panvk_physical_device *pdev =
++      to_panvk_physical_device(dev->vk.physical);
++   struct panfrost_compile_inputs inputs = {
++      .gpu_id = pdev->kmod.props.gpu_prod_id,
++      .is_blit = true,
++      .no_idvs = true,
++      .no_ubo_to_push = true,
++   };
++   pan_shader_preprocess(b.shader, inputs.gpu_id);
++   struct panvk_internal_shader *shader;
++   VkResult result = panvk_v5_create_internal_shader(dev, b.shader, &inputs, &shader);
++   ralloc_free(b.shader);
++   if (result != VK_SUCCESS)
++      return result;
++
++   handle = (VkShaderEXT)vk_meta_cache_object(
++      &dev->vk, &dev->meta, &key, sizeof(key), VK_OBJECT_TYPE_SHADER_EXT,
++      (uint64_t)panvk_internal_shader_to_handle(shader));
++   *out = panvk_internal_shader_from_handle(handle);
+    return VK_SUCCESS;
+ }
++
++VkResult
++panvk_v5_cmd_fb_preload(struct panvk_cmd_buffer *cmdbuf)
++{
++   struct pan_fb_info *fb = &cmdbuf->state.gfx.render.fb.info;
++   struct panvk_batch *batch = cmdbuf->cur_batch;
++   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
++   uint32_t mask = 0;
++   for (unsigned i = 0; i < fb->rt_count; i++)
++      if (fb->rts[i].preload)
++         mask |= BITFIELD_BIT(i);
++   if (!mask && !fb->zs.preload.z && !fb->zs.preload.s)
++      return VK_SUCCESS;
++
++   /* Start with the fixed-function color formats. Other formats need Midgard
++    * blend/type-conversion shaders; Z/S and layered/MSAA jobs need distinct
++    * shader keys, texture views and renderer state. Never silently lose them.
++    */
++   if (fb->zs.preload.z || fb->zs.preload.s || fb->nr_samples != 1 ||
++       cmdbuf->state.gfx.render.layer_count != 1)
++      goto unsupported;
++   u_foreach_bit(rt, mask) {
++      const struct pan_image_view *view = fb->rts[rt].view;
++      if (!view || view->dim != MALI_TEXTURE_DIMENSION_2D ||
++          view->first_layer != view->last_layer ||
++          !panfrost_blendable_formats_v7[view->format].internal)
++         goto unsupported;
++   }
++
++   VkResult result = panvk_v5_cmd_alloc_tls_desc(cmdbuf, true);
++   if (result != VK_SUCCESS)
++      return result;
++
++   struct panvk_internal_shader *shader;
++   result = get_shader(dev, mask, &shader);
++   if (result != VK_SUCCESS)
++      return result;
++   /* cmd_close_batch allocated TLS before entering this helper. The small
++    * preload shaders must not introduce an unbacked spill stack afterwards.
++    */
++   if (shader->info.tls_size)
++      goto unsupported;
++
++   struct panfrost_ptr rsd = panvk_cmd_alloc_desc_aggregate(
++      cmdbuf, PAN_DESC(RENDERER_STATE), PAN_DESC_ARRAY(fb->rt_count, BLEND));
++   struct panfrost_ptr sampler = panvk_cmd_alloc_desc(cmdbuf, SAMPLER);
++   struct panfrost_ptr varying = panvk_cmd_alloc_desc(cmdbuf, ATTRIBUTE);
++   struct panfrost_ptr buffers = panvk_cmd_alloc_desc(cmdbuf, ATTRIBUTE_BUFFER);
++   struct panfrost_ptr viewport = panvk_cmd_alloc_desc(cmdbuf, VIEWPORT);
++   struct panfrost_ptr coords = panvk_cmd_alloc_dev_mem(cmdbuf, desc, 64, 64);
++   struct panfrost_ptr textures = panvk_cmd_alloc_dev_mem(
++      cmdbuf, desc, util_bitcount(mask) * sizeof(mali_ptr), sizeof(mali_ptr));
++   struct panfrost_ptr job = panvk_cmd_alloc_desc(cmdbuf, TILER_JOB);
++   if (!rsd.cpu || !sampler.cpu || !varying.cpu || !buffers.cpu ||
++       !viewport.cpu || !coords.cpu || !textures.cpu || !job.cpu)
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++
++   const float rect[] = {0, 0, 0, 1, fb->width, 0, 0, 1,
++                         0, fb->height, 0, 1, fb->width, fb->height, 0, 1};
++   memcpy(coords.cpu, rect, sizeof(rect));
++   pan_pack(varying.cpu, ATTRIBUTE, cfg) {
++      cfg.buffer_index = 0;
++      cfg.offset_enable = true;
++      cfg.format = GENX(panfrost_format_from_pipe_format)(PIPE_FORMAT_R32G32B32_FLOAT)->hw;
++   }
++   pan_pack(buffers.cpu, ATTRIBUTE_BUFFER, cfg) {
++      cfg.pointer = coords.gpu;
++      cfg.stride = 4 * sizeof(float);
++      cfg.size = sizeof(rect);
++   }
++   pan_pack(sampler.cpu, SAMPLER, cfg) {
++      cfg.seamless_cube_map = false;
++      cfg.normalized_coordinates = false;
++      cfg.minify_nearest = true;
++      cfg.magnify_nearest = true;
++   }
++   pan_pack(viewport.cpu, VIEWPORT, cfg) {
++      cfg.scissor_minimum_x = fb->extent.minx & ~31;
++      cfg.scissor_minimum_y = fb->extent.miny & ~31;
++      cfg.scissor_maximum_x = MIN2(ALIGN_POT(fb->extent.maxx + 1, 32), fb->width) - 1;
++      cfg.scissor_maximum_y = MIN2(ALIGN_POT(fb->extent.maxy + 1, 32), fb->height) - 1;
++   }
++   pan_pack(rsd.cpu, RENDERER_STATE, cfg) {
++      pan_shader_prepare_rsd(&shader->info,
++                            panvk_priv_mem_dev_addr(shader->code_mem), &cfg);
++      cfg.properties.work_register_count = MAX2(shader->info.work_reg_count, 4);
++      cfg.properties.force_early_z = true;
++      cfg.multisample_misc.sample_mask = 0xffff;
++      cfg.multisample_misc.depth_function = MALI_FUNC_ALWAYS;
++      cfg.stencil_mask_misc.alpha_test_compare_function = MALI_FUNC_ALWAYS;
++   }
++   struct mali_blend_packed *blends = rsd.cpu + pan_size(RENDERER_STATE);
++   for (unsigned i = 0; i < fb->rt_count; i++) {
++      pan_pack(&blends[i], BLEND, cfg) {
++         cfg.enable = mask & BITFIELD_BIT(i);
++         cfg.round_to_fb_precision = true;
++         cfg.srgb = cfg.enable && util_format_is_srgb(fb->rts[i].view->format);
++         cfg.equation.rgb.a = MALI_BLEND_OPERAND_A_SRC;
++         cfg.equation.rgb.b = MALI_BLEND_OPERAND_B_SRC;
++         cfg.equation.rgb.c = MALI_BLEND_OPERAND_C_ZERO;
++         cfg.equation.alpha = cfg.equation.rgb;
++         cfg.equation.color_mask = 0xf;
++      }
++   }
++
++   unsigned idx = 0;
++   u_foreach_bit(rt, mask) {
++      const struct pan_image_view *view = fb->rts[rt].view;
++      size_t size = pan_size(TEXTURE) +
++                    GENX(panfrost_estimate_texture_payload_size)(view);
++      struct panfrost_ptr tex = panvk_cmd_alloc_dev_mem(
++         cmdbuf, desc, size, pan_alignment(TEXTURE));
++      if (!tex.cpu)
++         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      struct panfrost_ptr surfaces = {.cpu = tex.cpu + pan_size(TEXTURE),
++                                     .gpu = tex.gpu + pan_size(TEXTURE)};
++      GENX(panfrost_new_texture)(view, tex.cpu, &surfaces);
++      ((mali_ptr *)textures.cpu)[idx++] = tex.gpu;
++   }
++
++   pan_section_pack(job.cpu, TILER_JOB, DRAW, cfg) {
++      cfg.thread_storage = batch->tls.gpu;
++      cfg.state = rsd.gpu;
++      cfg.position = coords.gpu;
++      cfg.viewport = viewport.gpu;
++      cfg.varyings = varying.gpu;
++      cfg.varying_buffers = buffers.gpu;
++      cfg.textures = textures.gpu;
++      cfg.samplers = sampler.gpu;
++   }
++   pan_section_pack(job.cpu, TILER_JOB, PRIMITIVE, cfg) {
++      cfg.draw_mode = MALI_DRAW_MODE_TRIANGLE_STRIP;
++      cfg.index_count = 4;
++      cfg.job_task_split = 6;
++   }
++   pan_section_pack(job.cpu, TILER_JOB, PRIMITIVE_SIZE, cfg) {
++      cfg.constant = 1.0f;
++   }
++   panfrost_pack_work_groups_compute(
++      pan_section_ptr(job.cpu, TILER_JOB, INVOCATION), 1, 4, 1, 1, 1, 1, true, false);
++   util_dynarray_append(&batch->jobs, void *, job.cpu);
++   pan_jc_add_job(&batch->vtc_jc, MALI_JOB_TYPE_TILER, false, false,
++                  0, 0, &job, true);
++   return VK_SUCCESS;
++
++unsupported:
++   vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_FEATURE_NOT_PRESENT);
++   return VK_ERROR_FEATURE_NOT_PRESENT;
++}
+diff --git a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+@@ -142,10 +142,15 @@
+                                  panfrost_sample_positions_offset(
+                                     pan_sample_pattern(fbinfo->nr_samples));
+ 
+-      if (batch->vtc_jc.first_tiler) {
++      if (PAN_ARCH == 5 || batch->vtc_jc.first_tiler) {
+          VkResult result = panvk_per_arch(cmd_fb_preload)(cmdbuf);
+-	 if (result != VK_SUCCESS)
++         if (result != VK_SUCCESS) {
++            vk_command_buffer_set_error(&cmdbuf->vk, result);
++            /* Already linked into batches: do not close/link it again after
++             * an unsupported preload or an allocation failure. */
++            cmdbuf->cur_batch = NULL;
+             return;
++         }
+       }
+ 
+       for (uint32_t i = 0; i < batch->fb.layer_count; i++) {

@@ -10,4 +10,4 @@ constexpr u64 counter_frequency([[maybe_unused]] u64 reported) {
     return reported;
 #endif
 }
-} // namespace platform
+}

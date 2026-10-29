@@ -185,3 +185,7 @@ int cmd_vm(int argc, char** argv);
 // Power requests (msh_power.cc).
 int cmd_shutdown(int argc, char** argv);
 int cmd_reboot(int argc, char** argv);
+
+int cmd_diag_gpu(bool reset = false, bool upload = false);
+int cmd_diag_gpu_vulkan();
+int cmd_diag_gpu_cts(const char* pattern,bool log_only=false);

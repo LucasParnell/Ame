@@ -33,10 +33,10 @@ void eoi(u32 irq_id);
 
 namespace irq {
 
-// One binding slot per interrupt id in a power-of-two range. 256 covers every
-// SPI both supported GICv2 distributors expose (QEMU virt, Tegra T210).
-constexpr u32 kIrqSlots = 256; // power of two
-constexpr u32 kFirstSpi = 32;  // SGIs (0-15) and PPIs (16-31) are kernel-owned
+// Cover all GICv2 INTIDs, including Hi6250 GPU SPIs 290..292.
+// INTIDs 1020..1023 are reserved and never bindable.
+constexpr u32 kIrqSlots = 1024; // power of two
+constexpr u32 kFirstSpi = 32;   // SGIs (0-15) and PPIs (16-31) are kernel-owned
 
 // GIC SPI INTID for SPI `number` (0-based): the distributor's first SPI line.
 constexpr u32 spi_intid(u32 number) {
@@ -51,7 +51,7 @@ constexpr u32 irq_index(u32 irq_id) {
     return irq_id & (kIrqSlots - 1);
 }
 constexpr bool irq_bindable(u32 irq_id) {
-    return irq_id >= kFirstSpi && irq_id < kIrqSlots;
+    return irq_id >= kFirstSpi && irq_id < 1020;
 }
 
 // Bind `line` to `doorbell`. `owner` is the caller's process identity, used to

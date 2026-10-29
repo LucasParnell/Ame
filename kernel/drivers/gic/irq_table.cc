@@ -13,6 +13,7 @@
 // critical section is short (a slot compare plus a counter/fast wake).
 
 #include "anko/irq.h"
+#include "anko/mali.h"
 #include "anko/ipc.h"
 #include "anko/object.h"
 #include "anko/mm.h"
@@ -45,8 +46,9 @@ DeliverHook g_deliver_hook = nullptr;
 
 void zero_bytes(void* p, usize n) {
     auto* b = static_cast<u8*>(p);
-    for (usize i = 0; i < n; ++i)
+    for (usize i = 0; i < n; ++i) {
         b[i] = 0;
+    }
 }
 
 void destroy_test_doorbell(void* target) {
@@ -72,13 +74,16 @@ object::Record* take_slot_locked(Slot& s) {
 } // namespace
 
 SysError bind(IrqLine* line, Doorbell* doorbell, u64 owner, u32 flags) {
-    if (!line || !doorbell)
+    if (!line || !doorbell) {
         return E_INVALID;
-    if (flags != 0)
+    }
+    if (flags != 0) {
         return E_INVALID; // reserved
+    }
     const u32 irq_id = line->irq_id;
-    if (!irq_bindable(irq_id))
+    if (!irq_bindable(irq_id)) {
         return E_INVALID;
+    }
     const u32 idx = irq_index(irq_id); // mask before any table access
 
     kernel::LockGuard guard(g_lock);
@@ -91,8 +96,9 @@ SysError bind(IrqLine* line, Doorbell* doorbell, u64 owner, u32 flags) {
         return E_BUSY;
     }
     object::Record* rec = object::acquire(doorbell);
-    if (!rec)
+    if (!rec) {
         return E_NOMEM;
+    }
 
     s.record = rec;
     s.owner = owner;
@@ -110,19 +116,23 @@ SysError bind(IrqLine* line, Doorbell* doorbell, u64 owner, u32 flags) {
 }
 
 SysError ack(IrqLine* line, u64 owner) {
-    if (!line)
+    if (!line) {
         return E_INVALID;
+    }
     const u32 irq_id = line->irq_id;
-    if (!irq_bindable(irq_id))
+    if (!irq_bindable(irq_id)) {
         return E_INVALID;
+    }
     const u32 idx = irq_index(irq_id);
 
     kernel::LockGuard guard(g_lock);
     Slot& s = g_slots[idx];
-    if (!s.active || s.irq_id != irq_id || !s.doorbell)
+    if (!s.active || s.irq_id != irq_id || !s.doorbell) {
         return E_OK; // nothing bound
-    if (s.owner != owner)
+    }
+    if (s.owner != owner) {
         return E_PERM;
+    }
     if (s.trigger == kTriggerLevel) {
         // Clear the latched pending bit and re-enable the line; a still-asserted
         // source re-pends and is delivered again.
@@ -134,60 +144,74 @@ SysError ack(IrqLine* line, u64 owner) {
 }
 
 void unbind_line(IrqLine* line, u64 owner) {
-    if (!line)
+    if (!line) {
         return;
+    }
     const u32 irq_id = line->irq_id;
-    if (!irq_bindable(irq_id))
+    if (!irq_bindable(irq_id)) {
         return;
+    }
     const u32 idx = irq_index(irq_id);
 
     object::Record* rec = nullptr;
     {
         kernel::LockGuard guard(g_lock);
         Slot& s = g_slots[idx];
-        if (!s.active || s.irq_id != irq_id)
+        if (!s.active || s.irq_id != irq_id) {
             return;
-        if (owner != 0 && s.owner != owner)
+        }
+        if (owner != 0 && s.owner != owner) {
             return; // not the binder
+        }
         rec = take_slot_locked(s);
     }
-    if (rec)
+    if (rec) {
         object::release(rec);
+    }
 }
 
 void unbind_owner(u64 owner) {
-    if (owner == 0)
+    if (owner == 0) {
         return;
+    }
     for (u32 idx = 0; idx < kIrqSlots; ++idx) {
         object::Record* rec = nullptr;
         {
             kernel::LockGuard guard(g_lock);
             Slot& s = g_slots[idx];
-            if (!s.active || s.owner != owner)
+            if (!s.active || s.owner != owner) {
                 continue;
+            }
             rec = take_slot_locked(s);
         }
-        if (rec)
+        if (rec) {
             object::release(rec);
+        }
     }
 }
 
 void deliver(u32 irq_id) {
-    if (!irq_bindable(irq_id))
+    if (!irq_bindable(irq_id)) {
         return; // timer/IPI/PPIs/SGIs are never redirected
+    }
 
     // Second-chance hook: the VM device-assignment layer routes assigned-device
     // host lines into the guest vGIC. It is independent of the doorbell table,
     // so it runs even when no driver holds a binding on this line.
-    if (g_deliver_hook)
+#ifndef ANKO_HOST_TEST
+    mali::deliver(irq_id);
+#endif
+    if (g_deliver_hook) {
         g_deliver_hook(irq_id);
+    }
 
     const u32 idx = irq_index(irq_id);
 
     kernel::LockGuard guard(g_lock);
     Slot& s = g_slots[idx];
-    if (!s.active || s.irq_id != irq_id || !s.doorbell)
+    if (!s.active || s.irq_id != irq_id || !s.doorbell) {
         return;
+    }
     if (s.trigger == kTriggerLevel) {
         // Pause the line until the driver acks so it cannot storm the CPU.
         drivers::gic::spi_disable(irq_id);
@@ -233,8 +257,9 @@ u64 run_selftest() {
                         drivers::gic::eoi(id);
                         const u64 delivered = delivered_count();
                         const u64 wakes = __atomic_load_n(&db->counter, __ATOMIC_RELAXED);
-                        if (delivered == before + 1 && wakes == 1)
+                        if (delivered == before + 1 && wakes == 1) {
                             status = 1;
+                        }
                     }
                     drivers::gic::spi_clear_pending(kTestIrq);
                     unbind_line(&line, 0);

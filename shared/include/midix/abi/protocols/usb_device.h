@@ -28,3 +28,24 @@ struct MxDeviceEvent {
     MxUsbSetup setup;
 };
 static_assert(sizeof(MxDeviceEvent) <= MX_RING_INLINE_PAYLOAD);
+
+// Read-only controller-owned endpoint observation. No caller-supplied register
+// address or memory range is accepted; the request selects one endpoint row.
+constexpr mx_u32_t MX_DEVICE_OBSERVE = 0x5544500b, MX_DEVICE_SNAPSHOT = 0x5544500c;
+// OBSERVE value 1 selects EP0's retained pre-diagnostic control trace. Its eight
+// words are: SETUPDONE OUT control/size, last RX status, RECEIVE OUT control/size,
+// software flags, total DATA OUT bytes, and type|request<<8|length<<16.
+// Software flag bit 9 marks post-trial RECEIVE registers; bits 10:11 hold the
+// consumed trial mode. Without bit 9, RECEIVE registers precede programming.
+constexpr mx_u32_t MX_DEVICE_OBSERVE_CONTROL_HISTORY = 1;
+// Explicit development trial, separate from read-only OBSERVE. Value 0 cancels;
+// 1 clears NAK, 2 programs a full OUT window then clears NAK. Only the next
+// nonempty EP0 RECEIVE is affected; reset cancels it. No register address or
+// arbitrary value is accepted. The reply is a SNAPSHOT with flags=armed mode.
+constexpr mx_u32_t MX_DEVICE_EP0_TRIAL = 0x5544500d;
+struct MxDeviceSnapshot {
+    mx_u64_t id, generation;
+    mx_u32_t control, interrupt, transfer_size, global_interrupt;
+    mx_u32_t flags, length, actual, tx_bytes;
+};
+static_assert(sizeof(MxDeviceSnapshot) == 48);

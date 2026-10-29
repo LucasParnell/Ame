@@ -22,6 +22,9 @@
 // collect_vm_ram() authorises appliance RAM, but as a separate, opt-in step.
 
 #include "anko/vm.h"
+#if defined(__aarch64__)
+#include "anko/el2_cache.h"
+#endif
 
 #include "anko/log.h"
 #include "anko/panic.h"
@@ -114,8 +117,9 @@ bool dma_perms_valid(u32 perms) {
 
 SysError shared_arena_create(Vm* vm, Arena* arena, object::Record* arena_record, u64 guest_pa,
                              u64 size, u32 rights, u32 flags, SharedArena** out) {
-    if (out)
+    if (out) {
         *out = nullptr;
+    }
     if (!vm || !arena || !arena_record) {
         return E_INVALID;
     }
@@ -217,8 +221,9 @@ SysError shared_arena_create(Vm* vm, Arena* arena, object::Record* arena_record,
                    shared->shared_id, shared->owner_vm_id,
                    static_cast<unsigned long long>(guest_pa),
                    static_cast<unsigned long long>(size));
-    if (out)
+    if (out) {
         *out = shared;
+    }
     return E_OK;
 }
 
@@ -272,12 +277,23 @@ SysError shared_arena_register_dma(SharedArena* shared, u32 perms) {
     if (!iommu::dma_class_perms(iommu::VmDmaClass::SharedGpu)) {
         return E_INVALID;
     }
+#if defined(__aarch64__)
+    // Retire host zero-fill and CPU-write cache lines before the first device
+    // access. A later dirty CPU eviction must never overwrite GPU output.
+    el2_cache::clean(shared->host_phys_base, shared->size, true);
+#endif
     shared->dma_class = iommu::VmDmaClass::SharedGpu;
     shared->dma_perms = perms;
     ++g_shared_dma_registered;
     ANKO_LOGF_INFO("kernel/vm", "shared: registered SharedGpu id=%u pa=0x%llx perms=%x",
                    shared->shared_id, static_cast<unsigned long long>(shared->host_phys_base),
                    perms);
+    // The guest learns DMA reachability only from the descriptor page, so the
+    // table has to be rewritten now or the flag would stay stale until the next
+    // staging call.
+    if (shared->owner_vm) {
+        publish_shared_regions(*shared->owner_vm);
+    }
     return E_OK;
 }
 
@@ -337,8 +353,9 @@ cap::Borrow<SharedArena> shared_arena_from_cap(Process& caller, CapHandle shared
     cap::Ref e = require_cap(caller, shared_cap, CAP_VM_SHARED, need_rights, out_error);
     auto* shared = e ? static_cast<SharedArena*>(e->target) : nullptr;
     if (!shared || !shared->lifetime) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_DEAD;
+        }
         note_error();
         return nullptr;
     }
@@ -349,8 +366,9 @@ cap::Borrow<SharedArena> shared_arena_from_cap(Process& caller, CapHandle shared
         (void)shared_arena_teardown(shared);
     }
     if (shared->dead) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_DEAD;
+        }
         note_error();
         return nullptr;
     }
@@ -362,8 +380,9 @@ CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle aren
     SysError rc = E_OK;
     auto vm = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
     if (!vm) {
-        if (out_error)
+        if (out_error) {
             *out_error = rc;
+        }
         return kNullCap;
     }
 
@@ -371,14 +390,16 @@ CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle aren
     // VA-only registration is rejected by shared_arena_create (no phys_base).
     cap::Ref arena_e = require_cap(caller, arena_cap, CAP_ARENA, RIGHT_MAP, &rc);
     if (!arena_e) {
-        if (out_error)
+        if (out_error) {
             *out_error = rc;
+        }
         return kNullCap;
     }
     auto* arena = static_cast<Arena*>(arena_e->target);
     if (!arena) {
-        if (out_error)
+        if (out_error) {
             *out_error = E_NOTFOUND;
+        }
         note_error();
         return kNullCap;
     }
@@ -387,8 +408,9 @@ CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle aren
     rc = shared_arena_create(vm.get(), arena, arena_e->object, guest_pa, size, rights, flags,
                              &shared);
     if (rc != E_OK) {
-        if (out_error)
+        if (out_error) {
             *out_error = rc;
+        }
         note_error();
         return kNullCap;
     }
@@ -399,13 +421,15 @@ CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle aren
         // Never leave a half-attached region behind: drop the creator reference,
         // which tears the mapping down and releases both retained records.
         object::release(shared->lifetime);
-        if (out_error)
+        if (out_error) {
             *out_error = E_OVERFLOW;
+        }
         note_error();
         return kNullCap;
     }
-    if (out_error)
+    if (out_error) {
         *out_error = E_OK;
+    }
     return cap_h;
 }
 

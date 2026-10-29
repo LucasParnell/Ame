@@ -13,7 +13,7 @@ struct SpinLock {
 
 // CPU ownership needs local interrupt exclusion, not necessarily a shared lock.
 class InterruptGuard {
-  public:
+public:
     InterruptGuard() {
 #if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
         irq_ = libk::cpu::interrupt_save_disable();
@@ -26,15 +26,14 @@ class InterruptGuard {
     }
     InterruptGuard(const InterruptGuard&) = delete;
     InterruptGuard& operator=(const InterruptGuard&) = delete;
-
-  private:
+private:
 #if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
     u64 irq_;
 #endif
 };
 
 class LockGuard {
-  public:
+public:
     explicit LockGuard(SpinLock& lock) : lock_(lock) {
 #if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
         irq_ = libk::cpu::interrupt_save_disable();
@@ -52,7 +51,7 @@ class LockGuard {
     LockGuard(const LockGuard&) = delete;
     LockGuard& operator=(const LockGuard&) = delete;
 
-  private:
+private:
     SpinLock& lock_;
 #if defined(__aarch64__) && !defined(ANKO_HOST_TEST)
     u64 irq_;

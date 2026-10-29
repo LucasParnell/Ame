@@ -114,12 +114,15 @@ Transition change(Runtime& r, MxUsbRole next, mx_u32_t cc = 0) {
         }
     }
     r.role = next;
-    if (next == MxUsbRole::Host)
+    if (next == MxUsbRole::Host) {
         r.source.begin(mx_clock_ns());
+    }
     r.renew_at = mx_clock_ns() + 500000000ull;
-    mochi::log_raw_marker(next == MxUsbRole::Host     ? "usb role: host; source=500mA\n"
-                          : next == MxUsbRole::Device ? "usb role: device; source off\n"
-                                                      : "usb role: detached; source off\n");
+    const auto* marker = next == MxUsbRole::Host     ? "usb role: host; source=500mA\n"
+                         : next == MxUsbRole::Device ? "usb role: device; source off\n"
+                                                     : "usb role: detached; source off\n";
+    sys_debug_puts(marker, libk::str::length(marker));
+    mochi::log_raw_marker(marker);
     result.ok = true;
     return result;
 }
@@ -150,8 +153,9 @@ extern "C" [[noreturn]] void _start() {
             r->query_fault_logged = false;
             // A failed boost/PHY/controller transition stays off until an
             // actual detach; do not repeatedly power-cycle a faulty partner.
-            if (!status.value && !(status.flags & MX_TYPEC_ATTACHED))
+            if (!status.value && !(status.flags & MX_TYPEC_ATTACHED)) {
                 r->fault = false;
+            }
         } else if (!r->query_fault_logged) {
             r->query_fault_logged = true;
             mochi::log_raw_marker("typec query failed\n");
@@ -170,12 +174,14 @@ extern "C" [[noreturn]] void _start() {
                                    "expected=%u seen=%u query=%u\n",
                                    port.flags, port.value, r->source.generation,
                                    r->source.seen ? 1u : 0u, observed.ok ? 1u : 0u);
-                if (length > 0 && static_cast<size_t>(length) < sizeof(line))
+                if (length > 0 && static_cast<size_t>(length) < sizeof(line)) {
                     mochi::log_raw_marker(line);
+                }
             }
         }
-        if (r->fault)
+        if (r->fault) {
             next = MxUsbRole::Detached;
+        }
         if (next != r->role) {
             const auto transition =
                 change(*r, next, status.flags & mochi::usb::typec::kOrientation);

@@ -9,7 +9,7 @@ namespace midix::usb::dwc2 {
 
 constexpr mx_u32_t kAhbConfig = 0x008, kUsbConfig = 0x00c, kReset = 0x010;
 constexpr mx_u32_t kInterruptStatus = 0x014, kInterruptMask = 0x018;
-constexpr mx_u32_t kRxStatusPop = 0x020, kRxFifoSize = 0x024;
+constexpr mx_u32_t kRxStatusPeek = 0x01c, kRxStatusPop = 0x020, kRxFifoSize = 0x024;
 constexpr mx_u32_t kNonperiodicTxSize = 0x028, kNonperiodicTxStatus = 0x02c;
 constexpr mx_u32_t kCoreId = 0x040, kHardware1 = 0x044, kHardware2 = 0x048;
 constexpr mx_u32_t kHardware3 = 0x04c, kHardware4 = 0x050;
@@ -58,23 +58,23 @@ struct Geometry {
     mx_u16_t max_packets;
     mx_u8_t host_channels;
     mx_u8_t device_endpoints; // EP0 plus nonzero endpoints
-    mx_u8_t in_endpoints;     // nonzero IN endpoints
+    mx_u8_t in_endpoints;    // nonzero IN endpoints
     mx_u8_t high_speed_phy;
     mx_u8_t utmi_width; // GHWCFG4 encoding: 0=8, 1=16, 2=either
     Architecture architecture;
     bool host, device, dynamic_fifo, dedicated_fifos;
 };
 
-inline bool decode_geometry(mx_u32_t id, mx_u32_t hw1, mx_u32_t hw2, mx_u32_t hw3, mx_u32_t hw4,
-                            Geometry* out) {
-    if (!out || ((id & 0xfffff000u) != 0x4f542000u && (id & 0xfffff000u) != 0x4f543000u))
-        return false;
+inline bool decode_geometry(mx_u32_t id, mx_u32_t hw1, mx_u32_t hw2,
+                            mx_u32_t hw3, mx_u32_t hw4, Geometry* out) {
+    if (!out || ((id & 0xfffff000u) != 0x4f542000u &&
+                 (id & 0xfffff000u) != 0x4f543000u)) return false;
     const auto mode = hw2 & 7u, architecture = (hw2 >> 3) & 3u;
     const auto transfer_width = (hw3 & 15u) + 11u;
     const auto packet_width = ((hw3 >> 4) & 7u) + 4u;
     const auto fifo_words = hw3 >> 16;
-    if (mode > 6 || architecture > 2 || transfer_width > 19 || packet_width > 10 || fifo_words < 16)
-        return false;
+    if (mode > 6 || architecture > 2 || transfer_width > 19 || packet_width > 10 ||
+        fifo_words < 16) return false;
     Geometry geometry{};
     geometry.core_id = id;
     geometry.endpoint_directions = hw1;
@@ -85,26 +85,20 @@ inline bool decode_geometry(mx_u32_t id, mx_u32_t hw1, mx_u32_t hw2, mx_u32_t hw
     geometry.device_endpoints = static_cast<mx_u8_t>(1 + ((hw2 >> 10) & 15u));
     geometry.in_endpoints = static_cast<mx_u8_t>((hw4 >> 26) & 15u);
     geometry.utmi_width = static_cast<mx_u8_t>((hw4 >> 14) & 3u);
-    if (geometry.utmi_width == 3)
-        return false;
+    if(geometry.utmi_width==3) return false;
     geometry.high_speed_phy = static_cast<mx_u8_t>((hw2 >> 6) & 3u);
     geometry.architecture = static_cast<Architecture>(architecture);
     geometry.host = mode <= 2 || mode >= 5;
     geometry.device = mode <= 4;
     geometry.dynamic_fifo = (hw2 & (1u << 19)) != 0;
     geometry.dedicated_fifos = (hw4 & (1u << 25)) != 0;
-    if (geometry.in_endpoints >= geometry.device_endpoints)
-        return false;
+    if (geometry.in_endpoints >= geometry.device_endpoints) return false;
     *out = geometry;
     return true;
 }
 
-struct FifoRegion {
-    mx_u16_t start, words;
-};
-struct HostFifos {
-    FifoRegion rx, nonperiodic, periodic;
-};
+struct FifoRegion { mx_u16_t start, words; };
+struct HostFifos { FifoRegion rx, nonperiodic, periodic; };
 inline bool valid_region(FifoRegion region, mx_u32_t capacity) {
     return region.words >= 16 && region.start <= capacity &&
            region.words <= capacity - region.start;
@@ -125,25 +119,21 @@ inline mx_u32_t fifo_size(FifoRegion region) {
 
 // HPRT.PRTENA is write-one-to-disable, and change flags are write-one-to-clear.
 // A generic read/modify/write would disable the port or lose unrelated changes.
-inline bool port_write(mx_u32_t observed, mx_u32_t set, mx_u32_t clear, mx_u32_t acknowledge,
-                       mx_u32_t* out) {
-    if (!out || ((set | clear) & ~kPortControls) || (set & clear) || (acknowledge & ~kPortChanges))
-        return false;
+inline bool port_write(mx_u32_t observed, mx_u32_t set, mx_u32_t clear,
+                       mx_u32_t acknowledge, mx_u32_t* out) {
+    if (!out || ((set | clear) & ~kPortControls) || (set & clear) ||
+        (acknowledge & ~kPortChanges)) return false;
     *out = (((observed & kPortControls) | set) & ~clear) | acknowledge;
     return true;
 }
 inline MxUsbSpeed port_speed(mx_u32_t port) {
     const auto speed = (port >> 17) & 3u;
-    return speed == 0   ? MxUsbSpeed::High
-           : speed == 1 ? MxUsbSpeed::Full
-           : speed == 2 ? MxUsbSpeed::Low
-                        : static_cast<MxUsbSpeed>(0);
+    return speed == 0 ? MxUsbSpeed::High : speed == 1 ? MxUsbSpeed::Full :
+           speed == 2 ? MxUsbSpeed::Low : static_cast<MxUsbSpeed>(0);
 }
 inline mx_u32_t channel_register(mx_u32_t channel, mx_u32_t reg) {
     return kChannelBase + channel * kChannelStride + reg;
 }
-inline mx_u32_t fifo_register(mx_u32_t fifo) {
-    return kFifoBase + fifo * kFifoStride;
-}
+inline mx_u32_t fifo_register(mx_u32_t fifo) { return kFifoBase + fifo * kFifoStride; }
 
 } // namespace midix::usb::dwc2

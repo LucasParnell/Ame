@@ -108,6 +108,12 @@ enum MxSyscall : mx_u64_t {
     // Validate both capabilities before notifying; then conditionally wait.
     MX_NR_NOTIFY_WAIT = 73,
     MX_NR_REPLY_WAIT = 74,
+    // 75 is MX_NR_IPC_POLICY (declared above, out of numeric order). Numbers are
+    // appended after the highest in use and never reused: a stale userland
+    // binary would otherwise decode as a different call.
+    // (vm, vcpu, gpu.platform authority) -> E_OK. Assigns the Hi6250 Mali
+    // appliance to a VM: registers, three interrupts and the LPM3 power path.
+    MX_NR_VM_MALI_ATTACH = 76,
 };
 
 constexpr mx_u32_t MX_SPAWN_SUSPENDED = 1u << 0;
@@ -204,3 +210,5 @@ constexpr mx_u64_t NR_VM_CHANNEL_STAGE = MX_NR_VM_CHANNEL_STAGE;
 constexpr mx_u64_t NR_VM_SHARED_MEMORY_ATTACH = MX_NR_VM_SHARED_MEMORY_ATTACH;
 constexpr mx_u64_t NR_VM_SHARED_MEMORY_REGISTER_DMA = MX_NR_VM_SHARED_MEMORY_REGISTER_DMA;
 constexpr mx_u64_t NR_VM_SHARED_MEMORY_INSPECT = MX_NR_VM_SHARED_MEMORY_INSPECT;
+
+constexpr mx_u64_t NR_VM_MALI_ATTACH = MX_NR_VM_MALI_ATTACH;

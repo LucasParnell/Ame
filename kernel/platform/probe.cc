@@ -114,11 +114,13 @@ struct ProbeCtx {
 };
 
 static void copy_console_path(char (&out)[256], const u8* data, u32 len) {
-    if (!len || len > sizeof(out) || data[len - 1])
+    if (!len || len > sizeof(out) || data[len - 1]) {
         return;
+    }
     u32 i = 0;
-    for (; i + 1 < len && data[i] && data[i] != ':'; ++i)
+    for (; i + 1 < len && data[i] && data[i] != ':'; ++i) {
         out[i] = data[i];
+    }
     out[i] = 0;
 }
 
@@ -181,10 +183,11 @@ static bool probe_begin(void* v, const char* name, u32 depth) {
         }
     }
     if (depth == 1 && ctx.collect_selection) {
-        if (libk::strcmp(name, "chosen") == 0)
+        if (libk::strcmp(name, "chosen") == 0) {
             s.selection = 1;
-        else if (libk::strcmp(name, "aliases") == 0)
+        } else if (libk::strcmp(name, "aliases") == 0) {
             s.selection = 2;
+        }
     }
     s.path_valid = !depth || ctx.slots[depth - 1].path_valid;
     u32 pos = depth ? ctx.slots[depth - 1].path_length : 0;
@@ -362,8 +365,9 @@ static void probe_prop(void* v, fdt::Property id, const char* name, const u8* da
         for (u32 off = 0; len - off >= 16; off += 16) {
             const u64 base = read_phys_be(data + off, 8);
             const u64 size = read_phys_be(data + off + 8, 8);
-            if (base && size)
+            if (base && size) {
                 ctx.reservations->append(base, size);
+            }
         }
     }
     if (s.selection == 1 && id == fdt::Property::StdoutPath) {
@@ -377,8 +381,9 @@ static void probe_prop(void* v, fdt::Property id, const char* name, const u8* da
     }
     // A disabled ancestor cannot be re-enabled by a child. Do not classify
     // compatible lists or read register arrays for an unusable subtree.
-    if (!s.parent_enabled)
+    if (!s.parent_enabled) {
         return;
+    }
     switch (id) {
     case fdt::Property::Compatible: {
         const u8 new_kind = compatible_kind(data, len);
@@ -399,16 +404,19 @@ static void probe_prop(void* v, fdt::Property id, const char* name, const u8* da
         break;
     }
     case fdt::Property::Width:
-        if (len >= 4)
+        if (len >= 4) {
             s.fb_width = libk::be32(data);
+        }
         break;
     case fdt::Property::Height:
-        if (len >= 4)
+        if (len >= 4) {
             s.fb_height = libk::be32(data);
+        }
         break;
     case fdt::Property::Stride:
-        if (len == 4)
+        if (len == 4) {
             s.fb_stride = libk::be32(data);
+        }
         break;
     case fdt::Property::Format: {
         constexpr const char* formats[] = {"a8r8g8b8", "x8r8g8b8", "a8b8g8r8", "x8b8g8r8"};
@@ -525,8 +533,9 @@ bool probe_dtb(const u8* dtb, usize available, HwInfo& hw, BootReservations* res
         };
         reservations_valid = fdt::walk_memreserve(dtb, reservations, entry, available);
         reservations->memreserve_count = reservations->count;
-        if (reservations_valid)
+        if (reservations_valid) {
             ctx.reservations = reservations;
+        }
     }
     if (!fdt::walk(dtb, {&ctx, probe_begin, probe_end, nullptr, probe_prop}, available)) {
         return false;
@@ -534,8 +543,9 @@ bool probe_dtb(const u8* dtb, usize available, HwInfo& hw, BootReservations* res
 
     if (ctx.console_path[0] && ctx.console_path[0] != '/') {
         if (ctx.alias_overflow) {
-            if (!replay_console_path(dtb, available, ctx.console_path))
+            if (!replay_console_path(dtb, available, ctx.console_path)) {
                 return false;
+            }
         } else {
             char alias[256];
             libk::memcpy(alias, ctx.console_path, sizeof(alias));
@@ -574,16 +584,27 @@ bool probe_dtb(const u8* dtb, usize available, HwInfo& hw, BootReservations* res
             return false;
         }
     }
-#ifdef ANKO_BOARD_HUAWEI_ANNE
-    // Only the first bank is supported for initial bring-up. Reserved firmware
-    // regions are excluded by reserve_dtb_regions() later.
-    if (discovered.ram_size > 128ull * 1024 * 1024) {
-        discovered.ram_size = 128ull * 1024 * 1024;
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
+    // QEMU diagnostics share ANE mechanisms but use QEMU RAM and PCI windows.
+    // Apply this physical-board layout constraint only to native ANE RAM.
+    // Process roots inherit the kernel's low identity mapping. It must end
+    // before the fixed user image window at 0x10000000, or loading init at
+    // 0x10010000 collides with a physical-RAM PTE. The stock bank begins at
+    // 0x00400000; reservations (including training and the dump region above
+    // 0x0e000000) remain excluded before allocation. The resulting ~220 MiB
+    // usable window can back the 128 MiB guest plus native services.
+    constexpr u64 kUserImageBase = 0x10000000;
+    if (discovered.ram_base >= kUserImageBase) {
+        return false;
+    }
+    if (discovered.ram_size > kUserImageBase - discovered.ram_base) {
+        discovered.ram_size = kUserImageBase - discovered.ram_base;
     }
 #endif
     hw = discovered;
-    if (reservations_valid && !reservations->overflow)
+    if (reservations_valid && !reservations->overflow) {
         reservations->source = dtb;
+    }
     return true;
 }
 

@@ -1,0 +1,400 @@
+Expand index and per-vertex attribute streams on the GPU at execution time.
+Preserve vertex IDs, signed offsets, instancing and primitive restart.
+Also repair optional push range metadata and varying allocation overflow.
+Hardware execution remains unverified.
+
+diff --git a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+@@ -37,6 +37,13 @@
+ #include "vk_pipeline_layout.h"
+ 
+ struct panvk_draw_info {
++#if PAN_ARCH == 5
++   bool deindexed;
++   mali_ptr vertex_ids;
++   unsigned index_job_id, gather_mask;
++   struct panvk_attrib_buf gathered_vbs[MAX_VBS];
++   unsigned gathered_strides[MAX_VBS];
++#endif
+    unsigned first_index;
+    unsigned index_count;
+    unsigned index_size;
+@@ -84,6 +91,10 @@
+    } jobs;
+ };
+ 
++#if PAN_ARCH == 5
++#include "../midgard/panvk_v5_index.h"
++#endif
++
+ #define is_dirty(__cmdbuf, __name)                                             \
+    BITSET_TEST((__cmdbuf)->vk.dynamic_graphics_state.dirty,                    \
+                MESA_VK_DYNAMIC_##__name)
+@@ -573,7 +584,7 @@
+    bool writes_point_size =
+       vs->info.vs.writes_point_size &&
+       ia->primitive_topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+-   unsigned vertex_count = draw->padded_vertex_count * draw->instance_count;
++   uint64_t vertex_count = (uint64_t)draw->padded_vertex_count * draw->instance_count;
+    mali_ptr psiz_buf = 0;
+ 
+    for (unsigned i = 0; i < PANVK_VARY_BUF_MAX; i++) {
+@@ -588,7 +599,12 @@
+          continue;
+       }
+ #endif
+-      unsigned buf_size = vertex_count * link->buf_strides[i];
++      uint64_t allocation_size = vertex_count * link->buf_strides[i];
++      if (allocation_size > UINT32_MAX) {
++         vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
++         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      }
++      unsigned buf_size = allocation_size;
+       mali_ptr buf_addr =
+          buf_size ? panvk_cmd_alloc_dev_mem(cmdbuf, varying, buf_size, 64).gpu
+                   : 0;
+@@ -763,9 +779,15 @@
+ 
+    for (unsigned i = 0; i < num_vbs; i++) {
+       if (vi->bindings_valid & BITFIELD_BIT(i)) {
+-         panvk_draw_emit_attrib_buf(draw, &vi->bindings[i],
+-                                    &cmdbuf->state.gfx.vb.bufs[i],
+-                                    &attrib_buf_descs[i * 2]);
++         struct vk_vertex_binding_state binding = vi->bindings[i];
++         const struct panvk_attrib_buf *buffer = &cmdbuf->state.gfx.vb.bufs[i];
++#if PAN_ARCH == 5
++         if (draw->gather_mask & BITFIELD_BIT(i)) {
++            binding.stride = draw->gathered_strides[i];
++            buffer = &draw->gathered_vbs[i];
++         }
++#endif
++         panvk_draw_emit_attrib_buf(draw, &binding, buffer, &attrib_buf_descs[i * 2]);
+       } else {
+          memset(&attrib_buf_descs[i * 2], 0, sizeof(*attrib_buf_descs) * 2);
+       }
+@@ -774,9 +796,11 @@
+    for (unsigned i = 0; i < num_vs_attribs; i++) {
+       if (vi->attributes_valid & BITFIELD_BIT(i)) {
+          unsigned buf_idx = vi->attributes[i].binding;
+-         panvk_draw_emit_attrib(
+-            draw, &vi->attributes[i], &vi->bindings[buf_idx],
+-            &cmdbuf->state.gfx.vb.bufs[buf_idx], &attrib_descs[i]);
++         const struct panvk_attrib_buf *buffer = &cmdbuf->state.gfx.vb.bufs[buf_idx];
++#if PAN_ARCH == 5
++         if (draw->gather_mask & BITFIELD_BIT(buf_idx)) buffer = &draw->gathered_vbs[buf_idx];
++#endif
++         panvk_draw_emit_attrib(draw, &vi->attributes[i], &vi->bindings[buf_idx], buffer, &attrib_descs[i]);
+       } else {
+          memset(&attrib_descs[i], 0, sizeof(attrib_descs[0]));
+       }
+@@ -786,7 +810,11 @@
+    for (unsigned id = PAN_VERTEX_ID; id <= PAN_INSTANCE_ID; id++) {
+       if (id >= attrib_count) continue;
+       unsigned buf = attrib_buf_count - 2 + (id - PAN_VERTEX_ID);
+-      if (id == PAN_VERTEX_ID)
++      if (id == PAN_VERTEX_ID && draw->deindexed) {
++         const struct vk_vertex_binding_state binding = {.stride = 4};
++         const struct panvk_attrib_buf ids = {draw->vertex_ids, draw->index_count * 4};
++         panvk_draw_emit_attrib_buf(draw, &binding, &ids, &attrib_buf_descs[buf]);
++      } else if (id == PAN_VERTEX_ID)
+          panfrost_vertex_id(draw->padded_vertex_count, &attrib_buf_descs[buf], draw->instance_count > 1);
+       else
+          panfrost_instance_id(draw->padded_vertex_count, &attrib_buf_descs[buf], draw->instance_count > 1);
+@@ -1014,6 +1042,9 @@
+          cfg.index_count = draw->index_count;
+          cfg.indices = draw->indices;
+          cfg.base_vertex_offset = draw->vertex_offset - draw->offset_start;
++#if PAN_ARCH == 5
++         if (draw->deindexed) cfg.base_vertex_offset = 0;
++#endif
+ 
+          switch (draw->index_size) {
+          case 4:
+@@ -1335,6 +1366,15 @@
+    if (result != VK_SUCCESS)
+       return;
+ 
++#if PAN_ARCH == 5
++   if (draw->deindexed) {
++      result = panvk_prepare_index_expansion(cmdbuf, draw);
++      if (result != VK_SUCCESS) {
++         vk_command_buffer_set_error(&cmdbuf->vk, result);
++         return;
++      }
++   }
++#endif
+    panvk_draw_prepare_attributes(cmdbuf, draw);
+ 
+    uint32_t used_set_mask =
+@@ -1357,6 +1397,10 @@
+          ? pan_jc_add_job(&batch->vtc_jc, MALI_JOB_TYPE_COMPUTE, false, false,
+                           0, 0, &draw->jobs.vertex_copy_desc, false)
+          : 0;
++
++#if PAN_ARCH == 5
++   if (draw->index_job_id) copy_desc_job_id = draw->index_job_id;
++#endif
+ 
+    bool vs_writes_pos =
+       cmdbuf->state.gfx.link.buf_strides[PANVK_VARY_BUF_POSITION] > 0;
+@@ -1557,16 +1601,28 @@
+                                uint32_t firstInstance)
+ {
+    VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+-   uint32_t min_vertex, max_vertex;
+-
+    if (instanceCount == 0 || indexCount == 0)
+       return;
+ 
+ #if PAN_ARCH == 5
+-   vk_command_buffer_set_error(&cmdbuf->vk, VK_ERROR_FEATURE_NOT_PRESENT);
++   struct panvk_draw_info draw = {
++      .deindexed = true,
++      .first_index = firstIndex,
++      .index_count = indexCount,
++      .index_size = cmdbuf->state.gfx.ib.index_size,
++      .vertex_offset = vertexOffset,
++      .first_instance = firstInstance,
++      .instance_count = instanceCount,
++      .vertex_range = indexCount,
++      .vertex_count = indexCount,
++      .padded_vertex_count = padded_vertex_count(cmdbuf, indexCount, instanceCount),
++      .indices = panvk_buffer_gpu_ptr(cmdbuf->state.gfx.ib.buffer, cmdbuf->state.gfx.ib.offset) +
++                 (uint64_t)firstIndex * cmdbuf->state.gfx.ib.index_size,
++   };
++   panvk_cmd_draw(cmdbuf, &draw);
+    return;
+-#endif
+-
++#else
++   uint32_t min_vertex, max_vertex;
+    const struct vk_input_assembly_state *ia =
+       &cmdbuf->vk.dynamic_graphics_state.ia;
+    bool primitive_restart = ia->primitive_restart_enable;
+@@ -1593,6 +1649,7 @@
+    };
+ 
+    panvk_cmd_draw(cmdbuf, &draw);
++#endif
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+diff --git a/src/panfrost/vulkan/panvk_meta.h b/src/panfrost/vulkan/panvk_meta.h
+--- a/src/panfrost/vulkan/panvk_meta.h
++++ b/src/panfrost/vulkan/panvk_meta.h
+@@ -16,6 +16,7 @@
+    PANVK_META_OBJECT_KEY_BLEND_SHADER = VK_META_OBJECT_KEY_DRIVER_OFFSET,
+    PANVK_META_OBJECT_KEY_COPY_DESC_SHADER,
+    PANVK_META_OBJECT_KEY_FB_PRELOAD_SHADER,
++   PANVK_META_OBJECT_KEY_INDEX_GATHER_SHADER,
+ };
+ 
+ static inline VkFormat
+diff --git a/src/panfrost/vulkan/panvk_vX_shader.c b/src/panfrost/vulkan/panvk_vX_shader.c
+--- a/src/panfrost/vulkan/panvk_vX_shader.c
++++ b/src/panfrost/vulkan/panvk_vX_shader.c
+@@ -459,7 +459,10 @@
+    nir_def *value = nir_load_ubo(b, intr->def.num_components, intr->def.bit_size,
+       nir_imm_int(b, ubo), offset,
+       .align_mul = 4, .align_offset = nir_intrinsic_base(intr) % 4,
+-      .range_base = nir_intrinsic_base(intr), .range = nir_intrinsic_range(intr));
++      .range_base = nir_intrinsic_base(intr),
++      /* Push-constant range metadata is optional; UBO range must be nonzero.
++       * Meta shaders omit it, and system values share the 512-byte block. */
++      .range = nir_intrinsic_range(intr) ?: 512 - nir_intrinsic_base(intr));
+    nir_def_replace(&intr->def, value);
+    return true;
+ }
+diff --git a/src/panfrost/vulkan/midgard/panvk_v5_index.h b/src/panfrost/vulkan/midgard/panvk_v5_index.h
+--- /dev/null
++++ b/src/panfrost/vulkan/midgard/panvk_v5_index.h
+@@ -0,0 +1,188 @@
++/* SPDX-License-Identifier: MIT */
++/* GPU expansion of indexed vertex streams. No index contents are read while
++ * recording: index buffers may be written by earlier GPU commands. */
++#include "nir_builder.h"
++#include "panvk_meta.h"
++
++struct panvk_index_record {
++   uint64_t source, destination;
++   uint32_t source_stride, destination_stride, size, pad;
++};
++
++struct panvk_index_inputs {
++   uint64_t indices, expanded_indices, vertex_ids;
++   uint32_t count, vertex_offset, record_count, pad;
++   struct panvk_index_record records[16];
++};
++
++static nir_def *
++index_input(nir_builder *b, unsigned offset, unsigned bits)
++{
++   return nir_load_ubo(b, 1, bits, nir_imm_int(b, 0), nir_imm_int(b, offset),
++                      .align_mul = 4, .range = sizeof(struct panvk_index_inputs));
++}
++
++static VkResult
++panvk_index_shader(struct panvk_device *dev, unsigned index_size, bool restart,
++                   struct panvk_internal_shader **out)
++{
++   struct {
++      enum panvk_meta_object_key_type type;
++      unsigned index_size, restart;
++   } key = {PANVK_META_OBJECT_KEY_INDEX_GATHER_SHADER, index_size, restart};
++   VkShaderEXT handle = (VkShaderEXT)vk_meta_lookup_object(
++      &dev->meta, VK_OBJECT_TYPE_SHADER_EXT, &key, sizeof(key));
++   if (handle) {
++      *out = panvk_internal_shader_from_handle(handle);
++      return VK_SUCCESS;
++   }
++   nir_builder b = nir_builder_init_simple_shader(
++      MESA_SHADER_COMPUTE, GENX(pan_shader_get_compiler_options)(),
++      "panvk-index-expand-%u-%u", index_size, restart);
++   b.shader->info.workgroup_size[0] = 64;
++   b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
++   b.shader->info.num_ubos = 1;
++   nir_def *gid = nir_load_global_invocation_id(&b, 32);
++   nir_def *position = nir_channel(&b, gid, 0);
++   nir_def *record = nir_channel(&b, gid, 1);
++#define INDEX_INPUT(field, bits) index_input(&b, offsetof(struct panvk_index_inputs, field), bits)
++   nir_push_if(&b, nir_ult(&b, position, INDEX_INPUT(count, 32)));
++   nir_def *address = nir_iadd(&b, INDEX_INPUT(indices, 64),
++      nir_u2u64(&b, nir_imul_imm(&b, position, index_size)));
++   nir_def *index = nir_u2u32(&b, nir_load_global(&b, address, index_size, 1, index_size * 8));
++   nir_def *is_restart = restart ? nir_ieq_imm(&b, index, index_size == 4 ? UINT32_MAX : (1u << (index_size * 8)) - 1) : nir_imm_false(&b);
++   nir_def *vertex = nir_iadd(&b, index, INDEX_INPUT(vertex_offset, 32));
++   vertex = nir_bcsel(&b, is_restart, nir_imm_int(&b, 0), vertex);
++   nir_def *word_offset = nir_u2u64(&b, nir_imul_imm(&b, position, 4));
++   nir_push_if(&b, nir_ieq_imm(&b, record, 0));
++   nir_store_global(&b, nir_iadd(&b, INDEX_INPUT(vertex_ids, 64), word_offset), 4, vertex, 1);
++   nir_store_global(&b, nir_iadd(&b, INDEX_INPUT(expanded_indices, 64), word_offset), 4,
++                    nir_bcsel(&b, is_restart, nir_imm_int(&b, UINT32_MAX), position), 1);
++   nir_pop_if(&b, NULL);
++   nir_push_if(&b, nir_ult(&b, record, INDEX_INPUT(record_count, 32)));
++   nir_def *record_offset = nir_iadd_imm(&b,
++      nir_imul_imm(&b, record, sizeof(struct panvk_index_record)), offsetof(struct panvk_index_inputs, records));
++#define RECORD_INPUT(field, bits) nir_load_ubo(&b, 1, bits, nir_imm_int(&b, 0), \
++      nir_iadd_imm(&b, record_offset, offsetof(struct panvk_index_record, field)), \
++      .align_mul = 4, .range = sizeof(struct panvk_index_inputs))
++   nir_def *source = nir_iadd(&b, RECORD_INPUT(source, 64),
++      nir_u2u64(&b, nir_imul(&b, vertex, RECORD_INPUT(source_stride, 32))));
++   nir_def *destination = nir_iadd(&b, RECORD_INPUT(destination, 64),
++      nir_u2u64(&b, nir_imul(&b, position, RECORD_INPUT(destination_stride, 32))));
++   nir_def *size = RECORD_INPUT(size, 32);
++   nir_variable *byte = nir_local_variable_create(b.impl, glsl_uint_type(), "byte");
++   nir_store_var(&b, byte, nir_imm_int(&b, 0), 1);
++   nir_push_loop(&b);
++   nir_def *offset = nir_load_var(&b, byte);
++   nir_break_if(&b, nir_uge(&b, offset, size));
++   nir_def *value;
++   nir_push_if(&b, is_restart);
++   nir_def *zero = nir_imm_intN_t(&b, 0, 8);
++   nir_push_else(&b, NULL);
++   nir_def *loaded = nir_load_global(&b, nir_iadd(&b, source, nir_u2u64(&b, offset)), 1, 1, 8);
++   nir_pop_if(&b, NULL);
++   value = nir_if_phi(&b, zero, loaded);
++   nir_store_global(&b, nir_iadd(&b, destination, nir_u2u64(&b, offset)), 1, value, 1);
++   nir_store_var(&b, byte, nir_iadd_imm(&b, offset, 1), 1);
++   nir_pop_loop(&b, NULL);
++   nir_pop_if(&b, NULL);
++   nir_pop_if(&b, NULL);
++#undef RECORD_INPUT
++#undef INDEX_INPUT
++   nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
++   struct panvk_physical_device *pdev = to_panvk_physical_device(dev->vk.physical);
++   struct panfrost_compile_inputs inputs = {
++      .gpu_id = pdev->kmod.props.gpu_prod_id,
++      .no_ubo_to_push = true,
++   };
++   pan_shader_preprocess(b.shader, inputs.gpu_id);
++   struct panvk_internal_shader *shader;
++   VkResult result = panvk_v5_create_internal_shader(dev, b.shader, &inputs, &shader);
++   ralloc_free(b.shader);
++   if (result != VK_SUCCESS) return result;
++   handle = (VkShaderEXT)vk_meta_cache_object(&dev->vk, &dev->meta, &key, sizeof(key),
++      VK_OBJECT_TYPE_SHADER_EXT, (uint64_t)panvk_internal_shader_to_handle(shader));
++   *out = panvk_internal_shader_from_handle(handle);
++   return VK_SUCCESS;
++}
++
++static VkResult
++panvk_prepare_index_expansion(struct panvk_cmd_buffer *cmd, struct panvk_draw_info *draw)
++{
++   struct panvk_device *dev = to_panvk_device(cmd->vk.base.device);
++   struct panvk_batch *batch = cmd->cur_batch;
++   const struct vk_vertex_input_state *vi = cmd->vk.dynamic_graphics_state.vi;
++   struct panvk_index_inputs inputs = {
++      .indices = draw->indices,
++      .count = draw->index_count,
++      .vertex_offset = draw->vertex_offset,
++   };
++   /* Attribute buffers have 32-bit sizes. Reject allocation overflow before
++    * requesting memory, rather than truncating the descriptor or pool size. */
++   if (draw->index_count > UINT32_MAX / 4)
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   struct panfrost_ptr ids = panvk_cmd_alloc_dev_mem(cmd, varying, draw->index_count * 4ull, 64);
++   struct panfrost_ptr indices = panvk_cmd_alloc_dev_mem(cmd, varying, draw->index_count * 4ull, 64);
++   if (!ids.gpu || !indices.gpu) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   inputs.vertex_ids = draw->vertex_ids = ids.gpu;
++   inputs.expanded_indices = indices.gpu;
++   u_foreach_bit(attribute, vi->attributes_valid) {
++      const struct vk_vertex_attribute_state *att = &vi->attributes[attribute];
++      if (vi->bindings[att->binding].input_rate == VK_VERTEX_INPUT_RATE_INSTANCE) continue;
++      unsigned size = vk_format_get_blocksize(att->format);
++      draw->gathered_strides[att->binding] = MAX2(draw->gathered_strides[att->binding], att->offset + size);
++      draw->gather_mask |= BITFIELD_BIT(att->binding);
++   }
++   u_foreach_bit(binding, draw->gather_mask) {
++      unsigned stride = ALIGN_POT(draw->gathered_strides[binding], 4);
++      uint64_t size = (uint64_t)stride * draw->index_count;
++      if (size > UINT32_MAX) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      struct panfrost_ptr buffer = panvk_cmd_alloc_dev_mem(cmd, varying, size, 64);
++      if (!buffer.gpu) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      draw->gathered_strides[binding] = stride;
++      draw->gathered_vbs[binding] = (struct panvk_attrib_buf){buffer.gpu, size};
++   }
++   u_foreach_bit(attribute, vi->attributes_valid) {
++      const struct vk_vertex_attribute_state *att = &vi->attributes[attribute];
++      unsigned binding = att->binding;
++      if (!(draw->gather_mask & BITFIELD_BIT(binding))) continue;
++      struct panvk_index_record *rec = &inputs.records[inputs.record_count++];
++      rec->source = cmd->state.gfx.vb.bufs[binding].address + att->offset;
++      rec->destination = draw->gathered_vbs[binding].address + att->offset;
++      rec->source_stride = vi->bindings[binding].stride;
++      rec->destination_stride = draw->gathered_strides[binding];
++      rec->size = vk_format_get_blocksize(att->format);
++   }
++   bool restart = cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
++   struct panvk_internal_shader *shader;
++   VkResult result = panvk_index_shader(dev, draw->index_size, restart, &shader);
++   if (result != VK_SUCCESS) return result;
++   struct panfrost_ptr data = panvk_cmd_alloc_dev_mem(cmd, desc, sizeof(inputs), 16);
++   struct panfrost_ptr ubo = panvk_cmd_alloc_desc(cmd, UNIFORM_BUFFER);
++   struct panfrost_ptr rsd = panvk_cmd_alloc_desc(cmd, RENDERER_STATE);
++   struct panfrost_ptr job = panvk_cmd_alloc_desc(cmd, COMPUTE_JOB);
++   if (!data.cpu || !ubo.cpu || !rsd.cpu || !job.cpu) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   memcpy(data.cpu, &inputs, sizeof(inputs));
++   pan_pack(ubo.cpu, UNIFORM_BUFFER, cfg) {
++      cfg.pointer = data.gpu;
++      cfg.entries = DIV_ROUND_UP(sizeof(inputs), 16);
++   }
++   pan_pack(rsd.cpu, RENDERER_STATE, cfg) {
++      pan_shader_prepare_rsd(&shader->info, panvk_priv_mem_dev_addr(shader->code_mem), &cfg);
++   }
++   panfrost_pack_work_groups_compute(pan_section_ptr(job.cpu, COMPUTE_JOB, INVOCATION),
++      DIV_ROUND_UP(draw->index_count, 64), MAX2(inputs.record_count, 1), 1, 64, 1, 1, false, false);
++   pan_section_pack(job.cpu, COMPUTE_JOB, PARAMETERS, cfg) { cfg.job_task_split = 9; }
++   pan_section_pack(job.cpu, COMPUTE_JOB, DRAW, cfg) {
++      cfg.state = rsd.gpu;
++      cfg.uniform_buffers = ubo.gpu;
++      cfg.thread_storage = batch->tls.gpu;
++   }
++   util_dynarray_append(&batch->jobs, void *, job.cpu);
++   draw->index_job_id = pan_jc_add_job(&batch->vtc_jc, MALI_JOB_TYPE_COMPUTE,
++      false, false, 0, 0, &job, false);
++   batch->tlsinfo.tls.size = MAX2(batch->tlsinfo.tls.size, shader->info.tls_size);
++   draw->indices = indices.gpu;
++   draw->index_size = 4;
++   return VK_SUCCESS;
++}

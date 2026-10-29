@@ -5,9 +5,7 @@ typedef unsigned int u32;
 typedef unsigned long u64;
 typedef long s64;
 
-struct bitfield {
-    u32 offset, length, msb_right;
-};
+struct bitfield { u32 offset, length, msb_right; };
 struct fixed {
     char id[16];
     u64 smem_start;
@@ -37,7 +35,7 @@ struct report {
 _Static_assert(sizeof(struct fixed) == 80, "Linux AArch64 fixed ABI");
 _Static_assert(sizeof(struct variable) == 160, "Linux variable ABI");
 _Static_assert(sizeof(struct report) == 272, "probe report ABI");
-static struct report report = {{'F', 'B', 'Q', '1'}, 1, -1, -1, -1, {0}, {0}};
+static struct report report = {{'F','B','Q','1'}, 1, -1, -1, -1, {0}, {0}};
 
 static s64 syscall4(s64 nr, s64 a, s64 b, s64 c, s64 d) {
     register s64 x0 __asm__("x0") = a;
@@ -50,7 +48,7 @@ static s64 syscall4(s64 nr, s64 a, s64 b, s64 c, s64 d) {
 }
 __attribute__((noreturn)) void _start(void) {
     // openat(O_RDONLY | O_CLOEXEC), FBIOGET_FSCREENINFO, FBIOGET_VSCREENINFO.
-    report.open_result = syscall4(56, -100, (s64) "/dev/graphics/fb0", 0x80000, 0);
+    report.open_result = syscall4(56, -100, (s64)"/dev/graphics/fb0", 0x80000, 0);
     if (report.open_result >= 0) {
         report.fixed_result = syscall4(29, report.open_result, 0x4602, (s64)&report.fixed, 0);
         report.variable_result = syscall4(29, report.open_result, 0x4600, (s64)&report.variable, 0);
@@ -59,13 +57,9 @@ __attribute__((noreturn)) void _start(void) {
     u64 done = 0;
     while (done < sizeof(report)) {
         s64 written = syscall4(64, 1, (s64)&report + done, sizeof(report) - done, 0);
-        if (written <= 0)
-            break;
+        if (written <= 0) break;
         done += written;
     }
-    syscall4(94,
-             report.open_result < 0 || report.fixed_result || report.variable_result ||
-                 done != sizeof(report),
-             0, 0, 0);
+    syscall4(94, report.open_result < 0 || report.fixed_result || report.variable_result || done != sizeof(report), 0, 0, 0);
     __builtin_unreachable();
 }

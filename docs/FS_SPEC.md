@@ -1,12 +1,12 @@
-# Midix Filesystem Specification (FS_SPEC)
+# Ame Filesystem Specification (FS_SPEC)
 
-Companion to [the architecture specification](architecture.md), §17, §9 and §20.
+Companion to [the Ame storage architecture](architecture.md#amefs-and-durable-storage).
 
 ---
 
 ## 1. Overview
 
-The Midix filesystem runs entirely in userland as the `io.fs` service. The kernel has no visibility into filesystem internals; it provides only the capability primitives (`CAP_MMIO`, `CAP_IRQ`, `CAP_ARENA`, `CAP_DOORBELL`) that the FS service and its block driver consume.
+The Ame filesystem runs entirely in userland as the `io.fs` service. The kernel has no visibility into filesystem internals; it provides only the capability primitives (`CAP_MMIO`, `CAP_IRQ`, `CAP_ARENA`, `CAP_DOORBELL`) that the FS service and its block driver consume.
 
 ```
 [ client service ]  ──ring IPC──>  [ io.fs ]  ──ring IPC──>  [ drv.blk.virtio ]
@@ -925,7 +925,7 @@ Tier migration is background work; no client-visible latency in V0.
 
 `userland/system.json` declares `drv.blk.virtio` and `io.fs`, their startup
 ordering, and the shared block endpoint's ring and doorbell grants. Board
-profiles select the services to package; see [System descriptor](SYSTEM_DESCRIPTOR.md).
+profiles select the services to package; see [System descriptor](abi.md#system_descriptor).
 
 `io.fs` registers with nameservice as `"io.fs"`. Clients resolve via nameservice to
 obtain an `MxEndpointDesc` containing the cmd/reply ring caps and doorbells.
@@ -987,7 +987,7 @@ The two-boot guest fixture writes and reads 3 MiB through actual IPC, and tests
 read-only arena rights, generation coherence and cap/mapping lifetime pinning.
 On a connected Anne, `fscheck write` writes/syncs/verifies a 3 MiB diagnostic;
 `fscheck read` verifies it after reboot. Hardware results are recorded in
-[EMMC.md](../boards/huawei-anne/EMMC.md).
+[EMMC.md](../boards/huawei-anne/storage.md#emmc).
 
 ### Handle access (protocol version 2)
 

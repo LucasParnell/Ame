@@ -124,8 +124,9 @@ bool bar_range_safe(const u8* host, const PciBar* bars, u32 bar, u64 start, u64 
                 const u32 bir = field & kMsixBirMask;
                 const u64 region = field & ~kMsixBirMask;
                 const u64 bytes =
-                    i == 0 ? static_cast<u64>(vectors) * kMsixTableEntryBytes
-                           : libk::div_round_up(vectors, kMsixPbaBitsPerEntry) * kMsixPbaEntryBytes;
+                    i == 0
+                        ? static_cast<u64>(vectors) * kMsixTableEntryBytes
+                        : libk::div_round_up(vectors, kMsixPbaBitsPerEntry) * kMsixPbaEntryBytes;
                 if (bir >= kMaxBars || region >= bars[bir].size ||
                     bytes > bars[bir].size - region) {
                     return false;
@@ -250,8 +251,7 @@ CfgWriteAction classify_config_write(const GuestConfig& cfg, u32 fn_index, u32 o
     // MSI/MSI-X capability windows are mediated: the guest may program them,
     // but the value is bent into an Anko route, never a raw host MSI target.
     const u32 msi_off = cfg.msi_cap_off[fn_index];
-    if (msi_off != 0 && offset >= msi_off + kMsiCtrlOffset &&
-        offset + size <= msi_off + kMsiCapBytes) {
+    if (msi_off != 0 && offset >= msi_off + kMsiCtrlOffset && offset + size <= msi_off + kMsiCapBytes) {
         return CfgWriteAction::Mediate;
     }
     // Anything else (device-specific read-only fields, power management, reset)

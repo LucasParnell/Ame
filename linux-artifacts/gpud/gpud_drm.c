@@ -14,10 +14,10 @@
 #include "midix/abi/linux_guest_console.h"
 #include "midix/abi/linux_guest_syscall.h"
 
-void* memcpy(void* dst, const void* src, unsigned long n);
-void* memset(void* dst, int c, unsigned long n);
+void *memcpy(void *dst, const void *src, unsigned long n);
+void *memset(void *dst, int c, unsigned long n);
 
-static const char* connector_type_name(uint32_t type) {
+static const char *connector_type_name(uint32_t type) {
     /* Short DRM_MODE_CONNECTOR_* names that fit the 8-byte output label. */
     switch (type) {
     case 1:
@@ -43,8 +43,8 @@ static const char* connector_type_name(uint32_t type) {
     }
 }
 
-static void output_set_name(char* dst, uint32_t type) {
-    const char* name = connector_type_name(type);
+static void output_set_name(char *dst, uint32_t type) {
+    const char *name = connector_type_name(type);
     uint32_t i;
     for (i = 0; i < 7 && name[i]; ++i) {
         dst[i] = name[i];
@@ -54,7 +54,7 @@ static void output_set_name(char* dst, uint32_t type) {
     }
 }
 
-int gdrm_card_open(struct gdrm_card* card, const char* path) {
+int gdrm_card_open(struct gdrm_card *card, const char *path) {
     struct drm_mode_card_res res;
     uint32_t count_crtcs;
     uint32_t count_connectors;
@@ -110,7 +110,7 @@ int gdrm_card_open(struct gdrm_card* card, const char* path) {
     return 0;
 }
 
-void gdrm_card_close(struct gdrm_card* card) {
+void gdrm_card_close(struct gdrm_card *card) {
     if (!card) {
         return;
     }
@@ -159,7 +159,7 @@ int gdrm_card_release_master(struct gdrm_card* card) {
     return 0;
 }
 
-int gdrm_card_enumerate(struct gdrm_card* card) {
+int gdrm_card_enumerate(struct gdrm_card *card) {
     uint32_t i;
     uint32_t outputs = 0;
 
@@ -169,7 +169,7 @@ int gdrm_card_enumerate(struct gdrm_card* card) {
     for (i = 0; i < card->connector_count && outputs < GDRM_MAX_CONNECTORS; ++i) {
         struct drm_mode_get_connector conn;
         struct drm_mode_modeinfo modes[GDRM_MAX_MODES];
-        struct gdrm_output* output;
+        struct gdrm_output *output;
         uint32_t cap;
 
         memset(&conn, 0, sizeof(conn));
@@ -230,8 +230,8 @@ int gdrm_card_enumerate(struct gdrm_card* card) {
     return outputs != 0 ? 0 : -1;
 }
 
-int gdrm_dumb_create(struct gdrm_card* card, uint32_t width, uint32_t height, uint32_t bpp,
-                     struct gdrm_dumb* dumb) {
+int gdrm_dumb_create(struct gdrm_card *card, uint32_t width, uint32_t height, uint32_t bpp,
+                     struct gdrm_dumb *dumb) {
     struct drm_mode_create_dumb create;
     struct drm_mode_map_dumb map;
     uint32_t bytes_per_pixel;
@@ -253,7 +253,8 @@ int gdrm_dumb_create(struct gdrm_card* card, uint32_t width, uint32_t height, ui
      * pitch that under-covers the width, or is not pixel aligned, would corrupt
      * the image. Guard the class before a single byte is mapped. */
     bytes_per_pixel = create.bpp / 8u;
-    if (bytes_per_pixel == 0 || (uint64_t)create.pitch < (uint64_t)create.width * bytes_per_pixel ||
+    if (bytes_per_pixel == 0 ||
+        (uint64_t)create.pitch < (uint64_t)create.width * bytes_per_pixel ||
         (create.pitch & (bytes_per_pixel - 1u)) != 0) {
         (void)mx_ioctl(card->fd, GDRM_IOCTL_MODE_DESTROY_DUMB, &create.handle);
         return -1;
@@ -278,29 +279,29 @@ int gdrm_dumb_create(struct gdrm_card* card, uint32_t width, uint32_t height, ui
     dumb->bpp = create.bpp;
     dumb->pitch = create.pitch;
     dumb->size = create.size;
-    dumb->map = (unsigned char*)(unsigned long)mapped;
+    dumb->map = (unsigned char *)(unsigned long)mapped;
     dumb->map_len = create.size;
     return 0;
 }
 
-void gdrm_dumb_destroy(struct gdrm_card* card, uint32_t handle) {
+void gdrm_dumb_destroy(struct gdrm_card *card, uint32_t handle) {
     if (!card || card->fd < 0 || handle == 0) {
         return;
     }
     (void)mx_ioctl(card->fd, GDRM_IOCTL_MODE_DESTROY_DUMB, &handle);
 }
 
-int gdrm_fb_create(struct gdrm_card* card, const struct gdrm_dumb* dumb, uint32_t* fb_id_out) {
+int gdrm_fb_create(struct gdrm_card *card, const struct gdrm_dumb *dumb, uint32_t *fb_id_out) {
     if (!dumb) {
         return -1;
     }
-    return gdrm_fb_create_handle(
-        card, dumb->handle, dumb->width, dumb->height, dumb->pitch, dumb->bpp,
-        24 /* XRGB8888 scans out as 24-bit colour plus padding */, fb_id_out);
+    return gdrm_fb_create_handle(card, dumb->handle, dumb->width, dumb->height, dumb->pitch,
+                                 dumb->bpp, 24 /* XRGB8888 scans out as 24-bit colour plus padding */,
+                                 fb_id_out);
 }
 
-int gdrm_fb_create_handle(struct gdrm_card* card, uint32_t handle, uint32_t width, uint32_t height,
-                          uint32_t pitch, uint32_t bpp, uint32_t depth, uint32_t* fb_id_out) {
+int gdrm_fb_create_handle(struct gdrm_card *card, uint32_t handle, uint32_t width, uint32_t height,
+                          uint32_t pitch, uint32_t bpp, uint32_t depth, uint32_t *fb_id_out) {
     struct drm_mode_fb_cmd fb;
 
     if (!card || card->fd < 0 || handle == 0 || width == 0 || height == 0 || pitch == 0) {
@@ -322,14 +323,14 @@ int gdrm_fb_create_handle(struct gdrm_card* card, uint32_t handle, uint32_t widt
     return 0;
 }
 
-void gdrm_fb_destroy(struct gdrm_card* card, uint32_t fb_id) {
+void gdrm_fb_destroy(struct gdrm_card *card, uint32_t fb_id) {
     if (!card || card->fd < 0 || fb_id == 0) {
         return;
     }
     (void)mx_ioctl(card->fd, GDRM_IOCTL_MODE_RMFB, &fb_id);
 }
 
-long gdrm_get_cap(struct gdrm_card* card, uint64_t capability) {
+long gdrm_get_cap(struct gdrm_card *card, uint64_t capability) {
     struct drm_get_cap cap;
 
     if (!card || card->fd < 0) {
@@ -343,7 +344,7 @@ long gdrm_get_cap(struct gdrm_card* card, uint64_t capability) {
     return (long)cap.value;
 }
 
-long gdrm_prime_import(struct gdrm_card* card, int fd, uint32_t* handle_out) {
+long gdrm_prime_import(struct gdrm_card *card, int fd, uint32_t *handle_out) {
     struct gdrm_prime_handle prime;
     long rc;
 
@@ -365,7 +366,7 @@ long gdrm_prime_import(struct gdrm_card* card, int fd, uint32_t* handle_out) {
     return 0;
 }
 
-void gdrm_gem_close(struct gdrm_card* card, uint32_t handle) {
+void gdrm_gem_close(struct gdrm_card *card, uint32_t handle) {
     struct gdrm_gem_close close;
 
     if (!card || card->fd < 0 || handle == 0) {
@@ -376,8 +377,8 @@ void gdrm_gem_close(struct gdrm_card* card, uint32_t handle) {
     (void)mx_ioctl(card->fd, GDRM_IOCTL_GEM_CLOSE, &close);
 }
 
-int gdrm_crtc_program(struct gdrm_card* card, uint32_t crtc_id, uint32_t connector_id,
-                      uint32_t fb_id, const struct drm_mode_modeinfo* mode) {
+int gdrm_crtc_program(struct gdrm_card *card, uint32_t crtc_id, uint32_t connector_id,
+                      uint32_t fb_id, const struct drm_mode_modeinfo *mode) {
     struct drm_mode_crtc crtc;
 
     if (!card || card->fd < 0 || !mode || crtc_id == 0 || fb_id == 0) {
@@ -395,7 +396,7 @@ int gdrm_crtc_program(struct gdrm_card* card, uint32_t crtc_id, uint32_t connect
     return mx_ioctl(card->fd, DRM_IOCTL_MODE_SETCRTC, &crtc) == 0 ? 0 : -1;
 }
 
-int gdrm_crtc_scanning(struct gdrm_card* card, uint32_t crtc_id, uint32_t fb_id) {
+int gdrm_crtc_scanning(struct gdrm_card *card, uint32_t crtc_id, uint32_t fb_id) {
     struct drm_mode_crtc got;
 
     if (!card || card->fd < 0 || crtc_id == 0) {

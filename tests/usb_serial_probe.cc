@@ -2,7 +2,7 @@
 // ownership under full rings and connection changes, with no phone involved.
 #include "../userland/usb/serial/bridge.h"
 #include "../userland/drivers/tty/transport.h"
-#include "../userland/drivers/tty/render.h"
+#include "../userland/drivers/tty/output.h"
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -74,6 +74,12 @@ static void input_backpressure() {
 static void output_generations() {
     Fixture f;
     f.change(21, true);
+    // The host has configured its terminal before initiating output.
+    MxFunctionChunk input{21, 1, 1, 0, 0, {'\r'}};
+    assert(f.bridge.stream.rx().try_push_msg(MX_FUNCTION_RX, input));
+    assert(mochi::usb::serial::accept_host(f.bridge));
+    MxRingSlot admitted{};
+    assert(f.bridge.input.try_pop(&admitted));
     MxRingSlot raw{};
     raw.type = MX_TERM_OUTPUT_BYTES;
     raw.length = 48;
@@ -109,6 +115,27 @@ static void output_generations() {
     assert(!f.bridge.stream.tx().depth());
     assert(f.mirror.hold(raw) && f.mirror.pending.empty());
 }
+static void no_unsolicited_output_before_host_input() {
+    Fixture f;
+    f.change(25, true);
+    MxRingSlot raw{};
+    raw.type = MX_TERM_OUTPUT_BYTES;
+    raw.length = 7;
+    std::memcpy(raw.payload, "msh:/$ ", 7);
+    assert(f.mirror.hold(raw) && f.mirror.flush());
+    assert(mochi::usb::serial::deliver_shell(f.bridge));
+    assert(!f.bridge.stream.tx().depth() && f.bridge.dropped_output == 7);
+    MxFunctionChunk input{25, 1, 1, 0, 0, {'\r'}};
+    assert(f.bridge.stream.rx().try_push_msg(MX_FUNCTION_RX, input));
+    assert(mochi::usb::serial::accept_host(f.bridge));
+    MxRingSlot admitted{};
+    assert(f.bridge.input.try_pop(&admitted));
+    assert(f.mirror.hold(raw) && f.mirror.flush());
+    assert(mochi::usb::serial::deliver_shell(f.bridge));
+    assert(f.bridge.stream.tx().depth());
+    f.change(26, true);
+    assert(!f.bridge.host_started);
+}
 static void lifecycle_backpressure() {
     Fixture f;
     f.change(31, true);
@@ -131,8 +158,9 @@ static void lifecycle_backpressure() {
     assert(f.shell.try_pop(&drained) && f.input.flush(f.shell));
     assert(mochi::tty::accept_serial(slot, f.mirror, f.input));
     assert(f.mirror.generation == 32 && !f.input.flush(f.shell));
-    for (unsigned i = 0; i < 7; ++i)
+    for (unsigned i = 0; i < 7; ++i) {
         assert(f.shell.try_pop(&drained));
+    }
     assert(f.shell.try_pop(&drained));
     MxTermControl control{};
     assert(mochi::message_get(drained, &control, MX_TERM_CONTROL));
@@ -194,7 +222,170 @@ static void render_backpressure_and_scroll() {
     assert(!cursor.advance(4) && cursor.remaining() == 3);
     assert(cursor.advance(2) && cursor.next(32).size == 1);
 }
+static void stalled_usb_cannot_hold_the_local_prompt() {
+    Fixture f;
+    f.change(61, true);
+    const char filler = 'z';
+    for (unsigned i = 0; i < 8; ++i)
+        assert(f.mirror.output.try_write(MX_TERM_SESSION_OUTPUT_BYTES, 61,
+                                        libk::as_bytes(&filler, 1)) == 1);
+    Storage shell_output;
+    mochi::terminal::OutputSink producer{{&shell_output.page, 3, 1}};
+    mochi::terminal::OutputSource source{{&shell_output.page, 3, 1}};
+    char log[384], cells[1280];
+    std::memset(log, 'x', sizeof(log));
+    std::memcpy(log + sizeof(log) - 9, "\r\nmsh:/$ ", 9);
+    assert(producer.try_write_bytes(log, sizeof(log)));
+    assert(!producer.try_write_bytes(&filler, 1)); // shell producer is backpressured too
+    mochi::tty::Render render{};
+    render.cells = cells;
+    render.rows = 32; render.cols = 40;
+    render.scale = 1; render.cell_w = 8; render.cell_h = 16;
+    render.init();
+    assert(mochi::tty::service_shell_output(source, f.mirror, render, true, 1));
+    assert(source.depth() == 7 && !f.mirror.pending.empty());
+    assert(!mochi::tty::service_shell_output(source, f.mirror, render, true, 1000000000));
+    assert(source.depth() == 7); // preserve a bounded wait for an ordinary slow host
+    assert(mochi::tty::service_shell_output(source, f.mirror, render, true, 1000000001));
+    assert(!source.depth() && f.mirror.pending.empty());
+    assert(render.x == 7 && !std::memcmp(render.line(render.y), "msh:/$ ", 7));
+    assert(producer.try_write_bytes(&filler, 1)); // the next local command can write
+    assert(f.mirror.output_stalled && f.mirror.dropped_output == sizeof(log));
+    MxRingSlot slot{};
+    while (f.mirror.output.try_pop(&slot)) {}
+    f.change(62, true);
+    assert(!f.mirror.output_stalled);
+    assert(mochi::tty::service_shell_output(source, f.mirror, render, true, 1000000002));
+    assert(f.mirror.output.try_pop(&slot));
+    mx_u64_t generation = 0;
+    libk::const_bytes bytes;
+    assert(mochi::terminal::session_bytes(slot, MX_TERM_SESSION_OUTPUT_BYTES, &generation, &bytes));
+    assert(generation == 62 && bytes.size == 1 && bytes.data[0] == filler);
+}
+static void slow_serial_progress_preserves_the_pending_suffix() {
+    Fixture f;
+    f.change(71, true);
+    const char filler = 'z';
+    for (unsigned i = 0; i < 8; ++i)
+        assert(f.mirror.output.try_write(MX_TERM_SESSION_OUTPUT_BYTES, 71,
+                                        libk::as_bytes(&filler, 1)) == 1);
+    MxRingSlot raw{}, slot{};
+    raw.type = MX_TERM_OUTPUT_BYTES;
+    raw.length = 48;
+    std::memset(raw.payload, 'a', raw.length);
+    assert(f.mirror.hold(raw));
+    assert(!f.mirror.flush(10));
+    assert(f.mirror.output.try_pop(&slot));
+    assert(f.mirror.flush(999999999) && f.mirror.pending.remaining() == 8);
+    // The accepted 40-byte prefix restarted the budget for its owned suffix.
+    assert(!f.mirror.flush(1000000010) && !f.mirror.output_stalled);
+    assert(f.mirror.output.try_pop(&slot));
+    assert(f.mirror.flush(1000000011) && f.mirror.pending.empty());
+    assert(!f.mirror.output_stalled && !f.mirror.dropped_output);
+    unsigned actual = 0;
+    while (f.mirror.output.try_pop(&slot)) {
+        mx_u64_t generation = 0;
+        libk::const_bytes bytes;
+        assert(mochi::terminal::session_bytes(slot, MX_TERM_SESSION_OUTPUT_BYTES, &generation, &bytes));
+        if (bytes.data[0] == 'a') actual += bytes.size;
+    }
+    assert(actual == raw.length);
+}
+// A serial host must be able to wake its own console. The tty gate used to need
+// three ESC keycodes from a keyboard, which a serial-only board cannot send, so
+// the FLOW_ON lifecycle record was dropped by the same predicate that closed the
+// gate and the console stayed deaf forever. Pin the property at the transport
+// layer: control is accepted unconditionally and its generation is what opens
+// the gate, with no keyboard involvement anywhere in the path.
+void serial_attach_opens_console() {
+    Fixture f;
+    const mx_u64_t generation = 7;
+    f.change(generation, true);
+    // The mirror now carries a live generation, which is exactly the condition
+    // tty.fb0's console_live() reads as "a host is attached".
+    assert(f.mirror.generation == generation);
+    // Bytes for this generation must then be deliverable without any keypress.
+    MxFunctionChunk chunk{generation, 1, 5, 1, 0, {}};
+    std::memcpy(chunk.data, "hello", 5);
+    assert(f.bridge.stream.rx().try_push_msg(MX_FUNCTION_RX, chunk));
+    assert(mochi::usb::serial::accept_host(f.bridge));
+    // The bridge republishes host bytes as a session-input record stamped with
+    // the generation the mirror holds; that match is what authorises delivery.
+    MxRingSlot slot{};
+    assert(f.bridge.input.try_pop(&slot));
+    mx_u64_t delivered = 0;
+    libk::const_bytes bytes;
+    assert(mochi::terminal::session_bytes(slot, MX_TERM_SESSION_INPUT_BYTES, &delivered, &bytes));
+    assert(delivered == generation && bytes.size == 5);
+    assert(mochi::tty::accept_serial(slot, f.mirror, f.input));
+    assert(f.input.retained());
+}
+
+// A host that re-opens the port it already owns sends a reset that keeps the
+// same generation and stays configured. Treating that as "host has not started"
+// silences output until an inbound byte arrives, and deliver_shell discards -
+// not queues - everything in the meantime. That is a permanent byte loss, and
+// it is what made the CDC console go mute while bulk input still worked.
+static void host_reopen_keeps_output_alive() {
+    Fixture f;
+    f.change(41, true);
+    MxFunctionChunk input{41, 1, 1, 0, 0, {'\r'}};
+    assert(f.bridge.stream.rx().try_push_msg(MX_FUNCTION_RX, input));
+    assert(mochi::usb::serial::accept_host(f.bridge));
+    MxRingSlot admitted{};
+    assert(f.bridge.input.try_pop(&admitted));
+    assert(f.bridge.host_started);
+
+    MxRingSlot raw{};
+    raw.type = MX_TERM_OUTPUT_BYTES;
+    raw.length = 6;
+    std::memcpy(raw.payload, "before", 6);
+    assert(f.mirror.hold(raw) && f.mirror.flush());
+    assert(mochi::usb::serial::deliver_shell(f.bridge));
+    assert(f.bridge.dropped_output == 0);
+
+    // Same generation, still configured: a reconnect, not a new session.
+    const MxFunctionChunk reopen{41, 0, 0, 0, MX_FUNCTION_CONFIGURED, {}};
+    assert(f.bridge.stream.rx().try_push_msg(MX_FUNCTION_RESET, reopen));
+    assert(mochi::usb::serial::accept_host(f.bridge));
+    assert(f.bridge.host_started);
+
+    raw.length = 5;
+    std::memcpy(raw.payload, "after", 5);
+    assert(f.mirror.hold(raw) && f.mirror.flush());
+    assert(mochi::usb::serial::deliver_shell(f.bridge));
+    assert(f.bridge.dropped_output == 0);
+    assert(f.bridge.stream.tx().depth());
+}
+// A RESET must be readable even while a forwarded row is retained. Otherwise a
+// blocked downstream ring latches rx_held forever with no way out: the reset is
+// what clears the latch, and a retained row used to block the only read that
+// could observe it.
+static void reset_reaches_held_row() {
+    Fixture f;
+    f.change(51, true);
+    char filler = 'x';
+    while (f.bridge.input.try_push(MX_TERM_INPUT_BYTES, &filler, 1)) {
+    }
+    MxFunctionChunk chunk{51, 1, 4, 0, 0, {'h', 'e', 'l', 'p'}};
+    assert(f.bridge.stream.rx().try_push_msg(MX_FUNCTION_RX, chunk));
+    assert(mochi::usb::serial::accept_host(f.bridge) && f.bridge.rx_held);
+    // Blocked with no reset pending: still no progress, nothing consumed.
+    assert(!mochi::usb::serial::accept_host(f.bridge));
+    assert(f.bridge.rx_held && f.bridge.generation == 51);
+    // A reset for a new generation must break the latch.
+    const MxFunctionChunk reset{52, 0, 0, 0, MX_FUNCTION_CONFIGURED, {}};
+    assert(f.bridge.stream.rx().try_push_msg(MX_FUNCTION_RESET, reset));
+    assert(mochi::usb::serial::accept_host(f.bridge));
+    assert(f.bridge.generation == 52 && !f.bridge.rx_held);
+}
 int main() {
+    stalled_usb_cannot_hold_the_local_prompt();
+    slow_serial_progress_preserves_the_pending_suffix();
+    no_unsolicited_output_before_host_input();
+    host_reopen_keeps_output_alive();
+    reset_reaches_held_row();
+    serial_attach_opens_console();
     input_backpressure();
     output_generations();
     lifecycle_backpressure();

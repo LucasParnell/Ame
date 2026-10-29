@@ -102,7 +102,8 @@ void arena_retain_mapping(ArenaTable& table, VirtAddr base, object::Record* reco
         } else {
             ANKO_ASSERT(table.backing[i] == record);
         }
-        table.unmapped[i] = 0;
+        for (auto& word : table.unmapped[i])
+            word = 0;
         return;
     }
     ANKO_ASSERT(false);
@@ -118,7 +119,8 @@ void arena_unregister(ArenaTable& table, u32 index) {
         record = table.backing[index];
         table.backing[index] = nullptr;
         table.entries[index] = {};
-        table.unmapped[index] = 0;
+        for (auto& word : table.unmapped[index])
+            word = 0;
         while (table.count && !table.entries[table.count - 1].size) {
             --table.count;
         }
@@ -141,8 +143,8 @@ void arena_release_va(ArenaTable& table, Arena&, VirtAddr base) {
 }
 
 void arena_unmap_page(ArenaTable& table, VirtAddr va) {
-    // All dynamically created user arenas contain at most 64 pages. Larger
-    // platform DMA mappings are pinned until address-space destruction.
+    // Track every page of user arenas, including the 1 MiB graphics buffers.
+    // Larger platform DMA mappings are pinned until address-space destruction.
     u32 complete = kArenaTableSize;
     {
         kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
@@ -152,12 +154,21 @@ void arena_unmap_page(ArenaTable& table, VirtAddr va) {
                 continue;
             }
             const u64 pages = a.size / PAGE_SIZE;
-            if (pages > 64) {
+            if (pages > kMaxUserArenaPages) {
                 break;
             }
-            table.unmapped[i] |= 1ull << ((va - a.base_va) / PAGE_SIZE);
-            const u64 all = pages == 64 ? ~0ull : (1ull << pages) - 1;
-            if (table.unmapped[i] == all) {
+            const u64 page = (va - a.base_va) / PAGE_SIZE;
+            table.unmapped[i][page / 64] |= 1ull << (page % 64);
+            bool all_unmapped = true;
+            for (u64 word = 0; word * 64 < pages; ++word) {
+                const u64 bits = pages - word * 64;
+                const u64 mask = bits >= 64 ? ~0ull : (1ull << bits) - 1;
+                if (table.unmapped[i][word] != mask) {
+                    all_unmapped = false;
+                    break;
+                }
+            }
+            if (all_unmapped) {
                 complete = i;
             }
             break;

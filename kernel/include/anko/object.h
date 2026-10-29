@@ -23,8 +23,7 @@ template <class T> class Ref {
 
   public:
     Ref() = default;
-    Ref(decltype(nullptr)) {
-    }
+    Ref(decltype(nullptr)) {}
     explicit Ref(T* target) : target_(target), record_(acquire(target)) {
         if (!record_) {
             target_ = nullptr;
@@ -34,12 +33,9 @@ template <class T> class Ref {
     // Retain that identity directly instead of searching the object registry.
     // A missing record preserves support for caller-owned/static probe objects.
     Ref(T* target, Record* record) : target_(target), record_(record) {
-        if (record_)
-            retain(record_);
-        else
-            record_ = acquire(target);
-        if (!record_)
-            target_ = nullptr;
+        if (record_) retain(record_);
+        else record_ = acquire(target);
+        if (!record_) target_ = nullptr;
     }
     Ref(const Ref& other) : target_(other.target_), record_(other.record_) {
         retain(record_);
@@ -61,10 +57,8 @@ template <class T> class Ref {
     }
     void reset(T* target, Record* record) {
         // Retain before dropping the old reference, including self-reset.
-        if (record)
-            retain(record);
-        else
-            record = acquire(target);
+        if (record) retain(record);
+        else record = acquire(target);
         auto* old = record_;
         record_ = record;
         target_ = record ? target : nullptr;

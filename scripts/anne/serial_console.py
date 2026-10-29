@@ -27,7 +27,7 @@ def write_until(fd: int, data: bytes, deadline: float):
 
 
 class Serial:
-    """Own a raw nonblocking serial FD and restore its settings on every exit."""
+    """Own a raw serial FD; restore saved settings with device echo disabled."""
     def __init__(self, path: str):
         self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         self.previous = None
@@ -64,7 +64,13 @@ class Serial:
         try:
             if self.previous is not None:
                 try:
-                    termios.tcsetattr(fd, termios.TCSANOW, self.previous)
+                    # The serial peer is itself a shell. Restoring the CDC
+                    # default ECHO sends its prompt/output back as commands,
+                    # even after this helper exits. ECHONL echoes newlines
+                    # independently of ECHO and must stay off as well.
+                    restored = self.previous[:]
+                    restored[3] &= ~(termios.ECHO | termios.ECHONL)
+                    termios.tcsetattr(fd, termios.TCSANOW, restored)
                 except (OSError, termios.error) as exc:
                     # macOS invalidates the old tty after reset/unplug. Cleanup
                     # must still close it without masking the original failure.

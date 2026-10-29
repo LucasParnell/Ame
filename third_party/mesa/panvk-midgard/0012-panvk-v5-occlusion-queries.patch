@@ -1,0 +1,359 @@
+Midgard occlusion query pools, GPU reset/availability/result copies,
+host result polling, and meta-query state isolation. Precise queries and
+timestamps remain unexposed. Hardware validation pending.
+
+diff --git a/src/panfrost/vulkan/meson.build b/src/panfrost/vulkan/meson.build
+--- a/src/panfrost/vulkan/meson.build
++++ b/src/panfrost/vulkan/meson.build
+@@ -88,7 +88,7 @@
+   per_arch_files = common_per_arch_files
+   inc_panvk_per_arch = []
+   if arch == 5
+-    per_arch_files += ['midgard/panvk_v5_cmd_fb_preload.c', 'midgard/panvk_v5_blend.c', 'midgard/panvk_v5_meta_desc_copy.c']
++    per_arch_files += ['midgard/panvk_v5_cmd_fb_preload.c', 'midgard/panvk_v5_blend.c', 'midgard/panvk_v5_meta_desc_copy.c', 'midgard/panvk_v5_query.c']
+   else
+     per_arch_files += ['panvk_vX_cmd_fb_preload.c']
+   endif
+diff --git a/src/panfrost/vulkan/panvk_meta.h b/src/panfrost/vulkan/panvk_meta.h
+--- a/src/panfrost/vulkan/panvk_meta.h
++++ b/src/panfrost/vulkan/panvk_meta.h
+@@ -18,6 +18,7 @@
+    PANVK_META_OBJECT_KEY_FB_PRELOAD_SHADER,
+    PANVK_META_OBJECT_KEY_INDEX_GATHER_SHADER,
+    PANVK_META_OBJECT_KEY_DISPATCH_PATCH_SHADER,
++   PANVK_META_OBJECT_KEY_QUERY_SHADER,
+ };
+ 
+ static inline VkFormat
+diff --git a/src/panfrost/vulkan/jm/panvk_cmd_buffer.h b/src/panfrost/vulkan/jm/panvk_cmd_buffer.h
+--- a/src/panfrost/vulkan/jm/panvk_cmd_buffer.h
++++ b/src/panfrost/vulkan/jm/panvk_cmd_buffer.h
+@@ -118,6 +118,9 @@
+ };
+ 
+ struct panvk_cmd_graphics_state {
++#if PAN_ARCH == 5
++   mali_ptr occlusion_query;
++#endif
+    struct panvk_descriptor_state desc_state;
+ 
+    struct {
+diff --git a/src/panfrost/vulkan/panvk_cmd_meta.h b/src/panfrost/vulkan/panvk_cmd_meta.h
+--- a/src/panfrost/vulkan/panvk_cmd_meta.h
++++ b/src/panfrost/vulkan/panvk_cmd_meta.h
+@@ -40,6 +40,9 @@
+    const struct panvk_cmd_meta_compute_save_ctx *save_ctx);
+ 
+ struct panvk_cmd_meta_graphics_save_ctx {
++#if PAN_ARCH == 5
++   mali_ptr occlusion_query;
++#endif
+    const struct panvk_graphics_pipeline *pipeline;
+    const struct panvk_descriptor_set *set0;
+    struct {
+diff --git a/src/panfrost/vulkan/panvk_vX_cmd_meta.c b/src/panfrost/vulkan/panvk_vX_cmd_meta.c
+--- a/src/panfrost/vulkan/panvk_vX_cmd_meta.c
++++ b/src/panfrost/vulkan/panvk_vX_cmd_meta.c
+@@ -87,6 +87,10 @@
+    struct panvk_descriptor_set *push_set0 =
+       cmdbuf->state.gfx.desc_state.push_sets[0];
+ 
++#if PAN_ARCH == 5
++   save_ctx->occlusion_query = cmdbuf->state.gfx.occlusion_query;
++   cmdbuf->state.gfx.occlusion_query = 0;
++#endif
+    save_ctx->set0 = set0;
+    if (push_set0 && push_set0 == set0) {
+       save_ctx->push_set0.desc_count = push_set0->desc_count;
+@@ -115,6 +119,9 @@
+    struct panvk_descriptor_set *push_set0 =
+       cmdbuf->state.gfx.desc_state.push_sets[0];
+ 
++#if PAN_ARCH == 5
++   cmdbuf->state.gfx.occlusion_query = save_ctx->occlusion_query;
++#endif
+    cmdbuf->state.gfx.desc_state.sets[0] = save_ctx->set0;
+    if (save_ctx->push_set0.desc_count) {
+       memcpy(push_set0->descs.host, save_ctx->push_set0.desc_storage,
+diff --git a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_draw.c
+@@ -440,7 +440,7 @@
+          cfg.properties.force_early_z = fs_info->fs.can_early_z && !alpha_to_coverage;
+          cfg.properties.work_register_count = MAX2(fs_info->work_reg_count, binfo.work_reg_count);
+          cfg.legacy_blend_shader = binfo.legacy_shader;
+-         bool force_ez_with_discard = !test_z && !test_s;
++         bool force_ez_with_discard = !test_z && !test_s && !cmdbuf->state.gfx.occlusion_query;
+          cfg.properties.shader_reads_tilebuffer = fs_info->fs.outputs_read || binfo.any_dest_read ||
+             (force_ez_with_discard && fs_info->fs.can_discard);
+          cfg.properties.shader_contains_discard = !force_ez_with_discard && fs_info->fs.can_discard;
+@@ -1139,7 +1139,12 @@
+       cfg.textures = fs_desc_state->tables[PANVK_BIFROST_DESC_TABLE_TEXTURE];
+       cfg.samplers = fs_desc_state->tables[PANVK_BIFROST_DESC_TABLE_SAMPLER];
+ 
+-      /* TODO: occlusion queries */
++#if PAN_ARCH == 5
++      if (cmdbuf->state.gfx.occlusion_query) {
++         cfg.occlusion_query = MALI_OCCLUSION_MODE_PREDICATE;
++         cfg.occlusion = cmdbuf->state.gfx.occlusion_query;
++      }
++#endif
+    }
+ }
+ 
+diff --git a/src/panfrost/vulkan/panvk_query_pool.h b/src/panfrost/vulkan/panvk_query_pool.h
+--- /dev/null
++++ b/src/panfrost/vulkan/panvk_query_pool.h
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef PANVK_QUERY_POOL_H
++#define PANVK_QUERY_POOL_H
++#include "vk_query_pool.h"
++#include "panvk_priv_bo.h"
++struct panvk_query_pool {
++   struct vk_query_pool vk;
++   struct panvk_priv_bo *storage;
++   uint32_t stride, core_count;
++};
++VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_query_pool, vk.base, VkQueryPool, VK_OBJECT_TYPE_QUERY_POOL)
++#endif
+diff --git a/src/panfrost/vulkan/midgard/panvk_v5_query.c b/src/panfrost/vulkan/midgard/panvk_v5_query.c
+--- /dev/null
++++ b/src/panfrost/vulkan/midgard/panvk_v5_query.c
+@@ -0,0 +1,236 @@
++/* SPDX-License-Identifier: MIT */
++#include "panvk_buffer.h"
++#include "panvk_cmd_alloc.h"
++#include "panvk_device.h"
++#include "panvk_entrypoints.h"
++#include "panvk_meta.h"
++#include "panvk_query_pool.h"
++#include "panvk_shader.h"
++#include "pan_shader.h"
++#include "pan_encoder.h"
++#include "pan_jc.h"
++#include "pan_props.h"
++#include "nir_builder.h"
++#include "util/os_time.h"
++
++enum query_op { QUERY_RESET, QUERY_AVAILABLE, QUERY_COPY };
++struct query_inputs {
++   uint64_t source, destination, destination_stride;
++   uint32_t count, source_stride, core_count, pad;
++};
++static nir_def *
++query_input(nir_builder *b, unsigned offset, unsigned bits)
++{
++   return nir_load_ubo(b, 1, bits, nir_imm_int(b, 0), nir_imm_int(b, offset),
++      .align_mul = 4, .range = sizeof(struct query_inputs));
++}
++static VkResult
++query_shader(struct panvk_device *dev, enum query_op op, VkQueryResultFlags flags,
++             struct panvk_internal_shader **out)
++{
++   const uint32_t key[3] = {PANVK_META_OBJECT_KEY_QUERY_SHADER, op, flags};
++   VkShaderEXT handle = (VkShaderEXT)vk_meta_lookup_object(&dev->meta, VK_OBJECT_TYPE_SHADER_EXT, key, sizeof(key));
++   if (handle) {*out = panvk_internal_shader_from_handle(handle); return VK_SUCCESS;}
++   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
++      GENX(pan_shader_get_compiler_options)(), "panvk-query-%u-%x", op, flags);
++   b.shader->info.workgroup_size[0] = 64;
++   b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
++   b.shader->info.num_ubos = 1;
++#define INPUT(field, bits) query_input(&b, offsetof(struct query_inputs, field), bits)
++   nir_def *id = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
++   nir_push_if(&b, nir_ult(&b, id, INPUT(count, 32)));
++   nir_def *stride = INPUT(source_stride, 32);
++   nir_def *source = nir_iadd(&b, INPUT(source, 64), nir_u2u64(&b, nir_imul(&b, id, stride)));
++   if (op == QUERY_AVAILABLE) {
++      nir_store_global(&b, source, 8, nir_imm_ivec2(&b, 1, 0), 3);
++   } else if (op == QUERY_RESET) {
++      nir_variable *offset_var = nir_local_variable_create(b.impl, glsl_uint_type(), "offset");
++      nir_store_var(&b, offset_var, nir_imm_int(&b, 0), 1);
++      nir_push_loop(&b);
++      nir_def *offset = nir_load_var(&b, offset_var);
++      nir_break_if(&b, nir_uge(&b, offset, stride));
++      nir_store_global(&b, nir_iadd(&b, source, nir_u2u64(&b, offset)), 16, nir_imm_ivec4(&b, 0, 0, 0, 0), 15);
++      nir_store_var(&b, offset_var, nir_iadd_imm(&b, offset, 16), 1);
++      nir_pop_loop(&b, NULL);
++   } else {
++      nir_def *availability_address = nir_iadd(&b, source, nir_u2u64(&b, nir_iadd_imm(&b, stride, -8)));
++      nir_def *available;
++      if (flags & VK_QUERY_RESULT_WAIT_BIT) {
++         nir_variable *av = nir_local_variable_create(b.impl, glsl_uint_type(), "available");
++         nir_push_loop(&b);
++         nir_def *read = nir_load_global(&b, availability_address, 8, 1, 32);
++         nir_intrinsic_set_access(nir_instr_as_intrinsic(read->parent_instr), ACCESS_VOLATILE);
++         nir_store_var(&b, av, read, 1);
++         nir_break_if(&b, nir_ine_imm(&b, read, 0));
++         nir_pop_loop(&b, NULL);
++         available = nir_load_var(&b, av);
++      } else {
++         available = nir_load_global(&b, availability_address, 8, 1, 32);
++      }
++      nir_def *destination = nir_iadd(&b, INPUT(destination, 64),
++         nir_imul(&b, nir_u2u64(&b, id), INPUT(destination_stride, 64)));
++      unsigned width = flags & VK_QUERY_RESULT_64_BIT ? 8 : 4;
++      nir_push_if(&b, (flags & VK_QUERY_RESULT_PARTIAL_BIT) ? nir_imm_true(&b) : nir_ine_imm(&b, available, 0));
++      nir_variable *core = nir_local_variable_create(b.impl, glsl_uint_type(), "core");
++      nir_variable *acc = nir_local_variable_create(b.impl, glsl_uint_type(), "result");
++      nir_store_var(&b, core, nir_imm_int(&b, 0), 1);
++      nir_store_var(&b, acc, nir_imm_int(&b, 0), 1);
++      nir_push_loop(&b);
++      nir_def *c = nir_load_var(&b, core);
++      nir_break_if(&b, nir_uge(&b, c, INPUT(core_count, 32)));
++      nir_def *counter = nir_load_global(&b, nir_iadd(&b, source, nir_u2u64(&b, nir_imul_imm(&b, c, 8))), 8, 2, 32);
++      nir_store_var(&b, acc, nir_ior(&b, nir_load_var(&b, acc), nir_ior(&b, nir_channel(&b, counter, 0), nir_channel(&b, counter, 1))), 1);
++      nir_store_var(&b, core, nir_iadd_imm(&b, c, 1), 1);
++      nir_pop_loop(&b, NULL);
++      nir_def *result = nir_b2i32(&b, nir_ine_imm(&b, nir_load_var(&b, acc), 0));
++      nir_store_global(&b, destination, 4, width == 8 ? nir_vec2(&b, result, nir_imm_int(&b, 0)) : result, width == 8 ? 3 : 1);
++      nir_pop_if(&b, NULL);
++      if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
++         nir_store_global(&b, nir_iadd_imm(&b, destination, width), 4,
++            width == 8 ? nir_vec2(&b, available, nir_imm_int(&b, 0)) : available, width == 8 ? 3 : 1);
++   }
++   nir_pop_if(&b, NULL);
++#undef INPUT
++   nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
++   struct panvk_physical_device *pdev = to_panvk_physical_device(dev->vk.physical);
++   struct panfrost_compile_inputs inputs = {.gpu_id = pdev->kmod.props.gpu_prod_id, .no_ubo_to_push = true};
++   pan_shader_preprocess(b.shader, inputs.gpu_id);
++   struct panvk_internal_shader *shader;
++   VkResult result = panvk_v5_create_internal_shader(dev, b.shader, &inputs, &shader);
++   ralloc_free(b.shader);
++   if (result != VK_SUCCESS) return result;
++   handle = (VkShaderEXT)vk_meta_cache_object(&dev->vk, &dev->meta, key, sizeof(key), VK_OBJECT_TYPE_SHADER_EXT,
++      (uint64_t)panvk_internal_shader_to_handle(shader));
++   *out = panvk_internal_shader_from_handle(handle);
++   return VK_SUCCESS;
++}
++static void
++query_job(struct panvk_cmd_buffer *cmd, enum query_op op, VkQueryResultFlags flags,
++          const struct query_inputs *inputs)
++{
++   if (!inputs->count) return;
++   struct panvk_device *dev = to_panvk_device(cmd->vk.base.device);
++   struct panvk_internal_shader *shader;
++   VkResult result = query_shader(dev, op, flags, &shader);
++   if (result != VK_SUCCESS) {vk_command_buffer_set_error(&cmd->vk, result); return;}
++   panvk_v5_cmd_close_batch(cmd);
++   if (cmd->state.gfx.render.layer_count) panvk_v5_cmd_preload_fb_after_batch_split(cmd);
++   struct panvk_batch *batch = panvk_v5_cmd_open_batch(cmd);
++   if (!batch) return;
++   result = panvk_v5_cmd_alloc_tls_desc(cmd, false);
++   if (result != VK_SUCCESS) {vk_command_buffer_set_error(&cmd->vk, result); return;}
++   struct panfrost_ptr data = panvk_cmd_alloc_dev_mem(cmd, desc, sizeof(*inputs), 16);
++   struct panfrost_ptr ubo = panvk_cmd_alloc_desc(cmd, UNIFORM_BUFFER);
++   struct panfrost_ptr rsd = panvk_cmd_alloc_desc(cmd, RENDERER_STATE);
++   struct panfrost_ptr job = panvk_cmd_alloc_desc(cmd, COMPUTE_JOB);
++   if (!data.cpu || !ubo.cpu || !rsd.cpu || !job.cpu) return;
++   memcpy(data.cpu, inputs, sizeof(*inputs));
++   pan_pack(ubo.cpu, UNIFORM_BUFFER, cfg) {cfg.pointer = data.gpu; cfg.entries = DIV_ROUND_UP(sizeof(*inputs), 16);}
++   pan_pack(rsd.cpu, RENDERER_STATE, cfg) {pan_shader_prepare_rsd(&shader->info, panvk_priv_mem_dev_addr(shader->code_mem), &cfg);}
++   panfrost_pack_work_groups_compute(pan_section_ptr(job.cpu, COMPUTE_JOB, INVOCATION), DIV_ROUND_UP(inputs->count, 64), 1, 1, 64, 1, 1, false, false);
++   pan_section_pack(job.cpu, COMPUTE_JOB, PARAMETERS, cfg) {cfg.job_task_split = 9;}
++   pan_section_pack(job.cpu, COMPUTE_JOB, DRAW, cfg) {
++      cfg.state = rsd.gpu; cfg.uniform_buffers = ubo.gpu; cfg.thread_storage = batch->tls.gpu;
++   }
++   util_dynarray_append(&batch->jobs, void *, job.cpu);
++   pan_jc_add_job(&batch->vtc_jc, MALI_JOB_TYPE_COMPUTE, true, false, 0, 0, &job, false);
++   batch->tlsinfo.tls.size = shader->info.tls_size;
++   panvk_v5_cmd_close_batch(cmd);
++   panvk_v5_cmd_open_batch(cmd);
++}
++VKAPI_ATTR VkResult VKAPI_CALL
++panvk_v5_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *info,
++   const VkAllocationCallbacks *alloc, VkQueryPool *out)
++{
++   VK_FROM_HANDLE(panvk_device, dev, device);
++   if (info->queryType != VK_QUERY_TYPE_OCCLUSION && info->queryType != VK_QUERY_TYPE_TIMESTAMP)
++      return VK_ERROR_FEATURE_NOT_PRESENT;
++   struct panvk_query_pool *pool = vk_query_pool_create(&dev->vk, info, alloc, sizeof(*pool));
++   if (!pool) return VK_ERROR_OUT_OF_HOST_MEMORY;
++   struct panvk_physical_device *pdev = to_panvk_physical_device(dev->vk.physical);
++   panfrost_query_core_count(&pdev->kmod.props, &pool->core_count);
++   pool->stride = ALIGN_POT(pool->core_count * 8 + 8, 64);
++   VkResult result = panvk_priv_bo_create(dev, (uint64_t)info->queryCount * pool->stride, 0,
++      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, &pool->storage);
++   if (result != VK_SUCCESS) {vk_query_pool_destroy(&dev->vk, alloc, &pool->vk); return result;}
++   memset(pool->storage->addr.host, 0, (size_t)info->queryCount * pool->stride);
++   *out = panvk_query_pool_to_handle(pool);
++   return VK_SUCCESS;
++}
++VKAPI_ATTR void VKAPI_CALL
++panvk_v5_DestroyQueryPool(VkDevice device, VkQueryPool handle, const VkAllocationCallbacks *alloc)
++{
++   VK_FROM_HANDLE(panvk_device, dev, device);
++   VK_FROM_HANDLE(panvk_query_pool, pool, handle);
++   if (!pool) return;
++   panvk_priv_bo_unref(pool->storage);
++   vk_query_pool_destroy(&dev->vk, alloc, &pool->vk);
++}
++VKAPI_ATTR VkResult VKAPI_CALL
++panvk_v5_GetQueryPoolResults(VkDevice device, VkQueryPool handle, uint32_t first,
++   uint32_t count, size_t data_size, void *data, VkDeviceSize stride, VkQueryResultFlags flags)
++{
++   VK_FROM_HANDLE(panvk_device, dev, device);
++   VK_FROM_HANDLE(panvk_query_pool, pool, handle);
++   VkResult status = VK_SUCCESS;
++   unsigned width = flags & VK_QUERY_RESULT_64_BIT ? 8 : 4;
++   unsigned bytes = width * (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT ? 2 : 1);
++   for (uint32_t q = 0; q < count; q++) {
++      if (bytes > data_size || (uint64_t)q * stride > data_size - bytes) return VK_NOT_READY;
++      const volatile uint64_t *slot = pool->storage->addr.host + (uint64_t)(first + q) * pool->stride;
++      uint64_t available;
++      while (!(available = slot[pool->stride / 8 - 1]) && (flags & VK_QUERY_RESULT_WAIT_BIT)) {
++         VkResult result = vk_device_check_status(&dev->vk);
++         if (result != VK_SUCCESS) return result;
++         os_time_sleep(1000);
++      }
++      uint64_t result = 0;
++      for (uint32_t core = 0; core < pool->core_count; core++) result |= slot[core];
++      result = !!result;
++      uint8_t *destination = data + (uint64_t)q * stride;
++      if (available || (flags & VK_QUERY_RESULT_PARTIAL_BIT)) memcpy(destination, &result, width);
++      if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) memcpy(destination + width, &available, width);
++      if (!available) status = VK_NOT_READY;
++   }
++   return status;
++}
++VKAPI_ATTR void VKAPI_CALL
++panvk_v5_CmdResetQueryPool(VkCommandBuffer command, VkQueryPool handle, uint32_t first, uint32_t count)
++{
++   VK_FROM_HANDLE(panvk_cmd_buffer, cmd, command);
++   VK_FROM_HANDLE(panvk_query_pool, pool, handle);
++   const struct query_inputs inputs = {.source = pool->storage->addr.dev + (uint64_t)first * pool->stride,
++      .count = count, .source_stride = pool->stride};
++   query_job(cmd, QUERY_RESET, 0, &inputs);
++}
++VKAPI_ATTR void VKAPI_CALL
++panvk_v5_CmdBeginQuery(VkCommandBuffer command, VkQueryPool handle, uint32_t query, VkQueryControlFlags flags)
++{
++   VK_FROM_HANDLE(panvk_cmd_buffer, cmd, command);
++   VK_FROM_HANDLE(panvk_query_pool, pool, handle);
++   cmd->state.gfx.occlusion_query = pool->storage->addr.dev + (uint64_t)query * pool->stride;
++   cmd->state.gfx.fs.rsd = 0;
++}
++VKAPI_ATTR void VKAPI_CALL
++panvk_v5_CmdEndQuery(VkCommandBuffer command, VkQueryPool handle, uint32_t query)
++{
++   VK_FROM_HANDLE(panvk_cmd_buffer, cmd, command);
++   VK_FROM_HANDLE(panvk_query_pool, pool, handle);
++   cmd->state.gfx.occlusion_query = 0;
++   cmd->state.gfx.fs.rsd = 0;
++   const struct query_inputs inputs = {.source = pool->storage->addr.dev + (uint64_t)(query + 1) * pool->stride - 8,
++      .count = 1, .source_stride = pool->stride};
++   query_job(cmd, QUERY_AVAILABLE, 0, &inputs);
++}
++VKAPI_ATTR void VKAPI_CALL
++panvk_v5_CmdCopyQueryPoolResults(VkCommandBuffer command, VkQueryPool handle,
++   uint32_t first, uint32_t count, VkBuffer buffer, VkDeviceSize offset, VkDeviceSize stride, VkQueryResultFlags flags)
++{
++   VK_FROM_HANDLE(panvk_cmd_buffer, cmd, command);
++   VK_FROM_HANDLE(panvk_query_pool, pool, handle);
++   VK_FROM_HANDLE(panvk_buffer, destination, buffer);
++   const struct query_inputs inputs = {.source = pool->storage->addr.dev + (uint64_t)first * pool->stride,
++      .destination = panvk_buffer_gpu_ptr(destination, offset), .destination_stride = stride,
++      .count = count, .source_stride = pool->stride, .core_count = pool->core_count};
++   query_job(cmd, QUERY_COPY, flags, &inputs);
++}

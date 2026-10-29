@@ -41,8 +41,8 @@ inline bool service_functions(Runtime& r) {
             }
         }
         while (f.rx_pending) {
-            MxFunctionChunk chunk{
-                r.function_generation, hid ? f.forwarded / 32 : 0, 0, out_ep, 0, {}};
+            MxFunctionChunk chunk{r.function_generation, hid ? f.forwarded / 32 : 0, 0,
+                                  out_ep, 0, {}};
             const auto left = f.received - f.forwarded;
             chunk.length = left < MX_FUNCTION_INLINE_BYTES ? left : MX_FUNCTION_INLINE_BYTES;
             libk::copy_n(libk::as_bytes(chunk.data),
@@ -74,22 +74,7 @@ inline bool service_functions(Runtime& r) {
                              r.links[i + 1].try_recv(&slot);
              ++n) {
             progress = true;
-            if (!hid && slot.type == MX_FUNCTION_SETUP_REPLY) {
-                MxFunctionSetup answer{};
-                if (mochi::message_get(slot, &answer, slot.type) &&
-                    r.phase == ControlPhase::Function && answer.id == r.setup.id &&
-                    answer.generation == r.function_generation) {
-                    if (answer.status != MX_OK || answer.length > 16) {
-                        stall(r);
-                    } else if (r.setup.setup.request_type & 128) {
-                        libk::copy_n(libk::slice(r.payload, 512, answer.length),
-                                     libk::as_bytes(answer.data, answer.length), answer.length);
-                        reply_data(r, answer.length);
-                    } else {
-                        r.phase = ControlPhase::StatusIn;
-                    }
-                }
-            } else {
+            {
                 MxFunctionChunk chunk{};
                 if (mochi::message_get(slot, &chunk, MX_FUNCTION_TX) &&
                     chunk.length <= MX_FUNCTION_INLINE_BYTES && !chunk.flags &&

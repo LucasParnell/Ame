@@ -1,0 +1,147 @@
+/dts-v1/;
+
+/ {
+    compatible = "ame,dango-linux-panfrost", "linux,dummy-virt";
+    #address-cells = <2>;
+    #size-cells = <2>;
+    interrupt-parent = <&intc>;
+
+    chosen {
+        stdout-path = "serial0:115200n8";
+        bootargs = "@BOOTARGS@";
+        linux,initrd-start = <@INITRD_START_HI@ @INITRD_START_LO@>;
+        linux,initrd-end   = <@INITRD_END_HI@ @INITRD_END_LO@>;
+    };
+
+    memory@40000000 {
+        device_type = "memory";
+        reg = <0x0 0x40000000 0x0 0x08000000>; // 128 MiB
+    };
+
+    // This is a synthetic guest platform, not the phone's physical DTB.
+    // Do not add an enabled GPU until Ame supplies isolated DMA, routed IRQs,
+    // registers and a verified power/clock ownership contract for Hi6250.
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+        dango_channel: dango-channel@@DANGO_CH_GUEST_BASE_UA@ {
+            reg = <0 @DANGO_CH_GUEST_BASE@ 0 @DANGO_CH_GUEST_SIZE@>;
+            no-map;
+        };
+
+        // Dynamic shared-arena descriptor (Phase L): the host publishes the
+        // attached-region table into this read-only page and the guest driver
+        // reads it. no-map keeps the kernel from treating it as RAM.
+        dango_shm: dango-shm@@DANGO_SHM_GUEST_BASE_UA@ {
+            reg = <0 @DANGO_SHM_GUEST_BASE@ 0 @DANGO_SHM_GUEST_SIZE@>;
+            no-map;
+        };
+    };
+
+    channel@@DANGO_CH_GUEST_BASE_UA@ {
+        compatible = "ame,dango-channel-v1";
+        reg = <0 @DANGO_CH_GUEST_BASE@ 0 @DANGO_CH_GUEST_SIZE@>;
+        memory-region = <&dango_channel>;
+        interrupts = <0 @DANGO_CH_GUEST_SPI@ 1>;
+    };
+
+    // Dynamic shared arenas (Phase L): no IRQ and no MMIO aperture of its own.
+    // The driver reads the descriptor page above and exposes each attached
+    // region to userspace through mmap, which is what makes dma-buf export
+    // reachable from the guest at all.
+    shm@@DANGO_SHM_GUEST_BASE_UA@ {
+        compatible = "ame,dango-shm-v1";
+        reg = <0 @DANGO_SHM_GUEST_BASE@ 0 @DANGO_SHM_GUEST_SIZE@>;
+        memory-region = <&dango_shm>;
+    };
+
+    // Firmware owns supply and clock state; the guest performs no DVFS. The
+    // frequency is informational only but must be nonzero: Panfrost reads the
+    // clock rate while probing, and a fixed-clock reporting 0 Hz cannot produce
+    // a usable OPP. It states the Hi6250 g3d base rate rather than an arbitrary
+    // value, and the guest must not program any rate from it.
+    gpu_clock: gpu-clock {
+        compatible = "fixed-clock";
+        #clock-cells = <0>;
+        clock-frequency = <120000000>;
+    };
+    // Host-owned power, exposed as an always-on supply with no voltage or
+    // enable controls. This is not a phone regulator or permission for DVFS.
+    gpu_supply: gpu-supply {
+        compatible = "regulator-fixed";
+        regulator-name = "ame-host-gpu";
+        regulator-always-on;
+        regulator-boot-on;
+    };
+    // Synthetic Mali appliance: a host-emulated register window, not the
+    // phone's physical GPU. The node is present only when the binding is
+    // enabled, because QEMU does not model a Mali-T830 and a claim of
+    // assignment without mediation would be false. Address, size and the three
+    // SPIs are all derived from shared/include/midix/abi/anne_gpu.h.
+    gpu@@AME_MALI_GUEST_BASE_UA@ {
+        compatible = "arm,mali-t830";
+        reg = <0 @AME_MALI_GUEST_BASE@ 0 @AME_MALI_REG_BYTES@>;
+        interrupts = <0 @AME_MALI_JOB_IRQ_SPI@ 4>,
+                     <0 @AME_MALI_MMU_IRQ_SPI@ 4>,
+                     <0 @AME_MALI_GPU_IRQ_SPI@ 4>;
+        interrupt-names = "job", "mmu", "gpu";
+        clocks = <&gpu_clock>;
+        // Panfrost binds clocks[0] as the core clock with devm_clk_get(dev, NULL)
+        // and treats "bus" as optional, so order matters more than naming here.
+        clock-names = "core";
+        mali-supply = <&gpu_supply>;
+        // Deliberately absent, each for a reason probe documents:
+        //   operating-points-v2 -> devfreq/OPP become mandatory-success
+        //   power-domains       -> 2+ entries is a hard -EINVAL
+        //   iommus              -> Panfrost drives the GPU's own MMU, not an SMMU
+        status = "@MALI_STATUS@";
+    };
+
+    psci {
+        compatible = "arm,psci-0.2";
+        method = "hvc";
+    };
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        cpu@0 {
+            device_type = "cpu";
+            compatible = "arm,arm-v8";
+            reg = <0>;
+            enable-method = "psci";
+        };
+    };
+
+    intc: interrupt-controller@8000000 {
+        compatible = "arm,cortex-a15-gic";
+        #interrupt-cells = <3>;
+        #address-cells = <0>;
+        interrupt-controller;
+        reg = <0x0 0x08000000 0x0 0x10000>,
+              <0x0 0x08010000 0x0 0x10000>;
+    };
+
+    timer {
+        compatible = "arm,armv8-timer";
+        @DANGO_TIMER_FREQUENCY@
+        interrupts = <1 13 0xf08>,
+                     <1 14 0xf08>,
+                     <1 11 0xf08>,
+                     <1 10 0xf08>;
+    };
+
+    uart0: serial@9000000 {
+        compatible = "arm,sbsa-uart";
+        reg = <0x0 0x09000000 0x0 0x1000>;
+        interrupts = <0 1 4>;
+        current-speed = <115200>;
+        status = "okay";
+    };
+
+    aliases {
+        serial0 = &uart0;
+    };
+};

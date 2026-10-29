@@ -228,12 +228,9 @@ do_shared_arena() {
     | python3 -c 'import sys; lines=[l.strip() for l in sys.stdin if l.strip()]; print("   -> " + (lines[-1] if lines else "no output"))'
 }
 
-# Standalone Linux executor proof; the native N/O session bridge is separate.
-do_vulkan_executor() {
-    python3 scripts/test/vulkan-executor.py \
-        --kernel "${AME_VERIFY_VULKAN_KERNEL:-${ROOT}/build/dango-linux-gpu/Image}" \
-        --artifacts "${AME_VERIFY_VULKAN_ARTIFACTS:-${ROOT}/build/dango-vkd}" \
-    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("   -> {} ({:.2f}s)".format(d["reason"], d["elapsed"])); sys.exit(0 if d["success"] else 1)'
+# Native Vulkan codec and an explicitly selected software driver reference.
+do_vulkan_frontend() {
+    python3 -m unittest discover -s tests -p 'test_native_vulkan.py'
 }
 
 # Ordered checks: "name:function". Add a row to extend the gate; do not add
@@ -305,7 +302,7 @@ if [[ "${AME_VERIFY_SHARED:-0}" == "1" ]]; then
 fi
 
 if [[ "${AME_VERIFY_VULKAN:-0}" == "1" ]]; then
-    CHECKS+=("vulkan-executor:do_vulkan_executor")
+    CHECKS+=("vulkan-frontend:do_vulkan_frontend")
 fi
 
 record_toolchain

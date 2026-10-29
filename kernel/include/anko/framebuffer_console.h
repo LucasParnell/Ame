@@ -3,14 +3,12 @@
 #include "libk/framebuffer.h"
 
 namespace console {
-struct Viewport {
-    u32 x, y, width, height, scale;
-};
+struct Viewport { u32 x, y, width, height, scale; };
 
 // A bounded kernel text surface. The caller serializes writes and publishes
 // dirty rows for DMA; this class only accesses validated normal pixel memory.
 class FramebufferConsole {
-  public:
+public:
     // Early diagnostics can recycle rows instead of copying the whole viewport
     // with interrupts masked. Interactive terminals keep ordinary scrolling.
     enum class Overflow { Scroll, Wrap };
@@ -21,24 +19,13 @@ class FramebufferConsole {
     void write(const char* text, usize size);
     void draw_text(u32 x, u32 y, u32 scale, const char* text, u32 foreground);
     bool take_dirty(u64& address, u32& bytes);
-    bool active() const {
-        return fb_.address != 0;
-    }
-    u32 columns() const {
-        return columns_;
-    }
-    u32 rows() const {
-        return rows_;
-    }
-    char cell(u32 row, u32 col) const {
-        return row < rows_ && col < columns_ ? cells_[row][col] : '\0';
-    }
-    u64 characters() const {
-        return characters_;
-    }
+    bool active() const { return fb_.address != 0; }
+    u32 columns() const { return columns_; }
+    u32 rows() const { return rows_; }
+    char cell(u32 row, u32 col) const { return row < rows_ && col < columns_ ? cells_[row][col] : '\0'; }
+    u64 characters() const { return characters_; }
     static constexpr u32 kBackground = 0xff07111f, kForeground = 0xffe6f1ff;
-
-  private:
+private:
     libk::Framebuffer32 fb_{};
     Viewport view_{};
     Overflow overflow_ = Overflow::Scroll;
@@ -51,4 +38,4 @@ class FramebufferConsole {
     void newline();
     void clear_row(u32 row);
 };
-} // namespace console
+}

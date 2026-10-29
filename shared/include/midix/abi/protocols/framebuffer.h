@@ -25,8 +25,8 @@ enum FbFormat : mx_u32_t {
 struct FbInfo {
     mx_u32_t width;
     mx_u32_t height;
-    mx_u32_t stride; // bytes per row
-    mx_u32_t format; // FbFormat
+    mx_u32_t stride;  // bytes per row
+    mx_u32_t format;  // FbFormat
     mx_u32_t flags;
     mx_u32_t reserved[3];
 };
@@ -35,13 +35,13 @@ static_assert(sizeof(FbInfo) == 32, "FbInfo size drift");
 
 // Ring message types for the io.framebuffer endpoint.
 enum FbMsg : mx_u32_t {
-    FB_INFO = 1,       // no payload -> reply: FbInfo
-    FB_CLEAR = 2,      // payload: uint32_t color (XRGB8888)
-    FB_FILL_RECT = 3,  // payload: FbFillRectCmd
+    FB_INFO       = 1, // no payload -> reply: FbInfo
+    FB_CLEAR      = 2, // payload: uint32_t color (XRGB8888)
+    FB_FILL_RECT  = 3, // payload: FbFillRectCmd
     FB_DRAW_GLYPH = 4, // payload: FbDrawGlyphCmd
-    FB_PRESENT = 5,    // no payload; currently a no-op for ramfb
-    FB_COPY_RECT = 6,  // payload: FbCopyRectCmd
-    FB_DRAW_TEXT = 7,  // payload: FbDrawTextCmd
+    FB_PRESENT    = 5, // no payload; currently a no-op for ramfb
+    FB_COPY_RECT  = 6, // payload: FbCopyRectCmd
+    FB_DRAW_TEXT  = 7, // payload: FbDrawTextCmd
 };
 
 struct FbFillRectCmd {

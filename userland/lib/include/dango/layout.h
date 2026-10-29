@@ -7,11 +7,11 @@
 namespace dango {
 
 constexpr uint64_t kPageSize = 4096;
-constexpr uint64_t kRamBase = 0x4000'0000ull;
-constexpr uint64_t kRamSize = 128ull * 1024ull * 1024ull;
-constexpr uint64_t kKernelLoad = 0x4020'0000ull;
-constexpr uint64_t kInitramfsLoad = 0x4600'0000ull;
-constexpr uint64_t kDtbBase = 0x4700'0000ull;
+constexpr uint64_t kRamBase = DANGO_RAM_BASE;
+constexpr uint64_t kRamSize = DANGO_RAM_SIZE;
+constexpr uint64_t kKernelLoad = DANGO_KERNEL_LOAD;
+constexpr uint64_t kInitramfsLoad = DANGO_INITRAMFS_LOAD;
+constexpr uint64_t kDtbBase = DANGO_DTB_LOAD;
 constexpr uint64_t kDtbSize = 0x0001'0000ull;
 constexpr uint64_t kMmioBase = 0x0800'0000ull;
 constexpr uint64_t kMmioSize = 0x0110'0000ull;
@@ -62,8 +62,8 @@ constexpr uint64_t kStagingHostVa = 0x3002'0000ull;
 
 // Windows are disjoint when neither contains the start of the other. Every
 // constant here is small enough that base + size cannot wrap.
-constexpr bool windows_disjoint(uint64_t a_base, uint64_t a_size, uint64_t b_base,
-                                uint64_t b_size) {
+constexpr bool windows_disjoint(uint64_t a_base, uint64_t a_size,
+                                uint64_t b_base, uint64_t b_size) {
     return a_base + a_size <= b_base || b_base + b_size <= a_base;
 }
 
@@ -80,8 +80,8 @@ static_assert(windows_disjoint(kGpuBar4Ipa, kGpuBar4Size, kStagingGuestIpa, kSta
               "GPU BAR4 aperture overlaps the GPU staging window");
 static_assert(windows_disjoint(kRamBase, kRamSize, kStagingGuestIpa, kStagingSize),
               "GPU staging window must live outside guest RAM");
-static_assert(windows_disjoint(kChannelGuestBase, kChannelGuestSize, kStagingGuestIpa,
-                               kStagingSize),
+static_assert(windows_disjoint(kChannelGuestBase, kChannelGuestSize,
+                               kStagingGuestIpa, kStagingSize),
               "GPU staging window overlaps the channel window");
 
 // The manager's own window VAs must not collide either, or one mapping would
@@ -106,8 +106,16 @@ struct VmLayout {
 
 constexpr VmLayout v3_layout() {
     return {
-        kRamBase, kRamSize,  kKernelLoad, kInitramfsLoad, kDtbBase,
-        kDtbSize, kMmioBase, kMmioSize,   kChannelBase,   kChannelSize,
+        kRamBase,
+        kRamSize,
+        kKernelLoad,
+        kInitramfsLoad,
+        kDtbBase,
+        kDtbSize,
+        kMmioBase,
+        kMmioSize,
+        kChannelBase,
+        kChannelSize,
     };
 }
 

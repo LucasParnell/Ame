@@ -8,14 +8,11 @@ extern "C" [[noreturn]] void _start() {
     (void)mochi::log_map_from_boot(boot, mochi::va::native_driver::kLog, "usb.fn.fido2");
     auto arena = mochi::make_state(mochi::va::native_driver::kState, 131072);
     auto* r = arena.alloc<mochi::fido2::Runtime>();
-    if (!r)
-        mochi::boot::invalid_boot();
+    if (!r) mochi::boot::invalid_boot();
     r->initialize();
     r->link = mochi::driver::link(boot, "function", mochi::va::native_driver::kLinks);
-    r->prompt.ring = mochi::boot::map_ring(
-        boot,
-        {"prompt.ring", mochi::va::native_driver::kLinks + mochi::va::native_driver::kLinkStride,
-         "prompt.doorbell"});
+    r->prompt.ring = mochi::boot::map_ring(boot, {"prompt.ring",
+        mochi::va::native_driver::kLinks + mochi::va::native_driver::kLinkStride, "prompt.doorbell"});
     r->generation = mochi::driver::value(boot, "usb.generation");
     const auto gpio_cap = mochi::boot::handle(boot, "presence.mmio");
     const auto seed_cap = mochi::boot::handle(boot, "fido2.seed");
@@ -38,22 +35,18 @@ extern "C" [[noreturn]] void _start() {
     (void)sys_unmap_page(seed_va);
     (void)sys_cap_revoke(seed_cap);
     auto* storage = arena.alloc<mochi::fido2::FileStore>();
-    if (!storage || !storage->map(boot, r->hid.auth.master) || !storage->load(r->hid.auth.store))
-        mochi::driver::startup_failed("usb.fn.fido2", "private persistent state");
+    if (!storage || !storage->map(boot,r->hid.auth.master) || !storage->load(r->hid.auth.store))
+        mochi::driver::startup_failed("usb.fn.fido2","private persistent state");
     r->hid.auth.enable_store();
     r->hid.auth.prepare_attestation();
     mochi::log_raw_marker(r->hid.auth.attestation_ready
-                              ? "attestation: packed/x5c\n"
-                              : "attestation: packed/self (certificate unavailable)\n");
-    mochi::log_raw_marker(r->hid.auth.provisioned ? "ready; key provisioned\n"
-                                                  : "ready; key unprovisioned\n");
+        ? "attestation: packed/x5c\n"
+        : "attestation: packed/self (certificate unavailable)\n");
+    mochi::log_raw_marker(r->hid.auth.provisioned ? "ready; key provisioned\n" : "ready; key unprovisioned\n");
     mochi::boot::ready(boot);
     for (;;) {
-        if (mochi::driver::run_batch([&] { return r->service(); })) {
-            mx_yield();
-            continue;
-        }
+        if (mochi::driver::run_batch([&] { return r->service(); })) { mx_yield(); continue; }
         mochi::driver::idle(&r->link, 1, r->link.rx_doorbell, r->deadline(),
-                            r->outgoing_chunk == 2 && !r->hid.output_pending ? 1 : 0);
+            r->outgoing_chunk == 2 && !r->hid.output_pending ? 1 : 0);
     }
 }

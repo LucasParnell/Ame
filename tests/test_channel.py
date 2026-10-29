@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import platform
 import subprocess
 import tempfile
 import unittest
@@ -54,7 +55,9 @@ class Channel(unittest.TestCase):
     def test_notify_arm_races_and_hvc_authority(self):
         with tempfile.TemporaryDirectory(prefix='ame-channel-') as work:
             probe = str(Path(work) / 'probe')
-            result = subprocess.run(['clang++', '-std=c++23', '-O1', '-g',
+            # Match the scheduler's native 128-bit atomic requirement on x86.
+            atomics = ['-mcx16'] if platform.machine() in ('x86_64', 'AMD64') else []
+            result = subprocess.run(['clang++', *atomics, '-std=c++23', '-O1', '-g',
                 '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                 '-I'+str(ROOT/'kernel/include'), '-I'+str(ROOT/'shared/include'),
                 '-idirafter', str(ROOT/'lib/include'),

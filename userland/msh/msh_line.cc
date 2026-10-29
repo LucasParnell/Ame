@@ -16,42 +16,48 @@ static RingSlot g_input_slot{};
 static uint32_t g_input_offset = 0;
 static bool g_input_cr = false;
 
-uint32_t build_prompt(char* out, uint32_t cap) {
-    if (!out || cap == 0)
+uint32_t build_prompt(char *out, uint32_t cap) {
+    if (!out || cap == 0) {
         return 0;
+    }
     libk::str::Buffer prompt(out, cap);
     prompt.format("msh:%s$ ", g.cwd);
     return static_cast<uint32_t>(prompt.length);
 }
 
-static void history_push(const char* line) {
-    if (!line || !line[0])
+static void history_push(const char *line) {
+    if (!line || !line[0]) {
         return;
+    }
     if (g_history_count > 0) {
         const uint32_t last = (g_history_head + kHistoryMax - 1u) % kHistoryMax;
-        if (streq(g_history[last], line))
+        if (streq(g_history[last], line)) {
             return;
+        }
     }
     libk::str::copy_into(g_history[g_history_head], kLineMax, line);
     g_history_head = (g_history_head + 1u) % kHistoryMax;
-    if (g_history_count < kHistoryMax)
+    if (g_history_count < kHistoryMax) {
         ++g_history_count;
+    }
 }
 
-static const char* history_get(uint32_t index_from_oldest) {
-    if (index_from_oldest >= g_history_count)
+static const char *history_get(uint32_t index_from_oldest) {
+    if (index_from_oldest >= g_history_count) {
         return nullptr;
+    }
     const uint32_t start = (g_history_head + kHistoryMax - g_history_count) % kHistoryMax;
     const uint32_t idx = (start + index_from_oldest) % kHistoryMax;
     return g_history[idx];
 }
 
-static void render_edit_line(const char* prompt, const char* buffer, uint32_t len, uint32_t cursor,
-                             uint32_t* prev_render_len) {
+static void render_edit_line(const char *prompt, const char *buffer, uint32_t len, uint32_t cursor,
+                             uint32_t *prev_render_len) {
     put("\r");
     put(prompt);
-    if (len)
+    if (len) {
         put_bytes(buffer, len);
+    }
     uint32_t prev = prev_render_len ? *prev_render_len : 0;
     while (prev > len) {
         put(" ");
@@ -59,10 +65,12 @@ static void render_edit_line(const char* prompt, const char* buffer, uint32_t le
     }
     put("\r");
     put(prompt);
-    if (cursor)
+    if (cursor) {
         put_bytes(buffer, cursor);
-    if (prev_render_len)
+    }
+    if (prev_render_len) {
         *prev_render_len = len;
+    }
 }
 
 enum CompletionKind {
@@ -78,15 +86,18 @@ enum CompletionKind {
     CompleteDiagSection,
 };
 
-static bool add_match(const char* candidate, const char* prefix, const char** matches,
-                      uint32_t* count, uint32_t max_matches) {
-    if (!candidate || !matches || !count)
+static bool add_match(const char *candidate, const char *prefix, const char **matches,
+                      uint32_t *count, uint32_t max_matches) {
+    if (!candidate || !matches || !count) {
         return false;
-    if (!starts_with(candidate, prefix ? prefix : ""))
+    }
+    if (!starts_with(candidate, prefix ? prefix : "")) {
         return false;
+    }
     for (uint32_t i = 0; i < *count; ++i) {
-        if (streq(matches[i], candidate))
+        if (streq(matches[i], candidate)) {
             return false;
+        }
     }
     if (*count < max_matches) {
         matches[*count] = candidate;
@@ -95,51 +106,64 @@ static bool add_match(const char* candidate, const char* prefix, const char** ma
     return true;
 }
 
-static void print_completion_matches(const char** matches, uint32_t count) {
-    if (count == 0)
+static void print_completion_matches(const char **matches, uint32_t count) {
+    if (count == 0) {
         return;
+    }
     put("\r\n");
     for (uint32_t i = 0; i < count; ++i) {
-        if (i)
+        if (i) {
             put("  ");
+        }
         put(matches[i]);
     }
     put("\r\n");
 }
 
-static uint32_t longest_common_prefix(const char** matches, uint32_t count) {
-    if (count == 0 || !matches[0])
+static uint32_t longest_common_prefix(const char **matches, uint32_t count) {
+    if (count == 0 || !matches[0]) {
         return 0;
+    }
     uint32_t n = slen(matches[0]);
     for (uint32_t i = 1; i < count; ++i) {
         uint32_t j = 0;
-        while (j < n && matches[i][j] && matches[0][j] == matches[i][j])
+        while (j < n && matches[i][j] && matches[0][j] == matches[i][j]) {
             ++j;
+        }
         n = j;
     }
     return n;
 }
 
 static CompletionKind completion_kind_for_tokens(uint32_t token_count, char tokens[][96]) {
-    if (token_count == 0)
+    if (token_count == 0) {
         return CompleteFirstToken;
+    }
     if (token_count == 1) {
-        if (streq(tokens[0], "svc"))
+        if (streq(tokens[0], "svc")) {
             return CompleteSvcVerb;
-        if (streq(tokens[0], "cap"))
+        }
+        if (streq(tokens[0], "cap")) {
             return CompleteCapVerb;
-        if (streq(tokens[0], "arena"))
+        }
+        if (streq(tokens[0], "arena")) {
             return CompleteArenaVerb;
-        if (streq(tokens[0], "ring"))
+        }
+        if (streq(tokens[0], "ring")) {
             return CompleteRingVerb;
-        if (streq(tokens[0], "doorbell"))
+        }
+        if (streq(tokens[0], "doorbell")) {
             return CompleteDoorbellVerb;
-        if (streq(tokens[0], "vm"))
+        }
+        if (streq(tokens[0], "vm")) {
             return CompleteVmVerb;
-        if (streq(tokens[0], "reboot"))
+        }
+        if (streq(tokens[0], "reboot")) {
             return CompleteRebootTarget;
-        if (streq(tokens[0], "diag"))
+        }
+        if (streq(tokens[0], "diag")) {
             return CompleteDiagSection;
+        }
         return CompleteFirstToken;
     }
     if (streq(tokens[0], "svc") && token_count == 2 &&
@@ -150,27 +174,31 @@ static CompletionKind completion_kind_for_tokens(uint32_t token_count, char toke
     return CompleteFirstToken;
 }
 
-static bool split_for_completion(const char* line, uint32_t len, char tokens[][96],
-                                 uint32_t* token_count, char* prefix_out, uint32_t prefix_cap,
-                                 bool* at_token_start) {
-    if (!token_count || !prefix_out || prefix_cap == 0 || !at_token_start)
+static bool split_for_completion(const char *line, uint32_t len, char tokens[][96],
+                                 uint32_t *token_count, char *prefix_out, uint32_t prefix_cap,
+                                 bool *at_token_start) {
+    if (!token_count || !prefix_out || prefix_cap == 0 || !at_token_start) {
         return false;
+    }
     *token_count = 0;
     *at_token_start = (len == 0);
     prefix_out[0] = '\0';
     uint32_t i = 0;
     while (i < len) {
-        while (i < len && is_space(line[i]))
+        while (i < len && is_space(line[i])) {
             ++i;
+        }
         if (i >= len) {
             *at_token_start = true;
             break;
         }
-        if (*token_count >= 4)
+        if (*token_count >= 4) {
             break;
+        }
         libk::str::Buffer token(tokens[*token_count]);
-        while (i < len && !is_space(line[i]))
+        while (i < len && !is_space(line[i])) {
             token.append(line[i++]);
+        }
         ++*token_count;
         *at_token_start = (i < len && is_space(line[i]));
     }
@@ -182,13 +210,14 @@ static bool split_for_completion(const char* line, uint32_t len, char tokens[][9
     return true;
 }
 
-static bool try_complete_line(char* line, uint32_t cap, uint32_t* len_io, uint32_t* cursor_io,
-                              const char* prompt, uint32_t* prev_render_len);
+static bool try_complete_line(char *line, uint32_t cap, uint32_t *len_io, uint32_t *cursor_io,
+                              const char *prompt, uint32_t *prev_render_len);
 
-static bool try_complete_line(char* line, uint32_t cap, uint32_t* len_io, uint32_t* cursor_io,
-                              const char* prompt, uint32_t* prev_render_len) {
-    if (!line || !len_io || !cursor_io)
+static bool try_complete_line(char *line, uint32_t cap, uint32_t *len_io, uint32_t *cursor_io,
+                              const char *prompt, uint32_t *prev_render_len) {
+    if (!line || !len_io || !cursor_io) {
         return false;
+    }
     char tokens[4][96]{};
     uint32_t token_count = 0;
     char prefix[96]{};
@@ -198,15 +227,16 @@ static bool try_complete_line(char* line, uint32_t cap, uint32_t* len_io, uint32
         return false;
     }
     CompletionKind kind = completion_kind_for_tokens(token_count, tokens);
-    const char* matches[kCompletionMax]{};
+    const char *matches[kCompletionMax]{};
     uint32_t match_count = 0;
-    auto add_literal = [&](const char* value) {
+    auto add_literal = [&](const char *value) {
         (void)add_match(value, prefix, matches, &match_count, kCompletionMax);
     };
 
     if (kind == CompleteFirstToken) {
-        for (uint32_t i = 0; i < kBuiltinCount; ++i)
+        for (uint32_t i = 0; i < kBuiltinCount; ++i) {
             add_literal(kBuiltins[i].name);
+        }
     } else if (kind == CompleteSvcVerb) {
         add_literal("list");
         add_literal("tree");
@@ -239,35 +269,40 @@ static bool try_complete_line(char* line, uint32_t cap, uint32_t* len_io, uint32
         add_literal("all");
         add_literal("el2");
         add_literal("el3");
+        add_literal("gpu");
         add_literal("el3-canary");
         add_literal("log");
     } else if (kind == CompleteSvcName && g.svc_registry) {
         mochi::svc::RegistryEntry e{};
         const uint16_t count = svc_registry_entry_count();
         for (uint16_t i = 0; i < count; ++i) {
-            if (svc_registry_copy_entry(i, &e))
+            if (svc_registry_copy_entry(i, &e)) {
                 add_literal(e.name);
+            }
         }
     }
-    if (match_count == 0)
+    if (match_count == 0) {
         return false;
+    }
 
     const uint32_t prefix_len = slen(prefix);
     const uint32_t lcp = longest_common_prefix(matches, match_count);
     if (match_count == 1 || lcp > prefix_len) {
-        const char* chosen = matches[0];
+        const char *chosen = matches[0];
         const uint32_t target_len = (match_count == 1) ? slen(chosen) : lcp;
         const uint32_t suffix_len = target_len > prefix_len ? (target_len - prefix_len) : 0;
         const uint32_t extra_space = (match_count == 1) ? 1u : 0u;
-        if (*len_io + suffix_len + extra_space >= cap)
+        if (*len_io + suffix_len + extra_space >= cap) {
             return false;
+        }
 
         for (uint32_t i = *len_io + extra_space + suffix_len;
              i > *cursor_io + suffix_len + extra_space; --i) {
             line[i - 1] = line[i - 1 - suffix_len - extra_space];
         }
-        for (uint32_t i = 0; i < suffix_len; ++i)
+        for (uint32_t i = 0; i < suffix_len; ++i) {
             line[*cursor_io + i] = chosen[prefix_len + i];
+        }
         *cursor_io += suffix_len;
         *len_io += suffix_len;
         if (extra_space) {
@@ -293,9 +328,10 @@ constexpr char kCtrlK = 11, kCtrlL = 12, kCtrlN = 14, kCtrlP = 16, kCtrlU = 21;
 constexpr char kDel = 0x7f;
 constexpr uint32_t kClearLines = 48;
 
-bool read_line(char* out, uint32_t cap) {
-    if (!out || cap == 0)
+bool read_line(char *out, uint32_t cap) {
+    if (!out || cap == 0) {
         return false;
+    }
     out[0] = '\0';
     uint32_t len = 0;
     uint32_t cursor = 0;
@@ -308,15 +344,19 @@ bool read_line(char* out, uint32_t cap) {
     const auto redraw = [&] { render_edit_line(prompt_text, out, len, cursor, &prev_render_len); };
 
     const auto load_history = [&](int32_t nav) {
-        if (g_history_count == 0)
+        if (g_history_count == 0) {
             return;
-        if (nav < 0)
+        }
+        if (nav < 0) {
             nav = 0;
-        if (nav >= static_cast<int32_t>(g_history_count))
+        }
+        if (nav >= static_cast<int32_t>(g_history_count)) {
             nav = static_cast<int32_t>(g_history_count) - 1;
-        const char* entry = history_get(g_history_count - 1u - static_cast<uint32_t>(nav));
-        if (!entry)
+        }
+        const char *entry = history_get(g_history_count - 1u - static_cast<uint32_t>(nav));
+        if (!entry) {
             return;
+        }
         libk::str::copy_into(out, cap, entry);
         len = slen(out);
         cursor = len;
@@ -326,8 +366,9 @@ bool read_line(char* out, uint32_t cap) {
 
     // Up / down through history: shared by the arrow keys and ^P / ^N.
     const auto history_prev = [&] {
-        if (history_nav < 0)
+        if (history_nav < 0) {
             libk::str::copy_into(live_line, sizeof(live_line), out);
+        }
         load_history(history_nav < 0 ? 0 : history_nav + 1);
     };
     const auto history_next = [&] {
@@ -344,10 +385,12 @@ bool read_line(char* out, uint32_t cap) {
 
     // Forward-delete at the cursor: shared by ^D and the ESC[3~ sequence.
     const auto delete_at_cursor = [&] {
-        if (cursor >= len)
+        if (cursor >= len) {
             return;
-        for (uint32_t j = cursor; j < len; ++j)
+        }
+        for (uint32_t j = cursor; j < len; ++j) {
             out[j] = out[j + 1];
+        }
         --len;
         redraw();
     };
@@ -358,8 +401,9 @@ bool read_line(char* out, uint32_t cap) {
     char esc_param = '\0';
 
     for (;;) {
-        if (!g.have_terminal || !g.term.valid())
+        if (!g.have_terminal || !g.term.valid()) {
             return false;
+        }
         if (g_input_offset >= g_input_slot.length) {
             g_input_offset = 0;
             mx_status_t status = MX_OK;
@@ -370,8 +414,9 @@ bool read_line(char* out, uint32_t cap) {
                 const int size = libk::snprintf(message, sizeof(message),
                                                 "msh: terminal read failed, status=%lld\r\n",
                                                 static_cast<long long>(status));
-                if (size > 0)
+                if (size > 0) {
                     put_bytes(message, size);
+                }
                 return false;
             }
             if (g_input_slot.type == MX_TERM_CONTROL) {
@@ -385,8 +430,9 @@ bool read_line(char* out, uint32_t cap) {
                     history_nav = -1;
                     esc = EscNone;
                     g_input_cr = false;
-                    if (control.code == MX_TERM_CONTROL_FLOW_ON)
+                    if (control.code == MX_TERM_CONTROL_FLOW_ON) {
                         redraw();
+                    }
                 }
                 g_input_slot.length = 0;
                 continue;
@@ -401,8 +447,9 @@ bool read_line(char* out, uint32_t cap) {
             char c = static_cast<char>(g_input_slot.payload[g_input_offset++]);
             const bool previous_cr = g_input_cr;
             g_input_cr = c == '\r';
-            if (previous_cr && c == '\n')
+            if (previous_cr && c == '\n') {
                 continue;
+            }
 
             if (esc == EscSeen) {
                 if (c == '[') {
@@ -456,8 +503,9 @@ bool read_line(char* out, uint32_t cap) {
                 }
                 esc = EscNone;
             } else if (esc == EscParam) {
-                if (esc_param == '3' && c == '~')
+                if (esc_param == '3' && c == '~') {
                     delete_at_cursor();
+                }
                 esc = EscNone;
                 continue;
             }
@@ -466,8 +514,9 @@ bool read_line(char* out, uint32_t cap) {
                 esc = EscSeen;
                 continue;
             }
-            if (c == '\r')
+            if (c == '\r') {
                 c = '\n';
+            }
 
             switch (c) {
             case kCtrlP:
@@ -477,8 +526,9 @@ bool read_line(char* out, uint32_t cap) {
                 history_next();
                 continue;
             case kCtrlD:
-                if (len == 0)
+                if (len == 0) {
                     return false;
+                }
                 delete_at_cursor();
                 continue;
             case kCtrlC:
@@ -506,8 +556,9 @@ bool read_line(char* out, uint32_t cap) {
                 }
                 continue;
             case kCtrlU:
-                for (uint32_t j = cursor; j <= len; ++j)
+                for (uint32_t j = cursor; j <= len; ++j) {
                     out[j - cursor] = out[j];
+                }
                 len -= cursor;
                 cursor = 0;
                 redraw();
@@ -518,15 +569,17 @@ bool read_line(char* out, uint32_t cap) {
                 redraw();
                 continue;
             case kCtrlL:
-                for (uint32_t j = 0; j < kClearLines; ++j)
+                for (uint32_t j = 0; j < kClearLines; ++j) {
                     put("\r\n");
+                }
                 redraw();
                 continue;
             case '\b':
             case kDel:
                 if (cursor > 0) {
-                    for (uint32_t j = cursor - 1; j < len; ++j)
+                    for (uint32_t j = cursor - 1; j < len; ++j) {
                         out[j] = out[j + 1];
+                    }
                     --cursor;
                     --len;
                     redraw();
@@ -546,8 +599,9 @@ bool read_line(char* out, uint32_t cap) {
 
             if (is_printable(c) && len + 1 < cap) {
                 const bool append = cursor == len;
-                for (uint32_t j = len + 1; j > cursor; --j)
+                for (uint32_t j = len + 1; j > cursor; --j) {
                     out[j] = out[j - 1];
+                }
                 out[cursor] = c;
                 ++cursor;
                 ++len;

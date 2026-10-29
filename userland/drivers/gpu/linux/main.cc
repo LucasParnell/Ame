@@ -14,10 +14,8 @@ namespace {
 // rectangle when the request lies entirely outside.
 MxGpuDamageRect clamp_damage(const MxGpuDamageRect& rect, uint32_t width, uint32_t height) {
     MxGpuDamageRect out{};
-    if (rect.x >= width || rect.y >= height)
-        return out;
-    if (rect.width == 0 || rect.height == 0)
-        return out;
+    if (rect.x >= width || rect.y >= height) return out;
+    if (rect.width == 0 || rect.height == 0) return out;
     const uint32_t x1 = rect.x + (rect.width < width - rect.x ? rect.width : width - rect.x);
     const uint32_t y1 = rect.y + (rect.height < height - rect.y ? rect.height : height - rect.y);
     out.x = rect.x;
@@ -42,13 +40,13 @@ void Client::attach(const Endpoint& endpoint, const MxGpuServiceRegisterStagingR
 }
 
 bool Client::push(uint32_t type, const void* payload, uint32_t length) {
-    return endpoint_.valid() && ring_try_push(endpoint_.request_ring, endpoint_.order, type,
-                                              payload, length, endpoint_.request_doorbell);
+    return endpoint_.valid() &&
+           ring_try_push(endpoint_.request_ring, endpoint_.order, type, payload, length,
+                         endpoint_.request_doorbell);
 }
 
 void Client::poll() {
-    if (state_ == ClientState::Failed || !endpoint_.valid())
-        return;
+    if (state_ == ClientState::Failed || !endpoint_.valid()) return;
 
     // Absorb replies first so a state change (INFO_REPLY) is visible below.
     RingSlot slot{};
@@ -57,22 +55,20 @@ void Client::poll() {
         case GPU_SERVICE_INFO_REPLY: {
             MxGpuServiceInfoReply reply{};
             if (!mochi::message_get(slot, &reply) || reply.status != MX_OK ||
-                (reply.flags & MX_GPU_SERVICE_FLAG_LIVE) == 0)
-                return fail();
+                (reply.flags & MX_GPU_SERVICE_FLAG_LIVE) == 0) return fail();
             // The service must scan out exactly the window this client renders
             // for; a mismatch means the two ends disagree about the binding.
             if (reply.width != window_.width || reply.height != window_.height ||
-                reply.stride != window_.stride || reply.pixel_format != window_.pixel_format) {
+                reply.stride != window_.stride ||
+                reply.pixel_format != window_.pixel_format) {
                 return fail();
             }
-            if (state_ == ClientState::AwaitInfo)
-                state_ = ClientState::AwaitRegister;
+            if (state_ == ClientState::AwaitInfo) state_ = ClientState::AwaitRegister;
             break;
         }
         case GPU_SERVICE_REGISTER_STAGING_REPLY: {
             MxGpuServiceRegisterStagingReply reply{};
-            if (!mochi::message_get(slot, &reply) || reply.status != MX_OK ||
-                reply.buffer_id == 0) {
+            if (!mochi::message_get(slot, &reply) || reply.status != MX_OK || reply.buffer_id == 0) {
                 return fail();
             }
             if (state_ == ClientState::AwaitRegister) {
@@ -83,8 +79,7 @@ void Client::poll() {
         }
         case GPU_SERVICE_PRESENT_COMPLETE: {
             MxGpuServicePresentComplete reply{};
-            if (!mochi::message_get(slot, &reply) || reply.status != MX_OK)
-                return fail();
+            if (!mochi::message_get(slot, &reply) || reply.status != MX_OK) return fail();
             break;
         }
         case GPU_SERVICE_ERROR:
@@ -97,25 +92,21 @@ void Client::poll() {
     // Send phase: one request at a time, retried on the next poll when the
     // request ring is momentarily full.
     if (state_ == ClientState::Idle) {
-        if (push(GPU_SERVICE_INFO, nullptr, 0))
-            state_ = ClientState::AwaitInfo;
+        if (push(GPU_SERVICE_INFO, nullptr, 0)) state_ = ClientState::AwaitInfo;
     } else if (state_ == ClientState::AwaitRegister && !register_sent_) {
-        if (push(GPU_SERVICE_REGISTER_STAGING, &window_, sizeof(window_)))
-            register_sent_ = true;
+        if (push(GPU_SERVICE_REGISTER_STAGING, &window_, sizeof(window_))) register_sent_ = true;
     }
 }
 
 bool Client::submit_present(const MxGpuDamageRect* damage, bool full_frame) {
-    if (state_ != ClientState::Live)
-        return false;
+    if (state_ != ClientState::Live) return false;
 
     MxGpuServicePresentRequest request{};
     request.buffer_id = buffer_id_;
-    request.flags =
-        full_frame ? MX_GPU_SERVICE_PRESENT_FLAG_FULL_FRAME : MX_GPU_SERVICE_PRESENT_FLAG_NONE;
+    request.flags = full_frame ? MX_GPU_SERVICE_PRESENT_FLAG_FULL_FRAME
+                               : MX_GPU_SERVICE_PRESENT_FLAG_NONE;
     request.damage_count = (damage && !full_frame) ? 1u : 0u;
-    if (request.damage_count == 1u)
-        request.damage = *damage;
+    if (request.damage_count == 1u) request.damage = *damage;
 
     if (push(GPU_SERVICE_PRESENT, &request, sizeof(request))) {
         dropped_presents_ = 0;
@@ -125,8 +116,7 @@ bool Client::submit_present(const MxGpuDamageRect* damage, bool full_frame) {
     // still cannot be queued is not fatal -- the caller keeps its damage, so
     // the next present carries the same rectangle.
     poll();
-    if (state_ != ClientState::Live)
-        return false;
+    if (state_ != ClientState::Live) return false;
     if (push(GPU_SERVICE_PRESENT, &request, sizeof(request))) {
         dropped_presents_ = 0;
         return true;
@@ -149,16 +139,6 @@ void Server::init(const Endpoint& endpoint, const ServerConfig& config) {
     boot_generation_ = 0;
     frame_index_ = 0;
     consecutive_failures_ = 0;
-    vk_enabled_ = false;
-    vk_client_id_ = 0;
-}
-
-void Server::init_vulkan(const VulkanBackend& backend, mx_u32_t client_id) {
-    // The broker is scoped to the boot generation this server publishes, so an
-    // object id minted by an earlier appliance boot never validates here.
-    vk_.init(backend, boot_generation_);
-    vk_client_id_ = client_id;
-    vk_enabled_ = true;
 }
 
 void Server::set_buffer(uint64_t buffer_id, uint64_t boot_generation) {
@@ -167,15 +147,9 @@ void Server::set_buffer(uint64_t buffer_id, uint64_t boot_generation) {
 }
 
 bool Server::reply(uint32_t type, const void* payload, uint32_t length) {
-    return endpoint_.valid() && ring_try_push(endpoint_.reply_ring, endpoint_.order, type, payload,
-                                              length, endpoint_.reply_doorbell);
-}
-
-// Push a fully formed reply frame (the broker builds the Vulkan session replies
-// itself, so the service does not re-encode them).
-bool Server::reply_frame(const MxVkFrame& frame) {
-    return endpoint_.valid() && ring_try_push_frame(endpoint_.reply_ring, endpoint_.order, frame,
-                                                    endpoint_.reply_doorbell);
+    return endpoint_.valid() &&
+           ring_try_push(endpoint_.reply_ring, endpoint_.order, type, payload, length,
+                         endpoint_.reply_doorbell);
 }
 
 void Server::error(uint32_t opcode, mx_status_t status, uint64_t detail) {
@@ -187,27 +161,12 @@ void Server::error(uint32_t opcode, mx_status_t status, uint64_t detail) {
 }
 
 bool Server::serve_once(PresentFn present, void* ctx) {
-    if (!endpoint_.valid())
-        return false;
+    if (!endpoint_.valid()) return false;
 
     RingSlot slot{};
     if (!ring_wait_pop(endpoint_.request_ring, endpoint_.order, &slot,
                        endpoint_.request_doorbell)) {
         return false;
-    }
-
-    // The Vulkan session protocol is a distinct opcode range on the same ring.
-    // When the broker is bound, every request in the range is answered with the
-    // broker's reply frame; otherwise the client is told the service is absent
-    // and keeps its local path.
-    if (mx_vk_is_opcode(slot.type)) {
-        MxVkFrame vk_reply{};
-        if (vk_enabled_ && vk_.handle(vk_client_id_, slot, &vk_reply)) {
-            (void)reply_frame(vk_reply);
-        } else {
-            error(slot.type, MX_ERR_SERVICE_UNAVAILABLE, slot.length);
-        }
-        return true;
     }
 
     switch (slot.type) {
@@ -232,8 +191,9 @@ bool Server::serve_once(PresentFn present, void* ctx) {
         // Guard: a client that was built against a different appliance binding
         // is refused rather than silently mis-presented.
         if (request.staging_pa != config_.staging_pa ||
-            request.staging_size != config_.staging_size || request.width != config_.width ||
-            request.height != config_.height || request.stride != config_.stride ||
+            request.staging_size != config_.staging_size ||
+            request.width != config_.width || request.height != config_.height ||
+            request.stride != config_.stride ||
             request.pixel_format != config_.pixel_format) {
             error(GPU_SERVICE_REGISTER_STAGING, MX_ERR_INVALID, request.staging_pa);
             break;

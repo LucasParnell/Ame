@@ -2,12 +2,12 @@
 // Bring-up diagnostics. EL3 metadata queries invoke firmware; explicit EL3
 // research operations can also modify shared memory. CPU capability and
 // ownership of the EL2 monitor are separate.
-#include "midix/abi/types.h"
 #include "midix/abi/power.h"
+#include "midix/abi/types.h"
 
 constexpr mx_u32_t MX_DIAG_VERSION = 1;
 constexpr mx_u64_t MX_DIAG_READ_MAX = 1024;
-constexpr mx_u64_t MX_DIAG_EL3_MAX_INDEX = 30;
+constexpr mx_u64_t MX_DIAG_EL3_MAX_INDEX = 33;
 
 enum MxDiagRequest : mx_u64_t {
     MX_DIAG_SYSTEM = 0,   // index=0, MxDiagSystem; returns sizeof(MxDiagSystem)
@@ -17,10 +17,11 @@ enum MxDiagRequest : mx_u64_t {
     // registration canary; index 2 = read-only window reconnaissance; index 3 =
     // legacy completion probe (index 3) now returns NOT_IMPLEMENTED: Linux
     // requires a completed storage operation and defines no callback guard.
-    MX_DIAG_EL3 = 3,     // indices 0..MAX_INDEX; 29/30 = notification-backed RPMB lifecycle
-    MX_DIAG_POWER = 6,   // index=0, MxPowerSnapshot
-    MX_DIAG_HEALTH = 5,  // index=0, MxDiagHealth; read-only console telemetry
-    MX_DIAG_RUNTIME = 4, // index=first PID (1..limit), MxDiagRuntimeBatch
+    MX_DIAG_EL3 = 3,    // indices 0..MAX_INDEX; 29/30 = RPMB lifecycle, 31 = GPU routing snapshot
+    MX_DIAG_HEALTH = 5, // index=0, MxDiagHealth; read-only console telemetry
+    MX_DIAG_VM_PROGRESS = 6, // index=logical CPU, bounded last vCPU/MMIO checkpoint
+    MX_DIAG_RUNTIME = 4,     // index=first PID (1..limit), MxDiagRuntimeBatch
+    MX_DIAG_POWER = 7, // MxPowerSnapshot; 6 remains the deployed VM progress request.
 };
 
 enum MxDiagBoard : mx_u32_t {
@@ -67,6 +68,31 @@ struct MxDiagCpu {
     mx_u64_t ipis_handled;
 };
 static_assert(sizeof(MxDiagCpu) == 72);
+
+enum MxVmProgressStage : mx_u64_t {
+    MX_VM_PROGRESS_NONE = 0,
+    MX_VM_PROGRESS_RUN = 1,
+    MX_VM_PROGRESS_CACHE_CLEAN = 2,
+    MX_VM_PROGRESS_GUEST_ENTER = 3,
+    MX_VM_PROGRESS_GUEST_EXIT = 4,
+    MX_VM_PROGRESS_CACHE_INVALIDATED = 5,
+    MX_VM_PROGRESS_IRQ = 6,
+    MX_VM_PROGRESS_MMIO = 7,
+    MX_VM_PROGRESS_MMIO_DONE = 8,
+    MX_VM_PROGRESS_MALI_LOCK = 9,
+    MX_VM_PROGRESS_MALI_LOCKED = 10,
+    MX_VM_PROGRESS_MALI_READ = 11,
+    MX_VM_PROGRESS_MALI_READ_DONE = 12,
+    MX_VM_PROGRESS_MALI_WRITE = 13,
+    MX_VM_PROGRESS_MALI_WRITE_DONE = 14,
+    MX_VM_PROGRESS_SHADOW = 15,
+    MX_VM_PROGRESS_SHADOW_DONE = 16,
+};
+struct MxDiagVmProgress {
+    mx_u32_t version, cpu;
+    mx_u64_t sequence, stage, sampled_ns, detail0, detail1;
+};
+static_assert(sizeof(MxDiagVmProgress) == 48);
 
 constexpr mx_u32_t MX_DIAG_PROCESS_LIMIT = 64, MX_DIAG_RUNTIME_ROWS = 8;
 // Fixed-size, pointer-free rows. Identity includes the PID generation so a
@@ -548,3 +574,40 @@ struct MxDiagEl3Scan2 {
     mx_u64_t crumb_stage;
 };
 static_assert(sizeof(MxDiagEl3Scan2) == 944);
+
+// Read-only, fixed register snapshot for Hi6250 GPU translation research.
+// MX_DIAG_EL3 index 31. No addresses or register writes are supplied by users.
+struct MxDiagGpuIommu {
+    mx_u32_t version, valid; // validity bit per register, in the order below
+    mx_u32_t gpu_id, mem_features, mmu_features, as_present;
+    mx_u32_t pctrl_ctrl8, pctrl_ctrl25;
+    mx_u64_t faults;
+};
+static_assert(sizeof(MxDiagGpuIommu) == 40);
+
+// Fixed Hi6250 DMSS snapshot, MX_DIAG_EL3 index 32. These are observations,
+// not evidence that GPU traffic traverses a particular ASI or an SMMU.
+constexpr mx_u32_t MX_DIAG_DMSS_PORTS = 7;
+constexpr mx_u32_t MX_DIAG_DMSS_WORDS = 8;
+struct MxDiagGpuDmss {
+    mx_u32_t version, valid;
+    mx_u32_t global_version, global_info, pctrl_ctrl8, reserved;
+    mx_u64_t faults, first_esr, first_far;
+    struct Port {
+        mx_u32_t valid;
+        // RTL_INF3, STAT_MASK, STAT_CYCLE, FLUX_FILTER0/1, FLUX_WR/RD,
+        // SEC_INT_STATUS. No clear-on-read or write-only registers included.
+        mx_u32_t words[MX_DIAG_DMSS_WORDS];
+    } ports[MX_DIAG_DMSS_PORTS];
+};
+static_assert(sizeof(MxDiagGpuDmss) == 304);
+
+// Index 33: architected SMMUv2 ID registers at the vendor IVP candidate.
+// This identifies accessibility/features only; it does not establish a GPU route.
+struct MxDiagSmmuId {
+    mx_u32_t version, valid;
+    mx_u64_t base;
+    mx_u32_t id[3], reserved;
+    mx_u64_t faults, first_esr, first_far;
+};
+static_assert(sizeof(MxDiagSmmuId) == 56);

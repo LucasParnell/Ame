@@ -63,9 +63,8 @@ Record* acquire(void* target) {
             u64 refs = __atomic_load_n(&p->references, __ATOMIC_RELAXED);
             while (refs) {
                 ANKO_ASSERT(refs != ~0ull);
-                if (__atomic_compare_exchange_n(&p->references, &refs, refs + 1, false,
-                                                __ATOMIC_RELAXED, __ATOMIC_RELAXED))
-                    return p;
+                if (__atomic_compare_exchange_n(&p->references, &refs, refs + 1,
+                        false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return p;
             }
             return nullptr;
         }
@@ -98,8 +97,7 @@ void release(Record* record) {
     // acquire fence and registry unlink; routine drops remain lock-free.
     const u64 previous = __atomic_fetch_sub(&record->references, 1, __ATOMIC_RELEASE);
     ANKO_ASSERT(previous);
-    if (previous != 1)
-        return;
+    if (previous != 1) return;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     {
         kernel::LockGuard guard(lock);

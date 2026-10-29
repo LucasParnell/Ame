@@ -1,0 +1,17 @@
+Match Gallium polygon-list BO alignment when suballocating lists.
+This is a hardware diagnosis candidate, not a verified fault fix.
+
+diff --git a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+--- a/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
++++ b/src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c
+@@ -293,7 +293,9 @@
+    bool hierarchy = !pdev->model->quirks.no_hierarchical_tiling;
+    unsigned size = panfrost_tiler_get_polygon_list_size(fb->width, fb->height,
+                                                         draws ? ~0u : 0, hierarchy);
+-   struct panfrost_ptr list = panvk_cmd_alloc_dev_mem(cmdbuf, desc, size, 64);
++   /* Gallium allocates polygon lists as page-aligned BOs. Keep the same
++    * alignment when suballocating, including the CPU-initialized clear list. */
++   struct panfrost_ptr list = panvk_cmd_alloc_dev_mem(cmdbuf, desc, size, 4096);
+    if (!list.gpu)
+       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    memset(list.cpu, 0, size);

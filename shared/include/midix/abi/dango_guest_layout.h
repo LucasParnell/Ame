@@ -3,7 +3,7 @@
  * time so the kernel bounds, the guest DTS and the artifact manifest cannot
  * disagree about where guest RAM ends and where the fixed device windows start.
  *
- * Two layouts exist (docs/GPU_APPLIANCE_GUEST_MEMORY.md):
+ * Two layouts exist (docs/linux-appliances.md#gpu_appliance_guest_memory):
  *
  *   minimal   the freestanding appliance guest: 128 MiB RAM. Default, and the
  *             only layout the tree boots today.
@@ -64,10 +64,10 @@
 #endif
 
 /* Window sizes are layout-independent: only their bases move. */
-#define DANGO_CH_GUEST_SIZE 0x20000ULL       /* descriptor page + two rings */
+#define DANGO_CH_GUEST_SIZE 0x20000ULL      /* descriptor page + two rings */
 #define DANGO_GPU_STAGING_SIZE 0x00300000ULL /* 3 MiB = one 1024x768 XRGB8888 frame */
 #define DANGO_SHM_GUEST_SIZE 0x00100000ULL   /* 1 MiB descriptor window */
-#define DANGO_GPU_MMIO_SIZE 0x10000000ULL    /* 256 MiB aperture */
+#define DANGO_GPU_MMIO_SIZE 0x10000000ULL   /* 256 MiB aperture */
 
 /* The layout invariants. Stated here, once, against the single source: a window
  * inside RAM, or two windows overlapping, must fail the build, not the guest. */
@@ -86,7 +86,8 @@ _Static_assert(DANGO_GPU_MMIO_BASE >= DANGO_SHM_GUEST_BASE + DANGO_SHM_GUEST_SIZ
  * first window. The initramfs-to-DTB gap is checked against the real artifact
  * size at build time (build-manifest.sh), which is what caught a 186 MiB rootfs
  * colliding with a DTB placed just above a small one. */
-_Static_assert(DANGO_KERNEL_LOAD >= DANGO_RAM_BASE && DANGO_KERNEL_LOAD < DANGO_INITRAMFS_LOAD &&
+_Static_assert(DANGO_KERNEL_LOAD >= DANGO_RAM_BASE &&
+                   DANGO_KERNEL_LOAD < DANGO_INITRAMFS_LOAD &&
                    DANGO_INITRAMFS_LOAD < DANGO_DTB_LOAD,
                "load addresses must be ordered inside RAM");
 _Static_assert(DANGO_DTB_LOAD < DANGO_CH_GUEST_BASE,

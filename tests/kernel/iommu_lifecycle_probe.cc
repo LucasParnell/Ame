@@ -68,6 +68,7 @@ bool owner_query(void*, PhysAddr pa, iommu::PageOwnership* out) {
     }
     out->object = kOwner;
     out->dma_class = iommu::VmDmaClass::ApplianceRam;
+    out->perms = iommu::dma_class_perms(out->dma_class);
     std::memset(out->pad, 0, sizeof(out->pad));
     return true;
 }

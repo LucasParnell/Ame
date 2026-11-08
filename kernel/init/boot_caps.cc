@@ -14,6 +14,8 @@
 #include "anko/irq.h"
 #include "anko/log.h"
 #include "anko/mm.h"
+#include "anko/amm.h"
+#include "anko/random.h"
 #include "anko/panic.h"
 #include "anko/panic_screen.h"
 #include "anko/pci.h"
@@ -65,7 +67,7 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
     }
     const PhysAddr boot_page = mm::alloc_page_for(init_proc.pid);
     ANKO_BOOT_CHECKPOINT(CapsBootPage);
-    auto *boot_arena = static_cast<Arena *>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
+    auto *boot_arena = static_cast<Arena *>(mm::allocate<Arena>());
     if (!boot_page || !boot_arena) {
         panic("init BootInfo allocation failed");
     }
@@ -107,9 +109,9 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
 
     ANKO_BOOT_CHECKPOINT(CapsArena);
     auto *manifest =
-        static_cast<MemoryObject *>(mm::heap_alloc(sizeof(MemoryObject), alignof(MemoryObject)));
+        static_cast<MemoryObject *>(mm::allocate<MemoryObject>());
     auto *initrd =
-        static_cast<MemoryObject *>(mm::heap_alloc(sizeof(MemoryObject), alignof(MemoryObject)));
+        static_cast<MemoryObject *>(mm::allocate<MemoryObject>());
     if (!manifest || !initrd) {
         return;
     }
@@ -172,6 +174,9 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
     grant("system.control", CAP_PLATFORM, platform::board_control(platform::Domain::System),
           RIGHT_WRITE | RIGHT_DUP);
 
+    grant("health.observe", CAP_PLATFORM, platform::board_control(platform::Domain::Health),
+          RIGHT_READ | RIGHT_DUP);
+
     // 7) Global log doorbell followed by one kernel log ring per supported CPU.
     Doorbell *log_db = ipc::doorbell_create_object(init_proc.pid);
     if (!log_db) {
@@ -215,7 +220,7 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
         };
         for (const auto &r : resources) {
             auto *range =
-                static_cast<MmioRange *>(mm::slab_alloc(sizeof(MmioRange), alignof(MmioRange)));
+                static_cast<MmioRange *>(mm::allocate<MmioRange>());
             if (!range) {
                 panic("Anne USB resource allocation failed");
             }
@@ -223,7 +228,7 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
             grant(r.name, CAP_MMIO, range, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_DUP);
         }
         const auto seed_page = mm::alloc_page_for(init_proc.pid);
-        auto *seed_arena = static_cast<Arena *>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
+        auto *seed_arena = static_cast<Arena *>(mm::allocate<Arena>());
         if (!seed_page || !seed_arena) {
             panic("FIDO2 seed allocation failed");
         }
@@ -235,7 +240,7 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
         seed_arena->owner_pid = init_proc.pid;
         seed_arena->rights = RIGHT_READ;
         grant("fido2.seed", CAP_ARENA, seed_arena, RIGHT_READ | RIGHT_MAP | RIGHT_DUP);
-        auto *line = static_cast<IrqLine *>(mm::slab_alloc(sizeof(IrqLine), alignof(IrqLine)));
+        auto *line = static_cast<IrqLine *>(mm::allocate<IrqLine>());
         if (!line) {
             panic("Anne USB IRQ allocation failed");
         }
@@ -256,7 +261,7 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
         // attributes. Ordinary filesystem/client arenas stay CPU-cacheable.
         constexpr usize kEmmcDmaPages = 17;
         const PhysAddr emmc_dma_phys = mm::alloc_pages_contiguous(kEmmcDmaPages);
-        auto *emmc_dma = static_cast<Arena *>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
+        auto *emmc_dma = static_cast<Arena *>(mm::allocate<Arena>());
         if (!emmc_dma || !emmc_dma_phys ||
             emmc_dma_phys + kEmmcDmaPages * PAGE_SIZE > (1ull << 32)) {
             panic("eMMC DMA allocation failed");
@@ -284,7 +289,7 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
                 panic("Anne framebuffer attributes failed");
             }
             auto *range =
-                static_cast<MmioRange *>(mm::slab_alloc(sizeof(MmioRange), alignof(MmioRange)));
+                static_cast<MmioRange *>(mm::allocate<MmioRange>());
             if (!range) {
                 panic("Anne framebuffer allocation failed");
             }
@@ -322,7 +327,7 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
             static_cast<usize>(g_hw.t210_dc_fb_width) * g_hw.t210_dc_fb_height * 4u;
         const usize fb_size_pages = (fb_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
         auto *fb_range =
-            static_cast<MmioRange *>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
+            static_cast<MmioRange *>(mm::allocate<MmioRange>());
         if (fb_range) {
             fb_range->phys_base = g_hw.t210_dc_fb_phys;
             fb_range->size = fb_size_pages;
@@ -354,7 +359,7 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
                 ANKO_LOG_WARN("kernel/init", "ramfb init failed — framebuffer will be blank");
             }
             auto *fb_range =
-                static_cast<MmioRange *>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
+                static_cast<MmioRange *>(mm::allocate<MmioRange>());
             if (fb_range) {
                 fb_range->phys_base = fb_phys;
                 fb_range->size = kFbPages * PAGE_SIZE;
@@ -402,9 +407,9 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
         constexpr usize kXusbSize = 0x8000u; // 32 KiB xHCI register window
         constexpr usize kXhciDmaPages = 64;
         auto *xhci_mmio =
-            static_cast<MmioRange *>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
+            static_cast<MmioRange *>(mm::allocate<MmioRange>());
         const PhysAddr xhci_dma_phys = mm::alloc_pages_contiguous_aligned(kXhciDmaPages, 16);
-        auto *xhci_dma = static_cast<Arena *>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
+        auto *xhci_dma = static_cast<Arena *>(mm::allocate<Arena>());
         if (xhci_mmio && xhci_dma_phys && xhci_dma) {
             if (!mm::register_noncached_range(xhci_dma_phys, kXhciDmaPages * PAGE_SIZE)) {
                 panic("xhci DMA memory attributes failed");
@@ -432,7 +437,7 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
             // with the QEMU path.  irq_id=0xFFFFFFFF signals no real IRQ;
             // the xhci driver uses polling mode via ANKO_XHCI_NORESET.
             auto *t210_irq =
-                static_cast<IrqLine *>(mm::heap_alloc(sizeof(IrqLine), alignof(IrqLine)));
+                static_cast<IrqLine *>(mm::allocate<IrqLine>());
             if (t210_irq) {
                 t210_irq->irq_id = 0xFFFF'FFFFu; // sentinel: invalid
                 t210_irq->trigger = 0;
@@ -463,7 +468,7 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
             MmioRange *xhci_mmio = drivers::pci_probe::alloc_xhci_mmio(xhci);
             IrqLine *xhci_irq = drivers::pci_probe::alloc_xhci_irq(xhci);
             const PhysAddr xhci_dma_phys = mm::alloc_pages_contiguous_aligned(kXhciDmaPages, 16);
-            Arena *xhci_dma = static_cast<Arena *>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
+            Arena *xhci_dma = static_cast<Arena *>(mm::allocate<Arena>());
             if (xhci_mmio && xhci_irq && xhci_dma_phys && xhci_dma) {
                 if (!mm::register_noncached_range(xhci_dma_phys, kXhciDmaPages * PAGE_SIZE)) {
                     panic("xhci DMA memory attributes failed");
@@ -544,10 +549,10 @@ void issue_boot_caps(Process &init_proc, PhysAddr manifest_addr, usize manifest_
     // 15..16) Virtio-blk block device (QEMU only — T210 uses AmeFS via SATA/SD).
     if (g_hw.has_virtio_blk) {
         auto *blk_mmio =
-            static_cast<MmioRange *>(mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
+            static_cast<MmioRange *>(mm::allocate<MmioRange>());
         constexpr usize kBlkDmaPages = 64;
         const PhysAddr blk_dma_phys = mm::alloc_pages_contiguous(kBlkDmaPages);
-        Arena *blk_dma = static_cast<Arena *>(mm::heap_alloc(sizeof(Arena), alignof(Arena)));
+        Arena *blk_dma = static_cast<Arena *>(mm::allocate<Arena>());
         if (blk_mmio && blk_dma_phys && blk_dma) {
             // Virtio and io.fs share this physical arena with the device.
             // Register before the first write so kernel and EL0 aliases agree;
@@ -600,7 +605,8 @@ Process *spawn_image(const void *elf_data, usize elf_size, PrincipalClass princi
     space.pgd_phys = p->ttbr0;
     space.pid = p->pid;
 
-    const VirtAddr entry = load_image(space, elf_data, elf_size);
+    MxArenaCreate arena_contract{};
+    const VirtAddr entry = load_image(space, elf_data, elf_size, &arena_contract);
     if (!entry) {
         ANKO_LOG_ERROR("kernel/loader", "image validation or mapping failed");
         sched::process_destroy(p);
@@ -612,7 +618,9 @@ Process *spawn_image(const void *elf_data, usize elf_size, PrincipalClass princi
     // userland/msh/main.cc). Give the entry thread a few pages and start later
     // per-thread stacks below them, so a service cannot fault on stack depth.
     constexpr u32 kInitialStackPages = 4;
-    const VirtAddr stack_base = USER_STACK_TOP - kInitialStackPages * PAGE_SIZE;
+    p->stack_aslr_pages = security::random_below(4096);
+    const VirtAddr stack_top = USER_STACK_TOP - u64{p->stack_aslr_pages} * PAGE_SIZE;
+    const VirtAddr stack_base = stack_top - kInitialStackPages * PAGE_SIZE;
     u32 mapped = 0;
     for (; mapped < kInitialStackPages; ++mapped) {
         const PhysAddr stack = mm::alloc_page_for(p->pid);
@@ -635,8 +643,24 @@ Process *spawn_image(const void *elf_data, usize elf_size, PrincipalClass princi
         sched::process_destroy(p);
         return nullptr;
     }
-    const VirtAddr sp_top = USER_STACK_TOP - 16;
+    const VirtAddr sp_top = stack_top - 16;
     p->next_stack_slot = kInitialStackPages;
+    Arena* primary = nullptr;
+    const auto primary_status = amm::create(p->pid, p->generation, arena_contract, &primary, space);
+    if (primary_status != E_OK) {
+        ANKO_LOGF_ERROR("kernel/loader", "manifest arena allocation failed status=%d", int(primary_status));
+        sched::process_destroy(p); return nullptr;
+    }
+    auto* primary_lifetime = object::create(primary, amm::destroy);
+    if (!primary_lifetime) { amm::destroy(primary); sched::process_destroy(p); return nullptr; }
+    p->primary_arena = primary; p->primary_arena_lifetime = primary_lifetime;
+    primary->base_va = arena_contract.cage_base;
+    const auto primary_mapping = amm::map(*primary, primary_lifetime, space, arena_contract.cage_base,
+                 RIGHT_READ | RIGHT_WRITE, sched::process_identity(*p));
+    if (primary_mapping != E_OK) {
+        ANKO_LOGF_ERROR("kernel/loader", "manifest arena mapping failed status=%d", int(primary_mapping));
+        sched::process_destroy(p); return nullptr;
+    }
 
     const u32 thread_flags = (flags & SPAWN_SUSPENDED) ? THREAD_SUSPENDED : 0;
     Thread *t = sched::thread_create(p->pid, entry, sp_top, PRIO_SERVICE, 0, thread_flags);
@@ -699,7 +723,7 @@ void create_init_process() {
         return;
     }
     ANKO_BOOT_CHECKPOINT(InitSpawnDone);
-    issue_boot_caps(*init_proc, static_cast<PhysAddr>(reinterpret_cast<u64>(manifest_blob)),
+    issue_boot_caps(*init_proc, mm::kernel_address_to_phys(reinterpret_cast<u64>(manifest_blob)),
                     manifest_size, initrd_base, initrd_size);
     ANKO_BOOT_CHECKPOINT(InitCapsDone);
     ANKO_LOG_INFO("kernel/init", "init queued");

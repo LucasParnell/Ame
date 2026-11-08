@@ -1907,8 +1907,15 @@ int gpu_iommu_report() {
         hex("gpu.pctrl_ctrl25", info.pctrl_ctrl25);
         decimal("gpu.smmu_sec_override", (info.pctrl_ctrl25 >> 11) & 1);
     }
+    const char* registers[] = {"gpu.irq.raw", "gpu.irq.mask", "gpu.irq.status",
+        "job.irq.raw", "job.irq.mask", "job.irq.status", "mmu.irq.raw",
+        "mmu.irq.mask", "mmu.irq.status", "job.slot0.status", "job.slot1.status",
+        "job.slot2.status", "as0.fault_status", "as0.fault_addr_lo",
+        "as0.fault_addr_hi", "as0.status"};
+    for (uint32_t i = 0; i < 16; ++i)
+        if (info.valid & (1u << (6 + i))) hex(registers[i], info.status_words[i]);
     putln("Read-only snapshot; bus master IDs do not establish an external SMMU route.");
-    return info.valid == 63 ? 0 : 1;
+    return info.valid == ((1u << 22) - 1) ? 0 : 1;
 }
 } // namespace
 

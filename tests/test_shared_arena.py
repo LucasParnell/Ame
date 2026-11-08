@@ -27,6 +27,7 @@ class SharedArena(unittest.TestCase):
                 str(ROOT/'kernel/vm/vm_shared.cc'),
                 str(ROOT/'kernel/vm/stage2.cc'),
                 str(ROOT/'kernel/iommu/core.cc'),
+                str(ROOT/'kernel/cap/cap_table.cc'),
                 '-o', probe], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([probe], capture_output=True, text=True, timeout=30)

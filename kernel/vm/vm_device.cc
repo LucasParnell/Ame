@@ -98,6 +98,7 @@ bool appliance_owner_query(void* ctx, PhysAddr pa, iommu::PageOwnership* out) {
         }
         out->object = a->authorized_object_;
         out->dma_class = iommu::VmDmaClass::ApplianceRam;
+        out->perms = iommu::dma_class_perms(out->dma_class);
         libk::memset(out->pad, 0, sizeof(out->pad));
         return true;
     }
@@ -1024,7 +1025,9 @@ SysError device_route_irq(Process& caller, CapHandle assign_cap, CapHandle irq_c
     if (a->owner_vm && a->owner_vm->vm_id != vcpu->owner_vm_id) {
         return E_PERM; // route target must belong to the assignment's VM
     }
-    cap::Ref irq_e = require_cap(caller, irq_cap, CAP_IRQ, RIGHT_READ, &rc);
+    // Routing configures/enables the physical line and transfers delivery to a
+    // guest. Inspection authority alone cannot authorize those side effects.
+    cap::Ref irq_e = require_cap(caller, irq_cap, CAP_IRQ, RIGHT_WRITE, &rc);
     if (!irq_e) {
         return rc;
     }

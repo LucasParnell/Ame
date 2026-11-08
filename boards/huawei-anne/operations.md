@@ -3,6 +3,7 @@
 Use fresh packages with matching ELF, signed bundle and provenance. These workflows retain capture, restoration and installation evidence; references to a device being installed/restored are dated observations. Private firmware and readback records stay under ignored artifact directories. See [boot](boot.md) for EL2 handoff and [USB](../../docs/usb.md) for the service/protocol boundary.
 
 - [ANE BootROM flashing with an EL2 handoff](#flash_el2)
+- [DTS partition handoff and restore](#dts_partition)
 - [Native boot diagnostics](#boot_diagnostics)
 - [CDC serial and USB-C reconnection](#cdc_serial)
 - [USB app sessions](#app_stream)
@@ -13,26 +14,35 @@ Use fresh packages with matching ELF, signed bundle and provenance. These workfl
 
 <a id="flash_el2-ane-bootrom-flashing-with-an-el2-handoff"></a>
 
-`flash-el2.py` brings the p20re `anne-el2/run.py`, `install_kernel.py`, and
-BootROM upload transport into this worktree. It uses the previously tested
-stock LK/TEE preload route. It writes the Ame kernel partition,
+`flash-el2.py` and `anne_transport.py` implement the flashing and BootROM
+protocols within Ame. They import no code from another project. The loader
+profile uses the stock LK/TEE preload route. It writes the Ame kernel partition,
 verifies the complete flashed partition, and uses `oem boot`
 to preserve the RAM EL2 patch. An ordinary reboot discards that patch.
 
 Dependencies: Python with `pyserial` and `pyusb`, and access to both the Huawei
 BootROM serial device and fastboot USB device.
 
-The four private firmware inputs are copied from p20re into
+The four private firmware inputs are kept within Ame under
 `out/anne-device-private/el2-firmware/`, which is ignored by Git:
 
 - `xloader.img`: signed `tools/potatonv/bootloaders/hisi65x_a/xloader.img`
 - `stock-lk-el2-tee.bin`: stock display initialization, EL2 descriptor, TEE hook
 - `teeos-decrypted.bin`: captured plaintext TEE preload
-- `manifest.json`: p20re's `stock-preload-manifest.json`
+- `manifest.json`: pinned loader identity and patch metadata
 
-The helper pins firmware hashes and RAM patch addresses. It requires the
-handset's already cleared FBLOCK; it does not change FBLOCK or flash LK/TEE.
-No USB drive or p20re Python modules are required after copying those inputs.
+The helper pins firmware hashes and RAM patch addresses. It checks the active
+USERLOCK and FBLOCK using `oem lock-state info`; the NV fallback byte is not
+proof of the active state. The verified dispatcher patch permits commands
+even if active FBLOCK is locked. The helper does not change persistent locks
+or flash LK/TEE.
+
+`scripts/anne/tools/recover-el2-firmware.py DUMP_DIR OUTPUT_DIR --xloader PATH`
+prepares the complete private bundle from stock captures using Ame's own
+decryption and patch builder. No p20re checkout or prebuilt patched LK is
+required. The deterministic reconstruction has a separate pinned hash from
+the original working loader and remains unverified on hardware; reproducing
+its hash does not establish equivalent boot behavior.
 
 The normal workflows use one entry point:
 
@@ -53,6 +63,40 @@ for build dependencies, keys, paths and GPU/native build options.
 Records, readback images, optional backups and hashes are saved under
 `out/anne-device-private/kernel-install-<UTC timestamp>/`. A readback mismatch
 stops before boot. Actual EL2 entry still needs the kernel's `diag el2` evidence.
+
+<a id="dts_partition"></a>
+## DTS partition handoff and restore
+
+The board-4970 DTS candidate produced EL2 entry and a ready Ame monitor on all
+eight CPUs in one observed boot. The full finding and its limitations are in
+the [DTS loader vulnerability report](dts-loader-vulnerability.md). This is a
+device-specific research result, not a supported production flashing flow.
+
+The 28 MiB stock partition backup is
+`boards/huawei-anne/stock-backups/anne-dts-backup.img`, SHA-256
+`269fd6ddc8892470916761b373f2063aaecd4bdfa8a503946dbea76fce37ccad`. The
+5 November pre-write readback of the previous board-ID-4007 image and the
+post-write readback of the board-ID-4970 candidate are under
+`out/anne-device-private/dts-el2/phone-capture-20261105-prewrite/`.
+
+To restore stock DTS from installed TWRP, verify the backup hash, push it to
+TWRP's temporary storage, write the 28 MiB partition, sync, then read the full
+partition back and compare the hash:
+
+```sh
+shasum -a 256 boards/huawei-anne/stock-backups/anne-dts-backup.img
+adb push boards/huawei-anne/stock-backups/anne-dts-backup.img /tmp/anne-dts-stock.img
+adb shell sha256sum /tmp/anne-dts-stock.img
+adb shell dd if=/tmp/anne-dts-stock.img of=/dev/block/platform/hi_mci.0/by-name/dts bs=1048576 count=28
+adb shell sync
+adb exec-out dd if=/dev/block/platform/hi_mci.0/by-name/dts bs=1048576 count=28 > out/anne-device-private/dts-stock-readback.img
+```
+
+The `adb exec-out dd` output on this TWRP build appends a short `dd` status
+footer; hash exactly the first 29,360,128 bytes. Do not treat fastboot's flash
+acknowledgement as a readback. The separate `kernel` partition is not restored
+by this procedure; restore it from the verified stock kernel image when
+returning to Huawei recovery.
 
 <a id="boot_diagnostics"></a>
 ## Native boot diagnostics
@@ -502,3 +546,44 @@ again with `container start`, then run:
 Private raw records and test harnesses are in
 `out/anne-device-private/app-stream-hardware-v1/`. The verified original stock
 kernel restore image remains in the package.
+
+
+## Verified stock BL31 to EL2 boot — 2 November 2026
+
+The minimal RAM handoff profile booted Ame successfully on ANE-LX1. A live
+`diag el2` reported `cpu.online_mask=0xff`, and CPUs 0–7 each reported
+`boot_entry_el=2 monitor_ready=1`. The host reported `host.current_el=1`, as
+expected after installing the EL2 monitor and entering the EL1 host.
+
+This test used the rebuilt `147285d` baseline kernel partition image, SHA-256
+`0e7703e4ed70b740afe498c4f0aab7b4a5c16d58d4d874dfb5dcc4170e880a24`.
+It does not establish a boot pass for the newer GPU/memory worktree build.
+
+The signed stock xloader was recovered from this device's boot0. Restoring
+its content-hash byte at offset `0x74c` from `ef` to `ee` makes the original
+payload hash and all three stock certificate signatures verify. The USB RAM
+copy uses that repaired header. Its authenticated eMMC LK load is wrapped to
+apply only these LK RAM patches:
+
+| LK offset | Stock instruction | RAM instruction | Purpose |
+| --- | --- | --- | --- |
+| `0x2cef8` | `0x97fffb7a` | `0x52800020` | Cached FBLOCK return for OEM boot access |
+| `0x2cfc0` | `0x97fffb0e` | `0x52800020` | Alternate cached FBLOCK initialization |
+| `0x10b634` | `0x528078a1` | `0x52807921` | Nonsecure SPSR from EL1h `0x3c5` to EL2h `0x3c9` |
+
+Normal LPM3, TEE and BL31 loading remained enabled. No firmware preloads,
+decryption bypasses, power/clock changes, or tracing hooks were used in this
+successful profile. The reason preceding attempts reset remains unresolved.
+
+The user's requested BootROM entry was restored separately through TWRP by
+changing only boot0 byte `0x74c` from `ee` to `ef`; full 4 MiB readback proved
+that single-byte difference, and boot0 `force_ro` was restored to `1`. Ame's
+kernel partition was restored and its SHA-256 read back before reboot.
+Consequently the EL2 patches last only for this RAM boot, and a subsequent
+reset is expected to return to BootROM while that invalid boot0 hash remains.
+
+The self-contained private runner and checked Cortex-M3 wrapper are under
+`out/anne-device-private/stock-el2-minimal/`. `hardware-success.json` and
+`successful-el2-console.log` contain the live proof. The boot0 backup and
+kernel restoration records are in
+`out/anne-device-private/twrp-restore-ame-and-bootrom-20261102T200719Z/`.

@@ -21,15 +21,19 @@ def sha256_file(path: Path) -> str:
 
 def build_manifest(build_dir: Path, descriptor: Path, profile: str) -> dict[str, object]:
     from system_descriptor import load_profile
+    from mxld import verify_arena_contract
 
     manifest = load_profile(descriptor, profile)
     userland_dir = build_dir / "userland"
     init_image = userland_dir / "init.mxi"
+    verify_arena_contract(init_image, manifest["init"]["arena"])
     for svc in manifest["services"]:
+        verify_arena_contract(userland_dir / f"{svc['object']}.mxi", svc["arena"])
         svc["sha256"] = sha256_file(userland_dir / f"{svc['object']}.mxi")
     manifest["boot"] = {"init": {
         "bundle": "/ame/boot/system.mxb", "object": "init",
         "sha256": sha256_file(init_image),
+        "arena": manifest["init"]["arena"],
     }}
     manifest["bundles"] = [{
         "id": "system", "path": "/ame/boot/system.mxb", "trust_key": "dev-ed25519",

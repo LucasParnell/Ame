@@ -247,7 +247,7 @@ void vm_device_selftest_if_testdev() {
 
     // Synthetic owner VM: heap-allocated because Vm carries the full stage-2
     // table image. Dev-only and one-shot, so the bump allocation is acceptable.
-    auto* owner = static_cast<Vm*>(mm::heap_alloc(sizeof(Vm), alignof(Vm)));
+    auto* owner = static_cast<Vm*>(mm::allocate<Vm>());
     if (!owner) {
         ANKO_LOG_ERROR("vm/selftest", "TEST FAILED: no memory for synthetic VM");
         return;

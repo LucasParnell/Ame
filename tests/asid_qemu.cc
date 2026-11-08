@@ -27,7 +27,9 @@ extern "C" void boot_cache_test(PhysAddr) {
         auto& t = tables[i];
         t.root[0] = address(t.l1) | mm::DESC_TABLE;
         // Identity-map RAM, code, stacks and tables with the production attrs.
-        t.l1[1] = 0x40000000 | attrs | mm::PTE_VALID;
+        // This tiny harness intentionally uses one RAM block for its code and
+        // data; production identity mappings split text, rodata and NX data.
+        t.l1[1] = 0x40000000 | (attrs & ~(mm::PTE_PXN | mm::PTE_AP_RO)) | mm::PTE_VALID;
         t.l1[0] = address(t.l2) | mm::DESC_TABLE;
         t.l2[(va >> 21) & 511] = address(t.l3) | mm::DESC_TABLE;
         t.l3[(va >> 12) & 511] = address(payload[i == 2 ? 1 : 0]) | attrs | mm::DESC_PAGE;

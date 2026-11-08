@@ -155,6 +155,7 @@ bool test_owner_query(void* ctx, PhysAddr pa, PageOwnership* out) {
     }
     out->object = arena->object;
     out->dma_class = VmDmaClass::ApplianceRam;
+    out->perms = dma_class_perms(out->dma_class);
     libk::memset(out->pad, 0, sizeof(out->pad));
     return true;
 }

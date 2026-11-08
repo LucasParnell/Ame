@@ -88,6 +88,10 @@
     {
       "name": "gpu.platform",
       "boot": "gpu.platform"
+    },
+    {
+      "name": "health.observe",
+      "boot": "health.observe"
     }
   ],
   "channels": [
@@ -653,7 +657,15 @@
         "nameservice"
       ],
       "uses": [],
-      "bindings": []
+      "bindings": [],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "io.console",
@@ -688,7 +700,15 @@
             "notify"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "demo.pong",
@@ -743,7 +763,15 @@
             "duplicate"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "demo.ping",
@@ -809,7 +837,15 @@
             "duplicate"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "dango.manager",
@@ -851,7 +887,15 @@
             "notify"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "dango.auth_probe",
@@ -875,7 +919,15 @@
             "notify"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "io.framebuffer",
@@ -925,7 +977,15 @@
             "notify"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "tty.fb0",
@@ -937,7 +997,9 @@
       "start_after": [
         "io.framebuffer"
       ],
-      "caps": [],
+      "caps": [
+        "health.observe"
+      ],
       "provides": [],
       "uses": [],
       "bindings": [
@@ -1091,8 +1153,23 @@
           "rights": [
             "wait"
           ]
+        },
+        {
+          "boot": "health.observe",
+          "name": "health.observe",
+          "rights": [
+            "read"
+          ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "drv.pci",
@@ -1109,7 +1186,15 @@
       ],
       "provides": [],
       "uses": [],
-      "bindings": []
+      "bindings": [],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "drv.usb.xhci",
@@ -1168,7 +1253,15 @@
             "map"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "io.usb",
@@ -1268,7 +1361,15 @@
             "map"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "drv.usb.hid",
@@ -1357,7 +1458,15 @@
             "wait"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "ui.input",
@@ -1437,7 +1546,15 @@
             "wait"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "drv.blk.virtio",
@@ -1489,7 +1606,15 @@
             "notify"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "io.fs",
@@ -1541,7 +1666,15 @@
             "wait"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "msh",
@@ -1637,7 +1770,15 @@
             "map"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "app.hello",
@@ -1656,7 +1797,15 @@
         "fs",
         "nameservice"
       ],
-      "bindings": []
+      "bindings": [],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "test.anne_smp",
@@ -1673,7 +1822,15 @@
       "affinity": 0,
       "provides": [],
       "uses": [],
-      "bindings": []
+      "bindings": [],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "drv.i2c.dw",
@@ -1777,7 +1934,15 @@
           "name": "i2c.1.address",
           "value": 107
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "drv.typec.fusb301",
@@ -1865,7 +2030,15 @@
           "name": "usb.device_only",
           "value": 0
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "drv.power.hi6523",
@@ -1956,7 +2129,15 @@
           "name": "i2c.address",
           "value": 107
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "drv.usb.anne-phy",
@@ -2020,7 +2201,15 @@
             "write"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "drv.usb.dwc2",
@@ -2175,7 +2364,15 @@
             "map"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "io.usb.role",
@@ -2325,7 +2522,15 @@
           "name": "usb.device_only",
           "value": 0
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "io.usb.gadget",
@@ -2526,7 +2731,15 @@
             "notify"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "usb.fn.acm",
@@ -2638,7 +2851,15 @@
             "wait"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "usb.fn.bulk",
@@ -2718,7 +2939,15 @@
             "wait"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "dev.usb-input",
@@ -2816,7 +3045,15 @@
             "wait"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "dev.serial",
@@ -2896,7 +3133,15 @@
             "wait"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "dev.apps",
@@ -2974,7 +3219,15 @@
             "wait"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "drv.blk.emmc",
@@ -3068,7 +3321,15 @@
           "name": "emmc.bus_width",
           "value": 8
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "usb.fn.fido2",
@@ -3157,7 +3418,15 @@
             "notify"
           ]
         }
-      ]
+      ],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     },
     {
       "name": "ipc.profiler",
@@ -3174,7 +3443,15 @@
       "uses": [
         "fs"
       ],
-      "bindings": []
+      "bindings": [],
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     }
   ],
   "profiles": {
@@ -3564,6 +3841,13 @@
               "name": "fido2.prompt.doorbell",
               "rights": [
                 "wait"
+              ]
+            },
+            {
+              "boot": "health.observe",
+              "name": "health.observe",
+              "rights": [
+                "read"
               ]
             }
           ],
@@ -4204,6 +4488,13 @@
               "rights": [
                 "wait"
               ]
+            },
+            {
+              "boot": "health.observe",
+              "name": "health.observe",
+              "rights": [
+                "read"
+              ]
             }
           ],
           "affinity": 0
@@ -4626,6 +4917,62 @@
         "apps_control_a",
         "apps_control_b"
       ]
+    }
+  ],
+  "arena_defaults": {
+    "base": 939524096,
+    "initial": 65536,
+    "reserve": 65536,
+    "limit": 1048576,
+    "type": 1,
+    "compact": false
+  },
+  "init": {
+    "arena": {
+      "base": 939524096,
+      "initial": 65536,
+      "reserve": 65536,
+      "limit": 1048576,
+      "type": 1,
+      "compact": false
+    }
+  },
+  "applications": [
+    {
+      "name": "app.hello",
+      "object": "app.hello",
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
+    },
+    {
+      "name": "app.stream-test",
+      "object": "app.stream-test",
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
+    },
+    {
+      "name": "app.stream-metrics",
+      "object": "app.stream-metrics",
+      "arena": {
+        "base": 939524096,
+        "initial": 65536,
+        "reserve": 65536,
+        "limit": 1048576,
+        "type": 1,
+        "compact": false
+      }
     }
   ]
 }

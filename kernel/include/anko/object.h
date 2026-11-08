@@ -10,6 +10,7 @@ struct Record;
 using Destructor = void (*)(void*);
 Record* create(void* target, Destructor destroy); // one creator reference
 Record* acquire(void* target);                    // static objects are allowed
+Record* acquire_existing(void* target);           // never creates a static record
 void retain(Record* record);
 void release(Record* record);
 u64 live_count();

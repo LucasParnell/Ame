@@ -378,7 +378,7 @@ SysError validate_ownership(IommuDomain* domain, const IommuMap& map, u64* out_o
     if (!domain->owner_.query) {
         return E_PERM;
     }
-    PageOwnership first;
+    PageOwnership first{};
     if (!domain->owner_.query(domain->owner_.ctx, map.pa, &first)) {
         return E_PERM; // unknown page: not owned by any object
     }
@@ -391,13 +391,19 @@ SysError validate_ownership(IommuDomain* domain, const IommuMap& map, u64* out_o
     if (!perms_allowed(first.dma_class, map.perms)) {
         return E_INVALID;
     }
+    if (map.perms & ~first.perms) {
+        return E_PERM;
+    }
     for (u64 pa = map.pa + kPageBytes; pa < map.pa + map.length; pa += kPageBytes) {
-        PageOwnership page;
+        PageOwnership page{};
         if (!domain->owner_.query(domain->owner_.ctx, pa, &page)) {
             return E_PERM;
         }
         if (page.object != first.object || page.dma_class != first.dma_class) {
             return E_PERM; // a mapping entry must be homogeneous
+        }
+        if (map.perms & ~page.perms) {
+            return E_PERM;
         }
     }
     *out_object = first.object;

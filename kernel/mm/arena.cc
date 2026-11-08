@@ -24,6 +24,15 @@ bool overlaps(ArenaTable& table, u64 base, u64 size) {
     }
     return false;
 }
+object::Record* detach_entry(ArenaTable& table, u32 index) {
+    if (index >= table.count) return nullptr;
+    auto* record = table.backing[index];
+    table.backing[index] = nullptr;
+    table.entries[index] = {};
+    for (auto& word : table.unmapped[index]) word = 0;
+    while (table.count && !table.entries[table.count - 1].size) --table.count;
+    return record;
+}
 } // namespace
 
 void destroy_arena(void* target) {
@@ -35,7 +44,7 @@ void destroy_arena(void* target) {
                                        arena->phys_base + off);
         }
     }
-    mm::slab_free(arena, sizeof(Arena), alignof(Arena));
+    mm::deallocate<Arena>(arena);
 }
 
 bool arena_register(ArenaTable& table, VirtAddr base, PhysAddr pa, u64 size, u32 pid, u32 rights,
@@ -113,17 +122,7 @@ void arena_unregister(ArenaTable& table, u32 index) {
     object::Record* record = nullptr;
     {
         kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
-        if (index >= table.count) {
-            return;
-        }
-        record = table.backing[index];
-        table.backing[index] = nullptr;
-        table.entries[index] = {};
-        for (auto& word : table.unmapped[index])
-            word = 0;
-        while (table.count && !table.entries[table.count - 1].size) {
-            --table.count;
-        }
+        record = detach_entry(table, index);
     }
     object::release(record);
 }
@@ -142,10 +141,9 @@ void arena_release_va(ArenaTable& table, Arena&, VirtAddr base) {
     arena_unregister(table, index);
 }
 
-void arena_unmap_page(ArenaTable& table, VirtAddr va) {
+object::Record* arena_unmap_page_detach(ArenaTable& table, VirtAddr va) {
     // Track every page of user arenas, including the 1 MiB graphics buffers.
     // Larger platform DMA mappings are pinned until address-space destruction.
-    u32 complete = kArenaTableSize;
     {
         kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
         for (u32 i = 0; i < table.count; ++i) {
@@ -169,12 +167,16 @@ void arena_unmap_page(ArenaTable& table, VirtAddr va) {
                 }
             }
             if (all_unmapped) {
-                complete = i;
+                return detach_entry(table, i);
             }
             break;
         }
     }
-    arena_unregister(table, complete);
+    return nullptr;
+}
+
+void arena_unmap_page(ArenaTable& table, VirtAddr va) {
+    object::release(arena_unmap_page_detach(table, va));
 }
 
 void arena_clear(ArenaTable& table) {

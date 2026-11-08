@@ -92,12 +92,13 @@ u64 counter_of(Doorbell* db) {
 int main() {
     // (1) Masking-at-entry: the index always lands in range; the range check
     // rejects the sentinel, PPIs/SGIs, and out-of-range ids.
-    assert(irq::irq_index(0xFFFF'FFFFu) == 255);
+    assert(irq::irq_index(0xFFFF'FFFFu) == irq::kIrqSlots - 1);
     assert(irq::irq_index(32) == 32);
-    assert(irq::irq_index(300) == 44);
+    assert(irq::irq_index(300) == 300);
     assert(!irq::irq_bindable(0xFFFF'FFFFu));
     assert(!irq::irq_bindable(0) && !irq::irq_bindable(30) && !irq::irq_bindable(31));
-    assert(irq::irq_bindable(32) && irq::irq_bindable(255) && !irq::irq_bindable(256));
+    assert(irq::irq_bindable(32) && irq::irq_bindable(256) && irq::irq_bindable(1019));
+    assert(!irq::irq_bindable(1020) && !irq::irq_bindable(1023));
 
     Doorbell* db = new_db();
     object::Record* rec = object::create(db, destroy_db);

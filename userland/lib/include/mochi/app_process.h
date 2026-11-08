@@ -234,10 +234,18 @@ struct Process {
             return MX_ERR_BUSY;
         if (!supervisor || slot >= va::app::kMaxChildren)
             return MX_ERR_PERM;
-        const auto* data = image.data;
-        const auto size = image.size;
-        if (!data || !size || size > midix::apps::kMaxImage ||
-            midix::format::parse_image(data, size, plan))
+        auto* data = image.data;
+        auto size = image.size;
+        if (!data || !size || size > midix::apps::kMaxImage)
+            return MX_ERR_BAD_IMAGE;
+        if (midix::package::has_magic(data, size)) {
+            midix::package::View package{};
+            if (!midix::package::parse(data, size, package)) return MX_ERR_BAD_IMAGE;
+            const auto executable = package.executable();
+            data = executable.data;
+            size = executable.size;
+        }
+        if (midix::format::parse_image(data, size, plan))
             return MX_ERR_BAD_IMAGE;
         char name[32]{};
         libk::str::copy_into(name, sizeof(name), options.name);
@@ -314,7 +322,7 @@ struct Process {
             return MX_ERR_PERM;
         add(MX_BOOT_ENTRY_HANDLE, "thread.self", self_thread);
         add(MX_BOOT_ENTRY_VALUE, "self.identity", 0, identity);
-        if (options.self_image && !publish_image(boot, process, data, size))
+        if (options.self_image && !publish_image(boot, process, image.data, image.size))
             return MX_ERR_NOMEM;
         wiring_status = MX_OK;
         return MX_OK;

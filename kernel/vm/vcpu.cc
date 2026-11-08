@@ -888,7 +888,9 @@ void finish_vcpu_run(Vcpu& vcpu, Vm& owner, VcpuState state, VcpuExitReason reas
                      u64 used_ns, VcpuRunResult* out) {
     sync_vcpu_from_el2(vcpu);
     vcpu.state = state;
-    owner.state = (state == VCPU_RUNNING) ? VM_RUNNING : (state == VCPU_DEAD ? VM_DEAD : VM_READY);
+    // Guest shutdown stops execution; the VM still owns stage-2 tables, DMA
+    // leases and child records. Only fenced retire_vm may publish VM_DEAD.
+    owner.state = (state == VCPU_RUNNING) ? VM_RUNNING : (state == VCPU_DEAD ? VM_PAUSED : VM_READY);
     vcpu.last_exit_reason = last_esr ? last_esr : static_cast<u64>(reason);
     vcpu.sched.last_exit_ns = sched::sched_clock_ns();
     vcpu.sched.used_ns += used_ns;
@@ -1011,7 +1013,7 @@ CapHandle create_vcpu(Process& caller, CapHandle vm_cap, u64 flags, SysError* ou
         return kNullCap;
     }
 
-    Vcpu* vcpu = static_cast<Vcpu*>(mm::slab_alloc(sizeof(Vcpu), alignof(Vcpu)));
+    Vcpu* vcpu = static_cast<Vcpu*>(mm::allocate<Vcpu>());
     if (!vcpu) {
         if (out_error) {
             *out_error = E_NOMEM;
@@ -1545,7 +1547,7 @@ void dispose_vcpu(void* target) {
     // pointing at its storage (or a stale vGIC pending bit) behind.
     channel_detach_vcpu(*cpu);
     object::release(cpu->sched.context_lifetime);
-    mm::slab_free(cpu, sizeof(Vcpu), alignof(Vcpu));
+    mm::deallocate<Vcpu>(cpu);
     object::release(owner);
 }
 

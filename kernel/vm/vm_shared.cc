@@ -112,6 +112,14 @@ bool dma_perms_valid(u32 perms) {
         static_cast<u32>(iommu::DmaPerm::Read) | static_cast<u32>(iommu::DmaPerm::Write);
     return perms != 0 && (perms & ~mask) == 0;
 }
+SysError shared_fence(void* context) {
+    auto& shared = *static_cast<SharedArena*>(context);
+    // Mali retains this attachment while any GPU translation can reach it.
+    // Its final reference is dropped only after the device reset/table fence.
+    // The remaining fence is the guest stage-2 translation lifetime.
+    return shared.mapped_stage2 ||
+        (shared.owner_vm && shared.owner_vm->stage2.active) ? E_BUSY : E_OK;
+}
 
 } // namespace
 
@@ -125,7 +133,7 @@ SysError shared_arena_create(Vm* vm, Arena* arena, object::Record* arena_record,
     }
     // An attachment needs a pinned physical backing: a VA-only registered arena
     // (phys_base == 0) has no host pages to map.
-    if (arena->phys_base == 0 || arena->size == 0) {
+    if ((!arena->managed && arena->phys_base == 0) || arena->size == 0) {
         return E_INVALID;
     }
     // Attach the whole page set. A sub-range attachment would let the guest
@@ -180,6 +188,15 @@ SysError shared_arena_create(Vm* vm, Arena* arena, object::Record* arena_record,
     shared->guest_pa_base = guest_pa;
     shared->rights = rights;
     shared->flags = flags;
+    if (arena->managed) {
+        const auto result = amm::pin_external(*arena, shared->external_pin, shared_fence, shared);
+        if (result != E_OK) { libk::memset(shared, 0, sizeof(*shared)); return result; }
+        if (shared->external_pin.size != size) {
+            ANKO_ASSERT(amm::unpin_external(shared->external_pin) == E_OK);
+            libk::memset(shared, 0, sizeof(*shared)); return E_BUSY;
+        }
+        shared->host_phys_base = shared->external_pin.base;
+    }
     // Non-DMA unless explicitly registered: the region enters stage 2 with no
     // DMA class and zero device permissions.
     shared->dma_class = iommu::VmDmaClass::None;
@@ -188,11 +205,13 @@ SysError shared_arena_create(Vm* vm, Arena* arena, object::Record* arena_record,
     const u64 pages = size / PAGE_SIZE;
     for (u64 i = 0; i < pages; ++i) {
         const SysError rc = stage2_map_page(&vm->stage2, guest_pa + i * PAGE_SIZE,
-                                            arena->phys_base + i * PAGE_SIZE, rights);
+                                            shared->host_phys_base + i * PAGE_SIZE, rights);
         if (rc != E_OK) {
             for (u64 j = 0; j < i; ++j) {
                 (void)stage2_unmap_page(&vm->stage2, guest_pa + j * PAGE_SIZE);
             }
+            if (shared->external_pin.arena)
+                ANKO_ASSERT(amm::unpin_external(shared->external_pin) == E_OK);
             libk::memset(shared, 0, sizeof(*shared));
             return rc;
         }
@@ -209,6 +228,8 @@ SysError shared_arena_create(Vm* vm, Arena* arena, object::Record* arena_record,
             (void)stage2_unmap_page(&vm->stage2, guest_pa + j * PAGE_SIZE);
         }
         shared->mapped_stage2 = false;
+        if (shared->external_pin.arena)
+            ANKO_ASSERT(amm::unpin_external(shared->external_pin) == E_OK);
         object::release(shared->arena_lifetime);
         object::release(shared->owner_lifetime);
         libk::memset(shared, 0, sizeof(*shared));
@@ -235,13 +256,15 @@ SysError shared_arena_teardown(SharedArena* shared) {
         return E_OK;
     }
     Vm* vm = shared->owner_vm;
+    if (vm && vm->state != VM_DEAD && vm->stage2.active) return E_BUSY;
     // Only unmap while the VM's stage 2 still exists. A retired VM has already
     // destroyed its tables (stage2_destroy), so the mapping is gone regardless;
     // touching the zeroed stage-2 space would just fail harmlessly.
     if (vm && vm->state != VM_DEAD && shared->mapped_stage2) {
         const u64 pages = shared->size / PAGE_SIZE;
         for (u64 i = 0; i < pages; ++i) {
-            (void)stage2_unmap_page(&vm->stage2, shared->guest_pa_base + i * PAGE_SIZE);
+            const auto result = stage2_unmap_page(&vm->stage2, shared->guest_pa_base + i * PAGE_SIZE);
+            if (result != E_OK && result != E_NOTFOUND) return result;
         }
     }
     shared->mapped_stage2 = false;
@@ -263,10 +286,17 @@ SysError shared_arena_register_dma(SharedArena* shared, u32 perms) {
     if (!dma_perms_valid(perms)) {
         return E_INVALID;
     }
+    const u32 allowed = ((shared->rights & RIGHT_READ)
+                            ? static_cast<u32>(iommu::DmaPerm::Read) : 0u) |
+                        ((shared->rights & RIGHT_WRITE)
+                            ? static_cast<u32>(iommu::DmaPerm::Write) : 0u);
+    if (perms & ~allowed) {
+        return E_PERM;
+    }
     if (shared->dma_class == iommu::VmDmaClass::SharedGpu) {
-        // Idempotent, but never an upgrade: re-registration may only keep or
-        // narrow the permission set captured at the first transition.
-        if ((perms & ~shared->dma_perms) != 0) {
+        // Registration permissions are immutable once device translations may
+        // exist. A different set needs a fenced teardown and a new attachment.
+        if (perms != shared->dma_perms) {
             return E_INVALID;
         }
         return E_OK;
@@ -276,6 +306,10 @@ SysError shared_arena_register_dma(SharedArena* shared, u32 perms) {
     ANKO_ASSERT(shared->dma_class == iommu::VmDmaClass::None);
     if (!iommu::dma_class_perms(iommu::VmDmaClass::SharedGpu)) {
         return E_INVALID;
+    }
+    if (shared->external_pin.arena) {
+        const auto result = amm::prepare_dma(shared->external_pin, false);
+        if (result != E_OK) return result;
     }
 #if defined(__aarch64__)
     // Retire host zero-fill and CPU-write cache lines before the first device
@@ -316,6 +350,7 @@ bool shared_arena_dma_query(void* ctx, PhysAddr pa, iommu::PageOwnership* out) {
     }
     out->object = shared->object_tag;
     out->dma_class = shared->dma_class;
+    out->perms = shared->dma_perms;
     libk::memset(out->pad, 0, sizeof(out->pad));
     return true;
 }
@@ -325,7 +360,13 @@ void dispose_shared_arena(void* target) {
     if (!shared) {
         return;
     }
-    (void)shared_arena_teardown(shared);
+    if (shared_arena_teardown(shared) != E_OK ||
+        (shared->external_pin.arena && amm::unpin_external(shared->external_pin) != E_OK)) {
+        // A destructor cannot report BUSY. Keep all backing and VM references
+        // until VM retirement supplies the missing guest/device fence.
+        shared->quarantined = true; shared->lifetime = nullptr;
+        return;
+    }
     object::Record* arena = shared->arena_lifetime;
     object::Record* owner = shared->owner_lifetime;
     libk::memset(shared, 0, sizeof(*shared));
@@ -341,10 +382,11 @@ void shared_arena_release_for_vm(Vm* vm) {
     }
     for (u32 i = 0; i < kMaxSharedArenas; ++i) {
         SharedArena* shared = &g_pool.slots[i];
-        if (shared->lifetime == nullptr || shared->owner_vm != vm || shared->dead) {
+        if (!shared->shared_id || shared->owner_vm != vm) {
             continue;
         }
         (void)shared_arena_teardown(shared);
+        if (shared->quarantined) dispose_shared_arena(shared);
     }
 }
 
@@ -377,6 +419,10 @@ cap::Borrow<SharedArena> shared_arena_from_cap(Process& caller, CapHandle shared
 
 CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle arena_cap, u64 guest_pa,
                                u64 size, u32 rights, u32 flags, SysError* out_error) {
+    if (!shared_rights_valid(rights)) {
+        if (out_error) *out_error = E_INVALID;
+        return kNullCap;
+    }
     SysError rc = E_OK;
     auto vm = vm_from_cap(caller, vm_cap, RIGHT_VM_CONTROL, &rc);
     if (!vm) {
@@ -388,7 +434,9 @@ CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle aren
 
     // The arena must be a pinned page set the caller is allowed to map; a
     // VA-only registration is rejected by shared_arena_create (no phys_base).
-    cap::Ref arena_e = require_cap(caller, arena_cap, CAP_ARENA, RIGHT_MAP, &rc);
+    // Guest access is another mapping of the same host pages. It cannot widen
+    // the source capability's read/write authority, including read-only loans.
+    cap::Ref arena_e = require_cap(caller, arena_cap, CAP_ARENA, RIGHT_MAP | rights, &rc);
     if (!arena_e) {
         if (out_error) {
             *out_error = rc;
@@ -427,6 +475,8 @@ CapHandle attach_shared_memory(Process& caller, CapHandle vm_cap, CapHandle aren
         note_error();
         return kNullCap;
     }
+    // The capability now owns the attachment; retain no invisible creator pin.
+    object::release(shared->lifetime);
     if (out_error) {
         *out_error = E_OK;
     }

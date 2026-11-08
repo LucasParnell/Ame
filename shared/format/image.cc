@@ -33,8 +33,11 @@ const char* validate_image_header(const MxImageHeader& header, const mx_u8_t* da
         header.arch != MX_IMAGE_ARCH_AARCH64 || header.abi_version != MX_IMAGE_ABI_VERSION) {
         return "unsupported image format or ABI";
     }
-    if (header.flags != MX_IMAGE_FLAG_STATIC || header.checksum_algorithm != MX_CHECKSUM_CRC32C ||
-        !is_zeroed(header.reserved, sizeof(header.reserved))) {
+    if ((header.flags != MX_IMAGE_FLAG_STATIC &&
+         header.flags != (MX_IMAGE_FLAG_STATIC | MX_IMAGE_FLAG_ARENA) &&
+         header.flags != (MX_IMAGE_FLAG_STATIC | MX_IMAGE_FLAG_ARENA | MX_IMAGE_FLAG_ASLR)) ||
+        header.checksum_algorithm != MX_CHECKSUM_CRC32C ||
+        (!(header.flags & MX_IMAGE_FLAG_ARENA) && !is_zeroed(header.reserved, sizeof(header.reserved)))) {
         return "unsupported image flags or checksum";
     }
     if (header.image_size != size || size > kMaxImageSize || header.segment_count == 0 ||
@@ -132,6 +135,33 @@ const char* parse_image(const mx_u8_t* data, mx_size_t size, ImagePlan& out) {
     mx_u64_t previous_file_end =
         header.segment_table_offset + header.segment_count * sizeof(MxImageSegment);
     mx_u64_t mapped_pages = 0;
+    if (header.flags & MX_IMAGE_FLAG_ARENA) {
+        mx_u64_t offset;
+        libk::memcpy(&offset, header.reserved, sizeof(offset));
+        if (offset != previous_file_end || !contains_range(offset, sizeof(MxArenaCreate), size))
+            return "invalid arena declaration location";
+        libk::memcpy(&candidate.arena, data + offset, sizeof(candidate.arena));
+        const auto& a = candidate.arena;
+        if (!a.size || a.size > a.capacity || a.capacity > a.cage_size ||
+            a.cage_size > MX_PROCESS_ARENA_LIMIT || a.cage_base < kUserImageStart ||
+            a.cage_base >= kUserImageEnd || a.cage_size > kUserImageEnd - a.cage_base ||
+            ((a.size | a.capacity | a.cage_base | a.cage_size) & (kPageSize - 1)) ||
+            !a.type_id || a.reserved || (a.policy & ~MX_ARENA_COMPACT_IDLE))
+            return "invalid arena declaration";
+        previous_file_end += sizeof(MxArenaCreate);
+    }
+    if (header.flags & MX_IMAGE_FLAG_ASLR) {
+        if (!contains_range(previous_file_end, sizeof(MxImageLayout), size)) return "truncated image layout";
+        libk::memcpy(&candidate.layout, data + previous_file_end, sizeof(candidate.layout));
+        previous_file_end += sizeof(candidate.layout);
+        if (candidate.layout.version != 1 || candidate.layout.count > 16384 ||
+            candidate.layout.minimum < kUserImageStart || candidate.layout.maximum > kUserImageEnd ||
+            candidate.layout.maximum <= candidate.layout.minimum || (candidate.layout.minimum & 4095) ||
+            !contains_range(previous_file_end, candidate.layout.count * sizeof(MxImageRelocation), size))
+            return "invalid image layout";
+        candidate.relocation_offset = previous_file_end; candidate.aslr = true;
+        previous_file_end += candidate.layout.count * sizeof(MxImageRelocation);
+    }
     bool entry_is_executable = false;
 
     for (mx_u32_t index = 0; index < header.segment_count; ++index) {
@@ -143,6 +173,9 @@ const char* parse_image(const mx_u8_t* data, mx_size_t size, ImagePlan& out) {
         }
         previous_file_end = segment.file_offset + segment.file_size;
         candidate.segments[index] = plan_segment(segment);
+        if (candidate.arena.cage_base < candidate.segments[index].va_start + candidate.segments[index].map_size &&
+            candidate.segments[index].va_start < candidate.arena.cage_base + candidate.arena.cage_size)
+            return "image overlaps its declared arena";
 
         mapped_pages += candidate.segments[index].map_size / kPageSize;
         if (mapped_pages > kMaxImagePages) {
@@ -159,6 +192,35 @@ const char* parse_image(const mx_u8_t* data, mx_size_t size, ImagePlan& out) {
 
     if (!entry_is_executable || header.entry_va % 4 != 0) {
         return "invalid image entry";
+    }
+    if (candidate.aslr) {
+        mx_u64_t previous = 0;
+        for (mx_u32_t i = 0; i < candidate.layout.count; ++i) {
+            MxImageRelocation r;
+            libk::memcpy(&r, data + candidate.relocation_offset + i * sizeof(r), sizeof(r));
+            if ((r.width != 4 && r.width != 8) || r.reserved || (r.address & (r.width - 1)) ||
+                (i && r.address < previous) || r.value < candidate.layout.minimum || r.value > candidate.layout.maximum)
+                return "invalid image relocation";
+            bool target = false;
+            for (mx_u32_t j = 0; j < header.segment_count; ++j) {
+                const auto& segment = candidate.segments[j];
+                if (r.address >= segment.va_start && r.address - segment.va_start <= segment.file_size &&
+                    r.width <= segment.file_size - (r.address - segment.va_start)) {
+                    mx_u64_t value = 0;
+                    libk::memcpy(&value, data + segment.file_offset + r.address - segment.va_start, r.width);
+                    if (value != r.value) return "relocation value mismatch";
+                    target = true;
+                }
+            }
+            if (!target) return "relocation target outside file segments";
+            previous = r.address + r.width;
+        }
+        for (mx_u32_t j = 0; j < header.segment_count; ++j) {
+            const auto& segment = candidate.segments[j];
+            if (segment.va_start < candidate.layout.minimum ||
+                segment.va_start + segment.map_size > ((candidate.layout.maximum + 4095) & ~mx_u64_t{4095}))
+                return "segment outside image layout";
+        }
     }
     candidate.entry = header.entry_va;
     candidate.count = header.segment_count;

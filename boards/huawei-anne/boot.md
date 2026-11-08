@@ -1,6 +1,6 @@
 # Huawei Anne boot and firmware investigations
 
-The working EL2 route uses RAM-patched stock LK and a staged TEE. All-core EL2 entry and monitor installation have recorded evidence; ordinary reboot discards the RAM patch. Start with the handoff reference below, especially its final 21 October checkpoint. The remaining sections preserve earlier investigations and negative results; their historical open tasks and device state are not current implementation claims. [Operations](operations.md) contains the installation workflow.
+Two EL2 routes now have evidence: the host-tethered RAM-patched stock LK route and a persistent DTS-triggered handoff on this ANE-LX1. The latter produced EL2 entry and a ready Ame monitor on all eight CPUs in one boot. Repeated cold boots and guest execution remain unverified. See the [DTS loader vulnerability report](dts-loader-vulnerability.md) for root cause, evidence, limits and recovery details. The remaining sections preserve historical investigations; their dated deployment snapshots are not current-state claims. [Operations](operations.md) contains the installation workflow.
 
 - [EL2 access for the first Dango hello guest](#el2)
 - [ANE-LX1 EL2 path audit](#el2_path_audit)
@@ -14,6 +14,22 @@ The working EL2 route uses RAM-patched stock LK and a staged TEE. All-core EL2 e
 
 <a id="el2"></a>
 ## EL2 access for the first Dango hello guest
+
+### Current device result — DTS-triggered EL2 handoff (5 November 2026)
+
+The handset's board ID is 4970, selecting HSDT entry 262 (`04 09 07 00`). The
+first flashed candidate modified entry 0 for board ID 4007 and therefore did
+not run. The corrected entry-262 DTS image passed stock-loader replay and was
+read back from the device with the expected full-partition hash. After booting
+Ame, `diag el2` reported `boot_entry_el=2` and `monitor_ready=1` on all eight
+CPUs. This confirms EL2 entry and monitor setup for one boot; it does not
+confirm the Dango hello guest or three consecutive cold boots. The runtime
+`vm start` and `vm console` commands currently report their required manager
+protocols as unavailable.
+
+The current persistent input and restoration path are described in the
+[DTS loader vulnerability report](dts-loader-vulnerability.md#evidence-and-limits)
+and [operations](operations.md#dts_partition).
 
 <a id="el2-el2-access-for-the-first-dango-hello-guest"></a>
 

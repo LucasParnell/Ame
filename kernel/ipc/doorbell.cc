@@ -78,7 +78,7 @@ Doorbell* doorbell_create_object(u32 pid) {
     if (!owner || !owner->cap_table)
         return nullptr;
 
-    Doorbell* db = static_cast<Doorbell*>(mm::slab_alloc(sizeof(Doorbell), alignof(Doorbell)));
+    Doorbell* db = static_cast<Doorbell*>(mm::allocate<Doorbell>());
     if (!db)
         return nullptr;
     libk::memset(db, 0, sizeof(*db));
@@ -264,17 +264,32 @@ SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
         //   - receiver is not already in a handoff chain (no reply_target)
         //   - receiver's principal is not throttled
         const u32 cpu = sched::current_cpu_id();
-        const bool affinity_ok =
-            (receiver->affinity_mask == 0) || ((receiver->affinity_mask >> cpu) & 1u);
-        if ((db->sched_hints & IPC_HINT_HANDOFF_OK) &&
-            (!db->bound_server || db->bound_server == receiver->lifetime) &&
-            sender->reply_target == nullptr &&
-            !libk::atomic::load_acquire(&receiver->terminate_requested) &&
-            receiver->state == TS_SLEEPING && receiver->cpu_id == cpu && affinity_ok &&
-            receiver->reply_target == nullptr &&
-            !sched::principal_throttled(receiver->principal_id)) {
-            ++db->handoff_count;
-            do_handoff = true;
+        if (receiver != sender) {
+            // Context binding may change a sleeping receiver's CPU. Serialize
+            // eligibility and link publication with both lifecycle guards;
+            // once linked, bind/wake/steal preserve this CPU's ownership.
+            Thread* first = reinterpret_cast<usize>(sender) < reinterpret_cast<usize>(receiver)
+                                ? sender : receiver;
+            Thread* second = first == sender ? receiver : sender;
+            kernel::LockGuard first_life(*reinterpret_cast<kernel::SpinLock*>(&first->lifecycle_lock));
+            kernel::LockGuard second_life(*reinterpret_cast<kernel::SpinLock*>(&second->lifecycle_lock));
+            const bool affinity_ok =
+                (receiver->affinity_mask == 0) || ((receiver->affinity_mask >> cpu) & 1u);
+            if ((db->sched_hints & IPC_HINT_HANDOFF_OK) &&
+                (!db->bound_server || db->bound_server == receiver->lifetime) &&
+                !__atomic_load_n(&sender->reply_target, __ATOMIC_ACQUIRE) &&
+                !libk::atomic::load_acquire(&receiver->terminate_requested) &&
+                receiver->state == TS_SLEEPING && receiver->cpu_id == cpu && affinity_ok &&
+                !__atomic_load_n(&receiver->reply_target, __ATOMIC_ACQUIRE) &&
+                !sched::principal_throttled(receiver->principal_id)) {
+                receiver->tf.x[1] = payload_word;
+                sched::handoff_grant_donation(receiver, sender);
+                __atomic_store_n(&sender->reply_target, receiver, __ATOMIC_RELEASE);
+                __atomic_store_n(&receiver->reply_target, sender, __ATOMIC_RELEASE);
+                sender->state = TS_BLOCKED;
+                ++db->handoff_count;
+                do_handoff = true;
+            }
         }
     } else {
         metric_inc(stats.no_waiter);
@@ -303,19 +318,6 @@ SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
     sched::ipc_note_wake(receiver->principal_id);
     metric_inc(stats.local);
 
-    // Deliver payload_word to receiver in x1 (x0 will hold the counter on return
-    // from wait_doorbell, but handoff receivers conventionally read x1 for payload).
-    receiver->tf.x[1] = payload_word;
-
-    // Non-transitive priority donation: lend our vruntime as a lower-bound key
-    // so the receiver is not unfairly penalized for being woken late.
-    sched::handoff_grant_donation(receiver, sender);
-
-    // Cross-link for reply path.
-    sender->state = TS_BLOCKED;
-    sender->reply_target = receiver;
-    receiver->reply_target = sender;
-
     // Grant IPC wake credit and set latency metadata on receiver.
     sched::apply_wake_metadata(receiver, WAKE_DOORBELL, db->sched_hints);
 
@@ -333,28 +335,24 @@ SysError notify_handoff_object(Doorbell* db, u64 payload_word) {
 // sender resumes, sys_notify_handoff() returns reply_val.
 // ---------------------------------------------------------------------------
 static SysError complete_reply(Thread* cur, u64 reply_val) {
-    Thread* sender = cur->reply_target;
+    Thread* sender = __atomic_load_n(&cur->reply_target, __ATOMIC_ACQUIRE);
     if (!sender)
         return E_INVALID;
     if (sender->state != TS_BLOCKED)
         return E_INVALID;
+    object::Ref<Thread> sender_reference(sender, sender->lifetime);
 
     // Write reply into sender's saved x0 so it sees reply_val on resume.
     sender->tf.x[0] = reply_val;
 
     // Release donation.
     sched::handoff_clear_donation(cur);
-    cur->reply_target = nullptr;
-    sender->reply_target = nullptr;
-
-    const u32 cpu = sched::current_cpu_id();
-    if (sender->cpu_id == cpu && sender->execution_cpu == kInvalidCpu &&
-        !libk::atomic::load_acquire(&sender->terminate_requested) &&
-        (!sender->affinity_mask || ((sender->affinity_mask >> cpu) & 1u)) &&
-        !sched::principal_throttled(sender->principal_id)) {
-        sched::set_handoff_next(sender);
-    } else
-        sched::wake(sender);
+    __atomic_store_n(&cur->reply_target, static_cast<Thread*>(nullptr), __ATOMIC_RELEASE);
+    // Queue the sender while its link still fixes its CPU. This publishes a
+    // lifecycle-protected runnable state before remote context binding is
+    // allowed again. Reply-and-wait can still use wake's sole-receiver slot.
+    sched::wake(sender);
+    __atomic_store_n(&sender->reply_target, static_cast<Thread*>(nullptr), __ATOMIC_RELEASE);
     // reply-and-wait has already parked the server. Plain reply preserves its
     // historical continue-after-reply behavior by requeueing it.
     sched::request_switch(cur->state == TS_RUNNING, SWITCH_REPLY);
@@ -430,7 +428,7 @@ static void destroy_doorbell(void* target) {
         }
     }
     object::release(db->bound_server);
-    mm::slab_free(db, sizeof(Doorbell), alignof(Doorbell));
+    mm::deallocate<Doorbell>(db);
 }
 
 void poll_deadline_waiters() {
@@ -629,8 +627,9 @@ SysError exchange_ring(CapHandle notify_handle, CapHandle ring_handle, CapHandle
     Thread* cur = sched::current();
     if (!cur)
         return E_DEAD;
-    if ((flags & MX_IPC_EXCHANGE_REPLY) && cur->reply_target) {
-        if (cur->reply_target->state != TS_BLOCKED)
+    if ((flags & MX_IPC_EXCHANGE_REPLY) &&
+        __atomic_load_n(&cur->reply_target, __ATOMIC_ACQUIRE)) {
+        if (__atomic_load_n(&cur->reply_target, __ATOMIC_ACQUIRE)->state != TS_BLOCKED)
             return E_INVALID;
         const auto rc = wait_doorbell_object(wait, 0, 0, ring, cursor, false);
         if (rc != E_OK)

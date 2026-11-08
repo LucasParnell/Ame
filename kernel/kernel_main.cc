@@ -13,6 +13,8 @@
 #include "anko/console.h"
 #include "anko/fat_log.h"
 #include "anko/hw_info.h"
+#include "anko/random.h"
+#include "anko/panic.h"
 #include "anko/boot_reservations.h"
 #include "libk/framebuffer.h"
 #include "anko/ipc.h"
@@ -202,6 +204,17 @@ extern "C" [[noreturn]] void kernel_main() {
     anko::log::early_init();
     libk::set_putchar(console::putchar);
     ANKO_LOG_INFO("kernel/boot", "anko booting");
+    if (!security::random_ready()) {
+#ifdef ANKO_BUILD_DEV
+        ANKO_LOG_WARN("kernel/security", "hardware entropy unavailable; address randomization inactive");
+#else
+        panic("hardware entropy unavailable");
+#endif
+    } else if (security::random_trusted()) {
+        ANKO_LOG_INFO("kernel/security", "trusted entropy; kernel TTBR1 and process ASLR active");
+    } else {
+        ANKO_LOG_WARN("kernel/security", "uptime seed fallback; KASLR/ASLR active with weak entropy");
+    }
 
     // -----------------------------------------------------------------------
     // Phase 1: probe DTB → update g_hw with discovered addresses/devices.

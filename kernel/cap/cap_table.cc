@@ -76,7 +76,7 @@ static u32 free_slot(const CapTable& table) {
 
 static CapHandle alloc_locked(CapTable& table, CapType type, void* target, u32 rights,
                               object::Record* cached = nullptr) {
-    if (!target || type == CAP_NULL) {
+    if (table.closed || !target || type == CAP_NULL) {
         return kNullCap;
     }
     rights = sanitize_rights(type, rights);
@@ -146,6 +146,10 @@ Ref lookup(CapTable& table, CapHandle handle, CapType expected_type) {
 
 Ref lookup_any(CapTable& table, CapHandle handle) {
     kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
+    if (table.closed) {
+        note_denial();
+        return nullptr;
+    }
     const u32 idx = cap_index(handle);
     if (idx >= kCapTableSize) {
         note_denial();
@@ -169,6 +173,10 @@ bool lookup_many(CapTable& table, const LookupRequest* requests, Ref* out, u32 c
             return false;
     const CapEntry* entries[kMaxBorrow];
     kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
+    if (table.closed) {
+        note_denial();
+        return false;
+    }
     for (u32 i = 0; i < count; ++i) {
         const auto& request = requests[i];
         const u32 index = cap_index(request.handle);
@@ -265,17 +273,27 @@ void clear(CapTable& table) {
     clear_matching(table, nullptr, true);
 }
 
-bool reserve_slots(CapTable& table, u32 count) {
-    if (count == 0) {
-        return true;
+void close(CapTable& table) {
+    {
+        kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
+        table.closed = 1;
     }
+    // Release outside the table lock, as destructors may touch other tables.
+    // The closed bit prevents them from publishing authority back into this one.
+    clear(table);
+}
+
+bool reserve_slots(CapTable& table, u32 count) {
     kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
-    return count <= kCapTableSize - table.used_count;
+    return !table.closed && count <= kCapTableSize - table.used_count;
 }
 
 // Duplicate a capability with a reduced rights mask (spec sys_cap_dup).
 CapHandle dup(CapTable& table, CapHandle src, u32 rights_mask) {
     kernel::LockGuard guard(*reinterpret_cast<kernel::SpinLock*>(&table.lock));
+    if (table.closed) {
+        return kNullCap;
+    }
     const u32 idx = cap_index(src);
     const u32 safe_idx = nospec_index(idx, kCapTableSize);
     if (idx >= kCapTableSize) {

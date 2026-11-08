@@ -7,8 +7,8 @@
 // event queues, stage-2 context programming, and the generic core's backend
 // hooks. It is deliberately small and fixed-capacity: every queue and table is
 // a static, cache-aligned array in .bss, so there is no hot-path allocation
-// and the physical addresses are simply the array addresses (the kernel is
-// identity mapped).
+// and device-visible addresses are translated explicitly from the shared
+// TTBR1 kernel image into physical addresses. Cache operations still use VAs.
 //
 // Translation model
 // -----------------
@@ -205,7 +205,7 @@ SysError program_ste_locked(u32 sid, const Ste& ste) {
 // STE for a requester that must not translate: stage-2 enabled but pointed at
 // an all-zero root table, so every lookup misses and is reported as a fault.
 Ste deny_ste() {
-    return make_ste_stage2(reinterpret_cast<PhysAddr>(g_deny_table), kDenyVmid, kT0Sz, kS2Sl0Level1,
+    return make_ste_stage2(mm::kernel_address_to_phys(reinterpret_cast<PhysAddr>(g_deny_table)), kDenyVmid, kT0Sz, kS2Sl0Level1,
                            g_ps, true, g_coherent);
 }
 
@@ -399,15 +399,16 @@ SysError smmuv3_bring_up() {
     clean_to_poc(reinterpret_cast<PhysAddr>(g_deny_table), sizeof(g_deny_table));
     libk::memset(g_stream_table, 0, sizeof(g_stream_table));
     clean_to_poc(reinterpret_cast<PhysAddr>(g_stream_table), sizeof(g_stream_table));
-    writel(kRegStrTabBase, static_cast<u32>(reinterpret_cast<PhysAddr>(g_stream_table)));
-    writel(kRegStrTabBase + 4, static_cast<u32>(reinterpret_cast<PhysAddr>(g_stream_table) >> 32));
+    const PhysAddr stream_pa = mm::kernel_address_to_phys(reinterpret_cast<PhysAddr>(g_stream_table));
+    writel(kRegStrTabBase, static_cast<u32>(stream_pa));
+    writel(kRegStrTabBase + 4, static_cast<u32>(stream_pa >> 32));
     writel(kRegStrTabBaseCfg, make_strtab_base_cfg_linear(hw_sid_size < kStreamLog2 ? hw_sid_size : kStreamLog2));
 
     // Command queue.
     libk::memset(g_cmdq, 0, sizeof(g_cmdq));
     g_cmdq_prod = 0;
     clean_to_poc(reinterpret_cast<PhysAddr>(g_cmdq), sizeof(g_cmdq));
-    const PhysAddr cq_pa = reinterpret_cast<PhysAddr>(g_cmdq);
+    const PhysAddr cq_pa = mm::kernel_address_to_phys(reinterpret_cast<PhysAddr>(g_cmdq));
     writel(kRegCmdqBase, static_cast<u32>(make_queue_base(cq_pa, g_cmdq_log2)));
     writel(kRegCmdqBase + 4, static_cast<u32>(make_queue_base(cq_pa, g_cmdq_log2) >> 32));
     writel(kRegCmdqProd, 0);
@@ -417,7 +418,7 @@ SysError smmuv3_bring_up() {
     libk::memset(g_evq, 0, sizeof(g_evq));
     g_evq_cons = 0;
     clean_to_poc(reinterpret_cast<PhysAddr>(g_evq), sizeof(g_evq));
-    const PhysAddr evq_pa = reinterpret_cast<PhysAddr>(g_evq);
+    const PhysAddr evq_pa = mm::kernel_address_to_phys(reinterpret_cast<PhysAddr>(g_evq));
     writel(kRegEventqBase, static_cast<u32>(make_queue_base(evq_pa, g_evq_log2)));
     writel(kRegEventqBase + 4, static_cast<u32>(make_queue_base(evq_pa, g_evq_log2) >> 32));
     writel(kRegEventqProd, 0);

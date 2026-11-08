@@ -1,4 +1,5 @@
 #include "anko/vm.h"
+#include "anko/amm.h"
 #include "anko/el2_cache.h"
 #include "anko/mali.h"
 #include "anko/log.h"
@@ -39,7 +40,7 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
         return false;
     }
 
-    PhysAddr* backing = static_cast<PhysAddr*>(mm::slab_alloc(bytes, alignof(PhysAddr)));
+    PhysAddr* backing = mm::allocate_array<PhysAddr>(pages);
     if (!backing) {
         ANKO_LOG_ERROR("kernel/vm", "vm_memory backing array alloc failed");
         return false;
@@ -78,7 +79,7 @@ bool alloc_backing_pages(usize pages, PhysAddr** out_pages) {
                     mm::free_page(backing[j]);
                 }
             }
-            mm::slab_free(backing, bytes, alignof(PhysAddr));
+            mm::deallocate_array(backing, pages);
             return false;
         }
         backing[i] = pa;
@@ -100,7 +101,7 @@ void free_backing_pages(PhysAddr* pages, usize page_count) {
             mm::free_page(pages[i]);
         }
     }
-    mm::slab_free(pages, page_count * sizeof(PhysAddr), alignof(PhysAddr));
+    mm::deallocate_array(pages, page_count);
 }
 
 bool mapping_overlaps(const VmMemory& mem, u64 guest_pa, u64 size) {
@@ -197,7 +198,7 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
         return kNullCap;
     }
 
-    VmMemory* mem = static_cast<VmMemory*>(mm::slab_alloc(sizeof(VmMemory), alignof(VmMemory)));
+    VmMemory* mem = static_cast<VmMemory*>(mm::allocate<VmMemory>());
     if (!mem) {
         if (out_error) {
             *out_error = E_NOMEM;
@@ -215,7 +216,7 @@ CapHandle create_memory(Process& caller, CapHandle vm_cap, u64 size, u64 flags,
         backing_ok = alloc_backing_pages(pages, &backing);
     }
     if (!backing_ok) {
-        mm::slab_free(mem, sizeof(VmMemory), alignof(VmMemory));
+        mm::deallocate<VmMemory>(mem);
         ANKO_LOG_ERROR("kernel/vm", "vm_memory_create backing allocation failed");
         if (out_error) {
             *out_error = E_NOMEM;
@@ -494,6 +495,7 @@ SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset, c
     caller_space.pgd_phys = caller.ttbr0;
     caller_space.pid = caller.pid;
     const VirtAddr src_base = reinterpret_cast<VirtAddr>(src);
+    if (!amm::prepare_read(caller_space, src_base, len)) return E_FAULT;
 
     u64 copied = 0;
     {
@@ -518,15 +520,14 @@ SysError write_memory(Process& caller, CapHandle memory_cap, u64 guest_offset, c
                 return E_INVALID;
             }
 
-            PhysAddr src_pa = 0;
-            if (!mm::user_va_to_pa(caller_space, src_va, RIGHT_READ, &src_pa)) {
+            const PhysAddr dst_pa = mem->pages[page_index] + page_off;
+            // Resolve and copy in one critical section. A plain resolve first
+            // would let a concurrent unmap free the page and hand its physical
+            // address to a page table before the read below.
+            if (!mm::vm_copy_from_user_to_pa(caller_space, dst_pa, src_va, chunk)) {
                 note_error();
                 return E_FAULT;
             }
-
-            const PhysAddr dst_pa = mem->pages[page_index] + page_off;
-            libk::memcpy(reinterpret_cast<void*>(dst_pa), reinterpret_cast<const void*>(src_pa),
-                         chunk);
             // Guest RAM can be executable through stage-2 immediately after this
             // write. Make freshly-copied kernel/trampoline bytes visible to the
             // instruction side before EL2 enters the guest.
@@ -556,7 +557,7 @@ void dispose_memory(void* target) {
     auto* mem = static_cast<VmMemory*>(target);
     auto* owner = mem->owner_lifetime;
     destroy_memory_object(mem);
-    mm::slab_free(mem, sizeof(VmMemory), alignof(VmMemory));
+    mm::deallocate<VmMemory>(mem);
     object::release(owner);
 }
 

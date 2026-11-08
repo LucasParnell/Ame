@@ -186,6 +186,7 @@ struct alignas(64) CapTable {
     u32 next_free; // bump pointer into entries[]
     u32 lock;
     u32 used_count;
+    u32 closed; // permanent teardown barrier, protected by lock
     u64 occupied[kCapBitmapWords];
     CapEntry entries[kCapTableSize];
 };
@@ -288,6 +289,9 @@ bool lookup_many(CapTable& table, const LookupRequest* requests, Ref* out, u32 c
 u64 denial_count();
 void revoke(CapTable& table, CapHandle handle);
 void clear(CapTable& table);
+// Permanently reject new authority before draining a retiring process table.
+// Unlike clear(), callbacks and concurrent grants cannot repopulate it.
+void close(CapTable& table);
 void revoke_target(CapTable& table, void* target);
 bool reserve_slots(CapTable& table, u32 count);
 CapHandle dup(CapTable& table, CapHandle src, u32 rights_mask);

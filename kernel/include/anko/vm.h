@@ -10,6 +10,7 @@
 #include "anko/ipc.h"
 #include "anko/iommu.h"
 #include "anko/mm.h"
+#include "anko/amm.h"
 #include "anko/pci.h"
 #include "midix/abi/dango_channel_guest.h"
 #include "anko/sched.h"
@@ -503,6 +504,7 @@ constexpr u32 kSharedArenaFlagNone = 0;
 struct Vm; // defined below; SharedArena holds only a borrowed back-pointer
 
 struct SharedArena {
+    amm::ExternalPin external_pin;
     object::Record* lifetime;       // this attachment's own reference
     object::Record* arena_lifetime; // retained host arena (pinned page set)
     object::Record* owner_lifetime; // retained owner VM (guest mapping lifetime)
@@ -520,7 +522,7 @@ struct SharedArena {
     iommu::VmDmaClass dma_class; // None until explicitly registered SharedGpu
     bool mapped_stage2;
     bool dead;
-    u8 pad[1];
+    bool quarantined;
 };
 
 // Guest-visible geometry of an attachment (SYS_VM_SHARED_MEMORY_INSPECT).

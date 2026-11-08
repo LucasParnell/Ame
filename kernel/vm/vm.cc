@@ -39,7 +39,7 @@ static void dispose_vm(void* target) {
     if (v->shm_page) {
         mm::free_page(v->shm_page);
     }
-    mm::slab_free(target, sizeof(Vm), alignof(Vm));
+    mm::deallocate<Vm>(target);
 }
 
 namespace {
@@ -535,7 +535,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
         return kNullCap;
     }
 
-    Vm* v = static_cast<Vm*>(mm::slab_alloc(sizeof(Vm), alignof(Vm)));
+    Vm* v = static_cast<Vm*>(mm::allocate<Vm>());
     if (!v) {
         ANKO_LOG_ERROR("kernel/vm", "sys_vm_create heap alloc failed");
         if (out_error) {
@@ -558,7 +558,7 @@ CapHandle create_vm(Process& caller, CapHandle root_cap, u64 flags, SysError* ou
         ANKO_LOGF_ERROR("kernel/vm", "sys_vm_create stage2 create fail rc=%d",
                         static_cast<int>(s2));
         v->state = VM_DEAD;
-        mm::slab_free(v, sizeof(Vm), alignof(Vm));
+        mm::deallocate<Vm>(v);
         if (out_error) {
             *out_error = s2;
         }
@@ -620,6 +620,7 @@ static void retire_vm(Vm* v) {
     device_release_for_vm(v);
     // CallGuard excludes guest entry. Invalidate translations before pages.
     stage2_destroy(&v->stage2);
+    shared_arena_release_for_vm(v);
     for (u32 i = 0; i < v->memory_count; ++i) {
         auto* mem = v->memory_objects[i];
         if (!mem) {

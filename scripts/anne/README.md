@@ -47,6 +47,9 @@ scripts/huawei run --dry-run
 # Run a specific package, optionally retaining the previous installed kernel.
 scripts/huawei run --package /path/to/package --backup
 
+# Explicitly omit the kernel readback after fastboot acknowledges flashing.
+scripts/huawei run --skip-readback
+
 # Send one shell command without opening an interactive terminal.
 scripts/huawei console --send 'diag el2'
 scripts/huawei console --send 'diag gpu vulkan' --read 60
@@ -104,6 +107,51 @@ BootROM runs also need the four private files in
 Their expected origins and pinned identities are documented in
 [Anne operations](../../boards/huawei-anne/operations.md#flash_el2).
 
+On macOS, BootROM uses its vendor-specific USB bulk interface through libusb;
+it does not need to expose a serial port. Linux retains the serial IDT transport.
+Both upload the authentication patch after xloader and before the TEE/LK images.
+
+`tools/recover-el2-firmware.py DUMP_DIR OUTPUT_DIR --xloader PATH` reconstructs a separately
+hash-pinned LK/TEE preload from the stock `fastboot.img`, encrypted `teeos.img`
+and `trustfirmware.img`, and captured `tee-shared-ram.bin`. This is an offline
+tool: it performs no device operations and prints no key material. The shared
+capture covers the loader-identified region starting at `0x367ff600`, length
+`0xa00`. Keep captures and generated firmware private under ignored `out/`.
+The recovered plaintexts must match the existing TEE/BL31 hashes; the rebuilt
+LK has its own hash because the historical patched binary is unavailable.
+The tool validates and copies the signed xloader into the output bundle.
+No p20re checkout, imports, or prebuilt patched LK are required for recovery
+or runtime. BootROM and factory-fastboot transports live in `anne_transport.py`.
+Recovery of the files does not establish successful handset boot.
+
+### macOS checkpoint — 1 November 2026
+
+BootROM USB bulk uploads, the xloader RAM authentication patch, factory
+fastboot reads, and kernel flashing were exercised on the connected ANE.
+The captured encrypted firmware and loader shared RAM reproduced both existing
+plaintext TEE/BL31 hashes. The replacement TEE copy hook passed bounded-write
+emulation, and its LK image is separately pinned.
+
+The reconstructed profile has **not passed a phone boot**: both the latest
+29 October image and the archived, previously hardware-verified CDC control
+image returned to BootROM without an Ame CDC device. A stock-header container
+and private RAM-only diagnostic variants did not resolve that result. Retained
+LK logs show progress before the kernel handoff, but do not establish the exact
+failure instruction or that every final cached log record survived reset.
+This does not isolate macOS as the cause and does not invalidate the older
+successful route using the missing original patched LK.
+
+Partition readback was explicitly skipped for the initial tests. A subsequent
+full 24 MiB eMMC read at `0x1b800000` matched the installed, rebuilt 21 October
+`147285d` baseline byte for byte (SHA-256
+`0e7703e4ed70b740afe498c4f0aab7b4a5c16d58d4d874dfb5dcc4170e880a24`).
+The gzip payload decompressed to the expected raw kernel hash, and the Android
+legacy payload checksum was valid. This establishes the baseline partition
+write, not a successful boot or correctness of the rebuilt image itself.
+Installation records and raw captures remain under `out/anne-device-private/`.
+The rebuilt baseline remains installed after the stock EL1 control tests;
+`latest.json` still identifies the saved 29 October package and was not changed.
+
 ## Implementation and research tools
 
 `cli.py` implements the workflow. `tools/` contains the tested packaging,
@@ -111,3 +159,19 @@ transport and serial modules, plus specialized firmware inspection, emulation,
 monitor-probe and recovery experiments. They are not alternative build/run
 entry points. The old `build-release.sh` and `flash-latest.py` wrappers and the
 hard-coded historical PanVK flashing entry point have been removed.
+
+For the experimental DTS loader analysis, `dts-el2-payload.py preflight`
+checks an HSDT image's selected row bounds, the loader's 2 MiB inflate limit,
+and whether its normalized DTB and verifier proof prefix match the stock
+backup. Example:
+
+```sh
+python3 scripts/anne/dts-el2-payload.py preflight \
+  --image out/anne-device-private/dts-el2/proof-overread-stocktail-v2.img \
+  --reference boards/huawei-anne/stock-backups/anne-dts-backup.img
+```
+
+The report says `cryptographic_verification: not performed` and
+`device_ready: false`; this command is an offline input comparison, not a
+signature check or device-write approval. `emulate-dts-loader.py` separately
+replays the stock loader and records verifier and heap behavior in Unicorn.

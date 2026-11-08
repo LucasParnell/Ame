@@ -19,30 +19,39 @@ OUTPUT_ARCH(aarch64)
 ENTRY(_start)
 
 SECTIONS {
-    . = ANKO_LOAD_BASE;
+    KERNEL_VA_BASE = DEFINED(ANKO_LINK_BASE) ? ANKO_LINK_BASE : ANKO_LOAD_BASE;
+    KERNEL_VA_OFFSET = KERNEL_VA_BASE - ANKO_LOAD_BASE;
+    . = KERNEL_VA_BASE;
 
-    .text : ALIGN(4096) {
+    .text : AT(ADDR(.text) - KERNEL_VA_OFFSET) {
         __text_start = .;
         KEEP(*(.text.entry))         /* entry.S must be first */
         *(.text*)
         __text_end = .;
     }
 
-    .rodata : ALIGN(8) {
+    . = ALIGN(4096);
+    .rodata : AT(ADDR(.rodata) - KERNEL_VA_OFFSET) {
+        __rodata_start = .;
         *(.rodata*)
+        KEEP(*(.kaslr))
+        __rodata_end = .;
     }
 
-    .data : ALIGN(8) {
+    . = ALIGN(4096);
+    .data : AT(ADDR(.data) - KERNEL_VA_OFFSET) {
         *(.data*)
     }
 
-    .init_array : ALIGN(8) {
+    . = ALIGN(8);
+    .init_array : AT(ADDR(.init_array) - KERNEL_VA_OFFSET) {
         __init_array_start = .;
         KEEP(*(.init_array*))
         __init_array_end = .;
     }
 
-    .bss : ALIGN(16) {
+    . = ALIGN(16);
+    .bss : AT(ADDR(.bss) - KERNEL_VA_OFFSET) {
         __bss_start = .;
         *(.bss*)
         *(COMMON)

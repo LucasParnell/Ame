@@ -179,5 +179,61 @@ int main() {
     cap::clear(owner);
     cap::clear(owner); // a callback may populate a slot already passed by clear
     assert(!owner.used_count && object::live_count() == 0 && reentrant.allocated);
+
+    // Retirement must block a final destructor from resurrecting authority in
+    // a table whose teardown already passed the callback's destination slot.
+    reentrant.allocated = 0;
+    callback = object::create(&reentrant, [](void* target) {
+        auto* r = static_cast<Reentrant*>(target);
+        r->allocated = cap::alloc(*r->table, CAP_ARENA, &destroyed, RIGHT_READ);
+    });
+    assert(cap::alloc(owner, CAP_ARENA, &reentrant, RIGHT_READ, callback));
+    object::release(callback);
+    cap::close(owner);
+    cap::close(owner); // idempotent, including empty tables
+    assert(owner.closed && !owner.used_count && !reentrant.allocated);
+    assert(!cap::reserve_slots(owner, 0) && !cap::reserve_slots(owner, 1));
+    assert(object::live_count() == 0);
+
+    // Cross-process grants may already be in flight when the target retires.
+    // Close linearizes with allocation, lookup and dup at the table lock;
+    // references borrowed before it still keep their payload alive safely.
+    CapTable retiring{};
+    cached = object::create(&permanent, nullptr);
+    const auto original = cap::alloc(retiring, CAP_ARENA, &permanent,
+                                      RIGHT_READ | RIGHT_DUP, cached);
+    assert(original);
+    {
+        auto held = cap::lookup_any(retiring, original);
+        go = false;
+        std::atomic<bool> closed{false};
+        readers.clear();
+        for (unsigned i = 0; i < 4; ++i)
+            readers.emplace_back([&] {
+                while (!go.load()) {}
+                while (!closed.load()) {
+                    const auto cap = cap::alloc(retiring, CAP_ARENA, &permanent,
+                                                RIGHT_READ, cached);
+                    if (cap) cap::revoke(retiring, cap);
+                }
+                for (unsigned n = 0; n < 1000; ++n) {
+                    assert(!cap::alloc(retiring, CAP_ARENA, &permanent, RIGHT_READ, cached));
+                    assert(!cap::dup(retiring, original, RIGHT_READ));
+                    assert(!cap::lookup_any(retiring, original));
+                }
+            });
+        go = true;
+        cap::close(retiring);
+        closed = true;
+        for (auto& reader : readers) reader.join();
+        assert(held && static_cast<Payload*>(held->target)->value == 789);
+        const cap::LookupRequest request{original, CAP_ARENA, RIGHT_READ};
+        cap::Ref rejected;
+        assert(!cap::lookup_many(retiring, &request, &rejected, 1) && !rejected);
+        assert(retiring.closed && !retiring.used_count);
+        for (auto word : retiring.occupied) assert(!word);
+    }
+    object::release(cached);
+    assert(object::live_count() == 0);
     std::puts("capability lifetime, concurrent revoke and exhaustion passed");
 }

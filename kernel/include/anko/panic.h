@@ -13,7 +13,7 @@
 
 // Called from vec_kernel_sync assembly.
 // frame reuses TrapFrame layout; sp_el0 slot holds pre-fault SP_EL1.
-extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* frame);
+extern "C" void kernel_sync_fault(u64 esr, u64 far, TrapFrame* frame);
 
 // Assembly entry for the exception vectors with no dedicated handler (unexpected
 // FIQ/SError, stray EL1t or AArch32 exceptions): reports the vector and halts.

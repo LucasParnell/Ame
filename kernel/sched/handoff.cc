@@ -67,13 +67,16 @@ void ipc_drain_quantum_expire(Thread* t, u64 now) {
 // dies before the handoff completes.
 // ---------------------------------------------------------------------------
 void handoff_abort_reply(Thread* t) {
-    if (!t->reply_target)
+    Thread* peer = __atomic_load_n(&t->reply_target, __ATOMIC_ACQUIRE);
+    if (!peer)
         return;
-    Thread* peer = t->reply_target;
-    t->reply_target = nullptr;
-    if (peer->reply_target == t) {
-        peer->reply_target = nullptr;
+    // The live link pins both peers to this CPU. Retain the peer before
+    // unlinking, after which a context bind or wake may move and retire it.
+    object::Ref<Thread> peer_reference(peer, peer->lifetime);
+    __atomic_store_n(&t->reply_target, static_cast<Thread*>(nullptr), __ATOMIC_RELEASE);
+    if (__atomic_load_n(&peer->reply_target, __ATOMIC_ACQUIRE) == t) {
         peer->tf.x[0] = static_cast<u64>(E_DEAD);
+        __atomic_store_n(&peer->reply_target, static_cast<Thread*>(nullptr), __ATOMIC_RELEASE);
         wake(peer);
     }
 }

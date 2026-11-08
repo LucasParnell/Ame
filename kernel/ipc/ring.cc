@@ -16,7 +16,7 @@ static void destroy_ring(void* target) {
     auto* ring = static_cast<Ring*>(target);
     const u64 bytes = sizeof(RingHeader) + (1ull << ring->order) * sizeof(RingSlot);
     for (u64 off = 0; off < bytes; off += PAGE_SIZE) mm::free_page_for_identity((static_cast<u64>(ring->owner_generation) << 32) | ring->producer_pid, ring->phys_base + off);
-    mm::slab_free(ring, sizeof(Ring), alignof(Ring));
+    mm::deallocate<Ring>(ring);
 }
 
 
@@ -44,7 +44,7 @@ Ring* ring_create_object(u32 pid, u32 order, u32 flags) {
     libk::memset(reinterpret_cast<void*>(base), 0, pages * PAGE_SIZE);
     reinterpret_cast<RingHeader*>(base)->space.features = flags;
 
-    Ring* ring = static_cast<Ring*>(mm::slab_alloc(sizeof(Ring), alignof(Ring)));
+    Ring* ring = static_cast<Ring*>(mm::allocate<Ring>());
     if (!ring) {
         for (usize i = 0; i < pages; ++i) {
             mm::free_page_for(pid, base + i * PAGE_SIZE);

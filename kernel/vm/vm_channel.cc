@@ -80,7 +80,7 @@ CapHandle create_channel(Process& caller, CapHandle vm_cap, u32 order, u32 flags
     }
 
     VmChannel* channel =
-        static_cast<VmChannel*>(mm::slab_alloc(sizeof(VmChannel), alignof(VmChannel)));
+        static_cast<VmChannel*>(mm::allocate<VmChannel>());
     if (!channel) {
         release_creator(h2g);
         release_creator(g2h);
@@ -263,7 +263,7 @@ void dispose_channel(void* target) {
     if (channel->descriptor_page) {
         mm::free_page(channel->descriptor_page);
     }
-    mm::slab_free(channel, sizeof(VmChannel), alignof(VmChannel));
+    mm::deallocate<VmChannel>(channel);
     object::release(owner);
 }
 

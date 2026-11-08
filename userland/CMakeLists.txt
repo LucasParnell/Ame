@@ -4,6 +4,7 @@
 
 # Common include paths for all Mochi services.
 set(MOCHI_INCLUDES
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib/freestanding
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/include   # mochi/syscall.h, mochi/ring.h
     ${CMAKE_SOURCE_DIR}/shared/include        # midix/abi/*.h
     ${CMAKE_SOURCE_DIR}/lib/include           # freestanding cstdint/cstddef/cstdarg
@@ -12,7 +13,7 @@ set(MOCHI_INCLUDES
 # Midix userland C++ runtime: the compiler-emitted hooks that would normally
 # come from compiler-rt/libsupc++ (absent under -nostdlib). Currently the Itanium
 # __cxa_guard_* for function-local statics; see lib/runtime/cxx_guard.cc.
-add_library(mochi_runtime STATIC lib/runtime/cxx_guard.cc)
+add_library(mochi_runtime STATIC lib/runtime/cxx_guard.cc lib/runtime/memory.cc)
 set_property(TARGET mochi_runtime PROPERTY AME_USERLAND_SIMD TRUE)
 target_include_directories(mochi_runtime PRIVATE ${MOCHI_INCLUDES})
 
@@ -117,7 +118,7 @@ function(mochi_service name src load_base)
     target_compile_definitions(${name} PRIVATE AME_MOCHI_SERVICE=1)
     target_link_libraries(${name} PRIVATE libmochi)
     target_link_options(${name} PRIVATE
-        -nostdlib -static -fno-pie
+        -nostdlib -static -fno-pie -Wl,--emit-relocs
         -T ${LINKER_SCRIPT}
     )
 
@@ -129,8 +130,13 @@ function(mochi_service name src load_base)
                 $<TARGET_FILE:${name}>
                 ${MXI_FILE}
                 --kind exec
+                --memory-manifest ${MOCHI_SYSTEM_DESCRIPTOR} --service ${name}
+                --memory-profile ${MOCHI_SELECTED_PROFILE}
         DEPENDS ${name}
                 ${CMAKE_SOURCE_DIR}/scripts/mx/mxld.py
+                ${CMAKE_SOURCE_DIR}/scripts/mx/elf_relocations.py
+                ${MOCHI_SYSTEM_DESCRIPTOR}
+                ${CMAKE_SOURCE_DIR}/scripts/mx/system_descriptor.py
         COMMENT "Converting ${name} to MXI1"
         VERBATIM
     )
@@ -584,6 +590,10 @@ set_target_properties(bench.ipc.components PROPERTIES EXCLUDE_FROM_ALL TRUE)
 target_compile_options(bench.ipc.components PRIVATE -O2)
 add_custom_target(ipc_components DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/bench.ipc.components.mxi)
 
+include(libui/ui.cmake)
+include(app/ui-demo/ui-demo.cmake)
+include(app/packages.cmake)
+
 # Regression bundles are built explicitly and never included in system.mxb.
 if(ANKO_BUILD_DEV)
     mochi_service(test.app_terminal ${CMAKE_SOURCE_DIR}/tests/kernel/app_terminal.cc 0x10E00000)
@@ -609,6 +619,7 @@ if(ANKO_BUILD_DEV)
             ${CMAKE_SOURCE_DIR}/scripts/test/package-app-system.py
         VERBATIM)
     add_custom_target(app_system_regressions DEPENDS ${CMAKE_BINARY_DIR}/app-system.mxb)
+    add_dependencies(app_system_regressions app_package_demo)
     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/ipc-bench.mxb
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test/package-ipc-bench.py ${CMAKE_BINARY_DIR}
         DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/bench.ipc.mxi

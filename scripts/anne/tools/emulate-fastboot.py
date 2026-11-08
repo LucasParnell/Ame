@@ -38,6 +38,17 @@ HEAP_CURSOR = 0x2ad498
 HEAP_TOP = 0x2ad490
 HEAP_BASE = 0x30000000
 HEAP_SIZE = 0x4000000
+DTB_OUTPUT_END = 0x2e600000
+HEAP_B_BASE = 0x2e000000
+HEAP_B_SIZE = 0x2000000
+HEAP_B_CURSOR = 0x2ad4c0
+HEAP_B_TOP = 0x2ad4b8
+ALLOCATOR_CONFIGS = {
+    ALLOCATOR: {'name': 'arena-a', 'cursor': HEAP_CURSOR, 'top': HEAP_TOP,
+                'arena': (HEAP_BASE, HEAP_SIZE)},
+    0x11173c: {'name': 'arena-b', 'cursor': HEAP_B_CURSOR, 'top': HEAP_B_TOP,
+               'arena': (HEAP_B_BASE, HEAP_B_SIZE)},
+}
 BMP_CENTER = 0x4ebec
 BMP_SCRATCH = 0x293608
 LOGO_CHECKPOINTS = {BMP_CENTER: 'centering-entry', 0x4ecdc: 'before-clear',
@@ -153,12 +164,13 @@ class ExecutionMonitor:
 class HeapMonitor:
     """Observe real allocator calls; never replace the allocator or its results."""
 
-    def __init__(self, emulator, arena, allocator=ALLOCATOR, cursor=HEAP_CURSOR,
-                 top=HEAP_TOP, checkpoints=(), stop_on_oob=False, event_limit=20000):
+    def __init__(self, emulator, arenas=None, checkpoints=(), stop_on_oob=False,
+                 event_limit=20000):
         self.emulator = emulator
         self.uc = emulator.uc
-        self.arena = arena
-        self.allocator, self.cursor, self.top = allocator, cursor, top
+        self.arenas = list(arenas or [cfg['arena'] for cfg in ALLOCATOR_CONFIGS.values()])
+        self.arena = self.arenas[0]
+        self.allocators = dict(ALLOCATOR_CONFIGS)
         self.checkpoints = set(checkpoints)
         self.stop_on_oob = stop_on_oob
         self.event_limit = event_limit
@@ -174,6 +186,7 @@ class HeapMonitor:
         self.checkpoint_snapshots = []
         self.checkpoint_count = 0
         self.instruction_step = 0
+        self.call_candidates = []
 
     def snapshot(self):
         allocations = [dict(a) for a in self.allocations]
@@ -182,9 +195,17 @@ class HeapMonitor:
                           'target_allocation': (self.owner(v) or {}).get('id'),
                           'provenance': self.pointer_provenance.get(a, 'unknown')}
                          for a, v in sorted(self.pointer_slots.items())]
-        cursor = self.word(self.cursor)
-        return {'cursor': cursor, 'cursor_initialized': cursor is not None and
-                self.arena[0] <= cursor <= sum(self.arena), 'top': self.word(self.top),
+        allocator_states = {}
+        for address, cfg in self.allocators.items():
+            cursor = self.word(cfg['cursor'])
+            allocator_states[cfg['name']] = {
+                'entry': address, 'cursor_address': cfg['cursor'], 'cursor': cursor,
+                'cursor_initialized': cursor is not None and
+                cfg['arena'][0] <= cursor <= cfg['arena'][0] + cfg['arena'][1],
+                'top_address': cfg['top'], 'top': self.word(cfg['top']),
+                'arena': {'address': cfg['arena'][0], 'size': cfg['arena'][1]},
+            }
+        return {'allocator_states': allocator_states,
                 'scratch_pointer': self.word(BMP_SCRATCH), 'allocations': allocations,
                 'allocation_count': len(allocations), 'pending_count': len(self.pending),
                 'pointer_slots': pointer_slots,
@@ -246,7 +267,8 @@ class HeapMonitor:
                                          and end <= allocation['requested_end']),
                 'within_reservation': bool(allocation and address >= allocation['address']
                                            and end <= allocation['reserved_end']),
-                'touches_heap_arena': address < sum(self.arena) and end > self.arena[0]}
+                'touches_heap_arena': any(address < base + size and end > base
+                                          for base, size in self.arenas)}
 
     def memory_operation(self, address):
         if address == 0x4ec98:
@@ -272,9 +294,9 @@ class HeapMonitor:
     def check_range(self, pc, address, size, operation, expected=None):
         if size <= 0:
             return
-        lo, length = self.arena
         allocation = expected or self.owner(address)
-        touches = address < lo + length and address + size > lo
+        touches = any(address < lo + length and address + size > lo
+                      for lo, length in self.arenas)
         if allocation is None and not touches:
             return
         if allocation is None or address < allocation['address'] or address + size > allocation['requested_end']:
@@ -294,23 +316,30 @@ class HeapMonitor:
         if self.pending and address == self.pending[-1]['return_pc'] and sp == self.pending[-1]['sp']:
             allocation = self.pending.pop()
             allocation['address'] = self.uc.reg_read(REGISTERS['x0'])
-            allocation['cursor_after'] = self.word(self.cursor)
+            allocation['cursor_after'] = self.word(allocation['_cursor_address'])
             allocation['requested_end'] = allocation['address'] + allocation['size']
             # This allocator is a monotonic bump allocator; cursor gives its actual reservation.
             allocation['reserved_end'] = allocation['cursor_after'] or allocation['requested_end']
             allocation['status'] = 'returned' if allocation['address'] else 'failed'
+            if allocation['address'] and allocation['size']:
+                allocation['first_bytes_at_return'] = bytes(self.uc.mem_read(
+                    allocation['address'], min(allocation['size'], 64))).hex()
             self.emit('allocation-return', **allocation)
 
     def on_code(self, address, decoded):
         self.complete_return(address)
         sp = self.uc.reg_read(REGISTERS['sp'])
-        if address == self.allocator:
+        if address in self.allocators:
+            cfg = self.allocators[address]
             lr = self.uc.reg_read(REGISTERS['x30'])
-            allocation = {'id': len(self.allocations) + 1, 'caller': lr - 4 if lr != RETURN else None,
+            allocation = {'id': len(self.allocations) + 1, 'allocator': address,
+                          'allocator_name': cfg['name'], 'arena': cfg['arena'][0],
+                          '_cursor_address': cfg['cursor'],
+                          'caller': lr - 4 if lr != RETURN else None,
                           'synthetic_invocation': lr == RETURN,
                           'return_pc': lr, 'sp': sp,
                           'size': self.uc.reg_read(REGISTERS['x0']) & 0xffffffff,
-                          'cursor_before': self.word(self.cursor), 'status': 'pending'}
+                          'cursor_before': self.word(cfg['cursor']), 'status': 'pending'}
             self.allocations.append(allocation)
             self.pending.append(allocation)
             self.emit('allocation-call', **allocation)
@@ -327,8 +356,35 @@ class HeapMonitor:
             reg = decoded.op_str.strip()
             if reg in REGISTERS:
                 target = self.uc.reg_read(REGISTERS[reg])
+                arg0 = self.uc.reg_read(REGISTERS['x0'])
+                candidates = []
+                for allocation in self.allocations:
+                    base = allocation.get('address')
+                    if not base:
+                        continue
+                    object_address = arg0 if base <= arg0 < allocation.get('requested_end', base) else base
+                    first = self.word(object_address)
+                    second = self.word(first) if first is not None else None
+                    route = ('first-field' if first == target else
+                             'first-field-ops-table' if second == target else None)
+                    if route is None:
+                        continue
+                    candidate = {
+                        'allocation': allocation['id'], 'address': base,
+                        'allocation_size': allocation['size'],
+                        'allocation_caller': allocation.get('caller'),
+                        'object_address': object_address, 'field_offset': object_address - base,
+                        'dispatch_route': route, 'first_field': first,
+                        'branch_pc': address, 'branch_target': target,
+                        'x0': arg0, 'x0_is_object_base': arg0 == base,
+                        'allocated_after_dtb_output': base >= DTB_OUTPUT_END,
+                    }
+                    candidates.append(candidate)
+                    self.call_candidates.append(candidate)
                 self.emit('indirect-branch', pc=address, register=reg, target=target,
-                          allocation=(self.owner(target) or {}).get('id'))
+                          target_allocation=(self.owner(target) or {}).get('id'),
+                          x0=arg0, x0_allocation=(self.owner(arg0) or {}).get('id'),
+                          matching_first_fields=candidates)
 
     def on_memory(self, uc, access, address, size, value, _):
         pc = uc.reg_read(REGISTERS['pc'])
@@ -344,7 +400,8 @@ class HeapMonitor:
                 source = self.owner(address)
                 target = self.owner(value)
                 is_pointer = value != 0 and any(m['start'] <= value < m['end'] for m in self.emulator.maps)
-                if source or target or is_pointer and self.arena[0] <= value < sum(self.arena):
+                in_heap = any(base <= value < base + size for base, size in self.arenas)
+                if source or target or is_pointer and in_heap:
                     self.emit('pointer-sized-write', pc=pc, address=address, value=value,
                               allocation=(source or {}).get('id'), target_allocation=(target or {}).get('id'),
                               pointer_candidate=is_pointer, provenance='firmware-instruction',
@@ -363,19 +420,26 @@ class HeapMonitor:
                               slot=slot, value=target)
 
     def report(self):
-        return {'arena': {'address': self.arena[0], 'size': self.arena[1]},
-                'allocator': self.allocator, 'cursor_address': self.cursor, 'cursor': self.word(self.cursor),
-                'top': self.word(self.top), 'scratch_pointer': self.word(BMP_SCRATCH),
+        return {'arenas': [{'address': base, 'size': size} for base, size in self.arenas],
+                'allocator_states': self.snapshot()['allocator_states'],
+                'scratch_pointer': self.word(BMP_SCRATCH),
                 'allocations': [dict(item) for item in self.allocations], 'violation_count': self.violation_count,
                 'event_count': self.event_count, 'events': [dict(item) for item in self.events],
                 'events_truncated': self.event_count > len(self.events),
                 'checkpoint_snapshots': list(self.checkpoint_snapshots),
                 'checkpoints_truncated': self.checkpoint_count > len(self.checkpoint_snapshots),
                 'pointer_slots': self.snapshot()['pointer_slots'],
+                'call_candidates': [dict(item) for item in self.call_candidates],
+                'candidate_ranking': sorted(
+                    (dict(item) for item in self.call_candidates),
+                    key=lambda item: (not item['allocated_after_dtb_output'],
+                                      not item['x0_is_object_base'],
+                                      item['allocation'], item['branch_pc'])),
                 'limitations': ['Only allocations observed through this allocator are owned.',
                                 'Requested bytes and allocator alignment padding are reported separately.',
                                 'Range checks cannot prove pointer provenance for accesses wholly inside a different allocation.',
-                                'Pointer-sized values and target accesses are candidates, not proven data flow.']}
+                                'Pointer-sized values and target accesses are candidates, not proven data flow.',
+                                'First-field dispatch candidates require the allocation base to contain the observed indirect target; payload control still requires an end-to-end replay.']}
 
 
 def integer(value):
@@ -405,9 +469,10 @@ def dimensions(value):
 def save_allocations(output, allocations):
     def address(value):
         return hex(value) if value is not None else '-'
-    rows = ['Allocation\tCaller\tSize\tAddress\tCursor before\tCursor after\tStatus']
+    rows = ['Allocation\tAllocator\tArena\tCaller\tSize\tAddress\tCursor before\tCursor after\tStatus']
     for item in allocations:
-        rows.append('\t'.join((f"{item['id']:04d}", address(item['caller']), hex(item['size']),
+        rows.append('\t'.join((f"{item['id']:04d}", item.get('allocator_name', '-'),
+                               address(item.get('arena')), address(item['caller']), hex(item['size']),
                                address(item.get('address')), address(item['cursor_before']),
                                address(item.get('cursor_after')), item['status'])))
     (output / 'allocations.tsv').write_text('\n'.join(rows) + '\n')
@@ -458,9 +523,19 @@ class FastbootEmulator:
         self.assumptions.append(f'Applied startup BSS clear [{start:#x}, {end:#x}) '
                                 'from literals at 0x3d8 and 0x3e0; no module initializers executed.')
 
-    def watch_heap(self, checkpoints=(), stop_on_oob=False):
+    def watch_heap(self, checkpoints=(), stop_on_oob=False, arena=None, arenas=None):
         self.require_stock()
-        self.heap = HeapMonitor(self, (HEAP_BASE, HEAP_SIZE), checkpoints=checkpoints,
+        selected = list(arenas) if arenas is not None else ([arena] if arena else None)
+        if selected is None:
+            selected = [cfg['arena'] for cfg in ALLOCATOR_CONFIGS.values()]
+        for base, size in selected:
+            end = base + size
+            containing = next((m for m in self.maps if m['start'] <= base and end <= m['end']), None)
+            if containing is None:
+                if any(base < m['end'] and end > m['start'] for m in self.maps):
+                    raise ValueError('heap arena partially overlaps an existing memory map')
+                self.map(base, size, 'native allocator arena')
+        self.heap = HeapMonitor(self, selected, checkpoints=checkpoints,
                                 stop_on_oob=stop_on_oob)
         return self.heap
 
@@ -486,7 +561,8 @@ class FastbootEmulator:
                                 'display structure and log level supplied, heap initially empty. '
                                 'No BMP parser, storage, hardware routines, or module initialization run.')
         self.prepare_bitmap(bitmap, bytes_per_pixel)
-        self.watch_heap(checkpoints=(*LOGO_CHECKPOINTS, 0x4ef18, 0x4ec8c))
+        self.watch_heap(checkpoints=(*LOGO_CHECKPOINTS, 0x4ef18, 0x4ec8c),
+                        arenas=((HEAP_BASE, HEAP_SIZE),))
         return BMP_CENTER
 
     def logo_center_profile(self, bitmap=(2, 1), panel=(8, 8), bytes_per_pixel=1):
@@ -722,6 +798,9 @@ def main():
                         help='record guest reads/writes intersecting a range')
     parser.add_argument('--init-bss', action='store_true', help='apply exact stock startup BSS clear')
     parser.add_argument('--heap-watch', action='store_true', help='observe stock allocator and heap accesses')
+    parser.add_argument('--heap-arena', type=region, action='append', default=None,
+                        metavar='ADDRESS:SIZE',
+                        help='allocator arena range to monitor and map (repeatable; default: both A and B)')
     parser.add_argument('--checkpoint', type=integer, action='append', default=[], help='record heap state at PC')
     parser.add_argument('--stop-on-oob', action='store_true', help='stop when heap tracking detects a bounds violation')
     parser.add_argument('--bitmap', type=dimensions, default=(2, 1), metavar='WIDTHxHEIGHT')
@@ -742,7 +821,10 @@ def main():
         if args.init_bss and args.profile not in ('bmp-center', 'logo-center'):
             emulator.initialize_bss()
         if args.heap_watch and emulator.heap is None:
-            emulator.watch_heap()
+            emulator.watch_heap(arenas=args.heap_arena)
+        elif emulator.heap and args.heap_arena is not None:
+            if args.heap_arena != emulator.heap.arenas:
+                raise ValueError('selected profile already initialized different heap arenas')
         if emulator.heap:
             emulator.heap.checkpoints.update(args.checkpoint)
             emulator.heap.stop_on_oob = args.stop_on_oob

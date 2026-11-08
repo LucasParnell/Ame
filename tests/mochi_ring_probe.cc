@@ -522,7 +522,31 @@ static void batches() {
     assert(storage.page.tail.v == tail && out[0].seq == 991);
 }
 
+static void hostile_metadata() {
+    // Bypass every sender helper: a compromised peer writes shared memory.
+    for (unsigned test = 0; test < 4; ++test) {
+        reset();
+        const uint32_t lengths[] = {0, 3, MX_RING_INLINE_PAYLOAD + 1, ~uint32_t{0}};
+        storage.slots[0].type = kType;
+        storage.slots[0].length = lengths[test];
+        storage.page.head.v = 1;
+        RingSlot snapshot{};
+        assert(ring.try_pop(&snapshot));
+        uint32_t value = 0x12345678;
+        assert(!mochi::message_get(snapshot, &value, kType));
+        assert(value == 0x12345678);
+    }
+    reset();
+    storage.page.head.v = ~uint64_t{0};
+    RingSlot snapshot{};
+    snapshot.seq = 91;
+    assert(!ring.try_pop(&snapshot));
+    assert(!ring.try_pop_batch(&snapshot, 1));
+    assert(snapshot.seq == 91 && storage.page.tail.v == 0);
+}
+
 int main() {
+    hostile_metadata();
     parked_service();
     session_waits();
     reset();

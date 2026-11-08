@@ -36,7 +36,8 @@ class AppSystem(unittest.TestCase):
                         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
                     disk = Path(work) / f'cpu{server_cpu}-smp{cpus}.img'
                     run = subprocess.run([sys.executable, str(ROOT / 'scripts/mx/mkamefs.py'),
-                        'create', '--build-dir', str(build), '--output', str(disk), '--size', '128M'],
+                        'create', '--build-dir', str(build), '--output', str(disk), '--size', '128M',
+                        '--app', 'package-demo.amp=' + str(build / 'userland/package-demo.amp')],
                         capture_output=True, text=True, timeout=40)
                     self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
                     output = Path(work) / f'cpu{server_cpu}-smp{cpus}'
@@ -55,7 +56,8 @@ class AppSystem(unittest.TestCase):
                         report = results.parse_log(capture.split('APP_SYSTEM_BENCH_END')[0])
                         self.assertEqual(report['header']['diagnostic_scope'], 'shared_system')
                         self.assertEqual(len(report['cases']), 20 if server_cpu else 10)
-                    self.assertEqual(serial.count('child exited, status=0'), 2)
+                    self.assertEqual(serial.count('child exited, status=0'), 4)
+                    self.assertEqual(serial.count('packaged app: resources verified'), 2)
                     terminal_output = Path(work) / f'terminal-cpu{server_cpu}-smp{cpus}'
                     run = subprocess.run([sys.executable, str(ROOT / 'scripts/test/boot.py'),
                         '--build', str(build), '--bundle', str(build / 'app-terminal.mxb'),

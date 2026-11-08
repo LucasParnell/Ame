@@ -6,10 +6,14 @@
 // libraries, and resources.
 
 #include "midix/abi/types.h"
+#include "midix/abi/arena.h"
 
 constexpr mx_u32_t MX_IMAGE_MAGIC = 0x3149584du;    // 'MXI1'
 constexpr mx_u16_t MX_IMAGE_VERSION = 1;
 constexpr mx_u32_t MX_IMAGE_ABI_VERSION = 2;
+// Native code/data slides stay below the fixed IPC/device windows at 0x18000000.
+constexpr mx_u64_t MX_IMAGE_ASLR_START = 0x11000000;
+constexpr mx_u64_t MX_IMAGE_ASLR_END = 0x18000000;
 
 constexpr mx_u32_t MX_BUNDLE_MAGIC = 0x3142584du;   // 'MXB1'
 constexpr mx_u16_t MX_BUNDLE_VERSION = 2;
@@ -39,7 +43,15 @@ enum MxImageArch : mx_u32_t {
 enum MxImageFlags : mx_u32_t {
     MX_IMAGE_FLAG_NONE = 0,
     MX_IMAGE_FLAG_STATIC = 1u << 0,
+    MX_IMAGE_FLAG_ARENA = 1u << 1,
+    MX_IMAGE_FLAG_ASLR = 1u << 2,
 };
+
+// Follows the arena declaration when ASLR is set, then count records. The
+// converter emits resolved image pointers; no dynamic symbol lookup runs in EL1.
+struct MxImageLayout { mx_u32_t version, count; mx_u64_t minimum, maximum; };
+struct MxImageRelocation { mx_u64_t address, value; mx_u32_t width, reserved; };
+static_assert(sizeof(MxImageLayout) == 24 && sizeof(MxImageRelocation) == 24);
 
 enum MxImageSegmentFlags : mx_u32_t {
     MX_IMAGE_SEG_ZERO_FILL = 1u << 0,

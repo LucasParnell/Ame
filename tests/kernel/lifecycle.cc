@@ -1,5 +1,9 @@
 #include "mochi/boot.h"
+#include "mochi/managed_arena.h"
+#include "mochi/memory.h"
+#include "mochi/isolated_heap.h"
 #include "midix/abi/image.h"
+#include "midix/abi/vm.h"
 #include "midix/format/bundle.h"
 #include "midix/format/integrity.h"
 #include "libk/bytes.h"
@@ -13,6 +17,7 @@ static midix::format::Bundle bundle;
 // Presence of this value in a spawned BootInfo turns a second copy of this
 // image into the VM-owner worker instead of another supervising test.
 static constexpr uint64_t kModeVmWorker = 1;
+static constexpr uint64_t kModeSecurityWorker = 2;
 
 // Scratch arena the parent uses to materialise a synthetic failing image.
 static constexpr uint64_t kFixtureArenaVa = 0x32000000ull;
@@ -64,12 +69,12 @@ static const uint8_t* object_bytes(const char* name, uint64_t* size) {
     }
     return nullptr;
 }
-static Child spawn(const char* name) {
+static Child spawn(const char* name, uint64_t principal = MX_POLICY_PRINCIPAL_NATIVE_SANDBOXED) {
     uint64_t size = 0;
     const uint8_t* data = object_bytes(name, &size);
     check(data && size, "test image absent");
     static const char process_name[32] = "test.child";
-    auto result = sys_spawn(data, size, MX_POLICY_PRINCIPAL_NATIVE_SANDBOXED, supervisor,
+    auto result = sys_spawn(data, size, principal, supervisor,
                             MX_SPAWN_SUSPENDED, process_name);
     check(result.value > 0 && result.detail > 0, "spawn");
     Child child{static_cast<CapHandle>(result.value), static_cast<CapHandle>(result.detail), 0};
@@ -92,6 +97,84 @@ static void await_exit(uint64_t identity, long expected_status) {
     }
     fail("termination acknowledgement timeout");
 }
+
+// Bounded, deterministic hostile syscalls; no fuzzing or stress loops.
+static void security_worker(MxBootInfo* boot) {
+    const auto delegated = mochi::boot::require_handle(boot, "supervisor");
+    const auto archive = mochi::boot::require_handle(boot, "boot.initrd");
+    check(!sys_map_page(archive, 0x20000000, RIGHT_READ), "hostile child archive");
+    bundle.data = reinterpret_cast<const uint8_t*>(0x20000000);
+    bundle.size = mochi::boot::find(boot, "boot.initrd")->aux0;
+    (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)),
+                     libk::as_bytes(bundle.data, sizeof(bundle.header)), sizeof(bundle.header));
+    uint64_t size = 0;
+    const auto* image = object_bytes("test.busy", &size);
+    check(image && size, "hostile child valid image");
+    const bool trusted = mochi::boot::find(boot, "mode")->aux1 != 0;
+    auto result = sys_spawn(image, size, MX_POLICY_PRINCIPAL_NATIVE_TRUSTED,
+                            delegated, MX_SPAWN_SUSPENDED, nullptr);
+    check(result.value == MX_ERR_PERM, trusted ? "trusted app needs spawn authority" :
+                                                "sandbox cannot spawn trusted principal");
+    check(sys_cap_dup(archive, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP) == MX_ERR_PERM,
+          "hostile child cannot amplify capability rights");
+    check(sys_map_page(archive, 0x28000000, RIGHT_READ | RIGHT_WRITE) == MX_ERR_PERM,
+          "hostile child cannot write read-only archive");
+    check(sys_cap_grant(archive, archive, RIGHT_READ) == MX_ERR_PERM,
+          "hostile child cannot substitute arena for process authority");
+    check(sys_unmap_page(0xffff800040080000ull) == MX_ERR_INVALID,
+          "hostile child cannot unmap kernel image");
+    sys_exit(0);
+    fail("security worker returned");
+}
+
+static void settle(long objects, long pages);
+static void security_authority() {
+    const long objects = sys_debug_counter(200), pages = sys_debug_counter(201);
+    for (unsigned pass = 0; pass < 2; ++pass) {
+        const bool trusted = pass != 0;
+        auto child = spawn("init", trusted ? MX_POLICY_PRINCIPAL_NATIVE_TRUSTED :
+                                             MX_POLICY_PRINCIPAL_NATIVE_SANDBOXED);
+        auto arena = static_cast<CapHandle>(sys_arena_create(4096, 0));
+        check(arena && !sys_map_page(arena, 0x30000000, RIGHT_READ | RIGHT_WRITE),
+              "security boot arena");
+        auto* boot = reinterpret_cast<MxBootInfo*>(0x30000000);
+        libk::fill(libk::as_bytes(boot, sizeof(*boot)), 0);
+        check(sys_cap_grant(child.process, arena, RIGHT_READ | RIGHT_MAP) == (1ull << 32),
+              "security bootstrap handle");
+        boot->magic = MX_BOOT_MAGIC;
+        boot->version = MX_BOOT_VERSION;
+        boot->entry_count = 3;
+        boot->entries[0].type = MX_BOOT_ENTRY_VALUE;
+        (void)libk::copy_n(libk::as_bytes(boot->entries[0].name, 5), libk::as_bytes("mode", 5), 5);
+        boot->entries[0].aux0 = kModeSecurityWorker;
+        boot->entries[0].aux1 = trusted;
+        const auto delegated = sys_supervisor_delegate(supervisor, child.process);
+        check(delegated > 0, "delegate child supervisor");
+        boot->entries[1].type = MX_BOOT_ENTRY_HANDLE;
+        (void)libk::copy_n(libk::as_bytes(boot->entries[1].name, 11), libk::as_bytes("supervisor", 11), 11);
+        boot->entries[1].handle = sys_cap_grant(child.process, delegated,
+                                               trusted ? RIGHT_READ : RIGHT_SPAWN);
+        auto& archive = boot->entries[2];
+        archive.type = MX_BOOT_ENTRY_HANDLE;
+        (void)libk::copy_n(libk::as_bytes(archive.name, 12), libk::as_bytes("boot.initrd", 12), 12);
+        archive.handle = sys_cap_grant(child.process, mochi::boot::require_handle(boot_info, "boot.initrd"),
+                                       RIGHT_READ | RIGHT_MAP | RIGHT_DUP);
+        archive.aux0 = mochi::boot::find(boot_info, "boot.initrd")->aux0;
+        check(static_cast<int64_t>(archive.handle) > 0, "security archive grant");
+        check(boot->entries[1].handle && !sys_thread_resume(child.thread), "security child start");
+        await_exit(child.identity, 0);
+        sys_cap_revoke(delegated);
+        sys_unmap_page(0x30000000);
+        sys_cap_revoke(arena);
+    }
+    settle(objects, pages);
+    print("security authority regression passed\n");
+}
+static void print_hex(uint64_t number) {
+    char text[19] = "0x0000000000000000";
+    for (unsigned i = 0; i < 16; ++i) text[17 - i] = "0123456789abcdef"[(number >> (i * 4)) & 15];
+    print(text);
+}
 static void settle(long objects, long pages) {
     const uint64_t deadline = mx_clock_ns() + 3000000000ull;
     while (mx_clock_ns() < deadline) {
@@ -100,6 +183,8 @@ static void settle(long objects, long pages) {
         }
         sys_yield();
     }
+    print("resources expected/actual objects: "); print_hex(objects); print("/"); print_hex(sys_debug_counter(200));
+    print(" pages: "); print_hex(pages); print("/"); print_hex(sys_debug_counter(201)); print("\n");
     fail("resources accumulated");
 }
 
@@ -476,12 +561,193 @@ static void channel_lifecycle(long objects, long pages) {
     }
 }
 
+template <class F> static void arena_call(F call, const char* message) {
+    const auto deadline = mx_clock_ns() + 3000000000ull;
+    do {
+        const auto result = call();
+        if (!result) return;
+        check(result == MX_ERR_BUSY, message);
+        sys_yield();
+    } while (mx_clock_ns() < deadline);
+    print("arena retry timeout: "); print(message); print("\n");
+    fail(message);
+}
+static uint64_t arena_writer_stop, arena_writer_done;
+static void arena_writer(uint64_t address) {
+    auto* counter = reinterpret_cast<volatile uint64_t*>(address);
+    uint64_t value = *counter;
+    while (!__atomic_load_n(&arena_writer_stop, __ATOMIC_ACQUIRE)) *counter = ++value;
+    __atomic_store_n(&arena_writer_done, 1ull, __ATOMIC_RELEASE);
+    sys_thread_exit(0);
+    for (;;) sys_yield();
+}
+struct alignas(64) SecureNode { uint64_t value; explicit SecureNode(uint64_t v) : value(v) {} };
+static mochi::memory::IsolatedHeap<SecureNode> nodes;
+static void normal_memory() {
+    const uint64_t invalid_addresses[]{0ull, 0x00480000ull, 0x0ffff000ull, 0x40000000ull,
+                                   0x40080000ull, 0xffff800040080000ull, 0xfffffffffffff000ull};
+    for (const auto address : invalid_addresses)
+        check(sys_unmap_page(address) == MX_ERR_INVALID, "unmap rejects privileged VA");
+    check(sys_unmap_page(0x10000001) == MX_ERR_INVALID, "unmap rejects unaligned VA");
+    MxArenaCreate contract{}; CapHandle primary = 0;
+    check(!mx_process_arena(&contract, &primary) && contract.type_id && contract.size == 65536,
+          "manifest primary arena");
+    MxCapInfo info{};
+    check(!sys_cap_info(primary, &info, sizeof(info)) && info.base == contract.cage_base, "heap logical address isolation");
+    auto* data = static_cast<uint8_t*>(calloc(100, 16)); check(data, "calloc");
+    for (unsigned i = 0; i < 1600; ++i) check(data[i] == 0, "calloc zero");
+    for (unsigned i = 0; i < 1600; ++i) data[i] = i;
+    auto* larger = static_cast<uint8_t*>(realloc(data, 200000)); check(larger == data, "tail realloc without copy");
+    for (unsigned i = 0; i < 1600; ++i) check(larger[i] == uint8_t(i), "realloc contents");
+    free(larger);
+    auto* aligned = aligned_alloc(4096, 8192);
+    check(aligned && !(reinterpret_cast<uint64_t>(aligned) & 4095), "aligned allocation"); free(aligned);
+    auto* object = new SecureNode(47); check(object->value == 47, "normal new"); delete object;
+    const auto before = mochi::memory::statistics();
+    for (unsigned i = 0; i < 10000; ++i) { auto* p = malloc(64); check(p, "malloc local"); free(p); }
+    const auto after = mochi::memory::statistics();
+    check(after.growths == before.growths && after.live == before.live &&
+          after.allocations >= before.allocations + 10000, "heap fast path no growth syscalls");
+    MxArenaCreate typed{4096, 4096, 0x39001000, 65536, 0, 0, 0};
+    check(!nodes.initialize(typed), "typed isoheap");
+    auto* node = nodes.create(81); check(node && node->value == 81, "isoheap constructor");
+    check(!nodes.destroy(reinterpret_cast<SecureNode*>(contract.cage_base)), "isoheap foreign pointer");
+    check(nodes.destroy(node) && !nodes.destroy(node), "isoheap destruction and stale pointer");
+    typed.type_id = mochi::memory::IsolatedHeap<SecureNode>::type_id() ^ 1;
+    CapHandle foreign = 0;
+    check(mx_arena_managed_create(typed, &foreign) == MX_ERR_POLICY, "kernel type cage enforcement");
+    print("ASLR fixture entry/stack/heap: ");
+    print_hex(reinterpret_cast<uint64_t>(&normal_memory)); print(" ");
+    print_hex(reinterpret_cast<uint64_t>(&primary)); print(" "); print_hex(contract.cage_base); print("\n");
+    sys_cap_revoke(primary);
+    print("manifest heap: malloc/realloc/new, local fast path and typed isolation passed\n");
+}
+static void el2_roundtrip() {
+    const long objects = sys_debug_counter(200), pages = sys_debug_counter(201);
+    const auto root = mochi::boot::require_handle(boot_info, "vm.root");
+    const auto vm = sys_vm_create(root, 0); check(vm > 0, "EL2 roundtrip VM");
+    const auto memory = sys_vm_memory_create(vm, 4096, 0); check(memory > 0, "EL2 roundtrip RAM");
+    const uint32_t code[]{0x52800100, 0x72b08000, 0xd4000002, 0x14000000}; // PSCI SYSTEM_OFF via HVC
+    check(!sys_vm_memory_write(memory, 0, code, sizeof(code)) &&
+          !sys_vm_memory_map(vm, memory, 0x40000000, 4096, RIGHT_READ | RIGHT_EXEC), "EL2 roundtrip code");
+    const auto cpu = sys_vcpu_create(vm, 0); check(cpu > 0, "EL2 roundtrip vCPU");
+    check(!sys_vcpu_set_entry(cpu, 0x40000000, 0, 0), "EL2 roundtrip entry");
+    MxVcpuRunBudget budget{10000000, 0, 8, 0}; MxVcpuRunResult result{};
+    auto status = sys_vcpu_run(cpu, &budget, &result);
+    if (status != MX_ERR_NOT_IMPLEMENTED) {
+        check(!status, "EL2 roundtrip run");
+        const auto deadline = mx_clock_ns() + 1000000000;
+        while (result.exit_reason != 5 && mx_clock_ns() < deadline) {
+            sys_yield(); check(!sys_vcpu_run(cpu, &budget, &result), "EL2 roundtrip resume");
+        }
+        check(result.exit_reason == 5, "EL2 roundtrip shutdown");
+        print("EL2 guest HVC: restored randomized TTBR1 host\n");
+    }
+    check(!sys_vm_destroy(vm), "EL2 roundtrip destroy");
+    sys_cap_revoke(vm);
+    settle(objects, pages);
+}
+static void managed_arenas() {
+    constexpr uint64_t base = 0x33000000, alias = 0x33100000, clone_va = 0x33200000;
+    MxArenaCreate request{8192, 16384, base, 0x1000000, 0x414d4d, 0, 0};
+    CapHandle arena = 0, clone = 0;
+    check(!mx_arena_managed_create(request, &arena), "AMM create");
+    arena_call([&] { return sys_map_page(arena, base, RIGHT_READ | RIGHT_WRITE); }, "AMM map");
+    arena_call([&] { return sys_map_page(arena, alias, RIGHT_READ | RIGHT_WRITE); }, "AMM alias");
+    auto* data = reinterpret_cast<volatile uint64_t*>(base);
+    auto* other = reinterpret_cast<volatile uint64_t*>(alias);
+    data[0] = 11; data[512] = 22;
+    arena_call([&] { return mx_arena_resize(arena, 16384); }, "AMM grow");
+    check(other[0] == 11 && other[1024] == 0, "AMM grow retains backing");
+    arena_call([&] { return mx_arena_resize(arena, 8192); }, "AMM shrink");
+    arena_call([&] { return mx_arena_clone(arena, &clone); }, "AMM clone");
+    arena_call([&] { return sys_map_page(clone, clone_va, RIGHT_READ | RIGHT_WRITE); }, "AMM clone map");
+    auto* copy = reinterpret_cast<volatile uint64_t*>(clone_va);
+    copy[0] = 99;
+    check(data[0] == 11 && copy[0] == 99, "AMM EL0 COW");
+    // The kernel must COW a destination before copying syscall output into it.
+    check(!mx_arena_inspect(arena, reinterpret_cast<MxArenaInfo*>(base + 4096)), "AMM kernel COW");
+    check(copy[512] == 22, "AMM kernel COW retains clone");
+    const uint32_t order[]{1, 0};
+    arena_call([&] { return mx_arena_reorder(arena, order, 2); }, "AMM reorder");
+    check(data[512] == 11, "AMM reorder aliases");
+    arena_call([&] { return mx_arena_reorder(arena, order, 2); }, "AMM reorder restore");
+
+    auto worker = sys_thread_create(0, reinterpret_cast<uint64_t>(arena_writer), base,
+                                     MX_THREAD_SUSPENDED);
+    check(worker > 0, "AMM writer create");
+    check(!sys_thread_set_affinity(worker, 1ull << (cpu_count - 1)) && !sys_thread_resume(worker),
+          "AMM writer resume");
+    for (uint32_t round = 0; round < 8; ++round) {
+        arena_call([&] { return mx_arena_precopy(arena); }, "AMM precopy");
+        sys_yield();
+        const auto before = data[0];
+        arena_call([&] { return mx_arena_commit(arena); }, "AMM commit");
+        check(data[0] >= before && other[0] >= before, "AMM migration lost concurrent stores");
+        check(copy[0] == 99, "AMM migration changed clone");
+    }
+    __atomic_store_n(&arena_writer_stop, 1ull, __ATOMIC_RELEASE);
+    const auto deadline = mx_clock_ns() + 3000000000ull;
+    while (!__atomic_load_n(&arena_writer_done, __ATOMIC_ACQUIRE) && mx_clock_ns() < deadline)
+        sys_yield();
+    check(__atomic_load_n(&arena_writer_done, __ATOMIC_ACQUIRE), "AMM writer stop");
+    sys_cap_revoke(worker);
+    // A guest attachment owns an external generation lease until all stage-2
+    // mappings and attachment references have retired.
+    const auto root = mochi::boot::require_handle(boot_info, "vm.root");
+    const auto vm = sys_vm_create(root, 0);
+    check(vm > 0, "AMM guest VM");
+    const auto memory = sys_vm_memory_create(vm, 65536, 0);
+    check(memory > 0 && !sys_vm_memory_map(vm, memory, 0x40000000, 65536, RIGHT_READ | RIGHT_WRITE),
+          "AMM guest stage2");
+    const auto read_only = sys_cap_dup(arena, RIGHT_READ | RIGHT_MAP);
+    check(read_only > 0, "AMM read-only guest source");
+    check(sys_vm_shared_memory_attach(vm, read_only, 0x49000000, 8192,
+                                      RIGHT_READ | RIGHT_WRITE, 0) == MX_ERR_PERM,
+          "guest attach cannot amplify arena capability rights");
+    const auto read_shared = sys_vm_shared_memory_attach(vm, read_only, 0x49000000,
+                                                         8192, RIGHT_READ, 0);
+    check(read_shared > 0, "read-only guest attachment");
+    check(sys_vm_shared_memory_register_dma(read_shared, 3) == MX_ERR_PERM,
+          "DMA cannot amplify read-only guest attachment");
+    check(!sys_vm_shared_memory_register_dma(read_shared, 1), "read-only guest DMA registration");
+    sys_cap_revoke(read_shared);
+    sys_cap_revoke(read_only);
+    const auto shared = sys_vm_shared_memory_attach(vm, arena, 0x48000000, 8192,
+                                                    RIGHT_READ | RIGHT_WRITE, 0);
+    check(shared > 0 && mx_arena_resize(arena, 4096) == MX_ERR_BUSY, "AMM guest pin");
+    check(!sys_vm_destroy(vm), "AMM guest retirement");
+    sys_cap_revoke(shared);
+    arena_call([&] { return mx_arena_realloc(arena, base, base + 4096, 8192); }, "AMM realloc");
+    check(*reinterpret_cast<volatile uint64_t*>(base + 4096) == other[0], "AMM realloc contents");
+    MxArenaInfo info{};
+    check(!mx_arena_inspect(arena, &info) && info.retired_generation && info.zero_copy_changes >= 4,
+          "AMM generations");
+    check(!mx_arena_pin(arena, info.generation) && mx_arena_precopy(arena) == MX_ERR_BUSY,
+          "AMM pin exclusion");
+    check(!mx_arena_unpin(arena, info.generation), "AMM unpin");
+    arena_call([&] { return mx_arena_resize(arena, 24576); }, "AMM automatic growth");
+    check(!mx_arena_inspect(arena, &info) && info.capacity == 24576, "AMM growth capacity");
+    arena_call([&] { return mx_arena_resize(arena, 8192); }, "AMM trim size");
+    arena_call([&] { return mx_arena_trim(arena); }, "AMM trim");
+    arena_call([&] { return mx_arena_policy(arena, MX_ARENA_COMPACT_IDLE); }, "AMM read sampling");
+    check(*reinterpret_cast<volatile uint64_t*>(base + 4096) == other[0], "AMM EL0 access flag");
+    arena_call([&] { return mx_arena_unmap_cap(arena, base + 4096); }, "AMM detach source");
+    arena_call([&] { return mx_arena_unmap_cap(arena, alias); }, "AMM detach alias");
+    arena_call([&] { return mx_arena_unmap_cap(clone, clone_va); }, "AMM detach clone");
+    sys_cap_revoke(arena); sys_cap_revoke(clone);
+    print("arena migration: EL0 COW, resizing, realloc and concurrent writer passed\n");
+}
+
 extern "C" [[noreturn]] void _start() {
     auto* boot = mochi::boot::map();
     boot_info = boot;
     const auto* mode = mochi::boot::find(boot, "mode");
     if (mode && mode->type == MX_BOOT_ENTRY_VALUE && mode->aux0 == kModeVmWorker) {
         vm_owner_worker(boot);
+    }
+    if (mode && mode->type == MX_BOOT_ENTRY_VALUE && mode->aux0 == kModeSecurityWorker) {
+        security_worker(boot);
     }
     supervisor = mochi::boot::require_handle(boot, "supervisor");
     cpu_count = mochi::boot::find(boot, "cpu.count")->aux0;
@@ -491,6 +757,7 @@ extern "C" [[noreturn]] void _start() {
     bundle.size = mochi::boot::find(boot, "boot.initrd")->aux0;
     (void)libk::copy_n(libk::as_bytes(&bundle.header, sizeof(bundle.header)), libk::as_bytes(bundle.data, sizeof(bundle.header)), sizeof(bundle.header));
     print("lifecycle regression started\n");
+    security_authority();
 
     // The kernel raised a spare SPI at boot and delivered it to a doorbell;
     // this confirms real interrupt delivery, not just the binding plumbing.
@@ -606,6 +873,9 @@ extern "C" [[noreturn]] void _start() {
     vm_owner_death(objects, pages);
     vm_explicit_destroy(objects, pages);
     channel_lifecycle(objects, pages);
+    el2_roundtrip();
+    managed_arenas();
+    normal_memory();
     print("lifecycle regression passed\n");
     while (true) {
         sys_yield();

@@ -1,6 +1,8 @@
 # anko microkernel — sources are added phase-by-phase as V0 progresses.
 # Spec ref: docs/architecture.md.
 
+option(ANKO_ALLOW_WEAK_ENTROPY "Temporary uptime seed fallback when trusted boot entropy is unavailable" ON)
+
 # Keep per-device entropy out of the distributable userland system bundle.
 set(AME_FIDO2_SEED_FILE "" CACHE FILEPATH "Private 32-byte per-device FIDO2 seed (empty disables credential operations)")
 set(_fido_seed_args)
@@ -20,6 +22,9 @@ include_directories("${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 set(ANKO_SOURCES
     # ---- Phase 0: build and run --------------------------------------------
+    security/kernel_layout.cc
+    security/kernel_relocations.S
+    security/random.cc
     arch/arm64/entry.S
     arch/arm64/el2.S
     arch/arm64/vectors.S
@@ -54,6 +59,8 @@ set(ANKO_SOURCES
     mm/phys.cc
     mm/vm_space.cc
     mm/arena.cc
+    mm/amm.cc
+    mm/adma.cc
     syscall/dispatch.cc
     init/image_loader.cc
     init/fdt.cc
@@ -236,6 +243,7 @@ endif()
 target_include_directories(anko PRIVATE
     include                            # anko/*.h
     ${CMAKE_SOURCE_DIR}/shared/include  # midix/abi/*.h
+    ${CMAKE_SOURCE_DIR}/third_party/monocypher
     ${CMAKE_SOURCE_DIR}/lib/include    # libk/*.h
     ${CMAKE_SOURCE_DIR}/boot/include   # boot/hw_info.h (used from Phase 1)
     ${CMAKE_SOURCE_DIR}/boards/${ANKO_BOARD}  # board-local overrides (unused for now)
@@ -253,6 +261,7 @@ target_compile_options(anko PRIVATE
 )
 
 target_compile_definitions(anko PRIVATE
+    $<$<BOOL:${ANKO_ALLOW_WEAK_ENTROPY}>:ANKO_ALLOW_WEAK_ENTROPY=1>
     $<$<BOOL:${ANKO_BUILD_DEV}>:ANKO_BUILD_DEV=1>
     $<$<BOOL:${ANKO_PANIC_SCREEN_DEMO}>:ANKO_PANIC_SCREEN_DEMO=1>
     ANKO_PANIC_DEMO_VECTOR=${ANKO_PANIC_DEMO_VECTOR}
@@ -262,7 +271,8 @@ target_compile_definitions(anko PRIVATE
 
 target_link_options(anko PRIVATE
     -T ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/linker/kernel.ld
-    -Wl,--build-id=none
+    -Wl,--build-id=none -Wl,--emit-relocs
+    -Wl,--defsym,ANKO_LINK_BASE=ANKO_LOAD_BASE+0xffff800000000000
     -Wl,--defsym,ANKO_LOAD_BASE=${ANKO_LOAD_BASE}
 )
 
@@ -271,7 +281,9 @@ add_custom_command(TARGET anko POST_BUILD
     COMMAND ${CMAKE_OBJCOPY} -O binary
             $<TARGET_FILE:anko>
             $<TARGET_FILE_DIR:anko>/anko.bin
-    COMMENT "Producing anko.bin"
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/mx/kernel_relocations.py
+            $<TARGET_FILE:anko> $<TARGET_FILE_DIR:anko>/anko.bin
+    COMMENT "Producing relocated anko.bin"
 )
 
 # Opt-in diagnostic at the ATF -> BL33 boundary; uses the same validated
@@ -306,3 +318,7 @@ if(ANKO_BOARD STREQUAL "switch-t210")
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:switch-cpu-probe>
                 $<TARGET_FILE_DIR:switch-cpu-probe>/switch-cpu-probe.bin)
 endif()
+
+set_property(TARGET anko APPEND PROPERTY LINK_DEPENDS
+    ${CMAKE_SOURCE_DIR}/scripts/mx/kernel_relocations.py
+    ${CMAKE_SOURCE_DIR}/scripts/mx/elf_relocations.py)

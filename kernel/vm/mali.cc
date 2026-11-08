@@ -12,6 +12,7 @@
 #include "anko/log.h"
 #include "midix/abi/anne_gpu.h"
 #include "libk/dma.h"
+#include "libk/string.h"
 #include "../../boards/huawei-anne/gpu.h"
 
 namespace mali {
@@ -300,12 +301,12 @@ SysError attach(Process& caller, CapHandle vmcap, CapHandle cpucap, CapHandle au
     // 4 KiB page because the vendor also maps ipc@e896b000 as 0x1000.
     static_assert(hw::kBytes == AME_MALI_REG_BYTES,
                   "guest register window must equal the vendor range");
-    if (!mm::map_kernel_device_mmio(hw::kBase, hw::kBytes) ||
-        !mm::map_kernel_device_mmio(hw::kIpcBase, 4096)) {
+    if (!mm::map_kernel_device_mmio(hw::kBase, hw::kBytes)) {
         return E_NOMEM;
     }
-    // SCTRL is already a Device identity mapping in the Anne bootstrap plan
-    // (debug/reset support). Mapping it twice is rejected, not an allocation.
+    // SCTRL and the LPM3 IPC page are already Device identity mappings in the
+    // Anne bootstrap plan (reset and DVFS support). A duplicate IPC mapping is
+    // rejected by the page mapper; that does not mean memory was exhausted.
     gpu.owner = &*owner;
     gpu.cpu = &*cpu;
     // Hold both objects through IRQ injection and any quarantine retry.
@@ -436,7 +437,8 @@ bool release(vm::Vm& owner) {
     for (u32 i = 0; i < pin_count; ++i) {
         pins[i] = gpu.shared_pins[i];
     }
-    gpu = {};
+    // Avoid a large aggregate temporary on the exception stack in debug builds.
+    libk::memset(&gpu, 0, sizeof(gpu));
     for (u32 i = 0; i < pin_count; ++i) {
         object::release(pins[i]);
     }

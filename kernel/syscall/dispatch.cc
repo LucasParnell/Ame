@@ -9,6 +9,7 @@
 #include "anko/ipc.h"
 #include "anko/irq.h"
 #include "anko/mm.h"
+#include "anko/amm.h"
 #include "anko/init.h"
 #include "anko/platform.h"
 #include "midix/abi/platform.h"
@@ -196,6 +197,8 @@ bool user_range_ok(const UserAccess& ua, u64 ptr, u64 len, u32 rights = RIGHT_RE
     if (!ua.valid) {
         return false;
     }
+    if ((rights & RIGHT_WRITE) && !amm::prepare_write(ua.space, ptr, len)) return false;
+    if (!(rights & RIGHT_WRITE) && !amm::prepare_read(ua.space, ptr, len)) return false;
     return mm::user_range_mapped(ua.space, ptr, len, rights);
 }
 
@@ -206,11 +209,13 @@ bool user_range_ok(const UserAccess& ua, u64 ptr, u64 len, u32 rights = RIGHT_RE
     if (len == 0) {
         return true;
     }
+    // Cheap rejection and arena/COW accounting first; the copy itself
+    // revalidates and moves under the page-table lock so a racing unmap cannot
+    // retarget it after the check.
     if (!user_range_ok(ua, user_ptr, len, RIGHT_READ)) {
         return false;
     }
-    libk::memcpy(dst, reinterpret_cast<const void*>(user_ptr), static_cast<usize>(len));
-    return true;
+    return mm::vm_copy_from_user(ua.space, dst, user_ptr, len);
 }
 
 [[maybe_unused]] bool copy_to_user(const UserAccess& ua, u64 user_ptr, const void* src, u64 len) {
@@ -223,8 +228,7 @@ bool user_range_ok(const UserAccess& ua, u64 ptr, u64 len, u32 rights = RIGHT_RE
     if (!user_range_ok(ua, user_ptr, len, RIGHT_WRITE)) {
         return false;
     }
-    libk::memcpy(reinterpret_cast<void*>(user_ptr), src, static_cast<usize>(len));
-    return true;
+    return mm::vm_copy_to_user(ua.space, user_ptr, src, len);
 }
 
 bool principal_from_id(u64 raw, PrincipalClass* out) {
@@ -278,18 +282,24 @@ bool map_object(Process& proc, VirtAddr va, PhysAddr pa, u64 size, u32 rights, b
     VmSpace space{};
     space.pgd_phys = proc.ttbr0;
     space.pid = proc.pid;
-    return device ? mm::vm_map_device_range(space, va, pa, size, rights)
-                  : mm::vm_map_range(space, va, pa, size, rights);
+    return amm::map_wired(sched::process_identity(proc), space, va, pa, size, rights, device);
 }
 
 } // namespace
 
-extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
+extern "C" bool syscall_fault(u64 esr, u64 far, void* frame) {
     auto* tf = static_cast<TrapFrame*>(frame);
     Process* p = cur_proc();
     Thread* ct = sched::current();
     const u32 ec = static_cast<u32>((esr >> 26) & 0x3fu);
     const u32 iss = static_cast<u32>(esr & 0x01ff'ffffu);
+    // Retry a managed arena translation or write-permission fault at the same
+    // ELR after COW/dirty tracking. External, alignment and table-walk faults
+    // retain the ordinary process fault behavior.
+    if (p && ec == 0x24 && !(iss & ((1u << 10) | (1u << 8) | (1u << 7))) &&
+        ((iss & 0x3f) == 7 || (iss & 0x3f) == 11 ||
+         ((iss & 0x3f) == 15 && (iss & (1u << 6)))) &&
+        amm::fault(VmSpace{p->ttbr0, p->pid}, far, (iss & (1u << 6)) != 0)) return true;
 #ifdef ANKO_BOARD_HUAWEI_ANNE
     anne::boot_user_fault(esr, tf ? tf->elr : 0, far, tf ? tf->sp_el0 : 0, p ? p->pid : 0,
                           ct ? ct->tid : 0);
@@ -353,6 +363,7 @@ extern "C" void syscall_fault(u64 esr, u64 far, void* frame) {
     syscall_metric_inc(local_syscall_metrics().faults);
     sched::record_exit(p, static_cast<long>(esr));
     sched::mark_current_dead(true);
+    return false;
 }
 
 // Keep steady-state IPC outside the large cold control/VM dispatch body.
@@ -447,7 +458,7 @@ static SysResult ipc_dispatch_hot(Process* p, u64 nr, u64 a0, u64 a1, u64 a2, u6
             return copy_to_user(ua, a2, &info, sizeof(info)) ? ok(sizeof(info)) : err(E_FAULT);
         }
         case MX_DIAG_HEALTH: {
-            if (a1 || a3 < sizeof(MxDiagHealth))
+            if (a3 < sizeof(MxDiagHealth))
                 return err(E_INVALID);
             MxDiagHealth info{};
             info.version = MX_DIAG_VERSION;
@@ -648,6 +659,13 @@ static SysResult ipc_dispatch_hot(Process* p, u64 nr, u64 a0, u64 a1, u64 a2, u6
                 capture(anne::gpu::kBase + anne::gpu::kRegMemFeatures, info.mem_features, 1);
                 capture(anne::gpu::kBase + anne::gpu::kRegMmuFeatures, info.mmu_features, 2);
                 capture(anne::gpu::kBase + anne::gpu::kRegAsPresent, info.as_present, 3);
+                // Panfrost GPU/JOB/MMU raw IRQ, mask/status, slot status and AS0
+                // fault registers. These reads do not acknowledge interrupts.
+                constexpr u32 offsets[] = {0x20, 0x28, 0x2c, 0x1000, 0x1008, 0x100c,
+                    0x2000, 0x2008, 0x200c, 0x1824, 0x18a4, 0x1924,
+                    0x241c, 0x2420, 0x2424, 0x2428};
+                for (u32 i = 0; i < 16; ++i)
+                    capture(anne::gpu::kBase + offsets[i], info.status_words[i], 6 + i);
                 // Pinned Hi6250 soc_pctrl_interface.h: read-only capture of
                 // GPU master IDs and the integration security-override bit.
                 capture(anne::gpu::kPctrlBase + anne::gpu::kPctrlGpuMasterIds, info.pctrl_ctrl8,
@@ -1970,7 +1988,9 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u6
         (nr >= SYS_WAIT_RING && nr <= SYS_REPLY_WAIT)) {
         return ipc_dispatch_hot(p, nr, a0, a1, a2, a3, a4, a5);
     }
-    return syscall_dispatch_cold(p, nr, a0, a1, a2, a3, a4, a5);
+    const auto result = syscall_dispatch_cold(p, nr, a0, a1, a2, a3, a4, a5);
+    (void)amm::reclaim(4);
+    return result;
 }
 
 [[gnu::noinline]] static SysResult syscall_dispatch_cold(Process* p, u64 nr, u64 a0, u64 a1, u64 a2,
@@ -2018,6 +2038,12 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u6
         if (!principal_from_id(a2, &principal)) {
             return err(E_INVALID);
         }
+        // Delegated spawn authority does not remove the caller's sandbox.
+        if (principal == PRINCIPAL_NATIVE_TRUSTED &&
+            p->principal_class != PRINCIPAL_NATIVE_TRUSTED &&
+            p->principal_class != PRINCIPAL_KERNEL) {
+            return err(E_PERM);
+        }
 
         cap::Ref supervisor_e =
             cap::lookup(*p->cap_table, static_cast<CapHandle>(a3), CAP_SUPERVISOR);
@@ -2038,10 +2064,35 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u6
             return err(E_OVERFLOW);
         }
 
+        // The loader reads the image more than once while validating segments
+        // and applying relocations. Keep those reads off a mutable userspace
+        // mapping: another thread may unmap or replace the source after the
+        // initial range check. vm_copy_from_user holds the page-table lock for
+        // the full snapshot, so the loader sees one stable kernel-owned copy.
+        u64 rounded_image_size = 0;
+        if (__builtin_add_overflow(a1, static_cast<u64>(PAGE_SIZE - 1),
+                                   &rounded_image_size)) {
+            return err(E_INVALID);
+        }
+        const usize image_pages = static_cast<usize>(rounded_image_size / PAGE_SIZE);
+        const u64 caller_identity = sched::process_identity(*p);
+        const PhysAddr image_snapshot =
+            mm::alloc_pages_contiguous_for_identity(caller_identity, image_pages);
+        if (!image_snapshot) {
+            return err(E_NOMEM);
+        }
+        if (!mm::vm_copy_from_user(ua.space, reinterpret_cast<void*>(image_snapshot), a0, a1)) {
+            for (usize i = 0; i < image_pages; ++i)
+                mm::free_page_for_identity(caller_identity, image_snapshot + i * PAGE_SIZE);
+            return err(E_FAULT);
+        }
+
         Thread* main_thread = nullptr;
         Process* child = kernel::init::spawn_image(
-            reinterpret_cast<const void*>(a0), static_cast<usize>(a1), principal, supervisor->pid,
-            static_cast<u32>(a4), &main_thread);
+            reinterpret_cast<const void*>(image_snapshot), static_cast<usize>(a1), principal,
+            supervisor->pid, static_cast<u32>(a4), &main_thread);
+        for (usize i = 0; i < image_pages; ++i)
+            mm::free_page_for_identity(caller_identity, image_snapshot + i * PAGE_SIZE);
         if (!child) {
             return err(E_NOMEM);
         }
@@ -2144,18 +2195,15 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u6
             if (size == 0) {
                 return err(E_INVALID);
             }
-            u32 arena_idx = 0;
-            if (!p->arena_table ||
-                !mm::arena_register(*p->arena_table, static_cast<VirtAddr>(a1), ring->phys_base,
-                                    size, p->pid, RIGHT_READ | RIGHT_WRITE, 0, &arena_idx)) {
-                return err(E_OVERFLOW);
-            }
-            if (!map_object(*p, a1, ring->phys_base, size, map_rights, false)) {
-                mm::arena_unregister(*p->arena_table, arena_idx);
-                return err(E_INVALID);
-            }
-            mm::arena_retain_mapping(*p->arena_table, a1, e->object);
-            return ok(E_OK);
+            if (!p->arena_table) return err(E_NOMEM);
+            Arena metadata{};
+            metadata.phys_base = ring->phys_base;
+            metadata.size = size;
+            metadata.owner_pid = p->pid;
+            metadata.rights = RIGHT_READ | RIGHT_WRITE;
+            const auto result = amm::map_shared_wired(sched::process_identity(*p),
+                VmSpace{p->ttbr0, p->pid}, *p->arena_table, metadata, e->object, a1, map_rights);
+            return result == E_OK ? ok() : err(result);
         }
         if (e->type_tag == CAP_PAGE) {
             auto* mem = static_cast<MemoryObject*>(e->target);
@@ -2175,114 +2223,145 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u6
             if (!arena) {
                 return err(E_NOTFOUND);
             }
+            if (arena->managed) {
+                const auto result = amm::map(*arena, e->object, VmSpace{p->ttbr0, p->pid}, a1,
+                                             map_rights, sched::process_identity(*p));
+                return result == E_OK ? ok() : err(result);
+            }
             if (!arena->phys_base) {
                 return err(E_INVALID);
             }
-            bool claimed_now = false;
-            if (!mm::arena_claim_va(*p->arena_table, *arena, static_cast<VirtAddr>(a1), arena->size,
-                                    &claimed_now)) {
-                return err(E_OVERFLOW);
-            }
-            if (!map_object(*p, a1, arena->phys_base, arena->size, map_rights, false)) {
-                if (claimed_now) {
-                    mm::arena_release_va(*p->arena_table, *arena, static_cast<VirtAddr>(a1));
-                }
-                return err(E_INVALID);
-            }
-            mm::arena_retain_mapping(*p->arena_table, a1, e->object);
-            return ok(E_OK);
+            if (!p->arena_table) return err(E_NOMEM);
+            const auto result = amm::map_shared_wired(sched::process_identity(*p),
+                VmSpace{p->ttbr0, p->pid}, *p->arena_table, *arena, e->object, a1, map_rights);
+            return result == E_OK ? ok() : err(result);
         }
         return err(E_BADTYPE);
     }
 
     case SYS_UNMAP_PAGE: {
-        if (a0 == 0 || (a0 & (PAGE_SIZE - 1)) != 0) {
+        // Never let a user request reach privileged TTBR0 identity subtrees or
+        // alias a high-half index into this process's lower translation root.
+        if (a0 < kUserCopyMin || a0 > kUserCopyMax - PAGE_SIZE || (a0 & (PAGE_SIZE - 1)))
             return err(E_INVALID);
-        }
         VmSpace space{};
         space.pgd_phys = p->ttbr0;
         space.pid = p->pid;
-        mm::vm_unmap(space, a0);
-        mm::arena_unmap_page(*p->arena_table, a0);
+        const auto managed = amm::unmap_page(space, a0);
+        if (managed != E_NOTFOUND) return managed == E_OK ? ok() : err(managed);
+        const auto wired = amm::unmap_wired(space, a0, p->arena_table);
+        if (wired != E_OK) return err(wired);
         return ok(E_OK);
     }
 
-    case SYS_ARENA_CREATE: {
-        if (!p->arena_table) {
-            return err(E_NOMEM);
-        }
-        const u64 size = a0;
-        if (size == 0) {
-            return err(E_INVALID);
-        }
-        u64 rounded_size = 0;
-        if (__builtin_add_overflow(size, static_cast<u64>(PAGE_SIZE - 1), &rounded_size)) {
-            return err(E_INVALID);
-        }
-        rounded_size &= ~(static_cast<u64>(PAGE_SIZE - 1));
-
-        const usize pages = static_cast<usize>(rounded_size / PAGE_SIZE);
-        if (pages == 0 || pages > kMaxArenaPages) {
-            return err(E_INVALID);
-        }
-
-        const PhysAddr base = mm::alloc_pages_contiguous_for(p->pid, pages);
-        if (!base) {
-            return err(E_NOMEM);
-        }
-        auto* arena = static_cast<Arena*>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
-        if (!arena) {
-            for (usize j = 0; j < pages; ++j) {
-                mm::free_page_for(p->pid, base + j * PAGE_SIZE);
+    case SYS_ARENA_CONTROL: {
+        const auto operation = static_cast<MxArenaOperation>(a0);
+        const auto ua = user_access_for(p);
+        if (operation == MX_ARENA_PROCESS) {
+            if (a1 || !p->primary_arena) return err(E_POLICY);
+            if (a2) {
+                if (a3 != sizeof(MxArenaCreate)) return err(E_INVALID);
+                const auto contract = amm::configuration(*p->primary_arena);
+                if (!copy_to_user(ua, a2, &contract, sizeof(contract))) return err(E_FAULT);
             }
-            return err(E_NOMEM);
+            const auto handle = cap::alloc(*p->cap_table, CAP_ARENA, p->primary_arena,
+                RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
+            return handle ? ok(static_cast<long>(handle)) : err(E_OVERFLOW);
         }
-        *arena = {};
-        arena->phys_base = base;
-        arena->size = rounded_size;
-        arena->owner_pid = p->pid;
-        arena->owner_generation = p->generation;
-        arena->rights = RIGHT_READ | RIGHT_WRITE;
-        // User flags cannot request exposure of physical addresses or ownership.
-        arena->flags = kArenaFlagOwnsPages;
-        auto* root = object::create(arena, mm::destroy_arena);
-        if (!root) {
-            mm::destroy_arena(arena);
-            return err(E_NOMEM);
+        if (operation == MX_ARENA_NEW || operation == MX_ARENA_CLONE) {
+            Arena* arena = nullptr;
+            SysError result;
+            if (operation == MX_ARENA_NEW) {
+                MxArenaCreate request{};
+                if (a1 || a3 != sizeof(request)) return err(E_INVALID);
+                if (!copy_from_user(ua, &request, a2, sizeof(request))) return err(E_FAULT);
+                result = amm::create(p->pid, p->generation, request, &arena, VmSpace{p->ttbr0, p->pid});
+            } else {
+                auto source = cap::lookup(*p->cap_table, a1, CAP_ARENA);
+                if (!source) return err(E_NOTFOUND);
+                if (!has_rights(source, RIGHT_READ)) return err(E_PERM);
+                result = amm::clone(*static_cast<Arena*>(source->target), p->pid, p->generation,
+                                    &arena, VmSpace{p->ttbr0, p->pid});
+            }
+            if (result != E_OK) return err(result);
+            auto* record = object::create(arena, amm::destroy);
+            if (!record) { amm::destroy(arena); return err(E_NOMEM); }
+            const auto handle = cap::alloc(*p->cap_table, CAP_ARENA, arena,
+                RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
+            object::release(record);
+            return handle ? ok(static_cast<long>(handle)) : err(E_OVERFLOW);
         }
-        const CapHandle handle =
-            cap::alloc(*p->cap_table, CAP_ARENA, arena,
-                       RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
-        object::release(root);
+        auto reference = cap::lookup(*p->cap_table, a1, CAP_ARENA);
+        if (!reference) return err(E_NOTFOUND);
+        auto* arena = static_cast<Arena*>(reference->target);
+        if (!arena || !arena->managed) return err(E_BADTYPE);
+        if (operation == MX_ARENA_INSPECT) {
+            if (!has_rights(reference, RIGHT_READ)) return err(E_PERM);
+            if (a3 != sizeof(MxArenaInfo)) return err(E_INVALID);
+            const auto info = amm::inspect(*arena);
+            return copy_to_user(ua, a2, &info, sizeof(info)) ? ok() : err(E_FAULT);
+        }
+        if (operation == MX_ARENA_UNMAP) {
+            if (!has_rights(reference, RIGHT_MAP)) return err(E_PERM);
+            const auto result = amm::unmap(*arena, VmSpace{p->ttbr0, p->pid}, a2);
+            return result == E_OK ? ok() : err(result);
+        }
+        if (!has_rights(reference, RIGHT_REGISTER) || arena->owner_pid != p->pid ||
+            arena->owner_generation != p->generation) return err(E_PERM);
+        SysError result = E_INVALID;
+        switch (operation) {
+        case MX_ARENA_RESIZE: result = amm::resize(*arena, a2); break;
+        case MX_ARENA_RESERVE: result = amm::reserve(*arena, a2); break;
+        case MX_ARENA_TRIM: result = amm::trim(*arena, a2); break;
+        case MX_ARENA_REALLOC:
+            result = amm::realloc(*arena, VmSpace{p->ttbr0, p->pid}, a2, a3, a4); break;
+        case MX_ARENA_REORDER: {
+            u32 order[kMaxUserArenaPages];
+            if (!a3 || a3 > kMaxUserArenaPages) return err(E_INVALID);
+            if (!copy_from_user(ua, order, a2, a3 * sizeof(u32))) return err(E_FAULT);
+            result = amm::reorder(*arena, order, a3); break;
+        }
+        case MX_ARENA_PRECOPY: result = amm::precopy(*arena); break;
+        case MX_ARENA_COMMIT: result = amm::commit(*arena); break;
+        case MX_ARENA_CANCEL: result = amm::cancel(*arena); break;
+        case MX_ARENA_PIN: result = amm::pin(*arena, a2); break;
+        case MX_ARENA_UNPIN: result = amm::unpin(*arena, a2); break;
+        case MX_ARENA_POLICY:
+            if (a2 > ~u32{0}) return err(E_INVALID);
+            result = amm::policy(*arena, static_cast<u32>(a2)); break;
+        default: break;
+        }
+        return result == E_OK ? ok() : err(result);
+    }
+
+    case SYS_ARENA_CREATE: {
+        // Legacy syscall number, enforced managed semantics. No caller flag can
+        // request a wired page set, kernel ownership, or a physical address.
+        if (a1 || !a0 || a0 > kMaxArenaPages * PAGE_SIZE) return err(E_INVALID);
+        const MxArenaCreate request{a0, a0, kUserCopyMin, kUserCopyMax - kUserCopyMin,
+                                    0, MX_ARENA_COMPACT_IDLE, 0};
+        Arena* arena = nullptr;
+        const auto result = amm::create(p->pid, p->generation, request, &arena,
+                                         VmSpace{p->ttbr0, p->pid});
+        if (result != E_OK) return err(result);
+        auto* record = object::create(arena, amm::destroy);
+        if (!record) { amm::destroy(arena); return err(E_NOMEM); }
+        const auto handle = cap::alloc(*p->cap_table, CAP_ARENA, arena,
+            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
+        object::release(record);
         return handle ? ok(static_cast<long>(handle)) : err(E_OVERFLOW);
     }
 
     case SYS_ARENA_REGISTER: {
-        if (!p->arena_table || !a0 || !a1 || (a0 | a1) & (PAGE_SIZE - 1)) {
-            return err(E_INVALID);
-        }
-        VmSpace space{p->ttbr0, p->pid};
-        if (!mm::user_range_mapped(space, a0, a1, RIGHT_READ | RIGHT_WRITE)) {
-            return err(E_INVALID);
-        }
-        auto* arena = static_cast<Arena*>(mm::slab_alloc(sizeof(Arena), alignof(Arena)));
-        if (!arena) {
-            return err(E_NOMEM);
-        }
-        *arena = {};
-        arena->base_va = a0;
-        arena->size = a1;
-        arena->owner_pid = p->pid;
-        arena->owner_generation = p->generation;
-        arena->rights = RIGHT_READ | RIGHT_WRITE;
-        auto* root = object::create(arena, mm::destroy_arena);
-        if (!root) {
-            mm::destroy_arena(arena);
-            return err(E_NOMEM);
-        }
-        const CapHandle handle = cap::alloc(*p->cap_table, CAP_ARENA, arena,
-                                            RIGHT_READ | RIGHT_WRITE | RIGHT_REGISTER | RIGHT_DUP);
-        object::release(root);
+        if (a2 || !a0 || !a1 || ((a0 | a1) & (PAGE_SIZE - 1))) return err(E_INVALID);
+        Arena* arena = nullptr;
+        object::Record* creator = nullptr;
+        const auto result = amm::adopt(p->pid, p->generation, VmSpace{p->ttbr0, p->pid},
+                                       a0, a1, &arena, &creator);
+        if (result != E_OK) return err(result);
+        const auto handle = cap::alloc(*p->cap_table, CAP_ARENA, arena,
+            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP | RIGHT_REGISTER | RIGHT_DUP);
+        object::release(creator);
         return handle ? ok(static_cast<long>(handle)) : err(E_OVERFLOW);
     }
 
@@ -2549,8 +2628,9 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u6
         VmSpace space{};
         space.pgd_phys = target_proc->ttbr0;
         space.pid = target_proc->pid;
-        const VirtAddr stack_base = USER_STACK_TOP - (static_cast<VirtAddr>(slot + 1) * PAGE_SIZE);
-        if (!mm::vm_map_owned(space, stack_base, stack, RIGHT_READ | RIGHT_WRITE)) {
+        const VirtAddr stack_base = USER_STACK_TOP - (static_cast<VirtAddr>(slot + 1 + target_proc->stack_aslr_pages) * PAGE_SIZE);
+        if (!amm::map_wired(sched::process_identity(*target_proc), space, stack_base, stack,
+                             PAGE_SIZE, RIGHT_READ | RIGHT_WRITE, false, true)) {
             mm::free_page_for(target_proc->pid, stack);
             return err(E_INVALID);
         }
@@ -2900,15 +2980,26 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u6
         if (!user_range_ok(ua, a0, len)) {
             return err(E_FAULT);
         }
-        const char* s = reinterpret_cast<const char*>(a0);
         syscall_metric_inc(local_syscall_metrics().debug_puts);
+        // Never consume a userspace pointer after validation. A sibling
+        // thread can change the mapping between the range check and the
+        // logging operation, so copy each bounded chunk through the guarded
+        // user-copy path before passing it to the backend.
+        char chunk[128];
+        for (u64 offset = 0; offset < len;) {
+            const u64 count = (len - offset < sizeof(chunk)) ? len - offset : sizeof(chunk);
+            if (!copy_from_user(ua, chunk, a0 + offset, count)) {
+                return err(E_FAULT);
+            }
 #ifdef ANKO_BOARD_HUAWEI_ANNE
-        anne::boot_log_write(s, len);
+            anne::boot_log_write(chunk, count);
 #else
-        for (u64 i = 0; i < len; ++i) {
-            libk::putchar(s[i]);
-        }
+            for (u64 i = 0; i < count; ++i) {
+                libk::putchar(chunk[i]);
+            }
 #endif
+            offset += count;
+        }
         return ok(E_OK);
     }
 
@@ -3049,6 +3140,16 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u6
         return err(vm::device_destroy(*p, static_cast<CapHandle>(a0)));
 
     case SYS_DEBUG_READ:
+        // Health's index may carry an explicitly delegated read-only observer
+        // capability. No other diagnostic becomes available to sandboxed apps.
+        if (p->principal_class != PRINCIPAL_NATIVE_TRUSTED &&
+            p->principal_class != PRINCIPAL_KERNEL) {
+            if (a0 != MX_DIAG_HEALTH || !platform::can_observe_health(*p->cap_table, a1))
+                return err(E_PERM);
+        } else if (a0 == MX_DIAG_HEALTH && a1 &&
+                   !platform::can_observe_health(*p->cap_table, a1)) {
+            return err(E_PERM);
+        }
         return debug_read(ua, a0, a1, a2, a3);
 
     case SYS_DEBUG_COUNTERS:
@@ -3279,8 +3380,8 @@ extern "C" SysResult syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u6
                 return err(E_NOTFOUND);
             }
             info.base = (arena->flags & kArenaFlagExposePhys) ? arena->phys_base : arena->base_va;
-            info.size = arena->size;
-            info.attr = mm::range_is_noncached(arena->phys_base, arena->size)
+            info.size = arena->managed ? amm::inspect(*arena).size : arena->size;
+            info.attr = mm::range_is_noncached(arena->phys_base, info.size)
                             ? MX_ARENA_MEMORY_NONCACHEABLE
                             : MX_ARENA_MEMORY_WRITE_BACK;
             info.flags = arena->flags & ~(kArenaFlagExposePhys | kArenaFlagOwnsPages);

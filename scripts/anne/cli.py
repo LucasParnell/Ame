@@ -280,6 +280,8 @@ def run(args, package=None):
                '--expect-sha256', hashlib.sha256(image).hexdigest()]
     if args.backup:
         command.append('--backup')
+    if args.skip_readback:
+        command.append('--skip-readback')
     execute(command)
 
 
@@ -313,6 +315,7 @@ def parser():
         command.add_argument('--serial', help='require this handset serial after BootROM upload')
         command.add_argument('--wait', type=nonnegative, default=0, help='BootROM wait in seconds; 0 waits until it appears')
         command.add_argument('--backup', action='store_true', help='also save the kernel being replaced')
+        command.add_argument('--skip-readback', action='store_true', help='skip kernel readback after flashing')
 
     for name, help_text in [('build', 'build all Huawei components and package; no phone access'),
                             ('run', 'flash and boot the recorded build through BootROM; no building'),

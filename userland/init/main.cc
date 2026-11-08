@@ -447,6 +447,17 @@ static bool spawn_service(ServiceSpec &spec, uint32_t flags) {
     }
     SysPair spawned = sys_spawn(spec.image_data, spec.image_size, principal_id(spec.principal),
                                 kCapSupervisor, flags, spec.name);
+    if (spawned.value <= 0 || spawned.detail <= 0) {
+        constexpr char prefix[] = "init: unable to create service ";
+        sys_debug_puts(prefix, sizeof(prefix) - 1); sys_debug_puts(spec.name, slen(spec.name));
+        constexpr char label[] = " (status "; sys_debug_puts(label, sizeof(label) - 1);
+        const auto error = spawned.value <= 0 ? spawned.value : spawned.detail;
+        char number[24]; unsigned end = sizeof(number), at = end;
+        uint64_t value = error < 0 ? 0 - uint64_t(error) : uint64_t(error);
+        do { number[--at] = '0' + value % 10; value /= 10; } while (value);
+        if (error < 0) number[--at] = '-';
+        sys_debug_puts(number + at, end - at); sys_debug_puts(")\n", 2);
+    }
     spec.proc = as_cap(spawned.value);
     spec.main_thread = as_cap(spawned.detail);
     MxCapInfo info{};

@@ -52,7 +52,7 @@ void zero_bytes(void* p, usize n) {
 }
 
 void destroy_test_doorbell(void* target) {
-    mm::slab_free(target, sizeof(Doorbell), alignof(Doorbell));
+    mm::deallocate<Doorbell>(target);
 }
 
 // Release a slot's shared body. Caller holds g_lock; the doorbell reference is
@@ -240,7 +240,7 @@ u64 run_selftest() {
     constexpr u32 kTestIrq = 100; // spare SPI, wired to nothing on either board
     u64 status = 2;
     if (irq_bindable(kTestIrq)) {
-        auto* db = static_cast<Doorbell*>(mm::slab_alloc(sizeof(Doorbell), alignof(Doorbell)));
+        auto* db = static_cast<Doorbell*>(mm::allocate<Doorbell>());
         if (db) {
             zero_bytes(db, sizeof(*db));
             object::Record* rec = object::create(db, &destroy_test_doorbell);
@@ -266,7 +266,7 @@ u64 run_selftest() {
                 }
                 object::release(rec);
             } else {
-                mm::slab_free(db, sizeof(Doorbell), alignof(Doorbell));
+                mm::deallocate<Doorbell>(db);
             }
         }
     }

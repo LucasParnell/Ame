@@ -12,6 +12,7 @@
 #include "midix/abi/status.h"
 #include "midix/abi/cap.h"
 #include "midix/abi/syscall.h"
+#include "midix/abi/arena.h"
 
 using CapHandle = mx_handle_t;
 constexpr CapHandle kNullCap = MX_NULL_HANDLE;
@@ -175,9 +176,18 @@ static inline int64_t sys_map_page(CapHandle cap, uint64_t va, uint32_t rights) 
     return _svc3(NR_MAP_PAGE, cap, va, rights);
 }
 static inline int64_t sys_unmap_page(uint64_t va) {
-    return _svc1(NR_UNMAP_PAGE, va);
+    // Managed unmap waits for remote kernel readers to leave the old mapping.
+    // Yield between bounded rendezvous attempts so remote faults can finish.
+    int64_t result;
+    for (unsigned attempt = 0; attempt < 64; ++attempt) {
+        result = _svc1(NR_UNMAP_PAGE, va);
+        if (result != MX_ERR_BUSY) return result;
+        (void)_svc1(NR_YIELD, 0);
+    }
+    return result;
 }
 static inline int64_t sys_arena_create(uint64_t size, uint32_t flags) {
+    if (flags || !size) return MX_ERR_INVALID;
     return _svc2(NR_ARENA_CREATE, size, flags);
 }
 static inline int64_t sys_arena_register(uint64_t base, uint64_t size, uint32_t flags) {

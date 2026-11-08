@@ -130,6 +130,7 @@ static bool bind_thread_to_context(Thread* t, SchedContext* ctx) {
     kernel::LockGuard life(*reinterpret_cast<kernel::SpinLock*>(&t->lifecycle_lock));
     if (__atomic_load_n(&t->execution_cpu, __ATOMIC_ACQUIRE) != kInvalidCpu ||
         t->terminate_requested) return false;
+    if (__atomic_load_n(&t->reply_target, __ATOMIC_ACQUIRE)) return false;
     const ThreadState state = t->state;
     if (state == TS_DEAD || state == TS_RUNNING || state == TS_RUNNABLE_PENDING_REMOTE ||
         state == TS_RUNNABLE_QUEUED || t->on_runqueue) return false;

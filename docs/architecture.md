@@ -160,7 +160,13 @@ shared arenas have explicit bounds, permissions and retained owners. Mapping
 failure unwinds partial mappings. Address-space activation uses ASIDs; ordinary
 activation avoids a global TLB flush, while ASID reuse performs invalidation.
 
-Arenas are explicit shared/pinned page sets with capability-mediated mapping.
+Each native principal receives a manifest-defined private managed arena before
+its first instruction. Libmochi normal allocation uses that arena; sharing and
+physical device access require explicit capabilities.
+The [Arena Migration Manager](arena-migration.md) provides managed arena identities,
+reserved capacity, mapping-based resize/realloc/reorder, COW clones and live
+backing replacement. Wired device arenas remain pinned. Managed migration uses
+write faults, a CPU rendezvous, broadcast ASID invalidation and fenced retirement.
 CPU memory attributes matter: a write-back CPU arena cannot become safe for a
 noncoherent DMA engine merely by adding an ordering barrier. Normal-NC DMA arenas,
 cache maintenance, device completion and lifetime retention serve different

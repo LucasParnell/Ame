@@ -96,7 +96,8 @@ constexpr u32 dma_class_perms(VmDmaClass cls) {
 struct PageOwnership {
     u64 object;
     VmDmaClass dma_class;
-    u8 pad[7];
+    u8 pad[3];
+    u32 perms; // per-object DmaPerm ceiling, further bounded by dma_class
 };
 static_assert(sizeof(PageOwnership) == 16);
 

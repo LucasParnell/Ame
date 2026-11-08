@@ -11,14 +11,15 @@ import mxpack
 build = Path(sys.argv[1]).resolve()
 manifest = json.loads((build / 'manifest.json').read_text())
 terminal = '--terminal' in sys.argv[2:]
+packages = '--packages' in sys.argv[2:]
 for service in manifest['services']:
     if service['name'] == 'msh' and not terminal:
-        service['object'] = 'test.app_system'
-        service['sha256'] = hashlib.sha256((build / 'userland/test.app_system.mxi').read_bytes()).hexdigest()
+        service['object'] = 'test.app_package_system' if packages else 'test.app_system'
+        service['sha256'] = hashlib.sha256((build / ('userland/' + service['object'] + '.mxi')).read_bytes()).hexdigest()
         service['start_after'] = ['io.fs', 'dev.apps']
         service['bindings'] = []
         service['restart'] = 'never'
-name = 'app-terminal' if terminal else 'app-system'
+name = 'app-terminal' if terminal else ('app-package-system' if packages else 'app-system')
 if terminal:
     manifest['services'].append({
         'name': 'test.app_terminal', 'object': 'test.app_terminal', 'bundle': 'system',

@@ -155,28 +155,44 @@ u64 refs_of(Record* record) {
 }
 } // namespace object
 
+// The attachment probe models the external lease boundary. AMM's generation,
+// coherency, COW and failed-fence mechanics run in the production AMM probe.
+namespace amm {
+static u32 external_leases;
+SysError pin_external(Arena& arena, ExternalPin& pin, SysError (*fence)(void*), void* context) {
+    assert(arena.managed && !pin.arena);
+    pin = {&arena, object::acquire(&arena), 1, arena.phys_base, arena.size, fence, context, false, true};
+    ++external_leases; return E_OK;
+}
+SysError prepare_dma(ExternalPin& pin, bool coherent) {
+    assert(pin.arena); pin.dma = true; pin.coherent = coherent; return E_OK;
+}
+SysError unpin_external(ExternalPin& pin) {
+    if (pin.fence(pin.context) != E_OK) return E_BUSY;
+    assert(external_leases); --external_leases;
+    auto* record = pin.lifetime; pin = {}; object::release(record); return E_OK;
+}
+}
+
 // --- vm / cap stubs for the capability-facing wrappers ----------------------
 namespace vm {
 void metric_inc(VmDebugCounter) {
 }
 void note_error() {
 }
-cap::Ref require_cap(Process&, CapHandle, CapType, u32, SysError*) {
-    return cap::Ref(nullptr);
-}
-cap::Borrow<Vm> vm_from_cap(Process&, CapHandle, u32, SysError* out_error) {
-    if (out_error) {
-        *out_error = E_DEAD;
+cap::Ref require_cap(Process& caller, CapHandle handle, CapType type, u32 rights, SysError* error) {
+    auto entry = cap::lookup(*caller.cap_table, handle, type);
+    if (!entry || (entry->rights_mask & rights) != rights) {
+        if (error) *error = entry ? E_PERM : E_NOTFOUND;
+        return nullptr;
     }
-    return cap::Borrow<Vm>(nullptr);
+    if (error) *error = E_OK;
+    return entry;
+}
+cap::Borrow<Vm> vm_from_cap(Process& caller, CapHandle handle, u32 rights, SysError* error) {
+    return cap::Borrow<Vm>(require_cap(caller, handle, CAP_VM, rights, error));
 }
 } // namespace vm
-
-namespace cap {
-CapHandle alloc(CapTable&, CapType, void*, u32) {
-    return kNullCap;
-}
-} // namespace cap
 
 // --- fixtures ---------------------------------------------------------------
 namespace {
@@ -341,10 +357,14 @@ int main() {
         assert(vm::shared_arena_dma_query(ds, ds->host_phys_base, &own));
         assert(own.object == ds->object_tag && own.dma_class == iommu::VmDmaClass::SharedGpu);
 
-        // Now it maps, as a homogeneous SharedGpu range.
-        assert(iommu::domain_map_batch(*domain, &map, 1) == E_OK);
+        // A SharedGpu class does not grant more access than registration.
+        assert(iommu::domain_map_batch(*domain, &map, 1) == E_PERM);
+        assert(iommu::domain_pinned_pages(*domain) == 0);
+        const auto read_map = make_map(map.iova, map.pa, map.length,
+                                       static_cast<u32>(iommu::DmaPerm::Read));
+        assert(iommu::domain_map_batch(*domain, &read_map, 1) == E_OK);
         assert(iommu::domain_pinned_pages(*domain) == ds->size / kPage);
-        assert(iommu::domain_unmap_batch(*domain, &map, 1) == E_OK);
+        assert(iommu::domain_unmap_batch(*domain, &read_map, 1) == E_OK);
         iommu::domain_destroy(domain);
 
         // An unrelated domain may not reach the region even once registered.
@@ -439,6 +459,64 @@ int main() {
         destroy_vm(cv);
     }
 
+    // A managed attachment cannot lose its generation pin while a running
+    // guest still owns its translation, even if its last capability is revoked.
+    {
+        VmFixture mv = make_vm(16);
+        ArenaFixture mf = make_arena(2);
+        mf.arena.managed = reinterpret_cast<amm::Backing*>(1);
+        SharedArena* managed = nullptr;
+        assert(shared_arena_create(mv.vm, &mf.arena, mf.record, 0x52000000, mf.arena.size,
+                                    kRw, 0, &managed) == E_OK);
+        assert(amm::external_leases == 1 && managed->external_pin.arena == &mf.arena);
+        assert(shared_arena_register_dma(managed, kRwDma) == E_OK && managed->external_pin.dma);
+        mv.vm->stage2.active = true;
+        object::release(managed->lifetime);
+        assert(managed->quarantined && !managed->lifetime && amm::external_leases == 1);
+        mv.vm->stage2.active = false; mv.vm->state = VM_DEAD;
+        stage2_destroy(&mv.vm->stage2);
+        shared_arena_release_for_vm(mv.vm);
+        assert(!amm::external_leases && !mv.vm->shared_arena_count);
+        destroy_arena(mf); destroy_vm(mv);
+    }
+    // Capability-facing attach must preserve attenuation independently of the
+    // backing object's maximum rights. A read-only loan cannot be made writable
+    // through guest stage 2 or by registering write access for a DMA device.
+    {
+        auto target = make_vm(27);
+        auto source = make_arena(1);
+        CapTable table{};
+        Process caller{};
+        caller.cap_table = &table;
+        const auto vm_cap = cap::alloc(table, CAP_VM, target.vm, RIGHT_VM_CONTROL);
+        const auto arena_cap = cap::alloc(table, CAP_ARENA, &source.arena, RIGHT_READ | RIGHT_MAP);
+        const auto map_only = cap::alloc(table, CAP_ARENA, &source.arena, RIGHT_MAP);
+        assert(vm_cap && arena_cap && map_only);
+        const auto count = object::live_count();
+        const auto arena_refs = object::refs_of(source.record);
+        SysError error = E_OK;
+        assert(!attach_shared_memory(caller, vm_cap, arena_cap, 0x53000000,
+                                      source.arena.size, kRw, 0, &error));
+        assert(error == E_PERM && !target.vm->shared_arena_count);
+        assert(!attach_shared_memory(caller, vm_cap, map_only, 0x53000000,
+                                      source.arena.size, RIGHT_READ, 0, &error));
+        assert(error == E_PERM && !target.vm->shared_arena_count);
+        assert(object::live_count() == count && object::refs_of(source.record) == arena_refs);
+        const auto attached = attach_shared_memory(caller, vm_cap, arena_cap, 0x53000000,
+                                                    source.arena.size, RIGHT_READ, 0, &error);
+        assert(attached && error == E_OK && target.vm->shared_arena_count == 1);
+        auto* region = target.vm->shared_arenas[0];
+        assert(region->rights == RIGHT_READ);
+        assert(register_shared_memory_dma(caller, attached, kRwDma) == E_PERM);
+        assert(region->dma_class == iommu::DmaClass::None && !region->dma_perms);
+        assert(register_shared_memory_dma(caller, attached,
+                   static_cast<u32>(iommu::DmaPerm::Read)) == E_OK);
+        assert(register_shared_memory_dma(caller, attached, kRwDma) == E_PERM);
+        cap::close(table);
+        assert(!target.vm->shared_arena_count);
+        destroy_arena(source);
+        destroy_vm(target);
+    }
     destroy_vm(base);
 
     assert(g_mm_pages.empty() && "stage-2 page-table pages leaked");

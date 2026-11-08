@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts/mx'))
 import mxpack
 import signing
+import mxld
 
 class Formats(unittest.TestCase):
     @classmethod
@@ -49,6 +50,27 @@ class Formats(unittest.TestCase):
         mxpack.build_bundle(bundle, manifest, ['exec:init:'+str(image)], 'manifest.json')
         return bytearray(bundle.read_bytes())
     def crc(self, b): struct.pack_into('<I', b, 64, mxpack.crc32c_with_zeroed_field(b, 64, 4))
+    def test_manifest_arena_is_embedded_checked_and_not_substitutable(self):
+        ident = b'\x7fELF' + bytes([2, 1, 1]) + bytes(9)
+        executable = bytearray(4100)
+        struct.pack_into('<16sHHIQQQIHHHHHH', executable, 0, ident, 2, 183, 1,
+                         0x14000000, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+        struct.pack_into('<IIQQQQQQ', executable, 64, 1, 5, 4096, 0x14000000, 0, 4, 4096, 4096)
+        executable[4096:] = bytes.fromhex('00000014')
+        elf = self.work/'arena.elf'; elf.write_bytes(executable)
+        declaration = dict(mxld.DEFAULT_ARENA)
+        image = bytearray(mxld.build_mxi(elf, 'exec', 4096, declaration))
+        path = self.work/'arena.mxi'; path.write_bytes(image)
+        mxld.verify_arena_contract(path, declaration)
+        self.check_data('image', image, True)
+        for key, value in [('type', 2), ('initial', 4096), ('base', 0x39000000)]:
+            with self.assertRaises(ValueError): mxld.verify_arena_contract(path, {**declaration, key: value})
+        offset = struct.unpack_from('<Q', image, 120)[0]
+        for field, value in [(0, 0), (8, 4096), (16, 0x14000000), (24, 1048577), (32, 0)]:
+            bad = bytearray(image); struct.pack_into('<Q', bad, offset+field, value)
+            struct.pack_into('<I', bad, 112, mxld.crc32c_with_zeroed_field(bad, 112, 4))
+            self.check_data('image', bad, False)
+
     def test_signed_bundle(self): self.check_data('bundle', self.bundle(), True)
     def test_large_bundle_progress_preserves_authentication(self):
         manifest = self.work / 'progress-manifest.json'

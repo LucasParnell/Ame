@@ -18,6 +18,9 @@ using libk::metric_inc;
 static bool is_stealable(const Thread* t, u32 thief_cpu) {
     if (!t || __atomic_load_n(&t->terminate_requested, __ATOMIC_ACQUIRE)) return false;
     if (!t->on_runqueue || t->state != TS_RUNNABLE_QUEUED) return false;
+    // Reply links are owned by one CPU until reply/abort clears both peers.
+    // Migrating either peer would race saved-frame writes and peer teardown.
+    if (__atomic_load_n(&t->reply_target, __ATOMIC_ACQUIRE)) return false;
     if (!thread_budget_available(t)) return false;
     const SchedBand band = t->sched.sched_class;
     if (band == SCHED_BAND_RT_NATIVE || band == SCHED_BAND_LATENCY ||

@@ -15,6 +15,21 @@ class SystemDescriptor(unittest.TestCase):
         self.path = ROOT / 'userland/system.json'
         self.manifest = policy.load_profile(self.path, 'qemu-virt')
 
+    def test_status_health_grant_is_read_only_and_terminal_stays_sandboxed(self):
+        for profile in policy.read_descriptor(self.path)['profiles']:
+            with self.subTest(profile=profile):
+                manifest = policy.load_profile(self.path, profile)
+                for service in manifest['services']:
+                    if service['name'] == 'tty.fb0':
+                        self.assertEqual(service['principal'], 'native_sandboxed')
+                        grants = [b for b in service['bindings']
+                                  if b.get('boot') == 'health.observe']
+                        self.assertEqual(grants, [{'boot': 'health.observe',
+                            'name': 'health.observe', 'rights': ['read']}])
+                    else:
+                        self.assertFalse(any(b.get('boot') == 'health.observe'
+                                             for b in service['bindings']))
+
     def test_profiles_and_generated_compatibility_view(self):
         switch = policy.load_profile(self.path, 'switch-t210')
         self.assertEqual([s['name'] for s in switch['services']],
@@ -92,6 +107,17 @@ class SystemDescriptor(unittest.TestCase):
             bad = copy.deepcopy(self.manifest)
             next(c for c in bad['channels'] if c['name'] == arena['name'])['bytes'] = size
             self.assertTrue(policy.check_manifest(bad))
+
+    def test_every_principal_has_a_valid_arena(self):
+        for key, value in [("initial", 0), ("limit", 1048577), ("base", 3),
+                           ("type", 0), ("compact", 1), ("reserve", True)]:
+            bad = copy.deepcopy(self.manifest)
+            bad['services'][0]['arena'][key] = value
+            self.assertTrue(policy.check_manifest(bad))
+        bad = copy.deepcopy(self.manifest)
+        del bad['services'][0]['arena']
+        self.assertTrue(policy.check_manifest(bad))
+        self.assertEqual(policy.check_manifest(self.manifest), [])
 
     def test_cycle_rejected(self):
         self.manifest['services'][1]['start_after'] = ['nameservice']

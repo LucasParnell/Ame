@@ -62,5 +62,17 @@ int main() {
     check(no_storage.remaining() == 0);
     mochi::Arena wrap(reinterpret_cast<void*>(~mx_u64_t{0} - 7), 32);
     check(wrap.alloc(16, 1) == nullptr && wrap.used() == 0);
+    mochi::Arena reserved(region, 64, sizeof(region));
+    auto* tail = static_cast<unsigned char*>(reserved.alloc(16, 1));
+    tail[0] = 73;
+    check(reserved.realloc(tail, 16, 32, 1) == tail && reserved.used() == 32 && tail[0] == 73);
+    check(reserved.resize(128) && reserved.capacity() == sizeof(region));
+    check(!reserved.resize(16) && !reserved.resize(257));
+    auto* other = reserved.alloc(16, 1);
+    auto* replacement = static_cast<unsigned char*>(reserved.realloc(tail, 32, 48, 1));
+    check(replacement && replacement != tail && replacement[0] == 73 && other != nullptr);
+    const auto cursor = reserved.used();
+    check(reserved.realloc(replacement, 48, 257, 1) == nullptr && reserved.used() == cursor);
+    check(reserved.realloc(replacement, 48, 0, 1) == nullptr && reserved.used() == cursor - 48);
     return failures;
 }

@@ -5,6 +5,7 @@
 #include "midix/format/bundle.h"
 #include "midix/format/archive.h"
 #include "midix/format/json.h"
+#include "midix/format/image.h"
 #include "anko/fdt.h"
 static std::vector<unsigned char> read(const char* path) {
     std::ifstream f(path, std::ios::binary);
@@ -16,6 +17,16 @@ int main(int argc, char** argv) {
     }
     auto data = read(argv[2]);
     const std::string mode(argv[1]);
+    if (mode == "image") {
+        mx_u64_t relocated = 0;
+        using midix::format::rebase_image_address;
+        if (!rebase_image_address(0x12b14000, 0x12b00000, 0x11000000, &relocated) || relocated != 0x11014000 ||
+            !rebase_image_address(0x12b14000, 0x12b00000, 0x17000000, &relocated) || relocated != 0x17014000 ||
+            rebase_image_address(0x11000000, 0x12b00000, 0x11000000, &relocated) ||
+            rebase_image_address(~mx_u64_t{0}, 0, 1, &relocated)) return 2;
+        midix::format::ImagePlan plan{};
+        return midix::format::parse_image(data.data(), data.size(), plan) ? 1 : 0;
+    }
     if (mode == "archive") {
         libk::const_bytes entry{};
         return midix::format::archive_find(libk::as_bytes(data.data(), data.size()), "init", &entry) && entry.size ? 0 : 1;

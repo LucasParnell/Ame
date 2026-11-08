@@ -47,7 +47,8 @@ PhysAddr walk(PhysAddr root, u64 iova) {
 }
 bool query(void*, PhysAddr pa, iommu::PageOwnership* out) {
     if (pa < 0x200000 || pa >= 0x400000) return false;
-    *out = {kOwner, iommu::DmaClass::NativeDevice, {}}; return true;
+    *out = {kOwner, iommu::DmaClass::NativeDevice, {},
+            iommu::dma_class_perms(iommu::DmaClass::NativeDevice)}; return true;
 }
 void release(void*, PhysAddr, u64) { assert(!sync_fail); ++releases; }
 SysError publish(void*, PhysAddr pa, u64 length) {

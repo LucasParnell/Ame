@@ -352,6 +352,7 @@ struct alignas(64) Thread {
     CpuContext ctx; // assembly-referenced context, offset zero
     // Fill the context's alignment gap with latency-sensitive links. Handoff
     // and RT dispatch no longer fetch a line beyond the cold SIMD register file.
+    // Published atomically; a live reply link pins both peers to one station.
     Thread* reply_target;
     Thread* next;
     Thread* process_next;
@@ -426,7 +427,8 @@ struct alignas(64) Process {
     Thread* threads;
     u32 principal_id, next_stack_slot;
     PrincipalClass principal_class;
-    u8 _pad[3];
+    u8 _pad;
+    u16 stack_aslr_pages;
     u32 dying;
 
     alignas(64) u64 runtime_ns;
@@ -439,6 +441,8 @@ struct alignas(64) Process {
     // Monotonic: unrelated service exits must not wait on a running guest's
     // global VM call lock with IRQs masked. Set before publishing the first VM.
     bool created_vm;
+    Arena* primary_arena;
+    object::Record* primary_arena_lifetime;
 };
 static_assert(alignof(Process) == 64 && sizeof(Process) == 192);
 static_assert(__builtin_offsetof(Process, runtime_ns) == 64);

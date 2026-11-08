@@ -64,7 +64,7 @@ bool discover_initrd(PhysAddr dtb_phys, PhysAddr* out_base, usize* out_size) {
     extern const u8 anne_bundle_end[] asm("anne_bundle_end");
     if (!out_base || !out_size)
         return false;
-    *out_base = reinterpret_cast<PhysAddr>(anne_bundle_start);
+    *out_base = mm::kernel_address_to_phys(reinterpret_cast<PhysAddr>(anne_bundle_start));
     *out_size = static_cast<usize>(anne_bundle_end - anne_bundle_start);
     return *out_size != 0;
 #endif

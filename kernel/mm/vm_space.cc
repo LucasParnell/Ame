@@ -3,8 +3,9 @@
 // Spec ref: §5.2 Memory Management, §5.3 Address Spaces
 //
 // AArch64 4KB page, 48-bit VA, 4-level walk (L0–L3).
-// TTBR0_EL1 currently holds both user mappings and privileged kernel identity
-// mappings. Each process owns its tables. TTBR1/high-half separation is pending.
+// TTBR1_EL1 owns the shared, supervisor-only kernel image. TTBR0_EL1 owns
+// process mappings and legacy privileged physical aliases; its kernel-image
+// alias is NX. Physical-buffer/MMIO callers still use the low aliases.
 //
 // V0 operations needed:
 //   vm_space_create()           — allocate PGD, return VmSpace
@@ -30,6 +31,9 @@
 #include "libk/string.h"
 
 extern "C" char __text_start[];
+extern "C" char __text_end[] __attribute__((weak));
+extern "C" char __rodata_start[] __attribute__((weak));
+extern "C" char __rodata_end[] __attribute__((weak));
 extern "C" char __kernel_end[];
 #ifdef ANKO_HOST_TEST
 extern "C" void anko_vm_test_tlbi();
@@ -87,6 +91,9 @@ constexpr u64 PTE_SH_INNER = 3ull << 8;
 constexpr u64 PTE_PXN = 1ull << 53;
 constexpr u64 PTE_UXN = 1ull << 54;
 constexpr u64 PTE_SW_OWNED = 1ull << 55;
+// Invalid leaf reservation keeps prepared page tables alive during shrink,
+// precopy and BBM. It is never visible as a valid hardware translation.
+constexpr u64 PTE_SW_RESERVED = 1ull << 56;
 constexpr u64 PTE_ADDR_MASK = 0x0000'FFFF'FFFF'F000ull;
 constexpr u64 DESC_TABLE = PTE_VALID | PTE_TABLE;
 constexpr u64 DESC_PAGE = PTE_VALID | PTE_TABLE;
@@ -188,8 +195,14 @@ u64 kernel_page_attrs(bool device, PhysAddr pa) {
     u64 attrs = (device ? ATTR_DEVICE : normal_attrs(pa)) | PTE_AF | PTE_UXN | PTE_NG;
     if (!device)
         attrs |= PTE_SH_INNER;
-    if (device)
-        attrs |= PTE_PXN;
+    const auto text_start = kernel_address_to_phys(reinterpret_cast<PhysAddr>(__text_start));
+    const auto text_end = kernel_address_to_phys(reinterpret_cast<PhysAddr>(__text_end));
+    const auto rodata_start = kernel_address_to_phys(reinterpret_cast<PhysAddr>(__rodata_start));
+    const auto rodata_end = kernel_address_to_phys(reinterpret_cast<PhysAddr>(__rodata_end));
+    const bool text = !device && text_end > text_start && pa >= text_start && pa < text_end;
+    const bool rodata = !device && rodata_end > rodata_start && pa >= rodata_start && pa < rodata_end;
+    if (!text || kernel_ttbr1) attrs |= PTE_PXN;
+    if (text || rodata) attrs |= PTE_AP_RO;
     return attrs;
 }
 
@@ -242,7 +255,7 @@ bool map_page_raw(VmSpace& space, VirtAddr va, PhysAddr pa, u64 attrs) {
 
     u64* l3 = table_ptr(table_pa);
     const u32 idx = level_index(va, 3);
-    if (l3[idx] & PTE_VALID)
+    if (l3[idx])
         return rollback();
     l3[idx] = (pa & PTE_ADDR_MASK) | DESC_PAGE | attrs;
     return true;
@@ -282,6 +295,12 @@ bool append_identity_range(IdentityPlan& plan, PhysAddr base, u64 size, bool dev
         cut(bytes > ~u64{0} - address ? ~u64{0} : address + bytes);
     };
     if (!device) {
+        range(kernel_address_to_phys(reinterpret_cast<PhysAddr>(__text_start)),
+              kernel_address_to_phys(reinterpret_cast<PhysAddr>(__text_end)) > kernel_address_to_phys(reinterpret_cast<PhysAddr>(__text_start))
+                  ? kernel_address_to_phys(reinterpret_cast<PhysAddr>(__text_end)) - kernel_address_to_phys(reinterpret_cast<PhysAddr>(__text_start)) : 0);
+        range(kernel_address_to_phys(reinterpret_cast<PhysAddr>(__rodata_start)),
+              kernel_address_to_phys(reinterpret_cast<PhysAddr>(__rodata_end)) > kernel_address_to_phys(reinterpret_cast<PhysAddr>(__rodata_start))
+                  ? kernel_address_to_phys(reinterpret_cast<PhysAddr>(__rodata_end)) - kernel_address_to_phys(reinterpret_cast<PhysAddr>(__rodata_start)) : 0);
 #ifdef ANKO_BOARD_HUAWEI_ANNE
         range(anne::kDebugRamBase, anne::kDebugRamBytes);
         range(anne::kFirmwareFiqSource, PAGE_SIZE);
@@ -436,8 +455,8 @@ bool build_bootstrap_identity(IdentityPlan& plan) {
     if (!append_identity_if_present(plan, g_hw.ram_base, ram_map_size, false))
         return false;
 
-    const PhysAddr kernel_base = reinterpret_cast<PhysAddr>(&__text_start[0]);
-    const PhysAddr kernel_end = reinterpret_cast<PhysAddr>(&__kernel_end[0]);
+    const PhysAddr kernel_base = kernel_address_to_phys(reinterpret_cast<PhysAddr>(&__text_start[0]));
+    const PhysAddr kernel_end = kernel_address_to_phys(reinterpret_cast<PhysAddr>(&__kernel_end[0]));
     if (kernel_end > kernel_base &&
         !contains_range(g_hw.ram_base, ram_map_size, kernel_base, kernel_end - kernel_base)) {
         if (!append_identity_range(plan, kernel_base, kernel_end - kernel_base, false))
@@ -664,11 +683,14 @@ void enable_mmu(PhysAddr root) {
                         (1ull << 10) | // ORGN0: WBWA
                         (3ull << 12) | // SH0: inner-shareable
                         (0ull << 14) | // TG0: 4 KiB
+                        (16ull << 16) | // T1SZ: shared 48-bit kernel VA
+                        (1ull << 24) | (1ull << 26) | (3ull << 28) | (2ull << 30) |
                         (2ull << 32);  // IPS: 40-bit PA, enough for QEMU virt PCI ECAM
 
     asm volatile("msr mair_el1, %0\n"
                  "msr tcr_el1, %1\n"
                  "msr ttbr0_el1, %2\n"
+                 "msr ttbr1_el1, %3\n"
                  "isb\n"
                  "tlbi vmalle1\n"
                  "dsb ish\n"
@@ -680,7 +702,7 @@ void enable_mmu(PhysAddr root) {
                  "msr sctlr_el1, x9\n"
                  "isb\n"
                  :
-                 : "r"(mair), "r"(tcr), "r"(root)
+                 : "r"(mair), "r"(tcr), "r"(root), "r"(kernel_ttbr1)
                  : "x9", "memory");
 #endif
 }
@@ -709,7 +731,7 @@ bool unmap_page_raw(VmSpace& space, VirtAddr va, bool free_owned) {
     }
     auto* leaf = table_ptr(path[3]);
     const u64 pte = leaf[level_index(va, 3)];
-    if (!(pte & PTE_VALID))
+    if (!(pte & PTE_VALID) || (pte & PTE_SW_RESERVED))
         return false;
     leaf[level_index(va, 3)] = 0;
     PhysAddr retired[3]{};
@@ -717,7 +739,7 @@ bool unmap_page_raw(VmSpace& space, VirtAddr va, bool free_owned) {
     for (u32 level = 3; level > 0; --level) {
         bool empty = true;
         for (u32 i = 0; i < 512; ++i)
-            if (table_ptr(path[level])[i] & PTE_VALID) {
+            if (table_ptr(path[level])[i]) {
                 empty = false;
                 break;
             }
@@ -878,6 +900,7 @@ VmSpace vm_space_create(u32 pid) {
 }
 
 bool vm_map(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights) {
+    if (kernel_heap_overlaps(pa, PAGE_SIZE)) return false;
     if (!valid_user_rights(rights, false))
         return false;
     kernel::LockGuard guard(g_vm_lock);
@@ -888,6 +911,7 @@ bool vm_map(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights) {
 }
 
 bool vm_map_owned(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights) {
+    if (kernel_heap_overlaps(pa, PAGE_SIZE)) return false;
     if (!valid_user_rights(rights, false))
         return false;
     kernel::LockGuard guard(g_vm_lock);
@@ -898,6 +922,7 @@ bool vm_map_owned(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights) {
 }
 
 bool vm_map_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32 rights) {
+    if (kernel_heap_overlaps(pa, size)) return false;
     if (!valid_user_rights(rights, false))
         return false;
     if (size == 0 || (va & (PAGE_SIZE - 1)) != 0 || (pa & (PAGE_SIZE - 1)) != 0)
@@ -929,6 +954,7 @@ bool vm_map_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32 rights
 }
 
 bool vm_map_device_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32 rights) {
+    if (kernel_heap_overlaps(pa, size)) return false;
     if (!valid_user_rights(rights, true))
         return false;
     if (size == 0 || (va & (PAGE_SIZE - 1)) != 0 || (pa & (PAGE_SIZE - 1)) != 0)
@@ -961,6 +987,25 @@ bool vm_map_device_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32
 void vm_unmap(VmSpace& space, VirtAddr va) {
     kernel::LockGuard guard(g_vm_lock);
     (void)unmap_page_raw(space, va, true);
+}
+
+bool vm_unmap_user(VmSpace& space, VirtAddr va) {
+    if (!space.pgd_phys || (va & (PAGE_SIZE - 1)) || va < 0x10000000 || va > 0x40000000 - PAGE_SIZE)
+        return false;
+    kernel::LockGuard guard(g_vm_lock);
+    auto* table = table_ptr(space.pgd_phys);
+    for (u32 level = 0; level < 4; ++level) {
+        const u64 descriptor = table[level_index(va, level)];
+        if (!(descriptor & PTE_VALID)) return !(descriptor & PTE_SW_RESERVED);
+        if (level == 3 || !is_table_desc(descriptor)) {
+            // Even inside the numeric user interval, a privileged physical
+            // alias belongs to the kernel. A user syscall may not remove it.
+            if (!(descriptor & PTE_AP_EL0)) return false;
+            return level == 3 && unmap_page_raw(space, va, true);
+        }
+        table = table_ptr(descriptor & PTE_ADDR_MASK);
+    }
+    return false;
 }
 
 void vm_unmap_owned_range(VmSpace& space, VirtAddr va, u64 size) {
@@ -1062,6 +1107,147 @@ bool user_va_to_pa(const VmSpace& space, VirtAddr va, u32 rights, PhysAddr* out_
         return false;
 
     *out_pa = (pte & PTE_ADDR_MASK) | (va & (PAGE_SIZE - 1));
+    return true;
+}
+
+bool vm_copy_from_user(VmSpace space, void* dst, VirtAddr src, u64 size) {
+    if (size == 0)
+        return true;
+    if (!dst)
+        return false;
+    kernel::LockGuard guard(g_vm_lock);
+    if (!user_range_mapped(space, src, size, RIGHT_READ))
+        return false;
+    libk::memcpy(dst, reinterpret_cast<const void*>(src), static_cast<usize>(size));
+    return true;
+}
+
+bool vm_copy_to_user(VmSpace space, VirtAddr dst, const void* src, u64 size) {
+    if (size == 0)
+        return true;
+    if (!src)
+        return false;
+    kernel::LockGuard guard(g_vm_lock);
+    if (!user_range_mapped(space, dst, size, RIGHT_WRITE))
+        return false;
+    libk::memcpy(reinterpret_cast<void*>(dst), src, static_cast<usize>(size));
+    return true;
+}
+
+// Copy through the resolved physical page rather than the EL0 VA. The caller
+// keeps the chunk inside one page on both sides, so one resolution covers it.
+bool vm_copy_from_user_to_pa(VmSpace space, PhysAddr dst_pa, VirtAddr src, u64 size) {
+    if (size == 0)
+        return true;
+    if (!dst_pa)
+        return false;
+    kernel::LockGuard guard(g_vm_lock);
+    PhysAddr src_pa = 0;
+    if (!user_va_to_pa(space, src, RIGHT_READ, &src_pa))
+        return false;
+    libk::memcpy(reinterpret_cast<void*>(dst_pa), reinterpret_cast<const void*>(src_pa),
+                 static_cast<usize>(size));
+    return true;
+}
+
+u64* vm_prepare_slot(VmSpace& space, VirtAddr va) {
+    kernel::LockGuard guard(g_vm_lock);
+    if (!space.pgd_phys || (va & (PAGE_SIZE - 1))) return nullptr;
+    PhysAddr table_pa = space.pgd_phys;
+    for (u32 level = 0; level < 3; ++level) {
+        auto* slot = &table_ptr(table_pa)[level_index(va, level)];
+        if (!(*slot & PTE_VALID)) {
+            const PhysAddr next = alloc_page();
+            if (!next) return nullptr;
+            clear_table(next);
+            *slot = (next & PTE_ADDR_MASK) | DESC_TABLE;
+        }
+        if (!is_table_desc(*slot)) return nullptr;
+        table_pa = *slot & PTE_ADDR_MASK;
+    }
+    auto* slot = &table_ptr(table_pa)[level_index(va, 3)];
+    if (*slot) return nullptr;
+    *slot = PTE_SW_RESERVED;
+    return slot;
+}
+
+void vm_break_slots(VmSpace& space, u64* const* slots, usize count) {
+    kernel::LockGuard guard(g_vm_lock);
+    for (usize i = 0; i < count; ++i) if (slots[i]) *slots[i] = PTE_SW_RESERVED;
+    // Arm break-before-make: invalid descriptors visible before broadcast
+    // invalidation; completion precedes installing any replacement descriptor.
+    tlbi_space(space.pid);
+}
+
+void vm_drop_slots(VmSpace& space, u64* const* slots, usize count) {
+    kernel::LockGuard guard(g_vm_lock);
+    for (usize i = 0; i < count; ++i) if (slots[i]) *slots[i] = 0;
+    tlbi_space(space.pid);
+}
+
+void vm_make_slot(u64* slot, PhysAddr pa, u32 rights, bool accessed) {
+    kernel::LockGuard guard(g_vm_lock);
+    const auto attrs = user_page_attrs(rights, pa);
+    *slot = (pa & PTE_ADDR_MASK) | DESC_PAGE | PTE_SW_RESERVED |
+            (accessed ? attrs : attrs & ~PTE_AF);
+}
+
+void vm_note_access(VmSpace& space, u64* slot) {
+    kernel::LockGuard guard(g_vm_lock);
+    if ((*slot & PTE_VALID) && !(*slot & PTE_AF)) {
+        *slot |= PTE_AF;
+        tlbi_space(space.pid);
+    }
+}
+u64* vm_owned_slot(VmSpace& space, VirtAddr va, PhysAddr* pa) {
+    kernel::LockGuard guard(g_vm_lock);
+    if (!space.pgd_phys || !pa || (va & (PAGE_SIZE - 1))) return nullptr;
+    PhysAddr table = space.pgd_phys;
+    for (u32 level = 0; level < 3; ++level) {
+        const auto descriptor = table_ptr(table)[level_index(va, level)];
+        if (!is_table_desc(descriptor)) return nullptr;
+        table = descriptor & PTE_ADDR_MASK;
+    }
+    auto* slot = &table_ptr(table)[level_index(va, 3)];
+    const auto pte = *slot;
+    if (!(pte & PTE_VALID) || !(pte & PTE_SW_OWNED) || !(pte & PTE_AP_EL0) ||
+        (pte & (PTE_AP_RO | PTE_SW_RESERVED)) || !(pte & PTE_UXN)) return nullptr;
+    *pa = pte & PTE_ADDR_MASK;
+    return slot;
+}
+
+void vm_prune_empty(VmSpace& space, VirtAddr va) {
+    kernel::LockGuard guard(g_vm_lock);
+    PhysAddr path[4]{space.pgd_phys, 0, 0, 0};
+    if (!path[0]) return;
+    u32 depth = 0;
+    for (; depth < 3; ++depth) {
+        const u64 desc = table_ptr(path[depth])[level_index(va, depth)];
+        if (!is_table_desc(desc)) break;
+        path[depth + 1] = desc & PTE_ADDR_MASK;
+    }
+    PhysAddr retired[3]{};
+    usize count = 0;
+    for (u32 level = depth; level > 0; --level) {
+        bool empty = true;
+        for (u32 i = 0; i < 512; ++i) if (table_ptr(path[level])[i]) { empty = false; break; }
+        if (!empty) break;
+        table_ptr(path[level - 1])[level_index(va, level - 1)] = 0;
+        retired[count++] = path[level];
+    }
+    if (count) tlbi_space(space.pid);
+    for (usize i = 0; i < count; ++i) free_page(retired[i]);
+}
+
+void vm_sync_space(VmSpace& space) { tlbi_space(space.pid); }
+
+bool vm_cage_available(VmSpace& space, VirtAddr va, u64 size) {
+    kernel::LockGuard guard(g_vm_lock);
+    if (!space.pgd_phys) return false;
+    for (u64 offset = 0; offset < size; offset += PAGE_SIZE) {
+        const auto pte = vm_debug_pte(space, va + offset);
+        if ((pte & PTE_VALID) && !(pte & PTE_SW_RESERVED)) return false;
+    }
     return true;
 }
 

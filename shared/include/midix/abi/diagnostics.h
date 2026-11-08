@@ -18,7 +18,7 @@ enum MxDiagRequest : mx_u64_t {
     // legacy completion probe (index 3) now returns NOT_IMPLEMENTED: Linux
     // requires a completed storage operation and defines no callback guard.
     MX_DIAG_EL3 = 3,    // indices 0..MAX_INDEX; 29/30 = RPMB lifecycle, 31 = GPU routing snapshot
-    MX_DIAG_HEALTH = 5, // index=0, MxDiagHealth; read-only console telemetry
+    MX_DIAG_HEALTH = 5, // index=health.observe cap (or 0 for trusted callers), MxDiagHealth
     MX_DIAG_VM_PROGRESS = 6, // index=logical CPU, bounded last vCPU/MMIO checkpoint
     MX_DIAG_RUNTIME = 4,     // index=first PID (1..limit), MxDiagRuntimeBatch
     MX_DIAG_POWER = 7, // MxPowerSnapshot; 6 remains the deployed VM progress request.
@@ -582,8 +582,9 @@ struct MxDiagGpuIommu {
     mx_u32_t gpu_id, mem_features, mmu_features, as_present;
     mx_u32_t pctrl_ctrl8, pctrl_ctrl25;
     mx_u64_t faults;
+    mx_u32_t status_words[16]; // bounded read-only GPU execution/IRQ registers
 };
-static_assert(sizeof(MxDiagGpuIommu) == 40);
+static_assert(sizeof(MxDiagGpuIommu) == 104);
 
 // Fixed Hi6250 DMSS snapshot, MX_DIAG_EL3 index 32. These are observations,
 // not evidence that GPU traffic traverses a particular ASI or an SMMU.

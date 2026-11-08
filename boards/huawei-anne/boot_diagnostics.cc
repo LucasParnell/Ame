@@ -40,7 +40,9 @@ u32 cpu_id() {
     asm volatile("mrs %0, tpidr_el1" : "=r"(id));
     return id < MX_HOST_MAX_CPUS ? id : 0;
 }
-constexpr const char *kStageNames[] = {"invalid",
+// The first checkpoints run before relocation and MMU setup. Inline names
+// avoid dereferencing linked high-half pointers while executing physically.
+constexpr char kStageNames[][24] = {"invalid",
                                        "entry",
                                        "bss.begin",
                                        "bss.done",

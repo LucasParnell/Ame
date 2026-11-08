@@ -7,6 +7,8 @@ affinity and waiting for their exits. No application runs during normal boot.
 
 Include `mochi/app.h` for an ordinary app and `mochi/app_process.h` when it
 launches children. In `_start`, call `mochi::app::start()` to obtain the context.
+Apps and compiled UI resources can be stored together in an AmeFS application
+package; see [package builds and resource access](APP_PACKAGES.md).
 It maps BootInfo and parent stdout once, even when library helpers call it again.
 Write with `mochi::app::write()` or `puts()` and finish with `app::exit(status)`.
 The output helpers preserve complete writes under backpressure; `try_write()`

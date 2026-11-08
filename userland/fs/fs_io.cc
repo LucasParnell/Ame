@@ -1,5 +1,6 @@
 // Bounded per-session arena transport and immutable client read views.
 #include "fs_internal.h"
+#include "mochi/managed_arena.h"
 #include "libk/endian.h"
 #include "midix/abi/session.h"
 
@@ -36,7 +37,7 @@ void close_transfer_session(mx_u32_t session) {
     for (mx_u32_t i = 0; i < kReadViews; ++i) {
         if (!caps[i] || owners[i] != session)
             continue;
-        (void)sys_unmap_page(address(i));
+        (void)mx_arena_unmap_cap(caps[i], address(i));
         (void)sys_cap_revoke(caps[i]);
         // Client mappings, if any, retain the old object. A later session gets
         // a fresh arena; it never inherits the preceding generation's bytes.
@@ -82,11 +83,14 @@ mx_i32_t volume_read(const OpenHandle& handle, const FsReadRequest& req, FsReadR
             return MX_ERR_BUSY;
         if (!caps[selected]) {
             mx_handle_t cap = 0;
-            if (mx_arena_create(FS_READ_ARENA_MAX, 0, &cap) != MX_OK)
-                return MX_ERR_NOMEM;
-            if (mx_map_page(cap, address(selected), MX_RIGHT_READ | MX_RIGHT_WRITE) != MX_OK) {
+            const MxArenaCreate request{FS_READ_ARENA_MAX, FS_READ_ARENA_MAX,
+                0x10000000, 0x30000000, 0, MX_ARENA_COMPACT_IDLE, 0};
+            auto status = mx_arena_managed_create(request, &cap);
+            if (status != MX_OK) return status;
+            status = mx_map_page(cap, address(selected), MX_RIGHT_READ | MX_RIGHT_WRITE);
+            if (status != MX_OK) {
                 (void)sys_cap_revoke(cap);
-                return MX_ERR_NOMEM;
+                return status;
             }
             caps[selected] = cap;
         }

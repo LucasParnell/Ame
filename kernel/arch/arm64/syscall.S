@@ -63,11 +63,12 @@ syscall_entry:
     b       2f
 
 4:
-    // Non-SVC EL0 sync fault: kill current thread and reschedule.
+    // A resolved arena fault retries with every saved register intact.
     mrs     x1, FAR_EL1
     mov     x0, x12
     mov     x2, sp
     bl      syscall_fault
+    cbnz    x0, 2f
     mov     x0, #7
     neg     x0, x0
     str     x0, [sp, #0]

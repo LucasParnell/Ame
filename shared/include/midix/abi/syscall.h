@@ -114,6 +114,9 @@ enum MxSyscall : mx_u64_t {
     // (vm, vcpu, gpu.platform authority) -> E_OK. Assigns the Hi6250 Mali
     // appliance to a VM: registers, three interrupts and the LPM3 power path.
     MX_NR_VM_MALI_ATTACH = 76,
+    // (operation, arena cap or 0, argument0, argument1, argument2, argument3).
+    // NEW takes (request*, sizeof(request)); INSPECT takes (info*, sizeof(info)).
+    MX_NR_ARENA_CONTROL = 77,
 };
 
 constexpr mx_u32_t MX_SPAWN_SUSPENDED = 1u << 0;

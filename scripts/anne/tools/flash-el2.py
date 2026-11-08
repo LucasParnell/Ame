@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Flash Ame through the validated ANE BootROM -> RAM stock LK/TEE EL2 route.
+"""Flash Ame through an ANE BootROM -> RAM stock LK/TEE EL2 profile.
 
 Firmware is private and ignored under out/anne-device-private/el2-firmware.
-Adapted from p20re payloads/anne-el2/run.py and install_kernel.py. Only the
+All transport and flashing code is contained in this repository. Only the
 kernel partition is written; the EL2 bootloader and TEE preload stay in RAM.
 """
 import argparse
@@ -10,16 +10,19 @@ import datetime
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import struct
 import time
 
-from p20re_transport import Factory, upload
+from anne_transport import BootromUSB, Factory, upload
 
 ROOT = Path(__file__).resolve().parents[3]
 XLOADER_SHA = '07c2ec41717b532b5f8d27968111539901854afacb0c0f35ac8b85dc08be0e81'
 LK_SHA = 'b42e40323c270b649cb0f554e7959c78d09b577275b25af63b38c6693c531e17'
+# Deterministic reconstruction; copy hook emulated, handset boot still unproven.
+LK_REBUILT_SHA = 'fdcdd361f4ec8ef30b756c13dae054993019127318c6ef820333e4629c9966cf'
 TEE_SHA = '00699c5b984be77db180dc274b567f981d9c17b8465d7efc351456f9107ae239'
 
 
@@ -36,18 +39,22 @@ def inputs(package, firmware):
             sha(image) != manifest['native_image_sha256'] or image[:8] != b'ANDROID!'):
         raise RuntimeError('Kernel package identity, size or hash mismatch')
     m = json.loads((firmware / 'manifest.json').read_text())
+    lk_sha = m.get('sha256')
+    if lk_sha not in (LK_SHA, LK_REBUILT_SHA):
+        raise RuntimeError('Unreviewed RAM LK image')
     blobs = {}
     for name, expected in [('xloader.img', XLOADER_SHA),
-                           ('stock-lk-el2-tee.bin', LK_SHA), ('teeos-decrypted.bin', TEE_SHA)]:
+                           ('stock-lk-el2-tee.bin', lk_sha), ('teeos-decrypted.bin', TEE_SHA)]:
         blobs[name] = (firmware / name).read_bytes()
         if sha(blobs[name]) != expected:
             raise RuntimeError('Firmware hash mismatch: ' + name)
     # Pin the addresses as well as the binary; a changed manifest must not
     # redirect a verified payload into different RAM or alter the checks.
-    expected = dict(sha256=LK_SHA, tee_sha256=TEE_SHA, patch_offset=0x10b634,
+    expected = dict(sha256=lk_sha, tee_sha256=TEE_SHA, patch_offset=0x10b634,
                     patched_instruction='52807921', tee_staging=0x01000000,
                     tee_upload_address=0x11000000, tee_patch_offset=0x10bd3c,
-                    tee_patch_instruction='1406c0b1', diagnostic_dispatch_patch=0x21550)
+                    tee_patch_instruction='1406c0b1', diagnostic_dispatch_patch=0x21550,
+                    tee_bytes=2633984)
     if any(m.get(k) != v for k, v in expected.items()):
         raise RuntimeError('Unexpected EL2 firmware manifest')
     return image, m, blobs
@@ -72,9 +79,13 @@ def enter_lk(blobs, m):
     import serial
     import serial.tools.list_ports
     import usb.core
-    tty = wait_bootrom_tty(serial.tools.list_ports.comports)
-    with serial.Serial(tty, baudrate=115200, timeout=2, write_timeout=10,
-                       dsrdtr=True, rtscts=True, exclusive=True) as port:
+    if platform.system() == 'Darwin':
+        transport = BootromUSB()
+    else:
+        tty = wait_bootrom_tty(serial.tools.list_ports.comports)
+        transport = serial.Serial(tty, baudrate=115200, timeout=2, write_timeout=10,
+                                  dsrdtr=True, rtscts=True, exclusive=True)
+    with transport as port:
         port.reset_input_buffer()
         upload(port, 'signed xloader', blobs['xloader.img'], 0x20000)
         upload(port, 'RAM authentication patch', bytes.fromhex('00207047'), 0x211ac)
@@ -98,12 +109,21 @@ def verify_lk(fb, m):
     tee = fb.read('memory', m['tee_staging'], m['tee_bytes'])
     if sha(tee) != TEE_SHA:
         raise RuntimeError('TEE staging RAM hash mismatch')
-    if fb.command('getvar:nve:$FBLOCK').strip() != b'hex:00':
-        raise RuntimeError('Expected already unlocked FBLOCK; no unlock write sent')
-    print('Verified EL2/TEE RAM patches, full TEE staging hash and FBLOCK=0.', flush=True)
+    # The NV fallback byte is not the active FBLOCK state: stock initialization
+    # can select its OEMINFO-backed state instead. Query the running controller.
+    # The verified RAM dispatcher patch permits commands even with FBLOCK locked.
+    lock_state = fb.command('oem lock-state info').decode(errors='replace')
+    if not re.search(r'\bUSER LockState:\s*UNLOCKED\b', lock_state):
+        raise RuntimeError('Expected an already unlocked USER lock; no unlock write sent')
+    fb_lock = re.search(r'\bFB LockState:\s*(UNLOCKED|LOCKED)\b', lock_state)
+    if fb_lock is None:
+        raise RuntimeError('Stock LK did not report its active FBLOCK state')
+    print('Verified EL2/TEE RAM patches and full TEE staging hash. '
+          f'Active FBLOCK={fb_lock.group(1)}, USERLOCK=UNLOCKED.', flush=True)
+    return dict(fblock=fb_lock.group(1), userlock='UNLOCKED')
 
 
-def install(fb, image, output, report, save, backup=False):
+def install(fb, image, output, report, save, backup=False, verify_readback=True):
     value = fb.command('getvar:emmc:kernel').strip()
     match = re.fullmatch(rb'([0-9a-fA-F]{16}):([0-9a-fA-F]{16})', value)
     if not match:
@@ -148,6 +168,10 @@ def install(fb, image, output, report, save, backup=False):
     save()
     report['flash_response'] = fb.command('flash:kernel').decode(errors='replace')
     save()
+    if not verify_readback:
+        report['readback_skipped_by_user'] = True
+        save()
+        return
     report['after_sha256'] = capture('kernel-after.img')
     report['readback_verified'] = report['after_sha256'] == sha(image)
     save()
@@ -165,6 +189,7 @@ def main():
     parser.add_argument('--running', action='store_true', help='Use verified EL2/TEE LK already in RAM')
     parser.add_argument('--no-boot', action='store_true', help='Leave RAM LK active after readback')
     parser.add_argument('--backup', action='store_true', help='Also capture the previous kernel before flashing')
+    parser.add_argument('--skip-readback', action='store_true', help='Skip kernel readback after the flash acknowledgement')
     parser.add_argument('--expect-sha256', help='Require this image hash immediately before USB operations')
     parser.add_argument('--enter-only', action='store_true', help='Enter and verify diagnostic RAM LK without flashing or booting')
     args = parser.parse_args()
@@ -197,19 +222,21 @@ def main():
         if not args.running:
             enter_lk(blobs, m)
         with Factory(args.serial) as fb:
-            verify_lk(fb, m)
+            report['lock_state'] = verify_lk(fb, m)
             report['ram_lk_verified'] = True
             save()
             if args.enter_only:
                 print('Diagnostic EL2/TEE LK ready; no kernel write or boot requested.', flush=True)
                 return
-            install(fb, image, output, report, save, backup=args.backup)
+            install(fb, image, output, report, save, backup=args.backup,
+                    verify_readback=not args.skip_readback)
             if not args.no_boot:
                 # OEM boot preserves the RAM EL2 handoff; reboot would lose it.
                 report['boot_response'] = fb.command('oem boot').decode(errors='replace')
                 report['boot_command_sent'] = True
                 save()
-        print('Kernel partition flashed and full readback verified.', flush=True)
+        print('Kernel partition flashed; ' + ('readback skipped by request.' if args.skip_readback
+              else 'full readback verified.'), flush=True)
     except Exception as error:
         report['error'] = str(error)
         save()

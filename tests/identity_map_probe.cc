@@ -10,6 +10,9 @@
 HwInfo g_hw{};
 extern "C" {
 alignas(4096) char __text_start[4096]{};
+char __text_end[1]{};
+alignas(4096) char __rodata_start[4096]{};
+char __rodata_end[1]{};
 char __kernel_end[1]{};
 }
 static std::unordered_set<PhysAddr> pages;
@@ -214,8 +217,17 @@ int main() {
     assert(mm::vm_map_owned(first, user, backing, RIGHT_READ | RIGHT_WRITE));
     assert(mm::user_va_to_pa(first, user + 17, RIGHT_WRITE, &translated));
     assert(translated == backing + 17);
-    mm::vm_unmap(first, user);
+    assert(mm::vm_unmap_user(first, user));
     assert(owned_frees == 1 && !mm::user_va_to_pa(first, user, RIGHT_READ, &translated));
+
+    const auto privileged = mm::alloc_page();
+    constexpr u64 privileged_va = 0x21000000;
+    assert(mm::map_page_raw(first, privileged_va, privileged, mm::kernel_page_attrs(false, privileged)));
+    const auto privileged_pte = descriptor(first.pgd_phys, privileged_va);
+    assert(!mm::vm_unmap_user(first, privileged_va));
+    assert(descriptor(first.pgd_phys, privileged_va) == privileged_pte);
+    assert(!mm::vm_unmap_user(first, 0xffff800040080000ull));
+    mm::vm_unmap(first, privileged_va); mm::free_page(privileged);
 
     process.pid = 0;
     mm::vm_space_destroy(first);

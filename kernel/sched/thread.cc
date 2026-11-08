@@ -11,6 +11,7 @@
 #include "anko/irq.h"
 #include "anko/vm.h"
 #include "anko/mm.h"
+#include "anko/amm.h"
 #include "anko/panic.h"
 #include "anko/smp.h"
 #include "anko/spinlock.h"
@@ -185,33 +186,36 @@ static void destroy_process_storage(void* target) {
         vm::destroy_owned_process(process_identity(*p));
     }
     VmSpace space{p->ttbr0, p->pid};
+    amm::detach_space(space);
+    object::release(p->primary_arena_lifetime);
+    p->primary_arena_lifetime = nullptr; p->primary_arena = nullptr;
     mm::vm_space_destroy(space);
     if (p->arena_table) {
         mm::arena_clear(*p->arena_table);
-        mm::slab_free(p->arena_table, sizeof(ArenaTable), alignof(ArenaTable));
+        mm::deallocate<ArenaTable>(p->arena_table);
     }
     if (p->cap_table) {
-        cap::clear(*p->cap_table);
-        mm::slab_free(p->cap_table, sizeof(CapTable), alignof(CapTable));
+        cap::close(*p->cap_table);
+        mm::deallocate<CapTable>(p->cap_table);
     }
     // A dying driver must not leave an enabled IRQ line behind.
     irq::unbind_owner(process_identity(*p));
     release_principal(p->principal_id);
     release_reserved_pid(p->pid);
-    mm::slab_free(p, sizeof(Process), alignof(Process));
+    mm::deallocate<Process>(p);
 }
 
 static void destroy_thread_storage(void* target) {
     auto* t = static_cast<Thread*>(target);
     auto* owner = t->owner_lifetime;
     object::release(t->sched_context_lifetime);
-    mm::slab_free(t, sizeof(Thread), alignof(Thread));
+    mm::deallocate<Thread>(t);
     object::release(owner);
 }
 
 Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio, u64 arg0,
                       u32 flags) {
-    Thread* t = static_cast<Thread*>(mm::slab_alloc(sizeof(Thread), alignof(Thread)));
+    Thread* t = static_cast<Thread*>(mm::allocate<Thread>());
     if (!t) {
         return nullptr;
     }
@@ -221,7 +225,7 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
         kernel::LockGuard guard(g_lifecycle_lock);
         t->tid = alloc_tid_locked();
         if (t->tid == 0) {
-            mm::slab_free(t, sizeof(Thread), alignof(Thread));
+            mm::deallocate<Thread>(t);
             return nullptr;
         }
     }
@@ -299,7 +303,7 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
     if (!p) {
         kernel::LockGuard guard(g_lifecycle_lock);
         g_tid_reserved[t->tid] = false;
-        mm::slab_free(t, sizeof(Thread), alignof(Thread));
+        mm::deallocate<Thread>(t);
         return nullptr;
     }
     t->principal_id = p->principal_id;
@@ -312,7 +316,7 @@ Thread* thread_create(u32 pid, VirtAddr entry, VirtAddr sp, ThreadPriority prio,
         object::release(t->owner_lifetime);
         kernel::LockGuard guard(g_lifecycle_lock);
         g_tid_reserved[t->tid] = false;
-        mm::slab_free(t, sizeof(Thread), alignof(Thread));
+        mm::deallocate<Thread>(t);
         return nullptr;
     }
     {
@@ -378,7 +382,7 @@ void finish_thread(Thread* t) {
 }
 
 Process* process_create(PrincipalClass principal, u32 supervisor_pid) {
-    Process* p = static_cast<Process*>(mm::slab_alloc(sizeof(Process), alignof(Process)));
+    Process* p = static_cast<Process*>(mm::allocate<Process>());
     if (!p) {
         return nullptr;
     }
@@ -394,7 +398,7 @@ Process* process_create(PrincipalClass principal, u32 supervisor_pid) {
             p->generation = g_pid_generation[p->pid];
         }
         if (p->pid == 0) {
-            mm::slab_free(p, sizeof(Process), alignof(Process));
+            mm::deallocate<Process>(p);
             return nullptr;
         }
     }
@@ -410,7 +414,7 @@ Process* process_create(PrincipalClass principal, u32 supervisor_pid) {
             principal, principal == PRINCIPAL_NATIVE_TRUSTED ? 2048 : NICE_0_WEIGHT, 0, 0);
         if (p->principal_id == 0) {
             release_reserved_pid(p->pid);
-            mm::slab_free(p, sizeof(Process), alignof(Process));
+            mm::deallocate<Process>(p);
             return nullptr;
         }
     }
@@ -424,17 +428,17 @@ Process* process_create(PrincipalClass principal, u32 supervisor_pid) {
     if (!vm.pgd_phys) {
         release_principal(p->principal_id);
         release_reserved_pid(p->pid);
-        mm::slab_free(p, sizeof(Process), alignof(Process));
+        mm::deallocate<Process>(p);
         return nullptr;
     }
     p->ttbr0 = vm.pgd_phys;
 
-    p->cap_table = static_cast<CapTable*>(mm::slab_alloc(sizeof(CapTable), alignof(CapTable)));
+    p->cap_table = static_cast<CapTable*>(mm::allocate<CapTable>());
     if (!p->cap_table) {
         mm::vm_space_destroy(vm);
         release_principal(p->principal_id);
         release_reserved_pid(p->pid);
-        mm::slab_free(p, sizeof(Process), alignof(Process));
+        mm::deallocate<Process>(p);
         return nullptr;
     }
     libk::memset(p->cap_table, 0, sizeof(CapTable));
@@ -442,13 +446,13 @@ Process* process_create(PrincipalClass principal, u32 supervisor_pid) {
     // avoid a second strided write across every capability cache line here.
 
     p->arena_table =
-        static_cast<ArenaTable*>(mm::slab_alloc(sizeof(ArenaTable), alignof(ArenaTable)));
+        static_cast<ArenaTable*>(mm::allocate<ArenaTable>());
     if (!p->arena_table) {
-        mm::slab_free(p->cap_table, sizeof(CapTable), alignof(CapTable));
+        mm::deallocate<CapTable>(p->cap_table);
         mm::vm_space_destroy(vm);
         release_principal(p->principal_id);
         release_reserved_pid(p->pid);
-        mm::slab_free(p, sizeof(Process), alignof(Process));
+        mm::deallocate<Process>(p);
         return nullptr;
     }
     libk::memset(p->arena_table, 0, sizeof(ArenaTable));
@@ -511,8 +515,11 @@ void process_destroy(Process* p) {
             }
         }
         platform::fence_owner(process_identity(*p));
+        // Managed arenas never enter device DMA domains. Drop their software
+        // pins after platform ownership has been fenced on process exit.
+        amm::release_owner_pins(process_identity(*p));
         sweep_process_caps(p);
-        cap::clear(*p->cap_table);
+        cap::close(*p->cap_table);
         irq::unbind_owner(process_identity(*p));
         object::Ref<Doorbell> exit_wake;
         {

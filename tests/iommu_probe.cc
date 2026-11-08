@@ -60,6 +60,8 @@ struct OwnedRange {
     u64 length;
     u64 object;
     iommu::VmDmaClass cls;
+    u32 perms = static_cast<u32>(iommu::DmaPerm::Read) |
+                static_cast<u32>(iommu::DmaPerm::Write);
 };
 
 constexpr u64 kOwner = 0x1111;
@@ -74,6 +76,7 @@ bool owner_query(void*, PhysAddr pa, iommu::PageOwnership* out) {
         if (pa >= r.base && pa < r.base + r.length) {
             out->object = r.object;
             out->dma_class = r.cls;
+            out->perms = r.perms;
             std::memset(out->pad, 0, sizeof(out->pad));
             return true;
         }
@@ -228,6 +231,23 @@ int main() {
         assert(iommu::domain_map_batch(*d, &beyond, 1) == E_INVALID);
         const iommu::IommuMap misaligned = make_map(0x4000'0000, pa_owned + 1, PAGE_SIZE, kPermRW);
         assert(iommu::domain_map_batch(*d, &misaligned, 1) == E_INVALID);
+    }
+
+    // A class permits an upper bound, not every access to each object. Check
+    // both the first page and a later page before publishing any descriptors.
+    {
+        g_ranges[0].perms = static_cast<u32>(iommu::DmaPerm::Read);
+        const auto denied = make_map(0x40000000, pa_owned, PAGE_SIZE, kPermRW);
+        assert(iommu::domain_map_batch(*d, &denied, 1) == E_PERM);
+        g_ranges[0].perms = kPermRW;
+        g_ranges[3].length = PAGE_SIZE;
+        g_ranges[g_range_count++] = {pa_block + PAGE_SIZE, PAGE_SIZE, kOwner,
+            iommu::VmDmaClass::ApplianceRam, static_cast<u32>(iommu::DmaPerm::Read)};
+        const auto mixed = make_map(0x40200000, pa_block, 2 * PAGE_SIZE, kPermRW);
+        assert(iommu::domain_map_batch(*d, &mixed, 1) == E_PERM);
+        assert(!iommu::domain_live_mappings(*d) && !iommu::domain_pinned_pages(*d));
+        g_ranges[3].length = 2u * 1024 * 1024;
+        --g_range_count;
     }
 
     // (e) Counters move, and installed translations carry the right permissions.

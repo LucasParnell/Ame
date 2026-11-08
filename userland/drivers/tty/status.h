@@ -16,6 +16,7 @@ struct StatusBar {
     } commands[24];
     mx_u32_t count, sent, width, height, scale, margin, notch;
     mx_u64_t next_sample;
+    CapHandle health_observer;
     MxDiagHealth previous;
     bool enabled, baseline, drawn;
     mx_u32_t shown_cpu, shown_ram, shown_battery;
@@ -107,7 +108,7 @@ struct StatusBar {
     bool sample(mx_u64_t now) {
         if (!enabled || pending() || now < next_sample) return false;
         MxDiagHealth health{};
-        const auto rc = sys_debug_read(MX_DIAG_HEALTH, 0, &health, sizeof(health));
+        const auto rc = sys_debug_read(MX_DIAG_HEALTH, health_observer, &health, sizeof(health));
         frame(rc == sizeof(health) ? &health : nullptr);
         next_sample = now + 1000000000ull;
         return pending();

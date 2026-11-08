@@ -49,6 +49,7 @@ bool native_owner_query(void* context, PhysAddr pa, PageOwnership* out) {
         if (pa >= a.base && pa < a.base + a.size) {
             out->object = owner.identity;
             out->dma_class = DmaClass::NativeDevice;
+            out->perms = dma_class_perms(out->dma_class);
             libk::memset(out->pad, 0, sizeof(out->pad));
             return true;
         }

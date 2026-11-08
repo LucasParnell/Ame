@@ -4,13 +4,13 @@
 // Spec ref: §5.2 Memory Management, §5.7 Arenas
 //
 // V0 memory model:
-//   - 4 KiB pages, 48-bit VA; TTBR0 holds userspace and kernel identity mappings.
-//     A shared high-half TTBR1 kernel mapping is not installed yet.
+//   - 4 KiB pages, 48-bit VA; shared high-half kernel image in TTBR1.
+//     TTBR0 retains userspace and privileged NX physical aliases.
 //   - Simple physical page allocator (bitmap over discovered RAM).
 //   - No demand paging — all V0 memory is eagerly mapped.
 //   - Kernel-owned metadata allocated from kernel heap.
 //   - Shared physical pages mapped into multiple address spaces by capability.
-//   - Arenas: registered writable regions for snapshot-capable services.
+//   - Wired arenas and managed arenas with replaceable page backing.
 
 #include "anko/types.h"
 #include "anko/object.h"
@@ -38,12 +38,12 @@ struct PhysAllocator {
 // ---------------------------------------------------------------------------
 // VmSpace — one per process.
 // Holds the root page-table physical address and tracks mappings for teardown.
-// V0: no COW, no demand paging.
+// Eager mappings; managed arena clones use write-fault COW. No demand paging.
 // ---------------------------------------------------------------------------
 struct VmSpace {
     PhysAddr pgd_phys; // physical address of L0 (PGD) page table, 4KB aligned
     u32 pid;           // owning process
-    // V0: no mapping list needed; all maps are permanent until process death.
+    // Managed arena reverse mappings live in AMM, separately from this root.
 };
 
 struct MemoryObject {
@@ -59,18 +59,20 @@ struct MemoryObject {
 //   - Ring buffers must be in registered arenas.
 //   - Kernel tracks arena ownership per-process.
 //   - Registration quota fixed at process creation.
-//   - V0: no growable arenas, no snapshot persistence.
-//     The arena system exists so later snapshotting has the right shape.
+//   - Wired arenas retain their contiguous physical extent.
+//   - Managed arenas delegate resize, COW and backing generations to AMM.
 // ---------------------------------------------------------------------------
+namespace amm { struct Backing; }
 struct Arena {
     VirtAddr base_va;   // base virtual address in the owning process
-    PhysAddr phys_base; // physical backing when kernel-created; 0 for VA-only registrations
+    PhysAddr phys_base; // wired backing; 0 for managed arenas and VA-only registrations
     u64 size;
     u32 owner_pid;
     u32 rights; // CapRights bitmask
     u32 flags;
     u32 owner_generation;
-    u8 pad[24]; // pad to 64 bytes for cache friendliness
+    amm::Backing* managed; // null for wired/platform arenas
+    u8 pad[16]; // pad to 64 bytes for cache friendliness
 };
 static_assert(sizeof(Arena) == 64);
 
@@ -95,10 +97,22 @@ struct ArenaTable {
 
 namespace mm {
 
+inline u64 kernel_image_delta = 0;
+inline u64 kernel_image_physical = 0;
+inline u64 kernel_image_bytes = 0;
+inline u64 kernel_ttbr1 = 0;
+inline PhysAddr kernel_address_to_phys(u64 address) {
+    const u64 base = kernel_image_physical + kernel_image_delta;
+    return kernel_image_bytes && address >= base && address - base <= kernel_image_bytes
+        ? address - kernel_image_delta : address;
+}
+
 void phys_init(PhysAddr ram_base, usize ram_size);
 void reserve_phys_range(PhysAddr base, u64 size);
 PhysAddr alloc_page();
 PhysAddr alloc_page_for(u32 owner_pid);
+PhysAddr alloc_page_for_identity(u64 identity);
+PhysAddr alloc_pages_contiguous_for_identity(u64 identity, usize count);
 PhysAddr alloc_pages_contiguous_for(u32 owner_pid, usize count);
 PhysAddr alloc_pages_contiguous(usize count); // returns 0 on failure
 // Same, but the run must start at an `align_pages`-page boundary (a power of two),
@@ -113,9 +127,54 @@ u64 allocated_page_count();
 u64 total_page_count();
 
 void heap_init();
-void* heap_alloc(usize size, usize align);
 void* slab_alloc(usize size, usize align);
 void slab_free(void* ptr, usize size, usize align);
+void* slab_alloc_isolated(usize size, usize align, u64 type);
+void slab_free_isolated(void*, usize size, usize align, u64 type);
+inline PhysAddr kernel_heap_base = 0;
+inline usize kernel_heap_bytes = 0;
+inline bool kernel_heap_overlaps(PhysAddr pa, u64 size) {
+    return kernel_heap_bytes && size && pa < kernel_heap_base + kernel_heap_bytes &&
+           (pa > ~u64{0} - size || kernel_heap_base < pa + size);
+}
+template <typename T> consteval u64 allocation_type() {
+    u64 hash = 1469598103934665603ull;
+    for (char c : __PRETTY_FUNCTION__) { if (!c) break; hash = (hash ^ u8(c)) * 1099511628211ull; }
+    return hash ? hash : 1;
+}
+template <typename T> T* allocate() {
+#if defined(ANKO_HOST_TEST) && !defined(ANKO_MANAGED_ALLOCATOR_TEST)
+    return static_cast<T*>(slab_alloc(sizeof(T), alignof(T)));
+#else
+    return static_cast<T*>(slab_alloc_isolated(sizeof(T), alignof(T), allocation_type<T>()));
+#endif
+}
+template <typename T> void deallocate(void* pointer) {
+#if defined(ANKO_HOST_TEST) && !defined(ANKO_MANAGED_ALLOCATOR_TEST)
+    slab_free(pointer, sizeof(T), alignof(T));
+#else
+    slab_free_isolated(pointer, sizeof(T), alignof(T), allocation_type<T>());
+#endif
+}
+
+// Variable-length control arrays retain their element type independently of
+// byte buffers; the length is checked again at release.
+template <typename T> T* allocate_array(usize count) {
+    usize bytes;
+    if (__builtin_mul_overflow(count, sizeof(T), &bytes)) return nullptr;
+#if defined(ANKO_HOST_TEST) && !defined(ANKO_MANAGED_ALLOCATOR_TEST)
+    return static_cast<T*>(slab_alloc(bytes, alignof(T)));
+#else
+    return static_cast<T*>(slab_alloc_isolated(bytes, alignof(T), allocation_type<T>()));
+#endif
+}
+template <typename T> void deallocate_array(T* pointer, usize count) {
+#if defined(ANKO_HOST_TEST) && !defined(ANKO_MANAGED_ALLOCATOR_TEST)
+    slab_free(pointer, count * sizeof(T), alignof(T));
+#else
+    slab_free_isolated(pointer, count * sizeof(T), alignof(T), allocation_type<T>());
+#endif
+}
 
 bool register_noncached_range(PhysAddr base, u64 size); // boot only
 bool range_is_noncached(PhysAddr base, u64 size);
@@ -131,6 +190,7 @@ bool vm_map_owned(VmSpace& space, VirtAddr va, PhysAddr pa, u32 rights);
 bool vm_map_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32 rights);
 bool vm_map_device_range(VmSpace& space, VirtAddr va, PhysAddr pa, u64 size, u32 rights);
 void vm_unmap(VmSpace& space, VirtAddr va);
+bool vm_unmap_user(VmSpace& space, VirtAddr va);
 void vm_unmap_owned_range(VmSpace& space, VirtAddr va, u64 size);
 void vm_space_destroy(VmSpace& space);
 // The process registry has at most 64 live IDs. Reserve ASID zero for the
@@ -146,7 +206,25 @@ void vm_activate(PhysAddr pgd_phys);
 void sync_icache_range(PhysAddr pa, usize len);
 bool user_range_mapped(const VmSpace& space, VirtAddr va, u64 size, u32 rights);
 bool user_va_to_pa(const VmSpace& space, VirtAddr va, u32 rights, PhysAddr* out_pa);
+// Validation alone is not a guarantee: another thread of the same process can
+// unmap the page, and the allocator can hand it to a page table, between the
+// check and the access. These hold the page-table lock across both.
+bool vm_copy_from_user(VmSpace space, void* dst, VirtAddr src, u64 size);
+bool vm_copy_to_user(VmSpace space, VirtAddr dst, const void* src, u64 size);
+// Caller guarantees the range lies inside one page.
+bool vm_copy_from_user_to_pa(VmSpace space, PhysAddr dst_pa, VirtAddr src, u64 size);
 u64 vm_debug_pte(const VmSpace& space, VirtAddr va);
+// Prepare an empty leaf without publishing a translation. Used to make an
+// arena commit allocation-free. Empty tables belong to VmSpace until teardown.
+u64* vm_prepare_slot(VmSpace& space, VirtAddr va);
+void vm_break_slots(VmSpace& space, u64* const* slots, usize count);
+void vm_drop_slots(VmSpace& space, u64* const* slots, usize count);
+void vm_prune_empty(VmSpace& space, VirtAddr va);
+bool vm_cage_available(VmSpace& space, VirtAddr va, u64 size);
+void vm_make_slot(u64* slot, PhysAddr pa, u32 rights, bool accessed = true);
+void vm_note_access(VmSpace&, u64* slot);
+u64* vm_owned_slot(VmSpace&, VirtAddr, PhysAddr*);
+void vm_sync_space(VmSpace& space);
 
 bool arena_register(ArenaTable& table, VirtAddr base, PhysAddr phys_base, u64 size, u32 owner_pid,
                     u32 rights, u32 flags, u32* out_index);
@@ -157,6 +235,9 @@ void arena_unregister(ArenaTable& table, u32 index);
 void destroy_arena(void* target);
 void arena_retain_mapping(ArenaTable& table, VirtAddr base, object::Record* record);
 void arena_unmap_page(ArenaTable& table, VirtAddr va);
+// Detach the final mapping reference without running its destructor. Callers
+// holding a manager lock must release it after dropping that lock.
+object::Record* arena_unmap_page_detach(ArenaTable& table, VirtAddr va);
 void arena_clear(ArenaTable& table);
 
 } // namespace mm

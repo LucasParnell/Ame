@@ -100,6 +100,36 @@ class AnneFlash(unittest.TestCase):
         self.assertFalse(fb.reads[0][0])
         self.assertTrue(fb.reads[-1][0])
 
+    def test_explicit_skip_readback_still_flashes_and_records_skip(self):
+        image = b'new kernel' * 64
+        fb, report = FakeFactory(image), {}
+        with tempfile.TemporaryDirectory() as work:
+            flash.install(fb, image, Path(work), report, lambda: None,
+                          verify_readback=False)
+            self.assertFalse((Path(work) / 'kernel-after.img').exists())
+        self.assertTrue(fb.flashed)
+        self.assertFalse(fb.reads)
+        self.assertTrue(report['readback_skipped_by_user'])
+        self.assertNotIn('readback_verified', report)
+
+    @unittest.skipUnless(importlib.util.find_spec('usb') and importlib.util.find_spec('serial'),
+                         'Huawei host dependencies not installed')
+    def test_macos_uses_usb_and_keeps_xloader_patch_before_unsigned_uploads(self):
+        blobs = {'xloader.img': b'xloader', 'teeos-decrypted.bin': b'tee',
+                 'stock-lk-el2-tee.bin': b'lk'}
+        with mock.patch.object(flash.platform, 'system', return_value='Darwin'), \
+             mock.patch.object(flash, 'BootromUSB') as transport, \
+             mock.patch.object(flash, 'wait_bootrom_tty') as tty, \
+             mock.patch.object(flash, 'upload') as upload, \
+             mock.patch('usb.core.find', return_value=object()):
+            flash.enter_lk(blobs, {'tee_upload_address': 0x11000000})
+        tty.assert_not_called()
+        self.assertEqual([c.args[3] for c in upload.call_args_list],
+                         [0x20000, 0x211ac, 0x11000000, 0x10000000])
+        self.assertEqual(upload.call_args_list[1].args[2], bytes.fromhex('00207047'))
+        self.assertTrue(all(c.args[0] is transport.return_value.__enter__.return_value
+                            for c in upload.call_args_list))
+
     def test_readback_mismatch_fails(self):
         image = b'new kernel' * 64
         report = {}
@@ -116,3 +146,22 @@ class AnneFlash(unittest.TestCase):
                 flash.install(fb, image, Path(work), {}, lambda: None)
         self.assertFalse(fb.flashed)
         self.assertFalse(fb.reads)
+
+    def test_verification_uses_active_lock_state_instead_of_nv_fallback(self):
+        import struct
+        manifest = dict(patch_offset=0x10b634, patched_instruction='52807921',
+                        tee_patch_offset=0x10bd3c, tee_patch_instruction='1406c0b1',
+                        diagnostic_dispatch_patch=0x21550, tee_staging=0x01000000,
+                        tee_bytes=4)
+        memory = {0x10b634: struct.pack('<I', 0x52807921),
+                  0x10bd3c: struct.pack('<I', 0x1406c0b1),
+                  0x21550: struct.pack('<I', 0xd503201f), 0x01000000: b'tee!'}
+        fb = SimpleNamespace(read=mock.Mock(side_effect=lambda kind, address, size: memory[address]),
+                             command=mock.Mock(return_value=b' FB LockState: LOCKED\n USER LockState: UNLOCKED\n'))
+        with mock.patch.object(flash, 'sha', return_value=flash.TEE_SHA):
+            self.assertEqual(flash.verify_lk(fb, manifest),
+                             dict(fblock='LOCKED', userlock='UNLOCKED'))
+            fb.command.assert_called_once_with('oem lock-state info')
+            fb.command.return_value = b' FB LockState: UNLOCKED\n USER LockState: LOCKED\n'
+            with self.assertRaisesRegex(RuntimeError, 'USER lock'):
+                flash.verify_lk(fb, manifest)

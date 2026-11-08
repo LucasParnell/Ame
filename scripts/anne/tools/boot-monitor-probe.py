@@ -15,7 +15,7 @@ from pathlib import Path
 import struct
 import time
 
-from p20re_transport import Factory, upload
+from anne_transport import Factory, upload
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('anne_flash', Path(__file__).with_name('flash-el2.py'))

@@ -198,6 +198,17 @@ _start:
     str     xzr, [x0], #8
     b       2b
 3:
+    mov     x0, x19
+    bl      kernel_bootstrap_virtual
+    // The call returned through the temporary physical alias. Switch with no
+    // live C++ frames; static stacks acquire their shared TTBR1 aliases too.
+    adrp    x1, __boot_stack_top
+    add     x1, x1, :lo12:__boot_stack_top
+    add     sp, x1, x0
+    adr     x1, .Lvirtual_primary
+    add     x1, x1, x0
+    br      x1
+.Lvirtual_primary:
 
 #ifdef ANKO_BOARD_HUAWEI_ANNE
     mov     x0, #3                    // BssDone
@@ -346,6 +357,13 @@ secondary_start:
     add     x0, x0, x1
     mov     sp, x0
 
+    bl      kernel_bootstrap_secondary
+    mov     x1, sp
+    add     sp, x1, x0
+    adr     x1, .Lvirtual_secondary
+    add     x1, x1, x0
+    br      x1
+.Lvirtual_secondary:
     mov     x0, x19
 #ifdef ANKO_BOARD_HUAWEI_ANNE
     bl      anne_diag_install_early_vectors

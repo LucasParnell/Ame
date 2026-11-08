@@ -39,6 +39,7 @@ extern "C" [[noreturn]] void _start() {
     g.fs.try_close(bad.handle);
     g.fs.try_close(data.handle);
     check(cmd_exec("/data/bad.mxi") != 0, "bad image accepted");
+#ifndef APP_PACKAGE_ONLY
     for (unsigned cycle = 0; cycle < 2; ++cycle) {
         putln("APP_SYSTEM_BENCH_BEGIN");
         check(cmd_exec("/ame/userland/bin/bench.ipc.mxi") == 0, "benchmark exit status");
@@ -50,6 +51,23 @@ extern "C" [[noreturn]] void _start() {
               "filesystem lost after exec");
         g.fs.try_close(data.handle);
     }
+#endif
+    for (unsigned cycle = 0; cycle < 2; ++cycle) {
+        check(cmd_exec("/data/apps/package-demo.amp") == 0, "packaged app exit status");
+        check(*reinterpret_cast<volatile mx_u64_t*>(kVaTermInput) == terminal_marker &&
+                  *reinterpret_cast<volatile mx_u64_t*>(kVaTermOutput) == terminal_marker,
+              "terminal mapping damaged by packaged exec");
+        check(g.fs.wait_open(1, "data", FS_OPEN_READ, &data) && data.status == MX_OK,
+              "filesystem lost after packaged exec");
+        g.fs.try_close(data.handle);
+    }
+#ifdef APP_PACKAGE_ONLY
+    for (unsigned cycle = 0; cycle < 2; ++cycle)
+        check(cmd_exec("/data/apps/ui-demo.amp") == 0, "compiled QML app exit status");
+    check(cmd_exec("/data/apps/bad-package.amp") != 0, "malformed package accepted");
+    putln("app package system regression passed");
+#else
     putln("app system regression passed");
+#endif
     mochi::park();
 }

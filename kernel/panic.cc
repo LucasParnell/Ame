@@ -17,6 +17,8 @@
 //     by the very event it is reporting is worse than no report.
 
 #include "anko/panic.h"
+#include "anko/amm.h"
+#include "anko/sched.h"
 #include "anko/exception_vectors.h"
 #include "anko/panic_screen.h"
 #include "anko/panic_report.h"
@@ -262,9 +264,19 @@ static void claim_or_park() {
 // kernel_sync_fault — called from vec_kernel_sync assembly
 // ---------------------------------------------------------------------------
 
-extern "C" [[noreturn]] void kernel_sync_fault(u64 esr, u64 far, TrapFrame* frame) {
-    claim_or_park();
+extern "C" void kernel_sync_fault(u64 esr, u64 far, TrapFrame* frame) {
     const u32 ec = static_cast<u32>(arm64::esr_ec(esr));
+    const u32 fsc = esr & 63;
+    // A concurrent COW fault can temporarily break a user leaf while EL1 is
+    // copying a validated buffer. Wait for its AMM transaction, then retry the
+    // original instruction with every register preserved. Kernel addresses and
+    // genuine permission failures still take the fatal diagnostic path.
+    if (ec == 0x25 && (fsc == 7 || fsc == 11 || fsc == 15) &&
+        far >= 0x10000000 && far < 0x40000000) {
+        auto* p = sched::current_process();
+        if (p && amm::fault(VmSpace{p->ttbr0, p->pid}, far, (esr & (1ull << 6)) != 0)) return;
+    }
+    claim_or_park();
     anko::panic_report::capture_registers(g_report, frame->x, frame->sp_el0, frame->elr,
                                           frame->spsr, esr, far);
     halt_and_report(ec_name(ec), frame->x[29]);

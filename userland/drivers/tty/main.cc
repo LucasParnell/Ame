@@ -236,6 +236,8 @@ extern "C" [[noreturn]] void _start() {
         mochi::driver::idle(&reply, 1, g_tty->render.fb.reply.doorbell, geometry_deadline);
     }
     auto& render = g_tty->render;
+    if (const auto* observer = mochi::boot::find(boot, "health.observe"))
+        render.status.health_observer = observer->handle;
     const auto bar_height = mochi::driver::value(boot, "tty.status.height", 64);
     if (mochi::driver::value(boot, "tty.status", 1) && bar_height < info.height &&
         render.status.configure(info.width, bar_height,

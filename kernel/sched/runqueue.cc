@@ -11,6 +11,7 @@
 #include "sched_internal.h"
 #include "anko/ipc.h"
 #include "anko/mm.h"
+#include "anko/amm.h"
 #include "anko/smp.h"
 #include "anko/log.h"
 #include "anko/panic.h"
@@ -62,6 +63,9 @@ static inline void irq_disable() {
 // an SGI; timer IRQs also cover budget replenishment. SEV alone is not a wake.
 static inline void wait_for_interrupt() {
     const u32 cpu = current_cpu_id();
+    // CPU zero serializes the bounded background scan; no Eki lock is held
+    // here, and publication still wakes this CPU if work arrives meanwhile.
+    if (cpu == 0) amm::idle_step();
     power::idle_enter(cpu, sched_clock_ns());
     libk::cpu::wait_for_interrupt();
     power::idle_leave(cpu, sched_clock_ns());
@@ -572,6 +576,11 @@ static u32 target_cpu_for_wake_locked(Thread* waiter, Thread* waker, u32 db_sche
     if (!waiter)
         return current_cpu_id();
 
+    // A synchronous reply pair shares CPU-owned saved-frame and teardown state.
+    // Wake hints cannot move a peer before that link has been retired.
+    if (__atomic_load_n(&waiter->reply_target, __ATOMIC_ACQUIRE))
+        return waiter->cpu_id;
+
     // Active/queued work belongs to its station and cannot be woken or rebound.
     // Do not inspect last_cpu while that owner advances dispatch metadata.
     const ThreadState state = waiter->state;
@@ -710,6 +719,8 @@ static void wake_locked(Thread* t, u32 target_cpu) {
     if (old == TS_DEAD || old == TS_RUNNING || old == TS_RUNNABLE_QUEUED ||
         old == TS_RUNNABLE_PENDING_REMOTE || t->on_runqueue || t->terminate_requested)
         return;
+    if (__atomic_load_n(&t->reply_target, __ATOMIC_ACQUIRE))
+        target_cpu = t->cpu_id;
     const u64 allowed = t->affinity_mask ? t->affinity_mask & online_mask() : online_mask();
     if (!allowed)
         return;

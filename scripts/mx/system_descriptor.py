@@ -33,6 +33,21 @@ def read_descriptor(path: Path) -> dict:
     return document
 
 
+def arena_problems(arena, label: str) -> list[str]:
+    if not isinstance(arena, dict): return [f"{label}: missing arena declaration"]
+    required = {"base", "initial", "reserve", "limit", "type", "compact"}
+    if set(arena) != required: return [f"{label}: arena requires {sorted(required)}"]
+    if any(type(arena[key]) is not int for key in required - {"compact"}) or type(arena["compact"]) is not bool:
+        return [f"{label}: invalid arena field types"]
+    a = arena
+    if (not 0 < a["initial"] <= a["reserve"] <= a["limit"] <= 1048576 or
+        not 0x10010000 <= a["base"] < 0x40000000 or a["limit"] > 0x40000000 - a["base"] or
+        any(a[key] % 4096 for key in ("base", "initial", "reserve", "limit")) or
+        not 0 < a["type"] < 1 << 64):
+        return [f"{label}: invalid arena bounds or type"]
+    return []
+
+
 def check_manifest(manifest: dict) -> list[str]:
     problems: list[str] = []
     if not isinstance(manifest, dict):
@@ -70,6 +85,19 @@ def check_manifest(manifest: dict) -> list[str]:
             problems.append(f"service {record['name']}: duplicate {key}")
         return values
 
+    # Schema-2 legacy fixtures without a memory policy retain loader defaults.
+    # A descriptor that declares managed memory must declare every principal.
+    if "arena_defaults" in manifest:
+        problems.extend(arena_problems(manifest["arena_defaults"], "arena_defaults"))
+        principals = []
+        for key in ("services", "applications"):
+            values = manifest.get(key, [])
+            if isinstance(values, list): principals.extend(values)
+            else: problems.append(f"{key}: expected an array")
+        if "init" in manifest: principals = principals + [manifest["init"]]
+        for principal in principals:
+            if isinstance(principal, dict):
+                problems.extend(arena_problems(principal.get("arena"), str(principal.get("name", "init"))))
     services = records("services", 33)
     resources = {r["name"]: r for r in records("resources", 64)}
     channels = {c["name"]: c for c in records("channels", 128)}

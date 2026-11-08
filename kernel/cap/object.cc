@@ -34,7 +34,7 @@ Record* create(void* target, Destructor destroy) {
     if (!target) {
         return nullptr;
     }
-    auto* fresh = static_cast<Record*>(mm::slab_alloc(sizeof(Record), alignof(Record)));
+    auto* fresh = static_cast<Record*>(mm::allocate<Record>());
     if (!fresh) {
         return nullptr;
     }
@@ -48,6 +48,22 @@ Record* create(void* target, Destructor destroy) {
     head = fresh;
     ++count;
     return fresh;
+}
+
+Record* acquire_existing(void* target) {
+    if (!target) return nullptr;
+    kernel::LockGuard guard(lock);
+    for (auto* p = bucket(target); p; p = p->next) {
+        if (p->target != target) continue;
+        u64 refs = __atomic_load_n(&p->references, __ATOMIC_RELAXED);
+        while (refs) {
+            ANKO_ASSERT(refs != ~0ull);
+            if (__atomic_compare_exchange_n(&p->references, &refs, refs + 1, false,
+                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return p;
+        }
+        return nullptr;
+    }
+    return nullptr;
 }
 
 Record* acquire(void* target) {
@@ -69,7 +85,7 @@ Record* acquire(void* target) {
             return nullptr;
         }
     }
-    auto* fresh = static_cast<Record*>(mm::slab_alloc(sizeof(Record), alignof(Record)));
+    auto* fresh = static_cast<Record*>(mm::allocate<Record>());
     if (!fresh) {
         return nullptr;
     }
@@ -112,7 +128,7 @@ void release(Record* record) {
     if (record->destroy) {
         record->destroy(record->target);
     }
-    mm::slab_free(record, sizeof(Record), alignof(Record));
+    mm::deallocate<Record>(record);
 }
 
 u64 live_count() {

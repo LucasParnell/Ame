@@ -4,6 +4,7 @@
 #include "mochi/stdout.h"
 #include "midix/abi/protocols/app_stream.h"
 #include "libk/bytes.h"
+#include "midix/format/app_package.h"
 
 namespace mochi::app {
 inline bool add(MxBootInfo* boot, MxBootEntryType type, const char* name, mx_handle_t handle = 0,
@@ -101,6 +102,8 @@ struct Image {
 struct Context {
     const MxBootInfo* boot = nullptr;
     Image image{};
+    Image snapshot{};
+    midix::package::View package{};
     mx_u64_t value(const char* name, mx_u64_t fallback = 0) const {
         const auto* entry = boot::find(boot, name);
         return entry && entry->type == MX_BOOT_ENTRY_VALUE ? entry->aux0 : fallback;
@@ -115,9 +118,21 @@ struct Context {
         return value("cpu.mask", 1);
     }
     Image self_image() {
-        if (!image.data)
-            image.data = map_image(boot, va::app::kSelfImage, image.size);
+        if (image.data) return image;
+        if (!snapshot.data)
+            snapshot.data = map_image(boot, va::app::kSelfImage, snapshot.size);
+        if (midix::package::has_magic(snapshot.data, snapshot.size)) {
+            if (!midix::package::parse(snapshot.data, snapshot.size, package)) return {};
+            const auto executable = package.executable();
+            image = {executable.data, executable.size};
+        } else image = snapshot;
         return image;
+    }
+    // Bytes remain valid for this process lifetime; no filesystem authority is
+    // needed to read resources in its own immutable package snapshot.
+    midix::package::Bytes resource(const char* name) {
+        (void)self_image();
+        return package.find(name);
     }
 };
 inline Context& start() {

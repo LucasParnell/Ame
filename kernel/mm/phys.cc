@@ -31,14 +31,9 @@ static u8 g_bitmap[kMaxBitmapBytes];
 static PhysAddr g_heap_curr = 0;
 static PhysAddr g_heap_end  = 0;
 
-struct FreeNode {
-    FreeNode* next;
-};
-
 static constexpr usize kSlabClasses[] = {
     64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288
 };
-static FreeNode* g_slab_free[sizeof(kSlabClasses) / sizeof(kSlabClasses[0])]{};
 
 static inline bool page_in_range(usize page_idx) {
     return page_idx < g_phys.page_count;
@@ -104,11 +99,12 @@ void phys_init(PhysAddr ram_base, usize ram_size) {
         g_phys.ram_base == 0x8000'0000ull ? 16ull * 1024ull * 1024ull
                                           : 2ull * 1024ull * 1024ull;
     reserve_range_locked(g_phys.ram_base, g_phys.ram_base + low_reserve);
-    reserve_range_locked(reinterpret_cast<PhysAddr>(&__text_start[0]),
-                         reinterpret_cast<PhysAddr>(&__kernel_end[0]));
+    reserve_range_locked(kernel_address_to_phys(reinterpret_cast<PhysAddr>(&__text_start[0])),
+                         kernel_address_to_phys(reinterpret_cast<PhysAddr>(&__kernel_end[0])));
 
     // Heap is carved out explicitly later by heap_init().
     g_heap_curr = g_heap_end = 0;
+    kernel_heap_base = kernel_heap_bytes = 0;
 }
 
 PhysAddr alloc_page() {
@@ -142,6 +138,18 @@ PhysAddr alloc_pages_contiguous_for(u32 pid, usize count) {
     PhysAddr pa = charged == count ? alloc_pages_contiguous(count) : 0;
     if (!pa) while (charged) { --charged; sched::process_uncharge_page(pid); }
     return pa;
+}
+
+PhysAddr alloc_page_for_identity(u64 identity) {
+    auto p = sched::find_process(static_cast<u32>(identity));
+    if (!p || sched::process_identity(*p) != identity) return 0;
+    return alloc_page_for(p->pid);
+}
+
+PhysAddr alloc_pages_contiguous_for_identity(u64 identity, usize count) {
+    auto p = sched::find_process(static_cast<u32>(identity));
+    if (!p || sched::process_identity(*p) != identity) return 0;
+    return alloc_pages_contiguous_for(p->pid, count);
 }
 
 u64 allocated_page_count() {
@@ -244,10 +252,11 @@ void heap_init() {
 
     g_heap_curr = first;
     g_heap_end  = first + kHeapPages * PAGE_SIZE;
+    kernel_heap_base = first; kernel_heap_bytes = kHeapPages * PAGE_SIZE;
 }
 
 // Kernel heap bump allocator — used by cap tables, thread structs, etc.
-void* heap_alloc(usize size, usize align) {
+static void* heap_alloc(usize size, usize align) {
     kernel::LockGuard guard(g_heap_lock);
     if (size == 0) return nullptr;
     if (align == 0) align = alignof(void*);
@@ -260,47 +269,130 @@ void* heap_alloc(usize size, usize align) {
     return reinterpret_cast<void*>(aligned);
 }
 
-static usize slab_class_index(usize size, usize align) {
-    const usize needed = size > align ? size : align;
-    for (usize i = 0; i < sizeof(kSlabClasses) / sizeof(kSlabClasses[0]); ++i) {
-        if (needed <= kSlabClasses[i]) return i;
-    }
-    return ~static_cast<usize>(0);
+namespace {
+constexpr u64 kSlotMagic = 0x414d454152454e41ull;
+constexpr u8 kGuardByte = 0xd3;
+struct TypePool;
+// Slot state and links never reside in object storage. Each data page has an
+// immutable owner in this directory; virtual addresses never change type.
+struct Slot {
+    u64 magic;
+    usize size, alignment;
+    Slot* next;
+    u8* payload;
+    bool allocated, released;
+};
+struct Chunk { Chunk* next; usize first, count, stride; TypePool* pool; Slot* slots; };
+struct TypePool {
+    u64 type;
+    usize capacity, alignment;
+    Slot* free;
+    Chunk* chunks;
+    Slot* quarantine_head;
+    Slot* quarantine_tail;
+    usize quarantined;
+    bool used;
+};
+TypePool pools[256]{};
+Chunk* data_pages[4096]{};
+constexpr usize quarantine_depth = 16;
+usize align_up(usize value, usize align) { return (value + align - 1) & ~(align - 1); }
+usize byte_capacity(usize size) {
+    for (auto capacity : kSlabClasses) if (size <= capacity) return capacity;
+    return align_up(size, PAGE_SIZE);
 }
-
-void* slab_alloc(usize size, usize align) {
-    if (size == 0) return nullptr;
-    if (align == 0) align = alignof(void*);
-    if ((align & (align - 1)) != 0) return nullptr;
-
-    const usize idx = slab_class_index(size, align);
-    if (idx == ~static_cast<usize>(0)) return heap_alloc(size, align);
-
-    {
-        kernel::LockGuard guard(g_slab_lock);
-        FreeNode* node = g_slab_free[idx];
-        if (node) {
-            g_slab_free[idx] = node->next;
-            libk::memset(node, 0, kSlabClasses[idx]);
-            return node;
+void release_oldest(TypePool& pool) {
+    auto* slot = pool.quarantine_head;
+    ANKO_ASSERT(slot && !slot->allocated);
+    pool.quarantine_head = slot->next;
+    if (!pool.quarantine_head) pool.quarantine_tail = nullptr;
+    --pool.quarantined; slot->next = pool.free; pool.free = slot;
+}
+bool grow(TypePool& pool) {
+    const usize stride = align_up(pool.capacity + 16, pool.alignment);
+    const usize bytes = align_up(stride > 16384 ? stride : 16384, PAGE_SIZE);
+    const usize count = bytes / stride;
+    const usize metadata = align_up(sizeof(Chunk) + count * sizeof(Slot), PAGE_SIZE);
+    auto* storage = static_cast<u8*>(heap_alloc(bytes + metadata, PAGE_SIZE));
+    if (!storage) return false;
+    auto* chunk = reinterpret_cast<Chunk*>(storage + bytes);
+    auto* slots = reinterpret_cast<Slot*>(chunk + 1);
+    *chunk = {pool.chunks, reinterpret_cast<usize>(storage), count, stride, &pool, slots};
+    pool.chunks = chunk;
+    for (usize page = 0; page < bytes; page += PAGE_SIZE) {
+        const usize index = (reinterpret_cast<usize>(storage + page) - kernel_heap_base) / PAGE_SIZE;
+        ANKO_ASSERT(index < 4096 && !data_pages[index]); data_pages[index] = chunk;
+    }
+    for (usize i = 0; i < count; ++i) {
+        auto* slot = &slots[i];
+        *slot = {kSlotMagic, 0, 0, pool.free, storage + i * stride, false, false};
+        pool.free = slot;
+    }
+    return true;
+}
+}
+void* slab_alloc_isolated(usize size, usize align, u64 type) {
+    if (!size || size > 524288) return nullptr;
+    if (!align) align = alignof(void*);
+    if ((align & (align - 1)) || align > PAGE_SIZE) return nullptr;
+    const usize capacity = byte_capacity(size);
+    const usize alignment = align > 64 ? align : 64;
+    kernel::LockGuard guard(g_slab_lock);
+    TypePool* pool = nullptr;
+    // Open addressing preserves constant expected lookup without allocating.
+    const usize hash = (type ^ (capacity * 0x9e3779b97f4a7c15ull) ^ alignment) % 256;
+    for (usize n = 0; n < 256; ++n) {
+        auto& candidate = pools[(hash + n) % 256];
+        if (!candidate.used) {
+            candidate = {type, capacity, alignment, nullptr, nullptr, nullptr, nullptr, 0, true};
+            pool = &candidate; break;
+        }
+        if (candidate.type == type && candidate.capacity == capacity && candidate.alignment == alignment) {
+            pool = &candidate; break;
         }
     }
-
-    void* p = heap_alloc(kSlabClasses[idx], align);
-    if (p) libk::memset(p, 0, kSlabClasses[idx]);
-    return p;
+    if (!pool) return nullptr;
+    if (!pool->free && !grow(*pool)) {
+        if (!pool->quarantine_head) return nullptr;
+        release_oldest(*pool); // bounded memory-pressure escape, same type only
+    }
+    auto* slot = pool->free;
+    ANKO_ASSERT(slot->magic == kSlotMagic && !slot->allocated);
+    pool->free = slot->next;
+    if (slot->released) {
+        for (usize i = 0; i < pool->capacity; ++i) ANKO_ASSERT(slot->payload[i] == 0);
+        for (usize i = 0; i < 16; ++i) ANKO_ASSERT(slot->payload[pool->capacity + i] == kGuardByte);
+    }
+    slot->size = size; slot->alignment = align; slot->allocated = true; slot->next = nullptr;
+    libk::memset(slot->payload, 0, pool->capacity);
+    libk::memset(slot->payload + size, kGuardByte, 16);
+    return slot->payload;
 }
-
-void slab_free(void* ptr, usize size, usize align) {
-    if (!ptr || size == 0) return;
-    if (align == 0) align = alignof(void*);
-    const usize idx = slab_class_index(size, align);
-    if (idx == ~static_cast<usize>(0)) return;
-
-    auto* node = static_cast<FreeNode*>(ptr);
+void slab_free_isolated(void* pointer, usize size, usize align, u64 type) {
+    if (!pointer) return;
+    if (!align) align = alignof(void*);
+    const auto address = reinterpret_cast<usize>(pointer);
     kernel::LockGuard guard(g_slab_lock);
-    node->next = g_slab_free[idx];
-    g_slab_free[idx] = node;
+    ANKO_ASSERT(address >= kernel_heap_base && address - kernel_heap_base < kernel_heap_bytes);
+    const usize index = (address - kernel_heap_base) / PAGE_SIZE;
+    ANKO_ASSERT(index < 4096);
+    auto* chunk = data_pages[index];
+    ANKO_ASSERT(chunk && address >= chunk->first && (address - chunk->first) % chunk->stride == 0);
+    const usize position = (address - chunk->first) / chunk->stride;
+    ANKO_ASSERT(position < chunk->count);
+    auto* slot = &chunk->slots[position]; auto& pool = *chunk->pool;
+    ANKO_ASSERT(slot->magic == kSlotMagic && pool.type == type && slot->payload == pointer &&
+                slot->allocated && slot->size == size && slot->alignment == align);
+    for (usize i = 0; i < 16; ++i) ANKO_ASSERT(slot->payload[size + i] == kGuardByte);
+    libk::memset(slot->payload, 0, pool.capacity);
+    libk::memset(slot->payload + pool.capacity, kGuardByte, 16);
+    slot->allocated = false; slot->released = true; slot->next = nullptr;
+    if (pool.quarantine_tail) pool.quarantine_tail->next = slot;
+    else pool.quarantine_head = slot;
+    pool.quarantine_tail = slot; ++pool.quarantined;
+    if (pool.quarantined > quarantine_depth) release_oldest(pool);
 }
+void* slab_alloc(usize size, usize align) { return slab_alloc_isolated(size, align, 0); }
+void slab_free(void* ptr, usize size, usize align) { slab_free_isolated(ptr, size, align, 0); }
 
 } // namespace mm

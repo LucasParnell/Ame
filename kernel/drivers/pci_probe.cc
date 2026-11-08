@@ -142,7 +142,7 @@ bool enable_xhci_bus_master(const XhciInfo& info) {
 MmioRange* alloc_xhci_mmio(const XhciInfo& info) {
     if (!info.found) return nullptr;
     auto* range = static_cast<MmioRange*>(
-        mm::heap_alloc(sizeof(MmioRange), alignof(MmioRange)));
+        mm::allocate<MmioRange>());
     if (!range) return nullptr;
     range->phys_base   = info.bar0_phys;
     range->size        = info.bar0_size;
@@ -156,7 +156,7 @@ MmioRange* alloc_xhci_mmio(const XhciInfo& info) {
 IrqLine* alloc_xhci_irq(const XhciInfo& info) {
     if (!info.found) return nullptr;
     auto* line = static_cast<IrqLine*>(
-        mm::heap_alloc(sizeof(IrqLine), alignof(IrqLine)));
+        mm::allocate<IrqLine>());
     if (!line) return nullptr;
     line->irq_id      = info.irq_line;
     line->trigger     = 1; // edge

@@ -471,7 +471,7 @@ bool load_gpt_root_partition(RootPartition* out) {
     const u32 entries_size = static_cast<u32>(entries_size64);
     const u32 entries_sectors = static_cast<u32>(align_up_u64(entries_size, kSectorSize) /
                                                  kSectorSize);
-    u8* entries = static_cast<u8*>(mm::heap_alloc(entries_sectors * kSectorSize, 16));
+    u8* entries = static_cast<u8*>(mm::slab_alloc(entries_sectors * kSectorSize, 16));
     if (!entries) return false;
     if (!disk_read_sectors(entries_lba, entries_sectors, entries)) return false;
     if (crc32_ieee(entries, entries_size) != entries_crc) {

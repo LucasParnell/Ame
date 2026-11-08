@@ -18,6 +18,9 @@
 #ifdef ANKO_BOARD_HUAWEI_ANNE
 #include "boot_diagnostics.h"
 #include "debug_io.h"
+#ifdef ANKO_ANNE_WATCHDOG
+#include "watchdog.h"
+#endif
 #endif
 
 namespace drivers::gic {
@@ -48,6 +51,10 @@ constexpr u32 kWakeSgi = 1;
 static CpuTopology g_info{};
 static u32 g_cpu_started[kMaxCpus]{};
 static u32 g_release_secondaries = 0;
+static u64 g_rendezvous_epoch;
+static u64 g_rendezvous_request;
+static u64 g_rendezvous_targets;
+static u64 g_rendezvous_ack[kMaxCpus];
 
 static u64 counter() {
     u64 now;
@@ -93,35 +100,42 @@ void init(PhysAddr dtb_phys) {
                    (unsigned long long)g_info.mpidr[0]);
     clean_kernel_for_secondary_entry();
     const auto clean_done = sched::sched_clock_ns();
-    // PSCI CPU_ON is asynchronous. Issue every request before waiting so each
-    // CPU can initialize its own stack, GIC and timer concurrently.
+    auto wait_for = [&](u64 targets) {
+        const u64 wait_started = counter();
+        auto pending = [&] {
+            u64 waiting = targets;
+            for (u32 cpu = 1; cpu < g_info.count; ++cpu) {
+                if (__atomic_load_n(&g_cpu_started[cpu], __ATOMIC_ACQUIRE))
+                    waiting &= ~(u64{1} << cpu);
+            }
+            return waiting;
+        };
+        while (pending() && counter() - wait_started < timeout) {
+            // IRQs are masked here. WFE cannot enforce a deadline when a
+            // requested CPU never signals arrival.
+#if defined(ANKO_BOARD_HUAWEI_ANNE) && defined(ANKO_ANNE_WATCHDOG)
+            anne::watchdog::poll();
+#endif
+            libk::cpu::relax();
+        }
+    };
+    // Retain the verified sequential startup order on Anne's vendor firmware.
+    // Other platforms can initialize secondaries concurrently.
     u64 requested = 0;
     for (u32 cpu = 1; g_info.psci_available && cpu < g_info.count; ++cpu) {
         const i64 rc = static_cast<i64>(psci_call(g_info.cpu_on, g_info.mpidr[cpu],
-                                                  reinterpret_cast<u64>(&secondary_start), cpu));
-        if (rc == 0)
+                                                  mm::kernel_address_to_phys(reinterpret_cast<u64>(&secondary_start)), cpu));
+        if (rc == 0) {
             requested |= u64{1} << cpu;
-        else
+#ifdef ANKO_BOARD_HUAWEI_ANNE
+            wait_for(u64{1} << cpu);
+#endif
+        } else
             ANKO_LOGF_WARN("kernel/smp", "cpu%u CPU_ON rc=%lld", cpu, (long long)rc);
     }
-
-    // Park rather than spin: each secondary signals an event once it publishes
-    // g_cpu_started, so the primary sleeps between arrivals instead of burning
-    // a core for the whole bring-up.
-    const u64 wait_started = counter();
-    auto pending = [&requested] {
-        u64 waiting = requested;
-        for (u32 cpu = 1; cpu < g_info.count; ++cpu) {
-            if (__atomic_load_n(&g_cpu_started[cpu], __ATOMIC_ACQUIRE))
-                waiting &= ~(u64{1} << cpu);
-        }
-        return waiting;
-    };
-    while (pending() && counter() - wait_started < timeout) {
-        // A secondary that arrives between the check above and this WFE sets the
-        // event register, so the wakeup is never lost.
-        libk::cpu::wait_for_event();
-    }
+#ifndef ANKO_BOARD_HUAWEI_ANNE
+    wait_for(requested);
+#endif
 
     for (u32 cpu = 1; cpu < g_info.count; ++cpu) {
         if (!(requested & (u64{1} << cpu)))
@@ -152,8 +166,46 @@ void send_wake_ipi(u32 cpu_id) {
 }
 
 void handle_ipi() {
+    const u32 cpu = sched::current_cpu_id();
+    const u64 epoch = __atomic_load_n(&g_rendezvous_request, __ATOMIC_ACQUIRE);
+    if (epoch && (__atomic_load_n(&g_rendezvous_targets, __ATOMIC_RELAXED) & (1ull << cpu))) {
+        // IRQ entry is a quiescent boundary: interrupt-masked kernel accesses
+        // and lock holders must finish before this handler can acknowledge.
+        asm volatile("dsb sy" ::: "memory");
+        __atomic_store_n(&g_rendezvous_ack[cpu], epoch, __ATOMIC_RELEASE);
+        while (__atomic_load_n(&g_rendezvous_request, __ATOMIC_ACQUIRE) == epoch)
+            asm volatile("yield" ::: "memory");
+        asm volatile("dsb ish; isb" ::: "memory");
+    }
     sched::note_ipi_handled();
     sched::drain_pending_wakes();
+    asm volatile("sev" ::: "memory");
+}
+
+bool rendezvous() {
+    const u64 targets = sched::online_cpu_mask() & ~(1ull << sched::current_cpu_id());
+    const u64 epoch = ++g_rendezvous_epoch;
+    __atomic_store_n(&g_rendezvous_targets, targets, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_rendezvous_request, epoch, __ATOMIC_RELEASE);
+    for (u32 cpu = 0; cpu < kMaxCpus; ++cpu)
+        if (targets & (1ull << cpu)) send_wake_ipi(cpu);
+    const u64 deadline = sched::sched_clock_ns() + 10'000'000; // bounded 10 ms
+    for (;;) {
+        bool ready = true;
+        for (u32 cpu = 0; cpu < kMaxCpus; ++cpu)
+            if ((targets & (1ull << cpu)) &&
+                __atomic_load_n(&g_rendezvous_ack[cpu], __ATOMIC_ACQUIRE) != epoch) ready = false;
+        if (ready) return true;
+        if (sched::sched_clock_ns() >= deadline) {
+            resume();
+            return false;
+        }
+        asm volatile("yield" ::: "memory");
+    }
+}
+
+void resume() {
+    __atomic_store_n(&g_rendezvous_request, 0ull, __ATOMIC_RELEASE);
     asm volatile("sev" ::: "memory");
 }
 

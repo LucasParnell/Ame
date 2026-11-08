@@ -3,6 +3,7 @@
 #include "anko/log.h"
 #include "anko/mali.h"
 #include "anko/mm.h"
+#include "anko/amm.h"
 #include "anko/object.h"
 #include "anko/platform_control.h"
 #include "anko/power.h"
@@ -22,7 +23,7 @@ namespace platform {
 namespace {
 Control domains[] = {{Domain::UsbPhy, 0, 0},  {Domain::UsbController, 0, 0}, {Domain::I2c, 0, 0},
                      {Domain::Display, 0, 0}, {Domain::System, 0, 0},        {Domain::Emmc, 0, 0},
-                     {Domain::Gpu, 0, 0}, {Domain::Charger, 0, 0}};
+                     {Domain::Gpu, 0, 0}, {Domain::Charger, 0, 0}, {Domain::Health, 0, 0}};
 kernel::SpinLock domain_lock;
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST)
 u32 ref_logged;
@@ -30,7 +31,11 @@ u32 ref_logged;
 struct DisplayBuffer {
     object::Record *pin;
     u64 address;
+    amm::ExternalPin external;
 } display_buffers[2]{};
+SysError display_fence(void*) {
+    return (anne::native_display::scanout_status() & 2) ? E_BUSY : E_OK;
+}
 #endif
 bool display_quarantined;
 #endif
@@ -46,9 +51,8 @@ SysError display_bind(Control &control, Arena &arena, object::Record *pin, u32 s
     }
 #if defined(ANKO_BOARD_HUAWEI_ANNE) && !defined(ANKO_ANNE_DIAG_TEST) &&                            \
     defined(ANKO_ANNE_FRAMEBUFFER)
-    if (slot > 1 || !pin || !(arena.flags & kArenaFlagOwnsPages) ||
-        arena.size != AME_GPU_DIAG_BYTES || !arena.phys_base || (arena.phys_base & 4095) ||
-        arena.phys_base > 0x100000000ull - arena.size) {
+    if (slot > 1 || !pin || arena.size != AME_GPU_DIAG_BYTES ||
+        (!arena.managed && (!(arena.flags & kArenaFlagOwnsPages) || !arena.phys_base))) {
         return E_INVALID;
     }
     if (display_quarantined || (anne::native_display::scanout_status() & 2)) {
@@ -59,15 +63,27 @@ SysError display_bind(Control &control, Arena &arena, object::Record *pin, u32 s
     if (target.pin) {
         return target.pin == pin ? E_OK : E_BUSY;
     }
-    if (other.pin && arena.phys_base < other.address + AME_GPU_DIAG_BYTES &&
-        other.address < arena.phys_base + arena.size) {
-        return E_INVALID;
-    }
     if (!anne::native_display::scanout_prepare()) {
         return E_NOTIMPL;
     }
+    PhysAddr address = arena.phys_base;
+    if (arena.managed) {
+        const auto result = amm::pin_external(arena, target.external, display_fence, nullptr);
+        if (result != E_OK) return result;
+        address = target.external.base;
+    }
+    if ((address & 4095) || address > 0x100000000ull - arena.size ||
+        (other.pin && address < other.address + AME_GPU_DIAG_BYTES &&
+         other.address < address + arena.size)) {
+        if (target.external.arena) (void)amm::unpin_external(target.external);
+        return E_INVALID;
+    }
+    if (target.external.arena) {
+        const auto result = amm::prepare_dma(target.external, false);
+        if (result != E_OK) { (void)amm::unpin_external(target.external); return result; }
+    }
     object::retain(pin);
-    target = {pin, arena.phys_base};
+    target.pin = pin; target.address = address;
     return E_OK;
 #else
     (void)arena;
@@ -326,6 +342,9 @@ void fence_owner(u64 owner) {
                     display_quarantined = true;
                 } else {
                     for (auto &buffer : display_buffers) {
+                        if (buffer.external.arena && amm::unpin_external(buffer.external) != E_OK) {
+                            display_quarantined = true; continue;
+                        }
                         object::release(buffer.pin);
                         buffer = {};
                     }

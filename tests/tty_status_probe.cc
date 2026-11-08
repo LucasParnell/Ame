@@ -10,8 +10,9 @@
 static MxDiagHealth health{};
 static bool available = true;
 static unsigned samples;
+static constexpr CapHandle kHealthObserver = 0x10000000aull;
 static mx_i64_t read_health(mx_u64_t request, mx_u64_t index, void* out, mx_u64_t size) {
-    assert(request == MX_DIAG_HEALTH && !index && size == sizeof(health));
+    assert(request == MX_DIAG_HEALTH && index == kHealthObserver && size == sizeof(health));
     ++samples;
     if (!available)
         return MX_ERR_NOT_IMPLEMENTED;
@@ -45,6 +46,7 @@ int main(int argc, char** argv) {
 
     host_on_debug_read = read_health;
     mochi::tty::StatusBar bar{};
+    bar.health_observer = kHealthObserver;
     assert(!bar.configure(200, 64, 1, 16, 0));
     assert(!bar.configure(1080, 128, 2, 64, 900));
     assert(bar.configure(1080, 128, 2, 64, 448));
@@ -124,6 +126,7 @@ int main(int argc, char** argv) {
     }
     // The real terminal clear and pixel-copy scrolling preserve the status bar.
     mochi::tty::Render render{};
+    render.status.health_observer = kHealthObserver;
     std::vector<char> cells(59 * 3);
     render.fb = fb;
     render.cells = cells.data();

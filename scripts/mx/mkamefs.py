@@ -24,6 +24,7 @@ FS_INODE_FILE = 1
 FS_INODE_DIR = 2
 FS_CLASS_CONTENT_STORE = 1
 FS_CLASS_USER_DATA = 2
+FS_DATA_ROOT = 0x8000_0000  # store.h: /data redirects to this mutable subtree
 JOURNAL_START_BLOCK = 2
 JOURNAL_BLOCK_COUNT = 256
 FIRST_DATA_BLOCK = JOURNAL_START_BLOCK + JOURNAL_BLOCK_COUNT
@@ -81,7 +82,7 @@ def pack_internal_entry(max_key: int, child_block: int) -> bytes:
 
 
 def pack_inode_entry(inode_number: int, inode_type: int, inode_class: int,
-                     size: int, root_block: int, nlink: int) -> bytes:
+                     size: int, root_block: int, nlink: int, parent_inode: int = 0) -> bytes:
     return struct.pack("<IHHQQIIQQ16s",
                        inode_number,
                        inode_type,
@@ -92,7 +93,7 @@ def pack_inode_entry(inode_number: int, inode_type: int, inode_class: int,
                        0,  # retired Unix mode field; access belongs to handles
                        0,
                        0,
-                       bytes(16))
+                       struct.pack("<I12s", parent_inode, bytes(12)))
 
 
 def pack_extent_entry(logical_block: int, phys_block: int,
@@ -280,6 +281,7 @@ class Node:
         self.src = src
         self.children: list[Node] = []
         self.inode = 0
+        self.parent_inode = 0
         self.size = 0
         self.root_block = 0
 
@@ -301,11 +303,25 @@ def walk(node: Node):
 
 
 def assign_inodes(root: Node) -> None:
-    for number, node in enumerate(walk(root), start=1):
-        node.inode = number
+    next_static, next_data = 1, FS_DATA_ROOT
+
+    def assign(node: Node, parent: int = 0, mutable: bool = False):
+        nonlocal next_static, next_data
+        if mutable:
+            node.inode = next_data
+            next_data += 1
+            node.parent_inode = parent if parent >= FS_DATA_ROOT else 0
+        else:
+            node.inode = next_static
+            next_static += 1
+        for child in node.children:
+            assign(child, node.inode, mutable or (node is root and child.name == "data"))
+
+    assign(root)
 
 
-def build_tree(build_dir: Path, include_initrd: bool) -> tuple[Node, str]:
+def build_tree(build_dir: Path, include_initrd: bool,
+               apps: list[str] | None = None) -> tuple[Node, str]:
     kernel = build_dir / "kernel" / "anko"
     kernel_bin = build_dir / "kernel" / "anko.bin"
     userland_dir = build_dir / "userland"
@@ -338,6 +354,21 @@ def build_tree(build_dir: Path, include_initrd: bool) -> tuple[Node, str]:
     boot.add_file("system.mxb", system_bundle)
     for image in userland_images:
         userland_bin.add_file(image.name, image)
+
+    # Explicit offline provisioning only; applications add no boot-time work.
+    if apps:
+        apps_dir = root.add_dir("data").add_dir("apps")
+        names = set()
+        for item in apps:
+            name, separator, source = item.partition("=")
+            if (not separator or not name or name in (".", "..") or
+                    "/" in name or "\x00" in name or len(name.encode("utf-8")) > 47 or name in names):
+                raise ValueError("apps must be unique NAME=FILE pairs (1..47 byte names)")
+            path = Path(source).resolve()
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            names.add(name)
+            apps_dir.add_file(name, path)
 
     manifest_lines = [
         "ame-vfs-version 1",
@@ -385,7 +416,7 @@ def required_bytes(root: Node) -> int:
 def create_image(args: argparse.Namespace) -> None:
     build_dir = Path(args.build_dir).resolve()
     output = Path(args.output).resolve()
-    root, temp_manifest = build_tree(build_dir, args.include_initrd)
+    root, temp_manifest = build_tree(build_dir, args.include_initrd, args.app)
     try:
         size = parse_size(args.size)
         need = required_bytes(root)
@@ -420,7 +451,8 @@ def create_image(args: argparse.Namespace) -> None:
 
             inode_entries = []
             for node in walk(root):
-                inode_class = (FS_CLASS_USER_DATA if node.inode_type == FS_INODE_DIR
+                inode_class = (FS_CLASS_USER_DATA if node.inode_type == FS_INODE_DIR or
+                               node.inode >= FS_DATA_ROOT
                                else FS_CLASS_CONTENT_STORE)
                 nlink = 1 + len([c for c in node.children
                                  if c.inode_type == FS_INODE_DIR])
@@ -431,7 +463,8 @@ def create_image(args: argparse.Namespace) -> None:
                                      inode_class,
                                      node.size,
                                      node.root_block,
-                                     nlink),
+                                     nlink,
+                                     node.parent_inode),
                 ))
             inode_root = image.build_btree(inode_entries)
 
@@ -602,6 +635,8 @@ def main(argv: list[str]) -> int:
     create.add_argument("--build-dir", default="build")
     create.add_argument("--size", default="128M")
     create.add_argument("--include-initrd", action="store_true")
+    create.add_argument("--app", action="append", default=[], metavar="NAME=FILE",
+                        help="prepopulate /data/apps with an application or package")
     create.set_defaults(func=create_image)
 
     inspect = sub.add_parser("inspect")

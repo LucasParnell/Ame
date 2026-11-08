@@ -884,5 +884,51 @@ int main() {
     object::release(second.lifetime);
     sched::release_principal(pid);
     std::puts("remote wake/metadata/context-binding attempts cannot mutate station-owned dispatch");
+
+    reset();
+    sched::set_online_cpu_count(2);
+    pid = sched::allocate_principal(PRINCIPAL_NATIVE_SANDBOXED, 1024, 0, 0);
+    auto linked = make_thread(pid, SCHED_BAND_FAIR);
+    auto peer = make_thread(pid, SCHED_BAND_FAIR);
+    linked.reply_target = &peer;
+    peer.reply_target = &linked;
+    sched::enqueue(&linked);
+    audit_cpu = 1;
+    sched::maybe_send_steal_request(sched::current_eki());
+    assert(sched::current_eki().steal_req_in_flight);
+    audit_cpu = 0;
+    sched::handle_pending_steal_requests(sched::current_eki());
+    assert(linked.cpu_id == 0 && linked.on_runqueue && !linked.remote_next);
+    sched::dequeue_thread(&linked);
+    linked.state = TS_BLOCKED;
+    CapTable linked_controls{};
+    controller.cap_table = &linked_controls;
+    controller.principal_id = pid;
+    const auto linked_cap = cap::alloc(linked_controls, CAP_THREAD, &linked, RIGHT_THREAD_CONTROL);
+    const auto remote_context = sched::sched_context_create(controller,
+        SchedContext{.band = SCHED_BAND_FAIR, .core_mask = 2, .home_cpu = 1}, &error);
+    assert(linked_cap && remote_context);
+    assert(sched::sched_context_bind_thread(controller, linked_cap, remote_context) == E_BUSY);
+    assert(linked.cpu_id == 0 && !linked.sched_context);
+    auto notifier = make_thread(pid, SCHED_BAND_FAIR);
+    notifier.cpu_id = 1; // a different notifier's hint cannot migrate the pair
+    audit_cpu = 1;
+    assert(sched::wake_ipc(&linked, &notifier, IPC_HINT_WAKE_AFFINE, 1) == 0);
+    assert(linked.cpu_id == 0 && linked.state == TS_RUNNABLE_PENDING_REMOTE);
+    audit_cpu = 0;
+    sched::drain_pending_wakes();
+    assert(linked.cpu_id == 0 && linked.on_runqueue);
+    sched::dequeue_thread(&linked);
+    linked.state = TS_SLEEPING;
+    audit_cpu = 1;
+    sched::wake_remote(&linked, 1);
+    assert(linked.cpu_id == 0 && linked.state == TS_RUNNABLE_PENDING_REMOTE);
+    audit_cpu = 0;
+    sched::drain_pending_wakes();
+    sched::dequeue_thread(&linked);
+    linked.reply_target = peer.reply_target = nullptr;
+    cap::close(linked_controls);
+    sched::release_principal(pid);
+    std::puts("reply peers resist stealing, remote wake hints and context rebinding until unlink");
     return 0;
 }
